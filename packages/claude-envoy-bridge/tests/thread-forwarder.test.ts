@@ -7,7 +7,7 @@ import {
   type ForwarderConnection,
   type TopicSubscription,
 } from "../src/thread-forwarder"
-import { envoyInboundMessage } from "../src/envoy-monitor"
+import { renderInbound } from "@legion/envoy-client/delivery"
 import { FakeNatsServer } from "./fake-nats-server"
 
 interface Queue {
@@ -212,7 +212,7 @@ test("forwards and renders a future-source envelope", async () => {
 
   const forwarded = decode(nats.published[0]?.data ?? new Uint8Array())
   expect(forwarded).toBe(raw)
-  expect(envoyInboundMessage(forwarded, sessionId, agentSubject(sessionId))).toContain(
+  expect(renderInbound(forwarded, sessionId, agentSubject(sessionId)).content).toContain(
     "  unrecognised: source=newkind",
   )
 })

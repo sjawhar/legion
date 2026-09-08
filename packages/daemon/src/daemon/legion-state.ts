@@ -439,7 +439,6 @@ function migrateV8State(state: unknown): unknown {
     ? Object.fromEntries(
         Object.entries(prs).map(([key, pr]) => {
           if (!recordValue(pr)) return [key, pr];
-          if ("verdict" in pr && "failing" in pr && "ciSettledAt" in pr) return [key, pr];
           const {
             checks,
             firstRedEmitted,
@@ -461,26 +460,15 @@ function migrateV8State(state: unknown): unknown {
             !Number.isSafeInteger(lastEventAt)
               ? null
               : lastEventAt;
-          return [key, { ...withoutLegacyCi, verdict, failing: [], ciSettledAt }];
-        })
-      )
-    : undefined;
-  return { ...rest, version: 11, ...(migratedPrs ? { prs: migratedPrs } : {}) };
-}
-
-function migrateV11State(state: unknown): unknown {
-  if (!recordValue(state) || state.version !== 11) return state;
-  const { prs, ...rest } = state;
-  const migratedPrs = recordValue(prs)
-    ? Object.fromEntries(
-        Object.entries(prs).map(([key, pr]) => {
-          if (!recordValue(pr)) return [key, pr];
-          // v11 fenced nothing: every PR starts unfenced and unreconciled.
+          // v8 fenced nothing: every PR starts unfenced and unreconciled.
           return [
             key,
             {
-              ...pr,
+              ...withoutLegacyCi,
+              verdict,
+              failing: [],
               failingStatuses: [],
+              ciSettledAt,
               ciCheckRuns: null,
               ciSettlementGeneration: null,
               ciSnapshot: null,
@@ -506,9 +494,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV11State(
-    migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))))
-  );
+  const state = migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))));
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;

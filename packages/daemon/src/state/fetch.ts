@@ -433,18 +433,10 @@ interface RollupContextsPage {
 }
 
 function contextsPage(rollup: Record<string, unknown> | undefined): RollupContextsPage {
-  const rawContexts = rollup?.contexts;
-  if (typeof rawContexts !== "object" || rawContexts === null || Array.isArray(rawContexts)) {
-    return { nodes: [], hasNextPage: false, endCursor: null };
-  }
-  const contexts = rawContexts as Record<string, unknown>;
-  const rawPageInfo = contexts.pageInfo;
-  const pageInfo: Record<string, unknown> | undefined =
-    typeof rawPageInfo === "object" && rawPageInfo !== null && !Array.isArray(rawPageInfo)
-      ? (rawPageInfo as Record<string, unknown>)
-      : undefined;
+  const contexts = recordValue(rollup?.contexts);
+  const pageInfo = recordValue(contexts?.pageInfo);
   return {
-    nodes: Array.isArray(contexts.nodes) ? contexts.nodes : [],
+    nodes: Array.isArray(contexts?.nodes) ? contexts.nodes : [],
     hasNextPage: pageInfo?.hasNextPage === true,
     endCursor: typeof pageInfo?.endCursor === "string" ? pageInfo.endCursor : null,
   };

@@ -103,19 +103,12 @@ type CIObservation struct {
 // check runs and suites are folded into durable per-head state; neither emits a
 // raw webhook envelope.
 func GithubCIObservations(event string, body map[string]any) []CIObservation {
-	var key string
-	switch event {
-	case "check_run":
-		key = "check_run"
-	case "check_suite":
-		key = "check_suite"
-	default:
-		return nil
-	}
 	prs := githubCIPullRequests(event, body)
 	if len(prs) == 0 {
 		return nil
 	}
+	// The CI event name is also the key of its object in the body.
+	key := event
 	sha := nestedString(body, key, "head_sha")
 	if sha == "" {
 		return nil
@@ -467,16 +460,10 @@ func githubCIEvent(event string) bool {
 }
 
 func githubCIPullRequests(event string, body map[string]any) []string {
-	var key string
-	switch event {
-	case "check_run":
-		key = "check_run"
-	case "check_suite":
-		key = "check_suite"
-	default:
+	if !githubCIEvent(event) {
 		return nil
 	}
-	obj := mapValue(body[key])
+	obj := mapValue(body[event])
 	if obj == nil {
 		return nil
 	}

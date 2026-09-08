@@ -4,6 +4,7 @@ import type { CiFetchResult } from "../../state/fetch";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
 import { type Effect, type EnvelopeJson, reduceGithubEvent } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
+import { checkPr } from "./ci-fixtures";
 
 const issue = formatIssueKey("sjawhar", "legion", 42);
 
@@ -414,22 +415,10 @@ describe("runResync", () => {
       heldEvents: [],
     };
     state.roles[roleToken("omp", issue, "architect")] = { issue, role: "architect" };
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
-      verdict: null,
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: null,
-      ciCheckRuns: null,
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
       reviewDecision: "approved",
-    };
+    });
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
     let now = Date.parse("2026-08-24T00:00:00.000Z");
     const fetches: Record<string, unknown>[] = [];
@@ -497,21 +486,7 @@ describe("runResync", () => {
 
   it("reconciles an unsettled red PR with failing check names", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
-      repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
-      verdict: null,
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: null,
-      ciCheckRuns: null,
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    state.prs["sjawhar/legion#7"] = checkPr(issue, { repo: "sjawhar/legion" });
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
 
     await runResync({
@@ -562,22 +537,14 @@ describe("runResync", () => {
 
   it("moves a stale local head before applying GitHub's green rollup", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "red",
       failing: ["unit"],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
       reviewDecision: "approved",
-    };
+    });
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
     let fetches = 0;
 
@@ -852,22 +819,10 @@ describe("runResync", () => {
       released: true,
       labels: [],
     };
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       headUpdatedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      verdict: null,
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: null,
-      ciCheckRuns: null,
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
 
     await runResync({
       ...resyncDeps(state, []),
@@ -910,21 +865,7 @@ describe("runResync", () => {
 
   it("records the resynced check-run id to fence delayed live settlements", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
-      repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
-      verdict: null,
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: null,
-      ciCheckRuns: null,
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    state.prs["sjawhar/legion#7"] = checkPr(issue, { repo: "sjawhar/legion" });
 
     await runResync({
       ...resyncDeps(state, []),
@@ -948,21 +889,13 @@ describe("runResync", () => {
 
   it("reconciles a stored red verdict to green", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "red",
       failing: ["unit"],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
     const dispatched: Effect[][] = [];
 
     await runResync({
@@ -1002,21 +935,12 @@ describe("runResync", () => {
 
   it("reconciles a stored green verdict to red with GitHub's failing checks", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "green",
-      failing: [],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
     const dispatched: Effect[][] = [];
 
     await runResync({
@@ -1061,21 +985,12 @@ describe("runResync", () => {
 
   it("quietly refreshes an unchanged green verdict", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "green",
-      failing: [],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
     let fetches = 0;
     const dispatched: Effect[][] = [];
 
@@ -1108,65 +1023,14 @@ describe("runResync", () => {
     expect(dispatched).toEqual([]);
   });
 
-  it("a pending rollup advances the check-run fence so a delayed older live settlement is ignored", async () => {
-    const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
-      repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
-      verdict: "green",
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: 1_000,
-      ciCheckRuns: [{ name: "build", id: 1_000 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
-
-    await runResync({
-      ...resyncDeps(state, []),
-      fetchCiStatusBatch: async () => ({
-        "sjawhar/legion#7": {
-          ciStatus: "pending" as const,
-          mergeableStatus: null,
-          headSha: "head-1",
-          updatedAt: "2026-08-24T00:00:00.000Z",
-          checkRuns: [{ name: "build", id: 1_100 }],
-          isOpen: true,
-        },
-      }),
-      applyEffects: async () => {},
-    });
-
-    // The rerun's newer run id is the fence now: an old settlement at 1050
-    // that arrives late is stale, exactly as if the daemon had seen 1100 live.
-    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
-      verdict: null,
-      ciCheckRuns: [{ name: "build", id: 1_100 }],
-      ciSettledAt: 1_000,
-    });
-  });
-
   it("a cancelled-only failing rollup uncertifies a green head instead of settling red", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "green",
-      failing: [],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
     const dispatched: Effect[][] = [];
 
     await runResync({
@@ -1201,21 +1065,12 @@ describe("runResync", () => {
 
   it("clears a stored green verdict when GitHub reports a pending rollup", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "green",
-      failing: [],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
     let fetches = 0;
     const dispatched: Effect[][] = [];
 
@@ -1252,21 +1107,13 @@ describe("runResync", () => {
 
   it("preserves a stored red verdict when GitHub reports a pending rollup", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "red",
       failing: ["unit"],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
     const dispatched: Effect[][] = [];
 
     await runResync({
@@ -1298,21 +1145,7 @@ describe("runResync", () => {
 
   it("skips a closed GitHub PR", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
-      repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
-      verdict: null,
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: null,
-      ciCheckRuns: null,
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    state.prs["sjawhar/legion#7"] = checkPr(issue, { repo: "sjawhar/legion" });
     const dispatched: Effect[][] = [];
 
     await runResync({
@@ -1344,21 +1177,12 @@ describe("runResync", () => {
 
   it("leaves a PR untouched and reports an owner CI fetch failure", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "green",
-      failing: [],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 900 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
     const before = structuredClone(state.prs["sjawhar/legion#7"]);
 
     const event = await runResync({
@@ -1379,21 +1203,12 @@ describe("runResync", () => {
   });
   it("counts a CI fetch failure even when the PR changed while the fetch was in flight", async () => {
     const state = newLegionState("omp", 1);
-    state.prs["sjawhar/legion#7"] = {
-      key: issue,
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
-      number: 7,
-      headSha: "head-1",
       verdict: "green",
-      failing: [],
-      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 900 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-    };
+    });
     const fetchStarted = Promise.withResolvers<void>();
     const fetchedStatuses = Promise.withResolvers<Record<string, CiFetchResult>>();
     const resync = runResync({

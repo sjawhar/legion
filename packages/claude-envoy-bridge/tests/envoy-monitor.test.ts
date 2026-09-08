@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test"
 import { createServer } from "node:net"
 import { agentSubject } from "@legion/contracts"
-import { decode } from "@toon-format/toon"
-import { envoyInboundMessage, runEnvoyMonitor } from "../src/envoy-monitor"
+import { runEnvoyMonitor } from "../src/envoy-monitor"
 import { FakeNatsServer } from "./fake-nats-server"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -68,73 +67,6 @@ test("writes native delivery frames to Claude Code's Unix socket", async () => {
   expect(await received).toBe(
     '{"type":"auth","token":"socket-token"}\n{"type":"user","message":{"role":"user","content":"Envoy native delivery"}}\n',
   )
-})
-
-test("renders an agent envelope with its sender and reply instruction", async () => {
-  const rendered = envoyInboundMessage(
-    JSON.stringify({
-      source: "agent",
-      source_session: "ses_sender",
-      topic: "notifications.agent.ses_reader",
-      payload_summary: "Please report the deployment result.",
-    }),
-  )
-  expect(decode(rendered ?? "")).toEqual({
-    envoy: {
-      from: "ses_sender",
-      at: "unknown",
-      id: "unknown",
-      reply_with: 'envoy_send(session_id="ses_sender", message="...")',
-      summary: "Please report the deployment result.",
-    },
-  })
-})
-
-test("renders a human envelope without a reply instruction", async () => {
-  const rendered = envoyInboundMessage(
-    JSON.stringify({
-      source: "human",
-      topic: "notifications.agent.ses_reader",
-      payload_summary: "Please report the deployment result.",
-    }),
-  )
-  expect(decode(rendered ?? "")).toEqual({
-    envoy: {
-      from: "human",
-      at: "unknown",
-      id: "unknown",
-      summary: "Please report the deployment result.",
-    },
-  })
-})
-
-test("renders a GitHub envelope without a reply instruction", async () => {
-  const rendered = envoyInboundMessage(
-    JSON.stringify({
-      source: "github",
-      topic: "notifications.github.example-org.example-repo.issue.42.comment",
-      payload_summary: "The human answered.",
-    }),
-  )
-  expect(decode(rendered ?? "")).toEqual({
-    envoy: {
-      from: "github",
-      at: "unknown",
-      id: "unknown",
-      summary: "The human answered.",
-    },
-  })
-})
-
-test("skips a GitHub dispatch echo for the originating session", async () => {
-  const envelope = JSON.stringify({
-    source: "github",
-    topic: "notifications.agent.ses_origin",
-    payload_summary: "Please report the deployment result.",
-    payload: JSON.stringify({ dispatch_session: "ses_origin" }),
-  })
-
-  expect(envoyInboundMessage(envelope, "ses_origin")).toBeUndefined()
 })
 
 test("registers, heartbeats, and deregisters the monitor session", async () => {
@@ -273,33 +205,3 @@ test("reports a registry outage once and clears it on the next successful heartb
   }
 })
 
-test("uses the shared renderer output for a direct agent delivery", async () => {
-  const reader = "01a01111-2222-7333-4444-555555555555"
-  const sender = "01a00000-0000-7000-0000-000000000001"
-  const rendered = envoyInboundMessage(
-    JSON.stringify({
-      event_id: "agent-message-1",
-      source: "agent",
-      source_session: sender,
-      topic: `notifications.agent.${reader}`,
-      issued_at: Date.parse("2026-09-07T04:41:12Z"),
-      payload_summary: "Please review this.",
-      sender: { session_id: sender, title: "Reviewer", roles: ["legion-reviewer"] },
-    }),
-    reader,
-    `notifications.agent.${reader}`,
-  )
-
-  expect(rendered).toBe(
-    [
-      "envoy:",
-      "  to: you (01a0…)",
-      `  from: ${sender} (Reviewer)`,
-      '  at: "2026-09-07T04:41:12Z"',
-      "  id: agent-message-1",
-      `  reply_with: "envoy_send(session_id=\\"${sender}\\", message=\\"...\\")"`,
-      '  reply_role: "envoy_publish(topic=\\"notifications.role.legion-reviewer\\", message=\\"...\\")"',
-      "  summary: Please review this.",
-    ].join("\n"),
-  )
-})

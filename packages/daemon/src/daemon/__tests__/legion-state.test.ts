@@ -94,26 +94,6 @@ function legacyV8State(pr: Record<string, unknown>) {
   };
 }
 
-function legacyV11State() {
-  const current = stateWithTree();
-  const {
-    failingStatuses: _failingStatuses,
-    ciCheckRuns: _ciCheckRuns,
-    ciSettlementGeneration: _ciSettlementGeneration,
-    ciSnapshot: _ciSnapshot,
-    ciReconciled: _ciReconciled,
-    ...legacyPr
-  } = current.prs[prKey];
-  return {
-    current,
-    legacy: {
-      ...current,
-      version: 11,
-      prs: { ...current.prs, [prKey]: legacyPr },
-    },
-  };
-}
-
 describe("legion state", () => {
   let tempDir: string | undefined;
 
@@ -192,15 +172,6 @@ describe("legion state", () => {
     }
   });
 
-  it("migrates v11 CI state by defaulting all ordering fence fields to null", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v11-"));
-    const file = path.join(tempDir, "state.json");
-    const { current, legacy } = legacyV11State();
-    await writeFile(file, JSON.stringify(legacy), "utf8");
-
-    expect(await loadState(file, initialState)).toEqual(current);
-  });
-
   it("keeps the original v8 state bytes in a rollback backup", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v8-backup-"));
     const file = path.join(tempDir, "state.json");
@@ -234,9 +205,13 @@ describe("legion state", () => {
   it("migrates v5 name-only locators by clearing their unsafe identities", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v5-"));
     const file = path.join(tempDir, "state.json");
-    const current = stateWithTree();
+    // A v5 file carries the same legacy CI flags a v8 file does.
+    const { current, legacy: v8 } = legacyV8State({
+      greenEmitted: true,
+      lastEventAt: 1_724_457_600_000,
+    });
     const legacy = {
-      ...current,
+      ...v8,
       version: 5,
       trees: {
         ...current.trees,
@@ -261,9 +236,13 @@ describe("legion state", () => {
   it("migrates v6 state by dropping attribution and locator pids", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v6-"));
     const file = path.join(tempDir, "state.json");
-    const current = stateWithTree();
+    // A v6 file carries the same legacy CI flags a v8 file does.
+    const { current, legacy: v8 } = legacyV8State({
+      greenEmitted: true,
+      lastEventAt: 1_724_457_600_000,
+    });
     const legacy = {
-      ...current,
+      ...v8,
       version: 6,
       attribution: [{ sha: "abc123", sessionId: "ses_123", issue, phase: "implement" }],
       trees: {
@@ -322,6 +301,8 @@ describe("legion state", () => {
     ];
     const v7State = {
       ...legacy,
+      // A v7 file carries the same legacy CI flags a v8 file does.
+      prs: legacyV8State({ greenEmitted: true, lastEventAt: 1_724_457_600_000 }).legacy.prs,
       version: 7,
       dispatchThreads: [
         {

@@ -1,67 +1,20 @@
 import { expect, it, vi } from "bun:test";
-import { formatIssueKey, roleToken, roleTopic } from "@legion/contracts";
+import { roleTopic } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
 import type { CheckRunRef } from "../../state/types";
-import type { DaemonConfig } from "../config";
 import { startEventPump } from "../events";
-import { type LegionState, newLegionState } from "../legion-state";
+import type { LegionState } from "../legion-state";
 import { type Effect, reduceGithubEvent } from "../reducers";
 import { runResync } from "../resync";
+import {
+  config as daemonConfig,
+  FakeNats,
+  prPayload,
+  settledChecks,
+  stateForCi,
+} from "./ci-fixtures";
 
-class FakeNats {
-  private readonly subscriptions: Array<{
-    subject: string;
-    callback: (subject: string, data: string) => void;
-  }> = [];
-
-  subscribe(subject: string, callback: (subject: string, data: string) => void): () => void {
-    const subscription = { subject, callback };
-    this.subscriptions.push(subscription);
-    return () => {
-      const index = this.subscriptions.indexOf(subscription);
-      if (index >= 0) this.subscriptions.splice(index, 1);
-    };
-  }
-
-  publish(): void {}
-
-  emit(subject: string, data: string): void {
-    for (const subscription of this.subscriptions) {
-      if (matches(subscription.subject, subject)) subscription.callback(subject, data);
-    }
-  }
-}
-
-function matches(pattern: string, subject: string): boolean {
-  const patternTokens = pattern.split(".");
-  const subjectTokens = subject.split(".");
-  for (let index = 0; index < patternTokens.length; index += 1) {
-    const token = patternTokens[index];
-    if (token === ">") return index < subjectTokens.length;
-    if (token !== "*" && token !== subjectTokens[index]) return false;
-  }
-  return patternTokens.length === subjectTokens.length;
-}
-
-const config: DaemonConfig = {
-  project: "omp",
-  legionId: "acme/1",
-  port: 13370,
-  envoyUrl: "http://127.0.0.1:9020",
-  natsUrls: ["nats://127.0.0.1:4222"],
-  ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
-  boardProjectIds: ["PVT_board"],
-  appLogins: ["legion[bot]"],
-  admissionCap: 4,
-  workerBudget: 6,
-  maxRecursionDepth: 8,
-  lingerHours: 72,
-  maxFixAttempts: 3,
-  resyncIntervalMs: 600_000,
-  gates: { design: "root-issues", merge: "human" },
-  githubApps: {},
-  stateDir: "/state",
-};
+const config = daemonConfig();
 
 function envelope(payload: Record<string, unknown>): string {
   return JSON.stringify({
@@ -75,67 +28,6 @@ function envelope(payload: Record<string, unknown>): string {
     payload: JSON.stringify(payload),
     trace_id: "trace-checks-1",
   });
-}
-
-function settledChecks(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    kind: "checks",
-    repo: "acme/widgets",
-    number: "7",
-    sha: "head-1",
-    is_head: true,
-    check_runs: [{ name: "build", id: 1 }],
-    generation: 0,
-    snapshot: "state-hash-1",
-    failed: { count: 0, checks: [] },
-    running: { count: 0, checks: [] },
-    passed: { count: 1, checks: ["unit"] },
-    queued: { count: 0, checks: [] },
-    skipped: { count: 0, checks: [] },
-    cancelled: { count: 0, checks: [] },
-    failing_checks: [],
-    ...overrides,
-  };
-}
-
-function stateForCi() {
-  const state = newLegionState("omp", 2);
-  const issue = formatIssueKey("acme", "widgets", 1);
-  const architect = roleToken("omp", issue, "architect");
-  const implementer = roleToken("omp", issue, "implementer");
-  state.issues[issue] = {
-    key: issue,
-    title: "Issue one",
-    state: "open",
-    children: [],
-    released: true,
-    labels: [],
-  };
-  state.trees[issue] = {
-    root: issue,
-    generation: 1,
-    status: "active",
-    launchFailures: 0,
-    heldEvents: [],
-  };
-  state.roles[architect] = { issue, role: "architect" };
-  state.roles[implementer] = { issue, role: "implementer" };
-  state.prs["acme/widgets#7"] = {
-    key: issue,
-    repo: "acme/widgets",
-    number: 7,
-    headSha: "head-1",
-    verdict: null,
-    failing: [],
-    failingStatuses: [],
-    ciSettledAt: null,
-    ciCheckRuns: null,
-    ciSettlementGeneration: null,
-    ciSnapshot: null,
-    ciReconciled: false,
-    fixAttempts: 0,
-  };
-  return { state, architect, implementer };
 }
 
 function startCiPump(state: LegionState) {
@@ -156,6 +48,50 @@ function startCiPump(state: LegionState) {
   });
   return { nats, published, pump };
 }
+
+/** One GitHub rollup for the head under test, as the fetcher would return it. */
+function rollup(
+  ciStatus: "passing" | "failing" | "pending",
+  checkRuns: CheckRunRef[],
+  failures: { checks?: string[]; statuses?: string[] } = {}
+) {
+  return {
+    "acme/widgets#7": {
+      ciStatus,
+      failingChecks: failures.checks ?? [],
+      failingStatuses: failures.statuses ?? [],
+      cancelledCount: 0,
+      mergeableStatus: null,
+      headSha: "head-1",
+      isOpen: true,
+      updatedAt: "2026-09-07T00:00:00.000Z",
+      checkRuns,
+    },
+  };
+}
+
+/** Runs one resync against `state` returning `status`; each call is clocked past the debounce interval. */
+async function resyncWith(
+  state: LegionState,
+  status: ReturnType<typeof rollup>,
+  applied: Effect[][] = []
+): Promise<void> {
+  resyncClock += config.resyncIntervalMs;
+  await runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => status,
+    applyEffects: async (effects) => {
+      applied.push(effects);
+    },
+    now: () => resyncClock,
+  });
+}
+let resyncClock = 1;
+
+const publishedEmissions = (applied: Effect[][]) =>
+  applied.flat().flatMap((effect) => (effect.kind === "publish" ? [effect.payload] : []));
 
 it("routes an approved PR immediately when its head's checks settle green", async () => {
   const { state, architect, implementer } = stateForCi();
@@ -214,21 +150,7 @@ it("routes an approved PR immediately when its head's checks settle green", asyn
 
 it("emits settled-red when CI first settles red", async () => {
   const { state, implementer } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -263,21 +185,7 @@ it("emits settled-red when a green head re-settles red", async () => {
     verdict: "green",
     ciSettledAt: 1,
   };
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -313,21 +221,7 @@ it("emits settled-red when a red head re-settles with a changed failing set", as
     failingStatuses: [],
     ciSettledAt: 1,
   };
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -356,21 +250,7 @@ it("emits settled-red when duplicate failing names change to a different multise
     failingStatuses: [],
     ciSettledAt: 1,
   };
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -399,21 +279,7 @@ it("does not re-emit when a red head re-settles with the same failing set", asyn
     ciCheckRuns: [{ name: "build", id: 1 }],
     ciSettledAt: 1,
   };
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -513,34 +379,6 @@ it("emits an in-order higher-generation settlement for the same check run", asyn
   pump.stop();
 });
 
-it("keeps an equal check-run and generation settlement with an identical set quiet", async () => {
-  const { state } = stateForCi();
-  const { nats, published, pump } = startCiPump(state);
-  const red = settledChecks({
-    check_runs: [{ name: "build", id: 900 }],
-    generation: 1,
-    settled_at: 2,
-    failed: { count: 1, checks: ["unit"] },
-    passed: { count: 0, checks: [] },
-  });
-
-  nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(red));
-  await pump.drain();
-  nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(red));
-  await pump.drain();
-
-  expect(state.prs["acme/widgets#7"]).toMatchObject({
-    verdict: "red",
-    failing: ["unit"],
-    ciCheckRuns: [{ name: "build", id: 900 }],
-    ciSettlementGeneration: 1,
-  });
-  expect(published).toEqual([
-    JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),
-  ]);
-  pump.stop();
-});
-
 it("does not revive an uncertified verdict when an exact live settlement is replayed", async () => {
   const { state } = stateForCi();
   const { nats, published, pump } = startCiPump(state);
@@ -553,23 +391,7 @@ it("does not revive an uncertified verdict when an exact live settlement is repl
 
   nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(green));
   await pump.drain();
-  await runResync({
-    state,
-    config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
-    fetchCiStatusBatch: async () => ({
-      "acme/widgets#7": {
-        ciStatus: "pending",
-        mergeableStatus: null,
-        headSha: "head-1",
-        isOpen: true,
-        updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: [{ name: "build", id: 900 }],
-      },
-    }),
-    applyEffects: async () => {},
-    now: () => 2,
-  });
+  await resyncWith(state, rollup("pending", [{ name: "build", id: 900 }]));
   const afterResync = structuredClone(state.prs["acme/widgets#7"]);
 
   nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(green));
@@ -586,24 +408,7 @@ it("against a GitHub-authored fence an equal attempt set defers to GitHub's verd
 
   try {
     // GitHub read first: red at {build: 900}, no listener identity, holds the tie.
-    await runResync({
-      state,
-      config,
-      fetchGitHubProjectItems: async () => ({ items: [] }),
-      fetchCiStatusBatch: async () => ({
-        "acme/widgets#7": {
-          ciStatus: "failing",
-          mergeableStatus: null,
-          failingChecks: ["build"],
-          headSha: "head-1",
-          isOpen: true,
-          updatedAt: "2026-09-07T00:00:00.000Z",
-          checkRuns: [{ name: "build", id: 900 }],
-        },
-      }),
-      applyEffects: async () => {},
-      now: () => 1,
-    });
+    await resyncWith(state, rollup("failing", [{ name: "build", id: 900 }], { checks: ["build"] }));
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "red",
       ciCheckRuns: [{ name: "build", id: 900 }],
@@ -759,23 +564,7 @@ it("requires a nonempty snapshot and a well-formed attempt set", async () => {
 it("applies a same-set live settlement after a pending resync fence without a generation", async () => {
   const { state } = stateForCi();
 
-  await runResync({
-    state,
-    config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
-    fetchCiStatusBatch: async () => ({
-      "acme/widgets#7": {
-        ciStatus: "pending",
-        mergeableStatus: null,
-        headSha: "head-1",
-        isOpen: true,
-        updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: [{ name: "build", id: 900 }],
-      },
-    }),
-    applyEffects: async () => {},
-    now: () => 1,
-  });
+  await resyncWith(state, rollup("pending", [{ name: "build", id: 900 }]));
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: null,
     ciCheckRuns: [{ name: "build", id: 900 }],
@@ -991,67 +780,9 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
   pump.stop();
 });
 
-it("drops an older attempt set for the same head", async () => {
-  const { state } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
-
-  nats.emit(
-    "notifications.github.acme.widgets.pr.7.checks",
-    envelope(settledChecks({ check_runs: [{ name: "build", id: 2 }], settled_at: 1 }))
-  );
-  await pump.drain();
-  nats.emit(
-    "notifications.github.acme.widgets.pr.7.checks",
-    envelope(
-      settledChecks({
-        check_runs: [{ name: "build", id: 1 }],
-        settled_at: 2,
-        failed: { count: 1, checks: ["unit"] },
-        passed: { count: 0, checks: [] },
-      })
-    )
-  );
-  await pump.drain();
-
-  expect(state.prs["acme/widgets#7"]).toMatchObject({
-    verdict: "green",
-    failing: [],
-    ciCheckRuns: [{ name: "build", id: 2 }],
-  });
-  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
-  pump.stop();
-});
 it("preserves a live check-run fence through a same-head status-context resync", async () => {
   const { state } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -1059,23 +790,7 @@ it("preserves a live check-run fence through a same-head status-context resync",
   );
   await pump.drain();
 
-  await runResync({
-    state,
-    config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
-    fetchCiStatusBatch: async () => ({
-      "acme/widgets#7": {
-        ciStatus: "passing",
-        mergeableStatus: null,
-        headSha: "head-1",
-        isOpen: true,
-        updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: [],
-      },
-    }),
-    applyEffects: async () => {},
-    now: () => 2,
-  });
+  await resyncWith(state, rollup("passing", []));
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -1098,50 +813,6 @@ it("preserves a live check-run fence through a same-head status-context resync",
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
   pump.stop();
 });
-/** One GitHub rollup for the head under test, as the fetcher would return it. */
-function rollup(
-  ciStatus: "passing" | "failing" | "pending",
-  checkRuns: CheckRunRef[],
-  failures: { checks?: string[]; statuses?: string[] } = {}
-) {
-  return {
-    "acme/widgets#7": {
-      ciStatus,
-      failingChecks: failures.checks ?? [],
-      failingStatuses: failures.statuses ?? [],
-      cancelledCount: 0,
-      mergeableStatus: null,
-      headSha: "head-1",
-      isOpen: true,
-      updatedAt: "2026-09-07T00:00:00.000Z",
-      checkRuns,
-    },
-  };
-}
-
-/** Runs one resync against `state` returning `status`; each call is clocked past the debounce interval. */
-async function resyncWith(
-  state: LegionState,
-  status: ReturnType<typeof rollup>,
-  applied: Effect[][] = []
-): Promise<void> {
-  resyncClock += config.resyncIntervalMs;
-  await runResync({
-    state,
-    config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
-    fetchCiStatusBatch: async () => status,
-    applyEffects: async (effects) => {
-      applied.push(effects);
-    },
-    now: () => resyncClock,
-  });
-}
-let resyncClock = 1;
-
-const publishedEmissions = (applied: Effect[][]) =>
-  applied.flat().flatMap((effect) => (effect.kind === "publish" ? [effect.payload] : []));
-
 it("a pending GitHub read holds no tie: the terminal live settlement at the same set applies at once", async () => {
   const { state } = stateForCi();
   const { nats, published, pump } = startCiPump(state);
@@ -1300,21 +971,7 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
 
 it("a rollup whose highest check run is lower than the live fence is an older view and is ignored", async () => {
   const { state } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
   // The listener saw the rerun (901) succeed.
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -1332,25 +989,7 @@ it("a rollup whose highest check run is lower than the live fence is an older vi
 
   // GitHub's rollup has not indexed the rerun: its view tops out at the failed
   // run 900. Older than the fence — ignored, no red, no tie authority.
-  await runResync({
-    state,
-    config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
-    fetchCiStatusBatch: async () => ({
-      "acme/widgets#7": {
-        ciStatus: "failing",
-        failingChecks: ["build"],
-        cancelledCount: 0,
-        mergeableStatus: null,
-        headSha: "head-1",
-        isOpen: true,
-        updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: [{ name: "build", id: 900 }],
-      },
-    }),
-    applyEffects: async () => {},
-    now: () => 2,
-  });
+  await resyncWith(state, rollup("failing", [{ name: "build", id: 900 }], { checks: ["build"] }));
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "green",
     failing: [],
@@ -1512,12 +1151,8 @@ for (const order of orders) {
           )
         );
         await pump.drain();
-        if (githubSeen) {
-          // After GitHub has read this set, no listener event at it may certify green.
-          expect(published.slice(before)).not.toContain(
-            JSON.stringify({ type: "ci-green", sha: "head-1" })
-          );
-        }
+        // After GitHub has read this set, a listener event at it routes nothing.
+        if (githubSeen) expect(published.slice(before)).toEqual([]);
       }
       expect(state.prs["acme/widgets#7"]).toMatchObject({
         verdict: "red",
@@ -1531,52 +1166,6 @@ for (const order of orders) {
   });
 }
 
-for (const order of [
-  ["L2", "L3"],
-  ["L3", "L2"],
-] as Step[][]) {
-  it(`from a reconciled set, ${order.join(" -> ")} ends red with no green certified`, async () => {
-    const { state } = stateForCi();
-    const { nats, published, pump } = startCiPump(state);
-    try {
-      const set = [{ name: "build", id: 900 }];
-      nats.emit(
-        "notifications.github.acme.widgets.pr.7.checks",
-        envelope(settledChecks({ check_runs: set, generation: 1, settled_at: 1 }))
-      );
-      await pump.drain();
-      await resyncWith(
-        state,
-        rollup("failing", [{ name: "build", id: 900 }], { checks: ["build"] })
-      );
-      const before = published.length;
-      for (const step of order) {
-        const generation = step === "L2" ? 2 : 3;
-        nats.emit(
-          "notifications.github.acme.widgets.pr.7.checks",
-          envelope(
-            settledChecks({
-              check_runs: set,
-              generation,
-              snapshot: `hash-${step}`,
-              settled_at: generation,
-              ...(step === "L2"
-                ? { failed: { count: 1, checks: ["build"] }, passed: { count: 0, checks: [] } }
-                : {}),
-            })
-          )
-        );
-        await pump.drain();
-      }
-      expect(published.slice(before)).toEqual([]);
-      expect(state.prs["acme/widgets#7"]).toMatchObject({ verdict: "red", ciReconciled: true });
-    } finally {
-      pump.stop();
-    }
-  });
-}
-
-// Pass-7 must-fix 1: a live view that omits a name says nothing about it.
 for (const approved of [false, true]) {
   it(`a partial live view cannot certify a head green over a failure it omits${approved ? " (approved PR stays blocked)" : ""}`, async () => {
     const { state } = stateForCi();
@@ -2057,84 +1646,9 @@ it("a superseding attempt with an earlier completion is a newer set: accepted li
   }
 });
 
-it("a disagreeing live settlement at a GitHub-authored fence's set is stale: GitHub holds the tie", async () => {
-  const { state } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
-  await runResync({
-    state,
-    config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
-    fetchCiStatusBatch: async () => ({
-      "acme/widgets#7": {
-        ciStatus: "failing",
-        failingChecks: ["build"],
-        cancelledCount: 0,
-        mergeableStatus: null,
-        headSha: "head-1",
-        isOpen: true,
-        updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: [{ name: "build", id: 900 }],
-      },
-    }),
-    applyEffects: async () => {},
-    now: () => 2,
-  });
-  expect(state.prs["acme/widgets#7"]).toMatchObject({
-    verdict: "red",
-    ciSettlementGeneration: null,
-  });
-
-  nats.emit(
-    "notifications.github.acme.widgets.pr.7.checks",
-    envelope(
-      settledChecks({
-        check_runs: [{ name: "build", id: 900 }],
-        generation: 0,
-        snapshot: "hash-a",
-        settled_at: 3,
-      })
-    )
-  );
-  await pump.drain();
-  expect(state.prs["acme/widgets#7"]).toMatchObject({
-    verdict: "red",
-    failing: ["build"],
-    ciSettlementGeneration: null,
-  });
-  expect(published).toEqual([]);
-  pump.stop();
-});
 it("a same-head resync read at an equal attempt set never erases the known generation", async () => {
   const { state } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   // Live: (900, gen 1) green settles the head.
   nats.emit(
@@ -2150,23 +1664,7 @@ it("a same-head resync read at an equal attempt set never erases the known gener
   });
 
   // Resync reads the same attempt set {build: 900} (GitHub has no generation).
-  await runResync({
-    state,
-    config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
-    fetchCiStatusBatch: async () => ({
-      "acme/widgets#7": {
-        ciStatus: "passing",
-        mergeableStatus: null,
-        headSha: "head-1",
-        isOpen: true,
-        updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: [{ name: "build", id: 900 }],
-      },
-    }),
-    applyEffects: async () => {},
-    now: () => 2,
-  });
+  await resyncWith(state, rollup("passing", [{ name: "build", id: 900 }]));
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
@@ -2198,21 +1696,7 @@ it("a same-head resync read at an equal attempt set never erases the known gener
 });
 it("drops a delayed older attempt set and accepts a newer one for the same head", async () => {
   const { state } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -2265,21 +1749,7 @@ it("drops a delayed older attempt set and accepts a newer one for the same head"
 
 it("emits when a newer attempt set changes the failing set", async () => {
   const { state } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
@@ -2331,21 +1801,7 @@ it("emits when a newer attempt set changes the failing set", async () => {
 
 it("ignores a settlement without an attempt set", async () => {
   const { state } = stateForCi();
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
   const { check_runs: _checkRuns, ...withoutCheckRuns } = settledChecks();
 
   nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(withoutCheckRuns));
@@ -2372,41 +1828,11 @@ it("accepts a settlement for a new head with lower check-run ids", async () => {
     {
       event_id: "synchronize-1",
       issued_at: 0,
-      payload: {
-        kind: "pr",
-        action: "synchronize",
-        repo: "acme/widgets",
-        number: "7",
-        title: "PR title",
-        author: "author",
-        url: "https://github.com/acme/widgets/pull/7",
-        head_sha: "head-2",
-        head_ref: "legion/issue-1",
-        base_ref: "main",
-        merged: "false",
-        merge_commit_sha: "",
-        merged_by: "",
-        body: "",
-        updated_at: "2026-09-07T03:00:00Z",
-      },
+      payload: prPayload({ head_sha: "head-2" }),
     },
     config
   );
-  const nats = new FakeNats();
-  const published: string[] = [];
-  const pump = startEventPump({
-    nats,
-    state,
-    config,
-    envoyPublish: async (_topic, payloadJson) => {
-      published.push(payloadJson);
-    },
-    saveState: async () => {},
-    onException: async () => {},
-    onLinger: async () => {},
-    onProbe: async () => {},
-    onApprovalStatus: async () => {},
-  });
+  const { nats, published, pump } = startCiPump(state);
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",

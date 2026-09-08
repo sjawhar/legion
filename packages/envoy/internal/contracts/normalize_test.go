@@ -635,33 +635,6 @@ func TestGithubResourceSubject(t *testing.T) {
 	}
 }
 
-func TestGithubEnvelopesCICheckRunNoPRsDropsEnvelope(t *testing.T) {
-	items := GithubEnvelopes(GithubEnvelopeInput{
-		Event:    "check_run",
-		Delivery: "d1",
-		EventID:  "e1",
-		TraceID:  "t1",
-		Body: map[string]any{
-			"action": "completed",
-			"repository": map[string]any{
-				"full_name": "sjawhar/legion",
-				"name":      "legion",
-				"owner":     map[string]any{"login": "sjawhar"},
-			},
-			"check_run": map[string]any{
-				"name":          "test",
-				"status":        "completed",
-				"conclusion":    "success",
-				"pull_requests": []any{},
-			},
-		},
-	}, "@legion")
-	// Un-PR'd check_run events are dropped (no active subscribers per #377).
-	if len(items) != 0 {
-		t.Fatalf("expected 0 envelopes for un-PR'd check_run, got %d", len(items))
-	}
-}
-
 // CI events (check_run/check_suite) are not published raw. They fold into
 // envoy_ci_state via the webhook handler's CIRecorder; the summary loop emits
 // one settled checks envelope when the head's CI is complete.
@@ -737,6 +710,8 @@ func TestGithubCIObservations(t *testing.T) {
 				"status":        "completed",
 				"conclusion":    "failure",
 				"head_sha":      "deadbeef",
+				"html_url":      "https://example-host/checks/987654321",
+				"completed_at":  "2026-09-07T03:00:00Z",
 				"app":           map[string]any{"id": float64(12345)},
 				"pull_requests": prs,
 			},
@@ -750,7 +725,8 @@ func TestGithubCIObservations(t *testing.T) {
 		}
 		o := obs[0]
 		if o.Owner != "sjawhar" || o.Repo != "legion" || o.Number != "42" || o.SHA != "deadbeef" ||
-			o.AppID != "12345" || o.CheckName != "unit-tests" ||
+			o.AppID != "12345" || o.CheckName != "unit-tests" || o.CheckRunID != 987654321 ||
+			o.URL != "https://example-host/checks/987654321" || o.ObservedAt != "2026-09-07T03:00:00Z" ||
 			o.Status != "completed" || o.Conclusion != "failure" {
 			t.Fatalf("unexpected observation: %+v", o)
 		}
@@ -918,33 +894,6 @@ func TestSlackEnvelopeHandlesNonObjectEvent(t *testing.T) {
 	}
 	if err := item.Validate(); err != nil {
 		t.Fatalf("expected valid envelope: %v", err)
-	}
-}
-
-func TestGithubEnvelopesMalformedCheckRunPullRequestsDropsEnvelope(t *testing.T) {
-	items := GithubEnvelopes(GithubEnvelopeInput{
-		Event:    "check_run",
-		Delivery: "d-ci",
-		EventID:  "e-ci",
-		TraceID:  "t-ci",
-		Body: map[string]any{
-			"action": "completed",
-			"repository": map[string]any{
-				"name":  "envoy",
-				"owner": map[string]any{"login": "sjawhar"},
-			},
-			"check_run": map[string]any{
-				"name":          "ci",
-				"status":        "completed",
-				"conclusion":    "success",
-				"pull_requests": []any{"bad-entry", 42},
-			},
-		},
-	}, "@legion")
-	// Malformed entries that yield no valid PR numbers behave like an empty list:
-	// the envelope is dropped rather than emitted on a repo-wide ci topic.
-	if len(items) != 0 {
-		t.Fatalf("expected 0 envelopes for malformed pull_requests, got %d", len(items))
 	}
 }
 

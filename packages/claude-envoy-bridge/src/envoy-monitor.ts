@@ -42,15 +42,6 @@ export function nativeMessageFrames(input: NativeMessageInput): readonly [string
   ]
 }
 
-export function envoyInboundMessage(
-  input: string,
-  sessionId?: string,
-  subject?: string,
-): string | undefined {
-  const rendered = renderInbound(input, sessionId ?? "", subject)
-  return rendered.skip ? undefined : rendered.content
-}
-
 export function nativeMessagingCredentials(
   environment: NativeMessagingEnvironment,
 ): NativeMessagingCredentials {

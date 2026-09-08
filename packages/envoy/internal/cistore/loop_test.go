@@ -482,125 +482,87 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("re-settled summary = %q", third.PayloadSummary)
 	}
 }
-func TestSummaryTickCarriesGenerationWhenSettlementsShareTheirHighestRun(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	store := openStore(t, conn)
-	pub := &recPub{}
-	const (
-		owner  = "example-org"
-		repo   = "example-repo"
-		number = "42"
-		sha    = "abcdef1234567890abcdef1234567890abcdef12"
-	)
 
-	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record head: %v", err)
+// A re-settlement carries a higher generation than the settlement it
+// supersedes whether the aggregate gained a name (lint alongside build) or a
+// run was corrected in place (build re-observed failed at the same id).
+func TestSummaryTickCarriesGenerationAcrossResettlements(t *testing.T) {
+	cases := []struct {
+		name          string
+		secondName    string
+		secondRunID   string
+		secondRuns    map[string]uint64
+		secondFailed  string
+		secondPassed  string
+		secondPassedN int
+	}{
+		{name: "adds a lower-id name", secondName: "lint", secondRunID: "850", secondRuns: map[string]uint64{"build": 900, "lint": 850}, secondFailed: "lint", secondPassed: "build", secondPassedN: 1},
+		{name: "corrects a run in place", secondName: "build", secondRunID: "900", secondRuns: map[string]uint64{"build": 900}, secondFailed: "build", secondPassed: "", secondPassedN: 0},
 	}
-	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record build: %v", err)
-	}
-	waitCacheChecks(t, store, owner, repo, number, sha, 1)
-	setLastEventAt(t, store, owner, repo, number, sha, 0)
-	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, cleanup := connectNATS(t)
+			defer cleanup()
+			store := openStore(t, conn)
+			pub := &recPub{}
+			const (
+				owner  = "example-org"
+				repo   = "example-repo"
+				number = "42"
+				sha    = "abcdef1234567890abcdef1234567890abcdef12"
+			)
 
-	if err := recordCheck(store, owner, repo, number, sha, "lint", "850", "https://example.test/850", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
-		t.Fatalf("record failed lint: %v", err)
-	}
-	setLastEventAt(t, store, owner, repo, number, sha, 0)
-	runSummaryTick(store, pub, time.Second, logging.New("test"))
-	if got := pub.count(); got != 2 {
-		t.Fatalf("settlement count = %d, want 2", got)
-	}
+			if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+				t.Fatalf("record head: %v", err)
+			}
+			waitHead(t, store, owner, repo, number, sha)
+			if err := recordCheck(store, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+				t.Fatalf("record build: %v", err)
+			}
+			waitCacheChecks(t, store, owner, repo, number, sha, 1)
+			setLastEventAt(t, store, owner, repo, number, sha, 0)
+			runSummaryTick(store, pub, time.Second, logging.New("test"))
 
-	type payload struct {
-		CheckRuns            []CheckRunRef `json:"check_runs"`
-		Generation           *uint64       `json:"generation"`
-		SupersededSettlement string        `json:"superseded_settlement"`
-		Failed               StatusGroup   `json:"failed"`
-		Passed               StatusGroup   `json:"passed"`
-	}
-	var first, second payload
-	items := pub.all()
-	if err := json.Unmarshal([]byte(items[0].Payload), &first); err != nil {
-		t.Fatalf("decode first settlement: %v", err)
-	}
-	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
-		t.Fatalf("decode second settlement: %v", err)
-	}
-	assertCheckRuns(t, first.CheckRuns, map[string]uint64{"build": 900})
-	assertCheckRuns(t, second.CheckRuns, map[string]uint64{"build": 900, "lint": 850})
-	if first.Generation == nil || first.SupersededSettlement != "" ||
-		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
-		t.Fatalf("first settlement = %+v, want initial green build at run 900", first)
-	}
-	if second.Generation == nil || *second.Generation <= *first.Generation ||
-		second.SupersededSettlement != "true" || second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "lint" ||
-		second.Passed.Count != 1 || strings.Join(second.Passed.Checks, ",") != "build" {
-		t.Fatalf("second settlement = %+v, want a newer red lint settlement with max run 900", second)
+			if err := recordCheck(store, owner, repo, number, sha, tc.secondName, tc.secondRunID, "https://example.test/"+tc.secondRunID, "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
+				t.Fatalf("record second observation: %v", err)
+			}
+			setLastEventAt(t, store, owner, repo, number, sha, 0)
+			runSummaryTick(store, pub, time.Second, logging.New("test"))
+			if got := pub.count(); got != 2 {
+				t.Fatalf("settlement count = %d, want 2", got)
+			}
+
+			// Generation stays a pointer so an omitted field is caught, not read as zero.
+			type payload struct {
+				CheckRuns            []CheckRunRef `json:"check_runs"`
+				Generation           *uint64       `json:"generation"`
+				SupersededSettlement string        `json:"superseded_settlement"`
+				Failed               StatusGroup   `json:"failed"`
+				Passed               StatusGroup   `json:"passed"`
+			}
+			var first, second payload
+			items := pub.all()
+			if err := json.Unmarshal([]byte(items[0].Payload), &first); err != nil {
+				t.Fatalf("decode first settlement: %v", err)
+			}
+			if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
+				t.Fatalf("decode second settlement: %v", err)
+			}
+			assertCheckRuns(t, first.CheckRuns, map[string]uint64{"build": 900})
+			assertCheckRuns(t, second.CheckRuns, tc.secondRuns)
+			if first.Generation == nil || first.SupersededSettlement != "" ||
+				first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
+				t.Fatalf("first settlement = %+v, want initial green build at run 900", first)
+			}
+			if second.Generation == nil || *second.Generation <= *first.Generation ||
+				second.SupersededSettlement != "true" || second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != tc.secondFailed ||
+				second.Passed.Count != tc.secondPassedN || strings.Join(second.Passed.Checks, ",") != tc.secondPassed {
+				t.Fatalf("second settlement = %+v, want a newer red settlement (%s)", second, tc.name)
+			}
+		})
 	}
 }
 
-func TestSummaryTickCarriesGenerationForInPlaceCheckRunUpdate(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	store := openStore(t, conn)
-	pub := &recPub{}
-	const (
-		owner  = "example-org"
-		repo   = "example-repo"
-		number = "42"
-		sha    = "abcdef1234567890abcdef1234567890abcdef12"
-	)
-
-	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record successful build: %v", err)
-	}
-	waitCacheChecks(t, store, owner, repo, number, sha, 1)
-	setLastEventAt(t, store, owner, repo, number, sha, 0)
-	runSummaryTick(store, pub, time.Second, logging.New("test"))
-
-	if err := recordCheck(store, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
-		t.Fatalf("record failed in-place build update: %v", err)
-	}
-	setLastEventAt(t, store, owner, repo, number, sha, 0)
-	runSummaryTick(store, pub, time.Second, logging.New("test"))
-	if got := pub.count(); got != 2 {
-		t.Fatalf("settlement count = %d, want 2", got)
-	}
-
-	type payload struct {
-		CheckRuns            []CheckRunRef `json:"check_runs"`
-		Generation           *uint64       `json:"generation"`
-		SupersededSettlement string        `json:"superseded_settlement"`
-		Failed               StatusGroup   `json:"failed"`
-		Passed               StatusGroup   `json:"passed"`
-	}
-	var first, second payload
-	items := pub.all()
-	if err := json.Unmarshal([]byte(items[0].Payload), &first); err != nil {
-		t.Fatalf("decode first settlement: %v", err)
-	}
-	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
-		t.Fatalf("decode second settlement: %v", err)
-	}
-	assertCheckRuns(t, first.CheckRuns, map[string]uint64{"build": 900})
-	assertCheckRuns(t, second.CheckRuns, map[string]uint64{"build": 900})
-	if first.Generation == nil || first.SupersededSettlement != "" ||
-		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
-		t.Fatalf("first settlement = %+v, want green build at run 900", first)
-	}
-	if second.Generation == nil || *second.Generation <= *first.Generation ||
-		second.SupersededSettlement != "true" ||
-		second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "build" || second.Passed.Count != 0 {
-		t.Fatalf("second settlement = %+v, want a newer red build at the same attempt set", second)
-	}
-}
 func TestSummaryTickKeepsLegacyFailureAfterFreshCheckArrives(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
