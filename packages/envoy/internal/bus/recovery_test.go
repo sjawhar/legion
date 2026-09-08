@@ -189,8 +189,13 @@ func TestCoreSubscriptionsShareQueueGroup(t *testing.T) {
 	if _, err := second.SubscribeCore(subject, handler, queue); err != nil {
 		t.Fatalf("subscribe second core role lane: %v", err)
 	}
-	if err := publisher.Flush(); err != nil {
-		t.Fatalf("flush queue subscriptions: %v", err)
+	// A SUB is asynchronous on the wire: flush the subscribing connections, not
+	// the publisher's, so the server holds both queue members before the first
+	// publish. Core NATS drops a message with no subscriber.
+	for name, client := range map[string]*bus.Client{"first": first, "second": second} {
+		if err := client.Conn.Flush(); err != nil {
+			t.Fatalf("flush %s subscription: %v", name, err)
+		}
 	}
 	for range 3 {
 		if err := publisher.Publish(subject, []byte("queued")); err != nil {
