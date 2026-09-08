@@ -728,7 +728,7 @@ export default function envoyExtension(pi: PiApi): void {
 function schemaFor(pi: PiApi, operation: EnvoyToolOperation): unknown {
   const spec = envoyToolSpecs.find((candidate) => candidate.operation === operation);
   if (spec === undefined) throw new Error(`missing Envoy tool specification for ${operation}`);
-  return pi.zod.object(spec.arguments);
+  return pi.zod.object(spec.arguments(pi.zod));
 }
 
 function stringFor(parameters: Record<string, unknown>, key: string): string {

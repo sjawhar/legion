@@ -27,7 +27,7 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 
 ## Critical conventions
 
-- Register schemas through the injected `pi.zod`, or as plain JSON Schema (the path OMP's MCP tools take — `dispatch` serialises the shared contract's zod shape this way). A schema object built from another Zod instance is not rejected: OMP misreads it as JSON Schema, silently, and the model sees a wrong parameter shape.
+- Register schemas through the injected `pi.zod`, or as plain JSON Schema (the path OMP's MCP tools take — `dispatch` serialises the shared contract's zod shape this way). Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). The shared tool contract therefore exposes argument shapes as builders over the caller's Zod (`spec.arguments(pi.zod)`), never as prebuilt schemas; `envoy.test.ts` proves every registered field came from the injected instance.
 - Keep direct NATS subscription lifecycle and Pi steering delivery adapter-local. Inbound messages deliver as `steer` so they interrupt an in-flight turn; `triggerTurn` still wakes idle sessions.
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.

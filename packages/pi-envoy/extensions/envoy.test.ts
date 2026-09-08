@@ -213,7 +213,7 @@ afterEach(() => {
   natsState.drainStarted = false;
 });
 
-function createPi(options: { readonly clipboardError?: Error } = {}) {
+function createPi(options: { readonly clipboardError?: Error; readonly zod?: typeof z } = {}) {
   clipboardState.error = options.clipboardError;
   const commands: RegisteredCommand[] = [];
   const tools: RegisteredTool[] = [];
@@ -221,7 +221,7 @@ function createPi(options: { readonly clipboardError?: Error } = {}) {
   const messages: string[] = [];
   const deliveries: { readonly content: string; readonly options: unknown }[] = [];
   const pi: TestPi = {
-    zod: z,
+    zod: options.zod ?? z,
     registerTool: (tool) => tools.push(tool),
     registerCommand: (name, command) => commands.push({ name, ...command }),
     on: (event, handler) => handlers.set(event, handler),
@@ -434,6 +434,53 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  test("builds every tool parameter schema through the injected pi.zod, never the bundled zod", async () => {
+    // OMP's converter reads internals only its own Zod produces; a field built from this
+    // package's zod import registers here but fails to load in a real session. The fixture
+    // normally hands the extension the same zod the contract imports, which cannot tell the
+    // two apart, so this pi.zod tracks every schema it (or a chained call on one) creates.
+    const { default: envoyExtension } = await import("./envoy.ts?injected-zod-identity");
+    const built = new WeakSet<object>();
+    const track = <Schema extends object>(schema: Schema): Schema => {
+      const proxy = new Proxy(schema, {
+        get(target, property, receiver) {
+          const value: unknown = Reflect.get(target, property, receiver);
+          if (typeof value !== "function") return value;
+          return (...args: unknown[]) => {
+            const result: unknown = Reflect.apply(value, target, args);
+            return result instanceof z.ZodType ? track(result) : result;
+          };
+        },
+      });
+      built.add(proxy);
+      return proxy;
+    };
+    const foreign: string[] = [];
+    const injected = {
+      ...z,
+      object: (shape: z.ZodRawShape) => track(z.object(shape)),
+      string: () => track(z.string()),
+      number: () => track(z.number()),
+      array: (item: z.ZodType) => {
+        if (!built.has(item)) foreign.push("array element");
+        return track(z.array(item));
+      },
+      enum: (values: readonly [string, ...string[]]) => track(z.enum(values)),
+      unknown: () => track(z.unknown()),
+    } as unknown as typeof z;
+    const fixture = createPi({ zod: injected });
+    envoyExtension(fixture.pi);
+
+    for (const tool of fixture.tools.filter((candidate) => candidate.name.startsWith("envoy_"))) {
+      const parameters = tool.parameters as z.ZodObject<z.ZodRawShape>;
+      if (!built.has(parameters)) foreign.push(tool.name);
+      for (const [key, field] of Object.entries(parameters.shape)) {
+        if (!built.has(field)) foreign.push(`${tool.name}.${key}`);
+      }
+    }
+    expect(foreign).toEqual([]);
+  });
+
   test("uses the shared metadata schema to reject an invalid urgency", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?shared-metadata-validation");
     const fixture = createPi();
@@ -443,7 +490,7 @@ describe("envoy OMP extension", () => {
     if (send === undefined || spec === undefined) throw new Error("envoy_send was not registered");
 
     const input = { session_id: "ses_target", message: "direct", urgency: "urgent" };
-    const expected = z.object(spec.arguments).safeParse(input);
+    const expected = z.object(spec.arguments(z) as unknown as z.ZodRawShape).safeParse(input);
     const actual = (send.parameters as z.ZodType).safeParse(input);
     if (expected.success || actual.success) throw new Error("invalid urgency unexpectedly parsed");
 

@@ -14,7 +14,7 @@ import {
 } from "@legion/envoy-client/dispatch-contract";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { machineID } from "@legion/envoy-client/machine";
-import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
+import { envoyToolSpecs, type ToolSpec } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { tool } from "@opencode-ai/plugin/tool";
 import { logger } from "./log";
@@ -32,16 +32,20 @@ const skillsDirectory = [
   path.resolve(moduleDirectory, "../../../skills"),
 ].find((dir) => existsSync(dir));
 
-const [
-  subscribeSpec,
-  unsubscribeSpec,
-  listSpec,
-  sendSpec,
-  publishSpec,
-  roleSetSpec,
-  whoamiSpec,
-  sessionsSpec,
-] = envoyToolSpecs;
+function toolSpec(name: string): ToolSpec {
+  const spec = envoyToolSpecs.find((candidate) => candidate.name === name);
+  if (spec === undefined) throw new Error(`envoy tool contract has no ${name}`);
+  return spec;
+}
+
+const subscribeSpec = toolSpec("envoy_subscribe");
+const unsubscribeSpec = toolSpec("envoy_unsubscribe");
+const listSpec = toolSpec("envoy_list");
+const sendSpec = toolSpec("envoy_send");
+const publishSpec = toolSpec("envoy_publish");
+const roleSetSpec = toolSpec("envoy_role_set");
+const whoamiSpec = toolSpec("envoy_whoami");
+const sessionsSpec = toolSpec("envoy_sessions");
 
 // The dispatch tool's LLM-facing schema, built with OpenCode's own zod
 // (`tool.schema`): OpenCode converts plugin schemas with that instance, and a

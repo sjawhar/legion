@@ -191,7 +191,7 @@ test("rejects an invalid urgency with the shared field validation error", async 
     const module = await loadServer("shared-metadata-validation")
     const spec = envoyToolSpecs.find((candidate) => candidate.name === "envoy_send")
     if (spec === undefined) throw new Error("envoy_send specification is missing")
-    const parsed = z.object(spec.arguments).safeParse({
+    const parsed = z.object(spec.arguments(z) as unknown as z.ZodRawShape).safeParse({
       session_id: "ses_target",
       message: "hello",
       urgency: "urgent",
