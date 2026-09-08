@@ -9,6 +9,8 @@ interface MergeGatePrSnapshot {
   repo: `${string}/${string}`;
   raw: Record<string, unknown>;
   head: { ref: string; sha: string };
+  /** The PR's lifecycle clock (GitHub `updated_at`), so a delayed older synchronize cannot rewind this head. */
+  updatedAt: number;
 }
 
 async function fetchMergeGatePr(
@@ -31,7 +33,11 @@ async function fetchMergeGatePr(
   if (typeof head.ref !== "string" || typeof head.sha !== "string") {
     throw new Error(`GitHub PR #${number} has an invalid head`);
   }
-  return { repo, raw, head: { ref: head.ref, sha: head.sha } };
+  const updatedAt = typeof raw.updated_at === "string" ? Date.parse(raw.updated_at) : Number.NaN;
+  if (Number.isNaN(updatedAt)) {
+    throw new Error(`GitHub PR #${number} has an invalid updated_at`);
+  }
+  return { repo, raw, head: { ref: head.ref, sha: head.sha }, updatedAt };
 }
 
 async function recoverPrForMergeGate(
@@ -73,6 +79,7 @@ async function recoverPrForMergeGate(
     repo,
     number,
     headSha: head.sha,
+    headUpdatedAt: snapshot.updatedAt,
     verdict: null,
     failing: [],
     failingStatuses: [],
@@ -80,7 +87,6 @@ async function recoverPrForMergeGate(
     ciCheckRuns: null,
     ciSettlementGeneration: null,
     ciSnapshot: null,
-
     ciReconciled: false,
     fixAttempts: 0,
   };
@@ -121,6 +127,7 @@ export async function handleMergeGate(
   }
   if (pr.headSha !== snapshot.head.sha) {
     resetPrHead(pr, snapshot.head.sha);
+    pr.headUpdatedAt = snapshot.updatedAt;
     await ctx.save();
   }
   const approval = await getApprovalState(

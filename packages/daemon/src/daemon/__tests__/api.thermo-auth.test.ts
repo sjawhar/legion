@@ -35,6 +35,7 @@ function response(command: string[]): { stdout: string; stderr: string; exitCode
       stdout: JSON.stringify({
         number: 17,
         head: { ref: "legion/issue-1", sha: "live-head" },
+        updated_at: "2026-09-07T03:00:00Z",
       }),
       stderr: "",
       exitCode: 0,
@@ -179,6 +180,7 @@ describe("thermonuclear API regressions", () => {
       repo: "acme/widgets",
       number: 17,
       headSha: "cached-head",
+      headUpdatedAt: Date.parse("2026-09-07T02:00:00Z"),
       verdict: "red",
       failing: ["unit"],
       failingStatuses: [],
@@ -202,8 +204,10 @@ describe("thermonuclear API regressions", () => {
 
     expect(gate.status).toBe(200);
     expect(await gate.json()).toEqual({ approved: true, pr: 17, headSha: "live-head" });
+    // The lifecycle clock moves with the head, so a delayed older synchronize cannot rewind it.
     expect(state.prs["acme/widgets#17"]).toMatchObject({
       headSha: "live-head",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
       verdict: null,
       failing: [],
       failingStatuses: [],
