@@ -1,76 +1,66 @@
 # Envoy GitHub Topic Taxonomy
 
-Envoy maps GitHub webhook events to NATS topics so consumers can subscribe to the resource and
-event shape they need without consuming unrelated repository traffic.
+Envoy maps GitHub webhook events to resource-scoped NATS topics. Subscribers
+choose the resource and event shape they need without consuming unrelated
+repository traffic.
 
 ## Topic shapes
 
 | Event | Topic |
 |---|---|
-| Push to a branch | `notifications.github.<o>.<r>.push.branch.<branch_sanitized>` |
-| Push to a tag | `notifications.github.<o>.<r>.push.tag.<tag_sanitized>` |
-| Push to other refs (e.g. `refs/pull/.../merge`) | **dropped** — no envelope emitted |
-| `workflow_run` | `notifications.github.<o>.<r>.workflow.<filename_sanitized>.<action>` |
-| `workflow_run` with missing `path` field | **dropped** — no envelope emitted |
-| PR-associated `check_run` | `notifications.github.<o>.<r>.pr.<number>.check` — immediate raw per-check observation |
-| CI summary after the debounce window | `notifications.github.<o>.<r>.pr.<number>.ci` — per-commit aggregate |
-| `check_suite`, or `check_run` without an associated PR | **dropped** — no envelope emitted |
+| Push to a branch | `notifications.github.<owner>.<repo>.push.branch.<branch_sanitized>` |
+| Push to a tag | `notifications.github.<owner>.<repo>.push.tag.<tag_sanitized>` |
+| `workflow_run` | `notifications.github.<owner>.<repo>.workflow.<filename_sanitized>.<action>` |
+| Settled PR CI | `notifications.github.<owner>.<repo>.pr.<number>.checks` |
+| PR opened/closed/merged/ready | `notifications.github.<owner>.<repo>.pr.<number>` |
+| PR comment | `notifications.github.<owner>.<repo>.pr.<number>.comment` |
+| Issue comment | `notifications.github.<owner>.<repo>.issue.<number>.comment` |
+| Push to another ref | Dropped — no envelope |
+| `workflow_run` missing `path` | Dropped — no envelope |
+| CI event without an associated PR | Dropped — no state or envelope |
 
-Where:
-- `branch_sanitized` / `tag_sanitized` — branch or tag name with dots replaced by underscores. Slashes are preserved (NATS doesn't treat `/` as special), so `feat/foo` stays as `feat/foo`.
-- `filename_sanitized` — `basename(workflow_run.path)` with dots replaced by underscores. `.github/workflows/ci.yml` → `ci_yml`.
-- `action` — one of `requested`, `in_progress`, `completed`.
-
-## Sanitization rule
-
-Replace `.` with `_` so the segment stays a single NATS token. Extracted as a shared helper:
-- TS: `sanitizeSubjectSegment(value)` in `packages/contracts/src/subject.ts`, used by `slackThreadSubject`, `githubPushSubject`, and `githubWorkflowSubject`.
-- Go: `SanitizeSubjectSegment(value)` in `packages/envoy/internal/contracts/generated.go` (generated from TS via `gen-go.ts`), used by the corresponding Go subject builders.
-
-The transform is lossy — `release_yml` could come from `release.yml` or `release_yml`. Subscribers needing the exact identifier must inspect the envelope payload (which always carries the unsanitized `ref` or `workflow_run.path`).
+`check_run` and `check_suite` webhook events do not publish raw envelopes.
+They update durable CI state; one `checks` envelope publishes after the PR
+head's CI is complete.
 
 ## Subscription examples
 
 ```text
-# Watch pushes to main only
-envoy_subscribe(["notifications.github.sjawhar.legion.push.branch.main"])
+# All signal-worthy events beneath one pull request, including settled CI
+envoy_subscribe(["notifications.github.example-org.example-repo.pr.42.>"])
 
-# Watch all branch pushes in a repo
-envoy_subscribe(["notifications.github.sjawhar.legion.push.branch.>"])
+# Settled CI for a single pull request
+envoy_subscribe(["notifications.github.example-org.example-repo.pr.42.checks"])
 
-# Watch all tag pushes (release watching)
-envoy_subscribe(["notifications.github.sjawhar.legion.push.tag.>"])
+# Workflow events across a repository
+envoy_subscribe(["notifications.github.example-org.example-repo.workflow.>"])
 
-# React to a specific workflow starting
-envoy_subscribe(["notifications.github.sjawhar.legion.workflow.ci_yml.in_progress"])
-
-# React to any workflow completing across the repo
-envoy_subscribe(["notifications.github.sjawhar.legion.workflow.*.completed"])
-
-# Watch immediate state changes for each CI check on a PR
-envoy_subscribe(["notifications.github.sjawhar.legion.pr.9880.check"])
-
-# Watch the debounced CI summary for a PR
-envoy_subscribe(["notifications.github.sjawhar.legion.pr.9880.ci"])
+# Pushes to the main branch
+envoy_subscribe(["notifications.github.example-org.example-repo.push.branch.main"])
 ```
 
-Note NATS wildcard semantics: `*` matches exactly one token, `>` matches one or more remaining tokens. Use `>` for "everything under this prefix" and `*` for "exactly one segment here, then this suffix".
+NATS `*` matches one token and `>` matches one or more remaining tokens.
+
+## Sanitization
+
+Branch, tag, and workflow filename segments replace `.` with `_` so they
+remain one NATS token. The transformation is lossy; consumers that require an
+exact identifier inspect the envelope payload.
+
+Slashes are preserved because they are not special in a NATS subject. A
+workflow segment is the basename of `workflow_run.path`: for example,
+`.github/workflows/ci.yml` becomes `ci_yml`.
 
 ## Routing exclusions
 
-- `workflow_job` events are not routed; use `workflow_run` for workflow-level state.
-- `release`, `deployment`, `deployment_status`, and `package` events use no specialized topic in this taxonomy.
-- A `.` → `_` subject-segment transform is lossy, so consumers that need an exact branch or workflow identifier inspect the envelope payload.
+`workflow_job`, `release`, `deployment`, `deployment_status`, and `package`
+have no specialized topic in this taxonomy.
 
-## Where to look
+## Implementation
 
 | Concern | File |
 |---|---|
-| TS subject helpers (source of truth) | `packages/contracts/src/subject.ts` |
-| TS subject tests | `packages/contracts/src/envelope.test.ts` |
-| Go subject helpers (generated mirror) | `packages/envoy/internal/contracts/generated.go` (via `packages/contracts/scripts/gen-go.ts`) |
-| Push/workflow routing and CI envelopes | `packages/envoy/internal/contracts/normalize.go` (`githubTopic`, `githubPushRefSegments`, `githubWorkflowFilename`, `GithubCIEnvelope`) |
-| Drop policy for un-routable events | `packages/envoy/internal/contracts/normalize.go` (`GithubEnvelopes`) |
-| CI aggregation | `packages/envoy/internal/cistore/` |
-| Subscription docs | `skills/envoy/SKILL.md` |
-
+| GitHub envelope routing | `packages/envoy/internal/contracts/normalize.go` |
+| CI observation extraction | `packages/envoy/internal/contracts/normalize.go` |
+| CI state and `checks` publication | `packages/envoy/internal/cistore/` |
+| CI webhook ingestion | `packages/envoy/internal/webhook/github.go` |

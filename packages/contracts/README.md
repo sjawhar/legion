@@ -32,6 +32,7 @@ granularity they need using wildcard patterns.
 | Event type | Published topic |
 |-----------|----------------|
 | PR opened/closed/merged | `notifications.github.{owner}.{repo}.pr.{number}` |
+| PR check settlement | `notifications.github.{owner}.{repo}.pr.{number}.checks` |
 | PR comment | `notifications.github.{owner}.{repo}.pr.{number}.comment` |
 | PR review | `notifications.github.{owner}.{repo}.pr.{number}.review` |
 | Issue event | `notifications.github.{owner}.{repo}.issue.{number}` |
@@ -43,17 +44,17 @@ granularity they need using wildcard patterns.
 
 | Want | Subscribe to |
 |------|-------------|
-| All events for PR #42 | `notifications.github.acme.widgets.pr.42.>` |
+| All events for PR #42 | `notifications.github.acme.widgets.pr.42`, `notifications.github.acme.widgets.pr.42.>` |
 | All PR events in repo | `notifications.github.acme.widgets.pr.>` |
 | All events in repo | `notifications.github.acme.widgets.>` |
 | Exact resource topic | `notifications.github.acme.widgets.pr.42` |
 
-The `>` wildcard matches the current level and all deeper levels.
+The `>` wildcard matches one or more following levels.
 The `*` wildcard matches exactly one level.
 
-### Not yet published
+### CI check settlement
 
-- CI events (`check_run`, `check_suite`) — tracked in #175
+`notifications.github.{owner}.{repo}.pr.{number}.checks` publishes once a current PR head's recorded checks and suites settle after the quiet period.
 
 ## Slack Topic Hierarchy
 

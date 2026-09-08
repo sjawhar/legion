@@ -29,7 +29,6 @@ function config(): DaemonConfig {
     workerBudget: 1,
     maxRecursionDepth: 1,
     lingerHours: 1,
-    ciQuietMs: 1,
     maxFixAttempts: 1,
     resyncIntervalMs: 1,
     gates: { design: "root-issues", merge: "human" },

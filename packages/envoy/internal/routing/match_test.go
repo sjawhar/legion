@@ -22,14 +22,38 @@ func TestMatch(t *testing.T) {
 	}
 }
 
+func TestNATSMultiTokenWildcardRequiresSuffix(t *testing.T) {
+	pattern := "pr.42.>"
+	cases := []struct {
+		topic string
+		ok    bool
+	}{
+		{topic: "pr.42", ok: false},
+		{topic: "pr.42.checks", ok: true},
+		{topic: "pr.43.checks", ok: false},
+		{topic: "pr.42.comment", ok: true},
+	}
+	for _, item := range cases {
+		if got := Match(pattern, item.topic); got != item.ok {
+			t.Fatalf("pattern=%s topic=%s expected=%v got=%v", pattern, item.topic, item.ok, got)
+		}
+	}
+	if !Match("pr.*.checks", "pr.42.checks") {
+		t.Fatal("* should match exactly one token")
+	}
+	if Match("pr.*.checks", "pr.42.extra.checks") {
+		t.Fatal("* should not match multiple tokens")
+	}
+}
+
 func TestPerPRFiltering(t *testing.T) {
 	pattern := "notifications.github.acme.widgets.pr.7706.>"
 	cases := []struct {
 		topic string
 		ok    bool
 	}{
-		// Should match: PR 7706 base topic and subtopics
-		{topic: "notifications.github.acme.widgets.pr.7706", ok: true},
+		// NATS > matches one or more tokens, never the base PR subject.
+		{topic: "notifications.github.acme.widgets.pr.7706", ok: false},
 		{topic: "notifications.github.acme.widgets.pr.7706.comment", ok: true},
 		{topic: "notifications.github.acme.widgets.pr.7706.review", ok: true},
 		// Should NOT match: different PR number
@@ -183,17 +207,17 @@ func TestWhatsappPerJIDFiltering(t *testing.T) {
 	}
 }
 
-func TestCITopicFiltering(t *testing.T) {
+func TestPRTopicFiltering(t *testing.T) {
 	pattern := "notifications.github.acme.widgets.pr.42.>"
 	cases := []struct {
 		topic string
 		ok    bool
 	}{
-		{topic: "notifications.github.acme.widgets.pr.42.ci", ok: true},
+		{topic: "notifications.github.acme.widgets.pr.42.checks", ok: true},
 		{topic: "notifications.github.acme.widgets.pr.42.comment", ok: true},
 		{topic: "notifications.github.acme.widgets.pr.42.review", ok: true},
-		{topic: "notifications.github.acme.widgets.pr.43.ci", ok: false},
-		{topic: "notifications.github.acme.widgets.ci", ok: false},
+		{topic: "notifications.github.acme.widgets.pr.43.checks", ok: false},
+		{topic: "notifications.github.acme.widgets.checks", ok: false},
 	}
 	for _, item := range cases {
 		got := Match(pattern, item.topic)

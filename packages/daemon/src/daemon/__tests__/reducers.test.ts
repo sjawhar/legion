@@ -7,6 +7,7 @@ import {
   type ReducerConfig,
   reduceCiEmission,
   reduceGithubEvent,
+  uncertifyCiVerdict,
 } from "../reducers";
 
 const repo = "acme/widgets" as const;
@@ -83,18 +84,27 @@ function attachChild(state: LegionState, released = true): void {
 }
 
 function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
+  const {
+    ciSettlementGeneration = null,
+    ciSnapshot = null,
+    ciReconciled = false,
+    ...rest
+  } = overrides;
   state.prs[`${repo}#${prNumber}`] = {
     key: child,
     repo,
     number: prNumber,
     headSha: "old-sha",
-    checks: {},
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: 0,
+    verdict: null,
+    failing: [],
+    failingStatuses: [],
+    ciSettledAt: null,
+    ciCheckRuns: null,
+    ciSettlementGeneration,
+    ciSnapshot,
+    ciReconciled,
     fixAttempts: 0,
-    ...overrides,
+    ...rest,
   };
   state.prByBranch[`${repo}@legion/issue-2`] = `${repo}#${prNumber}`;
 }
@@ -105,7 +115,8 @@ function effects(
   topic = `notifications.github.acme.widgets.issue.1`,
   eventId?: string
 ): Effect[] {
-  return reduceGithubEvent(state, topic, github(payload, eventId), config);
+  const input = payload.kind === "pr" ? envelope(payload, eventId) : github(payload, eventId);
+  return reduceGithubEvent(state, topic, input, config);
 }
 
 describe("reduceGithubEvent", () => {
@@ -445,13 +456,13 @@ describe("reduceGithubEvent", () => {
     expect(state.issues[root].state).toBe("closed");
   });
 
-  it("ignores raw per-check observation topics", () => {
+  it("keeps settled CI envelopes out of the generic GitHub reducer", () => {
     const state = rootState();
     expect(
       effects(
         state,
         { action: "completed", check_run: { conclusion: "failure" } },
-        `notifications.github.acme.widgets.pr.${prNumber}.check`
+        `notifications.github.acme.widgets.pr.${prNumber}.checks`
       )
     ).toEqual([]);
   });
@@ -639,12 +650,14 @@ describe("reduceGithubEvent", () => {
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "opened",
-        pull_request: {
-          number: prNumber,
-          head: { ref: "legion/issue-2", sha: "head-sha" },
-          html_url: "pr-url",
-        },
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "head-sha",
+        url: "pr-url",
+        updated_at: "2026-09-07T03:00:00Z",
       })
     ).toEqual([
       {
@@ -657,19 +670,49 @@ describe("reduceGithubEvent", () => {
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       key: child,
       headSha: "head-sha",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
     });
   });
+  it("does not index a registered PR under an unknown branch", () => {
+    const state = rootState();
+    const fallbackIssue = formatIssueKey("acme", "widgets", prNumber);
+    state.issues[fallbackIssue] = {
+      key: fallbackIssue,
+      title: "Fallback PR issue",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "opened",
+        repo,
+        number: String(prNumber),
+        head_sha: "head-sha",
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      key: fallbackIssue,
+      headSha: "head-sha",
+    });
+    expect(state.prByBranch).toEqual({});
+  });
+
   it("registers a Legion PR on synchronization when its opened event was missed", () => {
     const state = rootState();
     attachChild(state);
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "synchronize",
-        pull_request: {
-          number: prNumber,
-          head: { ref: "legion/issue-2", sha: "recovered-head" },
-        },
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "recovered-head",
       })
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "recovered-head" }]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
@@ -679,48 +722,98 @@ describe("reduceGithubEvent", () => {
     expect(state.prByBranch[`${repo}@legion/issue-2`]).toBe(`${repo}#${prNumber}`);
   });
 
-  it("resets PR checks and approval state on synchronization, counts a red-head retry, and rechecks approval", () => {
+  it("resets a red CI verdict and approval state on synchronization, counts the retry, and rechecks approval", () => {
     const state = rootState();
     attachChild(state);
     addPr(state, {
       headSha: "old-sha",
-      checks: { tests: { status: "completed", conclusion: "failure" } },
-      firstRedEmitted: true,
-      settledRedEmitted: true,
-      greenEmitted: true,
+      verdict: "red",
+      failing: ["unit"],
+      failingStatuses: [],
+      ciSettledAt: 1,
+      ciCheckRuns: [{ name: "build", id: 1 }],
       reviewDecision: "approved",
     });
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "synchronize",
-        pull_request: {
-          number: prNumber,
-          head: { ref: "legion/issue-2", sha: "new-sha" },
-        },
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "new-sha",
       })
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "new-sha" }]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       headSha: "new-sha",
-      checks: {},
-      firstRedEmitted: false,
-      settledRedEmitted: false,
-      greenEmitted: false,
+      verdict: null,
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: null,
+      ciCheckRuns: null,
       fixAttempts: 1,
     });
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBeUndefined();
   });
+  it("keeps a newer head and its verdict when synchronize arrives out of order", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, {
+      headSha: "head-a",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+    });
 
-  it("treats neutral and skipped completed checks as green for an approved review", () => {
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "synchronize",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "head-b",
+        updated_at: "2026-09-07T03:02:00Z",
+      })
+    ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "head-b" }]);
+    Object.assign(state.prs[`${repo}#${prNumber}`], {
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1,
+      reviewDecision: "approved",
+    });
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "synchronize",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "head-a",
+        updated_at: "2026-09-07T03:01:00Z",
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      headSha: "head-b",
+      headUpdatedAt: Date.parse("2026-09-07T03:02:00Z"),
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1,
+      reviewDecision: "approved",
+      fixAttempts: 0,
+    });
+  });
+
+  it("treats a settled green PR as ready after an approved review", () => {
     const state = rootState();
     attachChild(state);
     const implementer = claim(state, child, "implementer");
     const architect = claim(state, child, "architect");
     addPr(state, {
-      checks: {
-        lint: { status: "completed", conclusion: "neutral" },
-        optional: { status: "completed", conclusion: "skipped" },
-      },
+      verdict: "green",
+      ciSettledAt: 0,
     });
 
     expect(
@@ -754,24 +847,6 @@ describe("reduceGithubEvent", () => {
     ]);
   });
 
-  it("counts completed checks missing a conclusion as red when a PR synchronizes", () => {
-    const state = rootState();
-    attachChild(state);
-    addPr(state, {
-      checks: { delayed: { status: "completed", conclusion: null } },
-    });
-
-    effects(state, {
-      action: "synchronize",
-      pull_request: {
-        number: prNumber,
-        head: { ref: "legion/issue-2", sha: "new-sha" },
-      },
-    });
-
-    expect(state.prs[`${repo}#${prNumber}`].fixAttempts).toBe(1);
-  });
-
   it("removes an unmerged PR mapping and tells the issue architect", () => {
     const state = rootState();
     attachChild(state);
@@ -781,12 +856,11 @@ describe("reduceGithubEvent", () => {
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "closed",
-        pull_request: {
-          number: prNumber,
-          merged: false,
-          head: { ref: "legion/issue-2" },
-        },
+        repo,
+        number: String(prNumber),
+        merged: "false",
       })
     ).toEqual([
       {
@@ -805,7 +879,8 @@ describe("reduceGithubEvent", () => {
     const implementer = claim(state, child, "implementer");
     const architect = claim(state, child, "architect");
     addPr(state, {
-      checks: { tests: { status: "completed", conclusion: "success" } },
+      verdict: "green",
+      ciSettledAt: 0,
     });
 
     expect(
@@ -846,7 +921,6 @@ describe("reduceGithubEvent", () => {
     const implementer = claim(state, child, "implementer");
     addPr(state, {
       headSha: "current-sha",
-      checks: { tests: { status: "completed", conclusion: "success" } },
     });
 
     expect(
@@ -930,7 +1004,7 @@ describe("reduceCiEmission", () => {
   it("notifies the architect when the CI edge turns green for an approved PR", () => {
     const state = rootState();
     attachChild(state);
-    addPr(state, { reviewDecision: "approved" });
+    addPr(state, { reviewDecision: "approved", verdict: "green", ciSettledAt: 0 });
     const architect = claim(state, child, "architect");
 
     expect(
@@ -947,7 +1021,7 @@ describe("reduceCiEmission", () => {
   it("notifies the architect when settled CI red exhausts the retry budget", () => {
     const state = rootState();
     attachChild(state);
-    addPr(state, { fixAttempts: 3 });
+    addPr(state, { fixAttempts: 3, verdict: "red", ciSettledAt: 0 });
     const architect = claim(state, child, "architect");
 
     expect(
@@ -965,5 +1039,29 @@ describe("reduceCiEmission", () => {
         payload: { type: "pr-blocked", pr: prNumber, attempts: 3 },
       },
     ]);
+  });
+});
+
+describe("uncertifyCiVerdict", () => {
+  it("clears a green verdict without changing CI settlement metadata", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, {
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1_000,
+      ciCheckRuns: [{ name: "build", id: 4 }],
+    });
+
+    uncertifyCiVerdict(state.prs[`${repo}#${prNumber}`]);
+
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      verdict: null,
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1_000,
+      ciCheckRuns: [{ name: "build", id: 4 }],
+    });
   });
 });

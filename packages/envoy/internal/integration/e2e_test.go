@@ -321,8 +321,24 @@ func TestE2E_AgentToAgent_LocalMachine(t *testing.T) {
 	if !strings.Contains(event.body, "private hello") {
 		t.Fatalf("delivery body missing agent payload: %s", event.body)
 	}
-	if !strings.Contains(event.body, "ses_sender") || !strings.Contains(event.body, "reply to this message") {
-		t.Fatalf("delivery body missing reply instruction: %s", event.body)
+	var delivery struct {
+		Parts []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(event.body), &delivery); err != nil {
+		t.Fatalf("decode delivery body: %v", err)
+	}
+	if len(delivery.Parts) != 1 {
+		t.Fatalf("delivery parts = %d, want 1: %s", len(delivery.Parts), event.body)
+	}
+	header := "[NOTIFICATION to you from ses_sender]"
+	if !strings.Contains(delivery.Parts[0].Text, header) {
+		t.Fatalf("delivery text missing header %q: %s", header, delivery.Parts[0].Text)
+	}
+	replyInstruction := `Reply With: envoy_send(session_id="ses_sender", message="...")`
+	if !strings.Contains(delivery.Parts[0].Text, replyInstruction) {
+		t.Fatalf("delivery text missing reply instruction %q: %s", replyInstruction, delivery.Parts[0].Text)
 	}
 	recorder.expectNoDelivery(t, 300*time.Millisecond)
 }

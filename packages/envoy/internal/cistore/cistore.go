@@ -1,12 +1,12 @@
-// Package cistore holds the ingest-side aggregation of GitHub check_run events.
-//
-// Each check_run webhook folds into a per-commit State record in a JetStream KV
-// bucket via compare-and-swap, instead of being published raw to pr.<n>.ci. A
-// reconcile ticker (see loop.go) emits one rendered, debounced summary per
-// commit once its checks have been quiet for the debounce window. All
-// coordination state lives in KV so the aggregation is durable, restart-safe,
-// and correct across multiple listener replicas; the only in-memory state is a
-// rebuildable WatchAll read-cache.
+// Package cistore holds the ingest-side aggregation of GitHub CI observations.
+
+// Each check_run and check_suite webhook folds into a per-commit State record
+// in a JetStream KV bucket via compare-and-swap rather than being published
+// raw. A reconcile ticker (see loop.go) emits one checks envelope when the
+// current head is quiet and its recorded CI work is complete. All coordination
+// state lives in KV, so aggregation is durable, restart-safe, and correct
+// across listener replicas; the only in-memory state is a rebuildable WatchAll
+// read-cache.
 package cistore
 
 import (
@@ -15,14 +15,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // Bucket is the JetStream KV bucket name for per-commit CI state.
@@ -41,22 +44,120 @@ const Bucket = "envoy_ci_state"
 const recordBudget = 2 * time.Second
 const recordBackoffCap = 50 * time.Millisecond
 
-// Check is the last-known state of a single named check for a commit.
-type Check struct {
-	Status     string `json:"status"`     // queued|in_progress|completed
-	Conclusion string `json:"conclusion"` // success|failure|... ("" until completed)
-	UpdatedAt  int64  `json:"updated_at"`
+// checkRunID is a GitHub check-run id. Records written before ids were
+// validated at ingress carry it as a decimal string; new records carry a
+// number. Id-less legacy checks omit the field when they are persisted again.
+type checkRunID uint64
+
+func (id *checkRunID) UnmarshalJSON(raw []byte) error {
+	var n uint64
+	if err := json.Unmarshal(raw, &n); err == nil && n > 0 {
+		*id = checkRunID(n)
+		return nil
+	}
+	var legacy string
+	if err := json.Unmarshal(raw, &legacy); err == nil {
+		if n, err := strconv.ParseUint(legacy, 10, 64); err == nil && n > 0 {
+			*id = checkRunID(n)
+			return nil
+		}
+	}
+	return fmt.Errorf("cistore: check run ID %s is not a positive integer", raw)
 }
 
-// State is the aggregated set of checks for one (owner, repo, PR number, head SHA).
+// Check is the last-known state of a single named check for a commit.
+type Check struct {
+	Name       string     `json:"name,omitempty"`
+	CheckRunID checkRunID `json:"check_run_id,omitempty"`
+	URL        string     `json:"url"`
+	Status     string     `json:"status"`     // queued|in_progress|completed
+	Conclusion string     `json:"conclusion"` // success|failure|... ("" until completed)
+	// ObservedAt orders observations of this run (completion, else start).
+	ObservedAt string `json:"observed_at"`
+}
+
+// UnmarshalJSON reads records written by deployed listeners: their checks
+// carry updated_at instead of observed_at. The retired updated_at becomes
+// observed_at.
+func (check *Check) UnmarshalJSON(data []byte) error {
+	type checkAlias Check
+	*check = Check{}
+	wire := struct {
+		*checkAlias
+		ObservedAt *string `json:"observed_at"`
+		UpdatedAt  string  `json:"updated_at"`
+	}{checkAlias: (*checkAlias)(check)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.ObservedAt != nil {
+		check.ObservedAt = *wire.ObservedAt
+		return nil
+	}
+	check.ObservedAt = wire.UpdatedAt
+	return nil
+}
+
+// Suite is the last-known state of one GitHub check suite for a commit.
+type Suite struct {
+	ID         string `json:"id"`
+	AppID      string `json:"app_id"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	ObservedAt string `json:"observed_at"`
+}
+
+// SettlementClaim is the durable right to publish one settlement snapshot.
+// Claims prevent replicas from publishing the same episode concurrently.
+type SettlementClaim struct {
+	Hash       string `json:"hash"`
+	Generation uint64 `json:"generation"`
+	ClaimedAt  int64  `json:"claimed_at"`
+}
+
+// State is the aggregated set of checks and suites for one (owner, repo, PR
+// number, head SHA).
 type State struct {
-	Owner        string           `json:"owner"`
-	Repo         string           `json:"repo"`
-	Number       string           `json:"number"`
-	SHA          string           `json:"sha"`
-	Checks       map[string]Check `json:"checks"`
-	LastEventAt  int64            `json:"last_event_at"`
-	LastEmitHash string           `json:"last_emit_hash"`
+	Owner          string           `json:"owner"`
+	Repo           string           `json:"repo"`
+	Number         string           `json:"number"`
+	SHA            string           `json:"sha"`
+	Checks         map[string]Check `json:"checks"`
+	Suites         map[string]Suite `json:"suites"`
+	LastEventAt    int64            `json:"last_event_at"`
+	Generation     uint64           `json:"generation"`
+	EmittedCount   uint64           `json:"emitted_count"`
+	SettledEmitted bool             `json:"settled_emitted"`
+	Claim          *SettlementClaim `json:"claim,omitempty"`
+}
+
+// UnmarshalJSON maps the retired resettled marker to the durable fact that
+// this record emitted at least one settlement.
+func (state *State) UnmarshalJSON(data []byte) error {
+	type stateAlias State
+	*state = State{}
+	wire := struct {
+		*stateAlias
+		Resettled bool `json:"resettled"`
+	}{stateAlias: (*stateAlias)(state)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if (wire.Resettled || state.SettledEmitted) && state.EmittedCount == 0 {
+		state.EmittedCount = 1
+	}
+	return nil
+}
+
+const headRecordKind = "head"
+
+var ErrInvalidHeadSHA = errors.New("cistore: invalid head SHA")
+
+type headRecord struct {
+	Kind       string `json:"kind"`
+	SHA        string `json:"sha"`
+	UpdatedAt  string `json:"updated_at"`
+	Generation uint64 `json:"generation"`
 }
 
 // keyCleaner replaces characters that are invalid in a NATS KV key. GitHub
@@ -77,31 +178,53 @@ func Key(owner, repo, number, sha string) string {
 		keyCleaner.Replace(sha)
 }
 
-// Hash is a stable, order-independent fingerprint of the check set
-// (name+status+conclusion). It decides whether a newly-observed state is worth
-// emitting: an unchanged hash since the last emit means nothing user-visible
-// changed, so the summary loop stays quiet.
-func (s State) Hash() string {
-	names := make([]string, 0, len(s.Checks))
-	for n := range s.Checks {
-		names = append(names, n)
+func headKey(owner, repo, number string) string {
+	return "head." + keyCleaner.Replace(owner) + "." +
+		keyCleaner.Replace(repo) + "." + keyCleaner.Replace(number)
+}
+
+func validHeadSHA(sha string) bool {
+	if len(sha) != 40 {
+		return false
 	}
-	sort.Strings(names)
+	_, err := hex.DecodeString(sha)
+	return err == nil
+}
+
+// Hash is a stable, order-independent fingerprint of the CI state. It includes
+// check-run attempts and check-suite state so a re-run becomes a distinct
+// delivery even when it resolves to the same conclusion.
+func (s State) Hash() string {
 	h := sha256.New()
-	for _, n := range names {
-		c := s.Checks[n]
-		h.Write([]byte(n + "\x00" + c.Status + "\x00" + c.Conclusion + "\x01"))
+	checkNames := make([]string, 0, len(s.Checks))
+	for name := range s.Checks {
+		checkNames = append(checkNames, name)
+	}
+	sort.Strings(checkNames)
+	for _, name := range checkNames {
+		check := s.Checks[name]
+		h.Write([]byte("check\x00" + name + "\x00" + strconv.FormatUint(uint64(check.CheckRunID), 10) + "\x00" + check.Status + "\x00" + check.Conclusion + "\x01"))
+	}
+	suiteIDs := make([]string, 0, len(s.Suites))
+	for id := range s.Suites {
+		suiteIDs = append(suiteIDs, id)
+	}
+	sort.Strings(suiteIDs)
+	for _, id := range suiteIDs {
+		suite := s.Suites[id]
+		h.Write([]byte("suite\x00" + id + "\x00" + suite.AppID + "\x00" + suite.Status + "\x00" + suite.Conclusion + "\x01"))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Store is a KV-backed CI state registry with an in-memory WatchAll read-cache.
 type Store struct {
-	kv        nats.KeyValue
-	mu        sync.RWMutex
-	cache     map[string]State
-	readyCh   chan struct{}
-	readyOnce sync.Once
+	kv             nats.KeyValue
+	mu             sync.RWMutex
+	cache          map[string]State
+	heads          map[string]string
+	cacheRevisions map[string]uint64
+	readyCh        chan struct{}
+	readyOnce      sync.Once
 	// watchErr is non-nil once the WatchAll watcher fails to start or its update
 	// stream ends. The summary loop reads only the cache (no KV fallback), so a
 	// dead watcher silently stops/staleness summaries; surfacing it via Ping lets
@@ -159,7 +282,13 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{kv: kv, cache: map[string]State{}, readyCh: make(chan struct{})}
+	s := &Store{
+		kv:             kv,
+		cache:          map[string]State{},
+		heads:          map[string]string{},
+		cacheRevisions: map[string]uint64{},
+		readyCh:        make(chan struct{}),
+	}
 	go s.watch()
 	return s, nil
 }
@@ -189,22 +318,80 @@ func (s *Store) watch() {
 			s.signalReady()
 			continue
 		}
+
+		key := entry.Key()
+		var malformed error
 		s.mu.Lock()
-		if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-			delete(s.cache, entry.Key())
-		} else {
-			var st State
-			if err := json.Unmarshal(entry.Value(), &st); err == nil {
-				s.cache[entry.Key()] = st
+		switch {
+		case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
+			s.evictCachedLocked(key, entry.Revision())
+		default:
+			var marker struct {
+				Kind string `json:"kind"`
+			}
+			if err := json.Unmarshal(entry.Value(), &marker); err == nil && marker.Kind == headRecordKind {
+				var head headRecord
+				if err := json.Unmarshal(entry.Value(), &head); err != nil {
+					s.evictCachedLocked(key, entry.Revision())
+					malformed = err
+				} else if !validHeadSHA(head.SHA) {
+					s.evictCachedLocked(key, entry.Revision())
+					malformed = errors.New("invalid head SHA")
+				} else {
+					s.cacheHeadLocked(key, head.SHA, entry.Revision())
+				}
+			} else {
+				var st State
+				if err := json.Unmarshal(entry.Value(), &st); err != nil {
+					s.evictCachedLocked(key, entry.Revision())
+					malformed = err
+				} else {
+					s.cacheStateLocked(key, st, entry.Revision())
+				}
 			}
 		}
 		s.mu.Unlock()
+
+		if malformed != nil {
+			slog.Warn("cistore watch evicted malformed value",
+				slog.String("key", key),
+				slog.Uint64("revision", entry.Revision()),
+				slog.String("error", malformed.Error()),
+			)
+		}
 	}
 	// Updates() closed unexpectedly (e.g. conn lost). The cache will now go stale
 	// with no updates; surface it via Ping so the self-health watchdog restarts
 	// the listener and rebuilds the cache from durable KV.
 	s.setWatchErr(errors.New("cistore: KV watcher stream closed"))
 	s.signalReady()
+}
+
+func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
+	if revision < s.cacheRevisions[key] {
+		return
+	}
+	s.cache[key] = state
+	delete(s.heads, key)
+	s.cacheRevisions[key] = revision
+}
+
+func (s *Store) cacheHeadLocked(key, sha string, revision uint64) {
+	if revision < s.cacheRevisions[key] {
+		return
+	}
+	delete(s.cache, key)
+	s.heads[key] = sha
+	s.cacheRevisions[key] = revision
+}
+
+func (s *Store) evictCachedLocked(key string, revision uint64) {
+	if revision < s.cacheRevisions[key] {
+		return
+	}
+	delete(s.cache, key)
+	delete(s.heads, key)
+	s.cacheRevisions[key] = revision
 }
 
 func (s *Store) setWatchErr(err error) {
@@ -236,9 +423,66 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 }
 
 // Record folds one check observation into the per-commit state via CAS.
-// It retries on revision conflict so concurrent writers (or replicas) racing on
-// the same commit never lose an update.
-func (s *Store) Record(owner, repo, number, sha, checkName, status, conclusion string) error {
+func (s *Store) Record(observation contracts.CIObservation) error {
+	return s.record(observation)
+}
+
+func (s *Store) record(observation contracts.CIObservation) error {
+	return s.update(observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
+		if st.Checks == nil {
+			st.Checks = map[string]Check{}
+		}
+		key := observation.CheckName
+		if current, ok := st.Checks[key]; ok {
+			if checkRunIDIsOlder(observation.CheckRunID, uint64(current.CheckRunID)) ||
+				(observation.CheckRunID == uint64(current.CheckRunID) && !observationMayReplace(observation.ObservedAt, current.ObservedAt, observation.Status, current.Status)) {
+				return false
+			}
+		}
+		next := Check{
+			Name:       observation.CheckName,
+			CheckRunID: checkRunID(observation.CheckRunID),
+			URL:        observation.URL,
+			Status:     observation.Status,
+			Conclusion: observation.Conclusion,
+			ObservedAt: observation.ObservedAt,
+		}
+		if current, ok := st.Checks[key]; ok && current == next {
+			return false
+		}
+		st.Checks[key] = next
+		rearm(st)
+		st.LastEventAt = time.Now().UnixMilli()
+		return true
+	})
+}
+
+// RecordSuite folds a check_suite observation into the per-commit state.
+func (s *Store) RecordSuite(observation contracts.CIObservation) error {
+	return s.update(observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
+		if st.Suites == nil {
+			st.Suites = map[string]Suite{}
+		}
+		next := Suite{
+			ID:         observation.SuiteID,
+			AppID:      observation.AppID,
+			Status:     observation.Status,
+			Conclusion: observation.Conclusion,
+			ObservedAt: observation.ObservedAt,
+		}
+		if current, ok := st.Suites[observation.SuiteID]; ok {
+			if !observationMayReplace(observation.ObservedAt, current.ObservedAt, observation.Status, current.Status) || current == next {
+				return false
+			}
+		}
+		st.Suites[observation.SuiteID] = next
+		rearm(st)
+		st.LastEventAt = time.Now().UnixMilli()
+		return true
+	})
+}
+
+func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool) error {
 	key := Key(owner, repo, number, sha)
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
@@ -256,12 +500,14 @@ func (s *Store) Record(owner, repo, number, sha, checkName, status, conclusion s
 		default:
 			return getErr
 		}
-		if st.Checks == nil {
-			st.Checks = map[string]Check{}
+		beforeHash := st.Hash()
+		generation := st.Generation
+		if !mutate(&st) {
+			return nil
 		}
-		now := time.Now().UnixMilli()
-		st.Checks[checkName] = Check{Status: status, Conclusion: conclusion, UpdatedAt: now}
-		st.LastEventAt = now
+		if rev != 0 && st.Hash() != beforeHash && st.Generation == generation {
+			bumpGeneration(&st)
+		}
 		buf, err := json.Marshal(st)
 		if err != nil {
 			return err
@@ -279,14 +525,138 @@ func (s *Store) Record(owner, repo, number, sha, checkName, status, conclusion s
 				return err
 			}
 		}
-		// Conflict — another writer advanced the revision. Back off with jitter
-		// so racing writers serialize instead of thundering, then retry with
-		// fresh state until the budget expires.
 		if time.Now().After(deadline) {
 			return errors.New("cistore: record exceeded CAS budget")
 		}
 		time.Sleep(casBackoff(attempt))
 	}
+}
+
+func rearm(st *State) {
+	if !st.SettledEmitted && (st.Claim == nil || st.Claim.Generation != st.Generation) {
+		return
+	}
+	bumpGeneration(st)
+	st.SettledEmitted = false
+}
+
+// bumpGeneration advances the delivery identity after a mutation invalidates a
+// settlement snapshot. ClaimSettlement and MarkSettled deliberately do not
+// call it: claiming reserves the current snapshot, while marking preserves the
+// identity of the snapshot that was published.
+func bumpGeneration(st *State) {
+	st.Generation++
+}
+
+func observationMayReplace(incomingAt, storedAt, incomingStatus, storedStatus string) bool {
+	incoming, incomingErr := time.Parse(time.RFC3339, incomingAt)
+	stored, storedErr := time.Parse(time.RFC3339, storedAt)
+	incomingValid := incomingErr == nil
+	storedValid := storedErr == nil
+	switch {
+	case incomingValid && storedValid:
+		if incoming.Before(stored) {
+			return false
+		}
+		if incoming.After(stored) {
+			return true
+		}
+		return statusRank(incomingStatus) >= statusRank(storedStatus)
+	case !incomingValid && storedValid:
+		return false
+	case incomingValid:
+		return true
+	default:
+		// A missing timestamp cannot order two observations, so preserve receipt
+		// order for two timestamp-less values. A timestamp-less incoming never
+		// displaces a stored observation with a usable timestamp.
+		return true
+	}
+}
+
+func statusRank(status string) int {
+	if status == "completed" {
+		return 1
+	}
+	return 0
+}
+
+func checkRunIDIsOlder(incoming, stored uint64) bool {
+	return incoming < stored
+}
+
+// RecordHead persists the current PR head SHA. The WatchAll cache serves Head.
+func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
+	if !validHeadSHA(sha) {
+		return ErrInvalidHeadSHA
+	}
+	var incomingAt time.Time
+	if updatedAt != "" {
+		var err error
+		incomingAt, err = time.Parse(time.RFC3339, updatedAt)
+		if err != nil {
+			return fmt.Errorf("cistore: invalid head updated_at: %w", err)
+		}
+	}
+	key := headKey(owner, repo, number)
+	deadline := time.Now().Add(recordBudget)
+	for attempt := 0; ; attempt++ {
+		entry, getErr := s.kv.Get(key)
+		var current headRecord
+		var rev uint64
+		switch {
+		case getErr == nil:
+			if err := json.Unmarshal(entry.Value(), &current); err != nil {
+				return err
+			}
+			rev = entry.Revision()
+		case errors.Is(getErr, nats.ErrKeyNotFound):
+			current = headRecord{Kind: headRecordKind}
+		default:
+			return getErr
+		}
+		if current.UpdatedAt != "" && updatedAt != "" {
+			storedAt, err := time.Parse(time.RFC3339, current.UpdatedAt)
+			if err == nil {
+				if incomingAt.Before(storedAt) || (incomingAt.Equal(storedAt) && current.SHA == sha) {
+					return nil
+				}
+			}
+		}
+		generation := current.Generation
+		if current.SHA != "" && current.SHA != sha {
+			generation++
+		}
+		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt, Generation: generation})
+		if err != nil {
+			return err
+		}
+		if rev == 0 {
+			if _, err := s.kv.Create(key, buf); err == nil {
+				return nil
+			} else if !errors.Is(err, nats.ErrKeyExists) {
+				return err
+			}
+		} else {
+			if _, err := s.kv.Update(key, buf, rev); err == nil {
+				return nil
+			} else if !isCASConflict(err) {
+				return err
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("cistore: record head exceeded CAS budget")
+		}
+		time.Sleep(casBackoff(attempt))
+	}
+}
+
+// Head returns the current PR head SHA when one has been observed.
+func (s *Store) Head(owner, repo, number string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sha, ok := s.heads[headKey(owner, repo, number)]
+	return sha, ok
 }
 
 // casBackoff returns a full-jitter, capped-exponential backoff for CAS retries.
@@ -295,7 +665,7 @@ func casBackoff(attempt int) time.Duration {
 	if base <= 0 || base > recordBackoffCap {
 		base = recordBackoffCap
 	}
-	return time.Duration(rand.Int63n(int64(base) + 1))
+	return time.Duration(rand.Int64N(int64(base) + 1))
 }
 
 // isCASConflict reports whether err is a compare-and-swap revision conflict
@@ -306,13 +676,52 @@ func isCASConflict(err error) bool {
 	return errors.Is(err, nats.ErrKeyExists) || strings.Contains(err.Error(), "wrong last sequence")
 }
 
+func (s *Store) casState(key string, apply func(st *State) (ok bool, err error)) (State, bool, error) {
+	deadline := time.Now().Add(recordBudget)
+	for attempt := 0; ; attempt++ {
+		entry, err := s.kv.Get(key)
+		if err != nil {
+			return State{}, false, err
+		}
+		var state State
+		if err := json.Unmarshal(entry.Value(), &state); err != nil {
+			return State{}, false, err
+		}
+		ok, err := apply(&state)
+		if err != nil {
+			return State{}, false, err
+		}
+		if !ok {
+			return state, false, nil
+		}
+		buf, err := json.Marshal(state)
+		if err != nil {
+			return State{}, false, err
+		}
+		revision, err := s.kv.Update(key, buf, entry.Revision())
+		if err == nil {
+			s.mu.Lock()
+			s.cacheStateLocked(key, state, revision)
+			s.mu.Unlock()
+			return state, true, nil
+		}
+		if !isCASConflict(err) {
+			return State{}, false, err
+		}
+		if time.Now().After(deadline) {
+			return State{}, false, errors.New("cistore: state transition exceeded CAS budget")
+		}
+		time.Sleep(casBackoff(attempt))
+	}
+}
+
 // List returns a snapshot copy of the current cached states.
 func (s *Store) List() []State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]State, 0, len(s.cache))
-	for _, st := range s.cache {
-		out = append(out, st)
+	for _, state := range s.cache {
+		out = append(out, state)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return Key(out[i].Owner, out[i].Repo, out[i].Number, out[i].SHA) <
@@ -321,52 +730,153 @@ func (s *Store) List() []State {
 	return out
 }
 
-// MarkEmitted claims the right to emit the summary for `hash` on a commit, via a
-// compare-and-swap that stamps LastEmitHash. It reads fresh from KV so it is
-// correct even when the caller acted on a slightly-stale WatchAll cache, and
-// re-validates the caller's decision against that fresh state before committing.
-//
-// Returns (false, nil) — not an error — when emitting would be wrong:
-//   - the entry already carries this hash (already emitted);
-//   - the fresh check set no longer hashes to `hash` (a Record landed after the
-//     caller rendered → its summary is stale, skip it);
-//   - the commit is no longer past the debounce window (that same late Record
-//     reopened the quiet window → too early to emit);
-//   - the revision moved under a concurrent writer (CAS conflict).
-//
-// These guards are what make emit-once AND debounce hold against the
-// eventually-consistent read-cache: a stale/premature summary can never win the
-// CAS. On success the durable state's hash still equals `hash`, so the caller's
-// already-rendered summary (which depends only on the hashed check set + stable
-// identity) faithfully represents what was marked.
-func (s *Store) MarkEmitted(key, hash string, debounce time.Duration) (bool, error) {
+// ClaimSettlement atomically acquires the right to publish a ready state
+// generation without changing that generation, after re-reading the durable
+// state and head record. It applies the debounce window to the durable
+// LastEventAt value, not the cache snapshot.
+func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uint64, now int64, debounce time.Duration) (State, bool, error) {
+	state, claimed, err := s.casState(key, func(state *State) (bool, error) {
+		if state.SettledEmitted ||
+			state.Claim != nil ||
+			state.Generation != expectedGeneration ||
+			state.Hash() != expectedHash ||
+			!settlementReady(*state) ||
+			state.LastEventAt+debounce.Milliseconds() > now {
+			return false, nil
+		}
+		headMatches, err := s.durableHeadMatches(*state)
+		if err != nil || !headMatches {
+			return headMatches, err
+		}
+		state.Claim = &SettlementClaim{
+			Hash:       expectedHash,
+			Generation: expectedGeneration,
+			ClaimedAt:  time.Now().UnixMilli(),
+		}
+		return true, nil
+	})
+	if err != nil || !claimed {
+		return State{}, false, err
+	}
+	return state, true, nil
+}
+
+// ClaimStillHeld verifies from durable KV that this exact snapshot retains the
+// settlement right immediately before an external publication.
+func (s *Store) ClaimStillHeld(key string, generation uint64, hash string) (bool, error) {
 	entry, err := s.kv.Get(key)
 	if err != nil {
 		return false, err
 	}
-	var st State
-	if err := json.Unmarshal(entry.Value(), &st); err != nil {
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
 		return false, err
 	}
-	if st.LastEmitHash == hash {
-		return false, nil // already emitted this exact check set
+	headMatches, err := s.durableHeadMatches(state)
+	if err != nil || !headMatches {
+		return false, err
 	}
-	if st.Hash() != hash {
-		return false, nil // set changed since the caller rendered; that summary is stale
+	return !state.SettledEmitted &&
+		state.Generation == generation &&
+		state.Claim != nil &&
+		state.Claim.Generation == generation &&
+		state.Claim.Hash == hash &&
+		state.Hash() == hash, nil
+}
+
+// ReclaimSettlement releases a claim from a replica that died before publish.
+// The caller determines the stale threshold from its configured debounce.
+func (s *Store) ReclaimSettlement(key string, generation uint64, staleBefore int64) (bool, error) {
+	_, reclaimed, err := s.casState(key, func(state *State) (bool, error) {
+		if state.Claim == nil ||
+			state.Claim.Generation != generation ||
+			(state.Generation == generation && state.Claim.ClaimedAt >= staleBefore) {
+			return false, nil
+		}
+		state.Claim = nil
+		bumpGeneration(state)
+		return true, nil
+	})
+	return reclaimed, err
+}
+
+// ReleaseClaim clears this generation's claim after a failed publication.
+func (s *Store) ReleaseClaim(key string, generation uint64) (bool, error) {
+	_, released, err := s.casState(key, func(state *State) (bool, error) {
+		if state.Claim == nil || state.Claim.Generation != generation {
+			return false, nil
+		}
+		state.Claim = nil
+		bumpGeneration(state)
+		return true, nil
+	})
+	return released, err
+}
+
+// MarkSettled records a successfully published claim without changing its
+// generation. A re-arm that happened after publication keeps its newer snapshot
+// unsettled, but it must not erase the fact that the obsolete snapshot emitted.
+func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
+	_, marked, err := s.casState(key, func(state *State) (bool, error) {
+		if state.Claim == nil || state.Claim.Generation != generation {
+			return false, nil
+		}
+		state.EmittedCount++
+		if state.Generation == generation && state.Claim.Hash == state.Hash() {
+			state.SettledEmitted = true
+		}
+		state.Claim = nil
+		return true, nil
+	})
+	return marked, err
+}
+
+func (s *Store) durableHeadMatches(state State) (bool, error) {
+	entry, err := s.kv.Get(headKey(state.Owner, state.Repo, state.Number))
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return true, nil
 	}
-	if time.Now().UnixMilli()-st.LastEventAt < debounce.Milliseconds() {
-		return false, nil // a later event reopened the debounce window; too early
-	}
-	st.LastEmitHash = hash
-	buf, err := json.Marshal(st)
 	if err != nil {
 		return false, err
 	}
-	if _, err := s.kv.Update(key, buf, entry.Revision()); err != nil {
-		if isCASConflict(err) {
-			return false, nil
-		}
-		return false, err
+	var head headRecord
+	if err := json.Unmarshal(entry.Value(), &head); err != nil || !validHeadSHA(head.SHA) {
+		return false, nil
 	}
-	return true, nil
+	return head.SHA == state.SHA, nil
+}
+
+func settlementReady(st State) bool {
+	if !terminal(st) {
+		return false
+	}
+	hasCheckRunID := false
+	for _, check := range st.Checks {
+		if check.CheckRunID > 0 {
+			hasCheckRunID = true
+			break
+		}
+	}
+	if !hasCheckRunID {
+		return false
+	}
+	for _, suite := range st.Suites {
+		if suite.Status != "completed" {
+			return false
+		}
+	}
+	return true
+}
+
+func terminal(st State) bool {
+	if len(st.Checks) == 0 {
+		return false
+	}
+	for _, check := range st.Checks {
+		switch classify(check) {
+		case catRunning, catQueued:
+			return false
+		}
+	}
+	return true
 }

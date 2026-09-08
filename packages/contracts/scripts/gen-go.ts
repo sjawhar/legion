@@ -7,6 +7,7 @@ type ScalarKind = "string" | "integer" | "boolean";
 type Prop = {
   type: ScalarKind | "array" | "object";
   enum?: string[];
+  minLength?: number;
   properties?: Record<string, Prop>;
   required?: string[];
   items?: Prop;
@@ -36,7 +37,43 @@ const nestedNames: Record<string, Record<string, string>> = {
   },
 };
 
-const keep = `const AgentTopicPrefix = "notifications.agent."
+const keep = `func ValidateWire(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for _, field := range []string{"in_reply_to", "supersedes", "urgency", "expects_reply"} {
+		if err := validateWireNonEmpty(fields, field, field); err != nil {
+			return err
+		}
+	}
+	senderRaw, found := fields["sender"]
+	if !found {
+		return nil
+	}
+	var sender map[string]json.RawMessage
+	if err := json.Unmarshal(senderRaw, &sender); err != nil {
+		return err
+	}
+	return validateWireNonEmpty(sender, "session_id", "sender.session_id")
+}
+
+func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string) error {
+	raw, found := fields[field]
+	if !found {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	if value == "" {
+		return fmt.Errorf("%s must not be empty", path)
+	}
+	return nil
+}
+
+const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
 
 func NowMillis() int64 {
@@ -97,8 +134,15 @@ function name(key: string) {
 }
 
 function envelopeKind(prop: Prop, req: Set<string>, key: string) {
-  if (prop.type === "array" || prop.type === "object") {
-    throw new Error(`unsupported envelope schema type for ${key}`);
+  if (prop.type === "object") {
+    if (!prop.properties) throw new Error(`missing object properties for ${key}`);
+    return `*Envelope${name(key)}`;
+  }
+  if (prop.type === "array") {
+    if (prop.items?.type !== "string") {
+      throw new Error(`unsupported array items for ${key}`);
+    }
+    return "[]string";
   }
   const base = map[prop.type];
   if (req.has(key) || prop.type === "string") return base;
@@ -112,28 +156,65 @@ function envelopeField(key: string, prop: Prop, req: Set<string>, wide: number, 
   return `\t${n.padEnd(wide)} ${t.padEnd(types)} \`json:"${tag}"\``;
 }
 
-function check(key: string, prop: Prop) {
-  const n = name(key);
+function check(access: string, path: string, prop: Prop, depth = 1) {
+  const indent = "\t".repeat(depth);
   if (prop.type === "string") {
-    return `\tif strings.TrimSpace(e.${n}) == "" {\n\t\treturn fmt.Errorf("${key} is required")\n\t}`;
+    return `${indent}if strings.TrimSpace(${access}) == "" {\n${indent}\treturn fmt.Errorf("${path} is required")\n${indent}}`;
   }
   if (prop.type === "integer") {
-    return `\tif e.${n} == 0 {\n\t\treturn fmt.Errorf("${key} must be set")\n\t}`;
+    return `${indent}if ${access} == 0 {\n${indent}\treturn fmt.Errorf("${path} must be set")\n${indent}}`;
   }
-  throw new Error(`unsupported required envelope type for ${key}`);
+  throw new Error(`unsupported required envelope type for ${path}`);
 }
 
-function enums(key: string, prop: Prop) {
+function enums(key: string, prop: Prop, optional: boolean) {
   if (!prop.enum?.length) return "";
   const n = name(key);
+  const indent = optional ? "\t\t" : "\t";
   const list = prop.enum.map((item) => `"${item}"`).join(", ");
-  return [
-    `\tswitch e.${n} {`,
-    `\tcase ${list}:`,
-    `\tdefault:`,
-    `\t\treturn fmt.Errorf("${key} must be one of: ${prop.enum.join(", ")}")`,
-    `\t}`,
+  const body = [
+    `${indent}switch e.${n} {`,
+    `${indent}case ${list}:`,
+    `${indent}default:`,
+    `${indent}\treturn fmt.Errorf("${key} must be one of: ${prop.enum.join(", ")}")`,
+    `${indent}}`,
   ].join("\n");
+  if (!optional) return body;
+  return `\tif e.${n} != "" {\n${body}\n\t}`;
+}
+
+
+function objectChecks(key: string, prop: Prop) {
+  if (prop.type !== "object" || !prop.properties) {
+    throw new Error(`missing object properties for ${key}`);
+  }
+  const access = `e.${name(key)}`;
+  const checks = (prop.required ?? []).map((nestedKey) => {
+    const nestedProp = prop.properties?.[nestedKey];
+    if (!nestedProp) throw new Error(`missing property for required field ${key}.${nestedKey}`);
+    return check(`${access}.${name(nestedKey)}`, `${key}.${nestedKey}`, nestedProp, 2);
+  });
+  if (!checks.length) return "";
+  return `\tif ${access} != nil {\n${checks.join("\n")}\n\t}`;
+}
+
+function renderEnvelopeObject(key: string, prop: Prop) {
+  if (prop.type !== "object" || !prop.properties) {
+    throw new Error(`missing object properties for ${key}`);
+  }
+  const properties = prop.properties;
+  const keys = Object.keys(properties);
+  const req = new Set(prop.required ?? []);
+  const wide = Math.max(...keys.map((nestedKey) => name(nestedKey).length));
+  const types = Math.max(
+    ...keys.map((nestedKey) => envelopeKind(properties[nestedKey], req, nestedKey).length)
+  );
+  const body = keys
+    .map((nestedKey) => envelopeField(nestedKey, properties[nestedKey], req, wide, types))
+    .join("\n");
+  return `type Envelope${name(key)} struct {
+${body}
+}`;
 }
 
 function renderEnvelope(schema: Schema) {
@@ -141,7 +222,9 @@ function renderEnvelope(schema: Schema) {
   const keys = Object.keys(schema.properties);
   const req = new Set(schema.required ?? []);
   const wide = Math.max(...keys.map((key) => name(key).length));
-  const types = Math.max(...keys.map((key) => envelopeKind(schema.properties[key], req, key).length));
+  const types = Math.max(
+    ...keys.map((key) => envelopeKind(schema.properties[key], req, key).length)
+  );
   const body = keys
     .map((key) => envelopeField(key, schema.properties[key], req, wide, types))
     .join("\n");
@@ -149,15 +232,40 @@ function renderEnvelope(schema: Schema) {
     .map((key) => {
       const prop = schema.properties[key];
       if (!prop) throw new Error(`missing property for required field ${key}`);
-      return check(key, prop);
+      return check(`e.${name(key)}`, key, prop);
     })
     .join("\n");
-  const source = schema.properties.source;
-  const extra = source ? enums("source", source) : "";
-  const validate = [checks, extra, "\treturn nil"].filter(Boolean).join("\n");
+  const optionalStringChecks = keys
+    .flatMap((key) => {
+      const prop = schema.properties[key];
+      if (req.has(key) || prop.type !== "string" || (prop.minLength ?? 0) < 1) return [];
+      const field = `e.${name(key)}`;
+      return [
+        `\tif ${field} != "" && strings.TrimSpace(${field}) == "" {\n\t\treturn fmt.Errorf("${key} must not be empty")\n\t}`,
+      ];
+    })
+    .join("\n");
+  const enumChecks = keys
+    .map((key) => enums(key, schema.properties[key], !req.has(key)))
+    .filter(Boolean)
+    .join("\n");
+  const nestedChecks = keys
+    .filter((key) => schema.properties[key].type === "object")
+    .map((key) => objectChecks(key, schema.properties[key]))
+    .filter(Boolean)
+    .join("\n");
+  const validate = [checks, optionalStringChecks, enumChecks, nestedChecks, "\treturn nil"]
+    .filter(Boolean)
+    .join("\n");
+  const nested = keys
+    .filter((key) => schema.properties[key].type === "object")
+    .map((key) => renderEnvelopeObject(key, schema.properties[key]))
+    .join("\n\n");
   return `type Envelope struct {
 ${body}
 }
+
+${nested}
 
 func (e Envelope) Validate() error {
 ${validate}
@@ -197,7 +305,9 @@ function renderQuestionStruct(schema: Schema, typeName: string): string[] {
   const wide = Math.max(...fields.map(({ n }) => n.length));
   const types = Math.max(...fields.map(({ t }) => t.length));
   const body = fields
-    .map(({ n, t, tag }) => `\t${n.padEnd(wide)} ${t.padEnd(types)} \`json:"${tag}" yaml:"${tag}"\``)
+    .map(
+      ({ n, t, tag }) => `\t${n.padEnd(wide)} ${t.padEnd(types)} \`json:"${tag}" yaml:"${tag}"\``
+    )
     .join("\n");
   const nested = keys.flatMap((key) => {
     const prop = schema.properties[key];
@@ -213,9 +323,10 @@ function renderContracts(envelope: Schema) {
   return `package contracts
 
 import (
-\t"fmt"
-\t"strings"
-\t"time"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
 )
 
 ${renderEnvelope(envelope)}

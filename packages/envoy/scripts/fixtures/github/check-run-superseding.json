@@ -1,0 +1,35 @@
+{
+  "action": "completed",
+  "check_run": {
+    "id": 2004,
+    "check_suite": {
+      "id": 1002
+    },
+    "name": "build",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "2222222222222222222222222222222222222222",
+    "html_url": "https://example.invalid/example-org/example-repo/runs/2004",
+    "app": {
+      "id": 1
+    },
+    "pull_requests": [
+      {
+        "number": 42
+      }
+    ],
+    "started_at": "2026-09-07T03:14:30Z",
+    "completed_at": "2026-09-07T03:15:00Z"
+  },
+  "sender": {
+    "login": "octocat",
+    "type": "User"
+  },
+  "repository": {
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "owner": {
+      "login": "example-org"
+    }
+  }
+}

@@ -10,22 +10,19 @@ import (
 func mkChecks(spec map[string][2]string) map[string]Check {
 	out := make(map[string]Check, len(spec))
 	for name, sc := range spec {
-		out[name] = Check{Status: sc[0], Conclusion: sc[1]}
+		out[name] = Check{CheckRunID: 1, Status: sc[0], Conclusion: sc[1]}
 	}
 	return out
 }
 
 func renderOrFail(t *testing.T, s State) (string, Summary) {
 	t.Helper()
-	raw, err := RenderSummary(s)
+	sum := renderSummary(s)
+	raw, err := json.Marshal(sum)
 	if err != nil {
-		t.Fatalf("RenderSummary: %v", err)
+		t.Fatalf("marshal summary: %v", err)
 	}
-	var sum Summary
-	if err := json.Unmarshal([]byte(raw), &sum); err != nil {
-		t.Fatalf("summary is not valid JSON: %v\n%s", err, raw)
-	}
-	return raw, sum
+	return string(raw), sum
 }
 
 func assertGroup(t *testing.T, label string, g StatusGroup, want []string) {
@@ -52,16 +49,105 @@ func TestRenderSummaryJSON(t *testing.T) {
 			"lint":        {"completed", "skipped"},
 		}),
 	}
-	_, sum := renderOrFail(t, s)
+	raw, sum := renderOrFail(t, s)
 
-	if sum.Kind != "ci_summary" || sum.Repo != "sjawhar/legion" || sum.Number != "13728" || sum.SHA != "a1b2c3d9999999" {
+	if sum.Kind != "checks" || sum.Repo != "sjawhar/legion" || sum.Number != "13728" || sum.SHA != "a1b2c3d9999999" {
 		t.Fatalf("identity wrong: %+v", sum)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode rendered summary: %v", err)
+	}
+	if got := string(payload["generation"]); got != "0" {
+		t.Fatalf("generation = %s, want 0", got)
+	}
+	var checkRuns []CheckRunRef
+	if err := json.Unmarshal(payload["check_runs"], &checkRuns); err != nil || len(checkRuns) != 8 {
+		t.Fatalf("check_runs = %s, want one entry per check", payload["check_runs"])
+	}
+	for i := 1; i < len(checkRuns); i++ {
+		if checkRuns[i-1].Name >= checkRuns[i].Name {
+			t.Fatalf("check_runs not sorted by name: %+v", checkRuns)
+		}
 	}
 	assertGroup(t, "failed", sum.Failed, []string{"infra-tests"})
 	assertGroup(t, "running", sum.Running, []string{"build-image", "snapshots"})
 	assertGroup(t, "passed", sum.Passed, []string{"classify", "review"})
 	assertGroup(t, "queued", sum.Queued, []string{"task-tests"})
 	assertGroup(t, "skipped", sum.Skipped, []string{"docs", "lint"})
+}
+
+func TestRenderSummaryCarriesTheAttemptSetSortedByName(t *testing.T) {
+	_, sum := renderOrFail(t, State{
+		Owner: "example-org", Repo: "example-repo", Number: "42", SHA: "abcdef",
+		Checks: map[string]Check{
+			"test":  {CheckRunID: 1024, Status: "completed", Conclusion: "success"},
+			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success"},
+			"lint":  {CheckRunID: 901, Status: "in_progress"},
+		},
+	})
+	want := []CheckRunRef{{Name: "build", ID: 900}, {Name: "lint", ID: 901}, {Name: "test", ID: 1024}}
+	if len(sum.CheckRuns) != len(want) {
+		t.Fatalf("check_runs = %+v, want %+v", sum.CheckRuns, want)
+	}
+	for i := range want {
+		if sum.CheckRuns[i] != want[i] {
+			t.Fatalf("check_runs[%d] = %+v, want %+v", i, sum.CheckRuns[i], want[i])
+		}
+	}
+}
+
+func TestRenderSummaryCarriesSnapshot(t *testing.T) {
+	state := State{
+		Owner:  "example-org",
+		Repo:   "example-repo",
+		Number: "42",
+		SHA:    "abcdef",
+		Checks: map[string]Check{
+			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success", ObservedAt: "2026-09-07T03:00:00Z"},
+			"lint":  {CheckRunID: 901, Status: "completed", Conclusion: "failure", ObservedAt: "2026-09-07T03:01:00Z"},
+			"test":  {CheckRunID: 902, Status: "in_progress", ObservedAt: "2026-09-07T03:02:00Z"},
+		},
+	}
+	raw, _ := renderOrFail(t, state)
+	var payload struct {
+		Snapshot string `json:"snapshot"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode rendered summary: %v", err)
+	}
+	if payload.Snapshot != state.Hash() {
+		t.Fatalf("snapshot = %q, want state hash %q", payload.Snapshot, state.Hash())
+	}
+}
+
+func TestRenderSummaryMarksOnlyPreviouslyEmittedSettlementSuperseded(t *testing.T) {
+	state := State{
+		Owner:      "example-org",
+		Repo:       "example-repo",
+		Number:     "42",
+		SHA:        "abcdef",
+		Generation: 7,
+		Checks:     mkChecks(map[string][2]string{"build": {"completed", "success"}}),
+	}
+	_, neverEmittedSummary := renderOrFail(t, state)
+	if neverEmittedSummary.SupersededSettlement != "" {
+		t.Fatalf("never-emitted superseded_settlement = %q, want empty", neverEmittedSummary.SupersededSettlement)
+	}
+
+	state.Generation++
+	_, changedButNeverEmitted := renderOrFail(t, state)
+	if changedButNeverEmitted.SupersededSettlement != "" {
+		t.Fatalf("generation-only superseded_settlement = %q, want empty", changedButNeverEmitted.SupersededSettlement)
+	}
+
+	if err := json.Unmarshal([]byte(`{"owner":"example-org","repo":"example-repo","number":"42","sha":"abcdef","generation":9,"emitted_count":1,"checks":{"build":{"check_run_id":900,"status":"completed","conclusion":"success"}}}`), &state); err != nil {
+		t.Fatalf("decode previously emitted state: %v", err)
+	}
+	_, previouslyEmitted := renderOrFail(t, state)
+	if previouslyEmitted.SupersededSettlement != "true" {
+		t.Fatalf("previously emitted superseded_settlement = %q, want true", previouslyEmitted.SupersededSettlement)
+	}
 }
 
 func TestRenderSummarySkippedKeepsAllNames(t *testing.T) {
@@ -113,7 +199,7 @@ func TestClassify(t *testing.T) {
 	}{
 		{"completed", "failure", catFailed},
 		{"completed", "timed_out", catFailed},
-		{"completed", "cancelled", catFailed},
+		{"completed", "cancelled", catCancelled},
 		{"completed", "action_required", catFailed},
 		{"completed", "startup_failure", catFailed},
 		{"completed", "stale", catFailed},
@@ -134,8 +220,32 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestRenderSummaryCancelledAndFailingChecks(t *testing.T) {
+	state := State{
+		Owner:  "example-org",
+		Repo:   "example-repo",
+		Number: "42",
+		SHA:    "abcdef1234567",
+		Checks: map[string]Check{
+			"cancelled-check": {CheckRunID: 1, Status: "completed", Conclusion: "cancelled"},
+			"failed-check":    {CheckRunID: 2, Status: "completed", Conclusion: "failure", URL: "https://example.test/checks/failed"},
+		},
+	}
+
+	raw, sum := renderOrFail(t, state)
+	assertGroup(t, "cancelled", sum.Cancelled, []string{"cancelled-check"})
+	_, passedSummary := renderOrFail(t, State{Checks: mkChecks(map[string][2]string{"passed": {"completed", "success"}})})
+	assertGroup(t, "cancelled empty", passedSummary.Cancelled, []string{})
+	if got := sum.FailingChecks; len(got) != 1 || got[0].Name != "failed-check" || got[0].URL != "https://example.test/checks/failed" {
+		t.Fatalf("failing_checks = %+v", got)
+	}
+	if !strings.Contains(raw, `"cancelled":{"count":1,"checks":["cancelled-check"]}`) {
+		t.Fatalf("cancelled group is not serialized: %s", raw)
+	}
+}
+
 // TestRenderSummaryExample prints the JSON for a realistic full CI run so the
-// exact notification shape is visible in test output (go test -run Example -v).
+// exact checks notification shape is visible in test output (go test -run Example -v).
 func TestRenderSummaryExample(t *testing.T) {
 	spec := map[string][2]string{
 		"infra-tests":      {"completed", "failure"},
@@ -155,5 +265,5 @@ func TestRenderSummaryExample(t *testing.T) {
 	raw, _ := renderOrFail(t, State{Owner: "citest", Repo: "citest", Number: "13728", SHA: "a1b2c3d9999999", Checks: mkChecks(spec)})
 	var pretty bytes.Buffer
 	_ = json.Indent(&pretty, []byte(raw), "", "  ")
-	t.Logf("EXAMPLE ci_summary notification:\n%s", pretty.String())
+	t.Logf("EXAMPLE checks notification:\n%s", pretty.String())
 }

@@ -100,7 +100,10 @@ func TestReadinessGate_NotReady_Returns503(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", rr.Code)
 	}
-	if body := rr.Body.String(); body != "service starting\n" {
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if body := rr.Body.String(); body != "{\"error\":\"service starting\"}\n" {
 		t.Fatalf("unexpected body: %q", body)
 	}
 }
@@ -497,7 +500,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	}
 
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: harness.client})
+	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
 	handler := publishHandler(&state)
 	publishRole := func(topic, source string) contracts.Envelope {
 		t.Helper()
@@ -545,22 +548,6 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		t.Fatalf("B received duplicate forwarded role event: %v", err)
 	}
 
-	deadRole := "legion-dead-holder"
-	deadTopic := contracts.RoleTopicPrefix + deadRole
-	if _, err := harness.registry.SetRole("ses_role_dead", "test-machine", deadRole); err != nil {
-		t.Fatalf("claim dead holder role: %v", err)
-	}
-	deadProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + deadTopic)
-	if err != nil {
-		t.Fatalf("subscribe dead-holder exception lane: %v", err)
-	}
-	t.Cleanup(func() { _ = deadProbe.Unsubscribe() })
-	if err := harness.client.Conn.Flush(); err != nil {
-		t.Fatalf("flush dead-holder exception subscription: %v", err)
-	}
-	dead := publishRole(deadTopic, "agent")
-	assertDeliveryException(t, deadProbe, dead, "delivery_failed")
-
 	externalHuman := publishRole(roleTopic, "human")
 	externalMessage, err := probeB.NextMsg(5 * time.Second)
 	if err != nil {
@@ -577,18 +564,6 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		t.Fatalf("human-sourced forwarded event id = %q, want %q", externalForwarded.EventID, externalHuman.EventID)
 	}
 
-	unclaimedTopic := contracts.RoleTopicPrefix + "legion-no-holder"
-	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + unclaimedTopic)
-	if err != nil {
-		t.Fatalf("subscribe to core exception lane: %v", err)
-	}
-	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
-	if err := harness.client.Conn.Flush(); err != nil {
-		t.Fatalf("flush exception subscription: %v", err)
-	}
-	unclaimed := publishRole(unclaimedTopic, "agent")
-	assertDeliveryException(t, exceptionProbe, unclaimed, "no_holder")
-
 	info, err := harness.client.JS().StreamInfo(bus.Stream)
 	if err != nil {
 		t.Fatalf("read notification stream: %v", err)
@@ -598,51 +573,6 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	}
 }
 
-func TestPublishHandler_RoleNoHolderExceptionPreservesPayload(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
-	roleTopic := contracts.RoleTopicPrefix + "payload-no-holder"
-	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
-	if err != nil {
-		t.Fatalf("subscribe role arbiter: %v", err)
-	}
-	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
-	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
-	if err != nil {
-		t.Fatalf("subscribe exception lane: %v", err)
-	}
-	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
-	if err := harness.client.Conn.Flush(); err != nil {
-		t.Fatalf("flush role subscriptions: %v", err)
-	}
-
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: harness.client})
-	payload := `{"kind":"role-event","number":42}`
-	requestBody, err := json.Marshal(map[string]string{
-		"topic":   roleTopic,
-		"message": "structured role event",
-		"payload": payload,
-		"source":  "agent",
-	})
-	if err != nil {
-		t.Fatalf("marshal structured role request: %v", err)
-	}
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(string(requestBody)))
-	publishHandler(&state).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("publish role payload: status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var published contracts.Envelope
-	if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
-		t.Fatalf("decode published envelope: %v", err)
-	}
-
-	if published.Payload != payload {
-		t.Fatalf("published payload = %q, want %q", published.Payload, payload)
-	}
-	assertDeliveryException(t, exceptionProbe, published, "no_holder")
-}
 func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	role := "fresh-deaf-holder"
@@ -678,7 +608,7 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
 	}
 
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: harness.client})
+	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","source":"agent"}`))
 	publishHandler(&state).ServeHTTP(recorder, request)
@@ -817,8 +747,8 @@ func TestSendHandler_RejectsEmptyTargetSession(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("decode JSON error: %v", err)
 	}
-	if response.Error != "session id required" {
-		t.Fatalf("error = %q, want session id required", response.Error)
+	if response.Error != "target_session is required" {
+		t.Fatalf("error = %q, want target_session is required", response.Error)
 	}
 }
 
@@ -1358,8 +1288,8 @@ func TestSubscribeHandler_RejectsEmptySessionID(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode JSON error: %v", err)
 	}
-	if response.Error != "session id required" {
-		t.Fatalf("error = %q, want session id required", response.Error)
+	if response.Error != "session_id is required" {
+		t.Fatalf("error = %q, want session_id is required", response.Error)
 	}
 }
 

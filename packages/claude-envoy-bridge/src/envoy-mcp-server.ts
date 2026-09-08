@@ -10,8 +10,17 @@ import {
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
-import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract"
-import { createEnvoyClient, type EnvoyClient, type Interest } from "@legion/envoy-client/transport"
+import {
+  EnvoyToolOperation,
+  envoyToolSpecs,
+  toMessageMetadata,
+} from "@legion/envoy-client/tool-contract"
+import {
+  createEnvoyClient,
+  type EnvoyClient,
+  expandSubscriptionTopics,
+  type Interest,
+} from "@legion/envoy-client/transport"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -36,11 +45,13 @@ const dispatchToolDefinition = {
 }
 
 export const envoyMcpToolDefinitions = [
-  ...envoyToolSpecs.map((spec) => ({
-    name: spec.name,
-    description: spec.description,
-    inputSchema: z.toJSONSchema(z.object(spec.arguments)),
-  })),
+  ...envoyToolSpecs
+    .filter((spec) => spec.operation !== EnvoyToolOperation.inbox)
+    .map((spec) => ({
+      name: spec.name,
+      description: spec.description,
+      inputSchema: z.toJSONSchema(z.object(spec.arguments)),
+    })),
   ...(dispatchConfig.url === null ? [] : [dispatchToolDefinition]),
 ]
 
@@ -62,8 +73,9 @@ function mcpResult(value: unknown): {
 // follows, with pi-envoy's connect options: nats.js rides out broker outages
 // on its own and re-subscribes when the broker returns. A connection it has
 // given up on for good is replaced by the next follow, carrying every followed
-// topic over. Without a broker address the registry interest is still recorded
-// and the gap reported once on stderr; nothing on this leg fails a tool call.
+// topic over. Manual envoy_subscribe first establishes that forwarding leg and
+// rejects rather than recording an undeliverable interest. Dispatch auto-
+// subscription remains best-effort and reports its forwarding gap on stderr.
 let forwarder: Promise<ThreadForwarder | null> | undefined
 let shuttingDown = false
 
@@ -94,8 +106,8 @@ async function openThreadForwarder(sessionId: string): Promise<ThreadForwarder |
   }
 }
 
-async function followTopics(sessionId: string, topics: readonly string[]): Promise<void> {
-  if (shuttingDown) return
+async function followTopics(sessionId: string, topics: readonly string[]): Promise<boolean> {
+  if (shuttingDown) return false
   try {
     forwarder ??= openThreadForwarder(sessionId)
     const attempt = forwarder
@@ -112,12 +124,18 @@ async function followTopics(sessionId: string, topics: readonly string[]): Promi
       forwarder ??= openThreadForwarder(sessionId)
       active = await forwarder
     }
-    if (active === null || shuttingDown) return
+    if (active === null) {
+      if (forwarder === attempt) forwarder = undefined
+      return false
+    }
+    if (shuttingDown) return false
     for (const topic of pending) active.follow(topic)
+    return true
   } catch (error) {
     process.stderr.write(
       `envoy-mcp: cannot forward ${topics.join(", ")} to ${sessionId} — ${messageFor(error)}\n`,
     )
+    return false
   }
 }
 
@@ -142,17 +160,22 @@ async function subscribeAndFollow(
   client: EnvoyClient,
   sessionId: string,
   topics: readonly string[],
+  requireForwarder = false,
 ): Promise<Interest> {
+  const expandedTopics = expandSubscriptionTopics(topics)
+  if (requireForwarder && !(await followTopics(sessionId, expandedTopics))) {
+    throw new Error("envoy_subscribe requires a live ENVOY_NATS_URL forwarder")
+  }
   const interest = await client.subscribe({
     sessionID: sessionId,
     directory: process.cwd(),
-    topics,
+    topics: expandedTopics,
     port: 0,
     title: "",
     driving: true,
     selfSubscribed: true,
   })
-  await followTopics(sessionId, topics)
+  if (!requireForwarder) await followTopics(sessionId, expandedTopics)
   return interest
 }
 
@@ -200,27 +223,37 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
   switch (spec.operation) {
     case EnvoyToolOperation.send: {
       const args = z.object(spec.arguments).parse(input)
-      return client.send({
+      const result = await client.send({
+        source: "agent",
         sourceSessionID: sessionId,
         targetSessionID: args.session_id,
         message: args.message,
+        ...toMessageMetadata(args),
       })
+      return {
+        message: `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`,
+        event_id: result.envelope.event_id,
+        recipient: result.recipient,
+        confirmed: result.confirmed,
+      }
     }
     case EnvoyToolOperation.publish: {
       const args = z.object(spec.arguments).parse(input)
       return client.publish({
+        source: "agent",
         sourceSessionID: sessionId,
         topic: args.topic,
         message: args.message,
+        ...toMessageMetadata(args),
       })
     }
     case EnvoyToolOperation.subscribe: {
       const args = z.object(spec.arguments).parse(input)
-      return subscribeAndFollow(client, sessionId, args.topics)
+      return subscribeAndFollow(client, sessionId, args.topics, true)
     }
     case EnvoyToolOperation.unsubscribe: {
       const args = z.object(spec.arguments).parse(input)
-      const topics = args.topics ?? []
+      const topics = expandSubscriptionTopics(args.topics ?? [])
       await client.unsubscribe({ sessionID: sessionId, topics })
       const active = forwarder === undefined ? null : await forwarder
       // An empty list means everything; name what was actually being forwarded.
@@ -240,7 +273,10 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       }
     case EnvoyToolOperation.listSessions: {
       const args = z.object(spec.arguments).parse(input)
-      const sessions = await client.listSessions()
+      const sessions = await client.listSessions({
+        ...(args.dir === undefined ? {} : { directory: args.dir }),
+        ...(args.title === undefined ? {} : { title: args.title }),
+      })
       if (!args.machine) {
         return sessions
       }
@@ -249,6 +285,10 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     case EnvoyToolOperation.setRole: {
       const args = z.object(spec.arguments).parse(input)
       return client.setRole({ sessionID: sessionId, role: args.role })
+    }
+    case EnvoyToolOperation.getRole: {
+      const args = z.object(spec.arguments).parse(input)
+      return client.getRole(args.role)
     }
     default:
       throw new UnsupportedEnvoyToolError(name)

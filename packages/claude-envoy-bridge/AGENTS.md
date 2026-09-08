@@ -5,7 +5,8 @@ Claude Code plugin package for Legion's Envoy subsystem.
 ## Overview
 
 The adapter uses an always-on Claude Code Monitor process as a Tier 1 inbound bus. The monitor
-subscribes directly to Envoy NATS topics and writes normalized Monitor events to stdout. Claude
+subscribes directly to Envoy NATS topics, renders every envelope through
+`@legion/envoy-client/delivery`, and writes one normalized TOON Monitor event to stdout. Claude
 Code surfaces those events to the session, including when the session is idle. The companion send
 CLI uses Envoy's local Go listener HTTP API for outbound direct messages.
 
@@ -28,12 +29,15 @@ CLI uses Envoy's local Go listener HTTP API for outbound direct messages.
 - The monitor subscribes to `notifications.agent.<session-id>` directly, registers that route as
   self-subscribed with port zero, refreshes it every heartbeat, and deregisters it at shutdown.
   The MCP server records registry interests for topics the session follows and forwards them onto
-  that agent subject.
+  that agent subject. Manual `envoy_subscribe` establishes the NATS forwarding leg before recording
+  its interest; dispatch auto-subscription remains best-effort when a broker is unavailable.
 - The monitor uses `CLAUDE_CODE_SESSION_ID` for its direct route. Set `ENVOY_SESSION_ID` only
   to explicitly override that identity for controlled QA; without either identity, the monitor
   exits with an error rather than subscribing to a made-up route.
 - Preserve one stdout line per inbound message because Claude Code consumes Monitor output as
   events.
+- The shared renderer is tolerant of additive envelopes and parse failures. Never add an adapter-
+  specific renderer or emit raw inbound envelope bytes.
 
 ## Topic reminder
 

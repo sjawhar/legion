@@ -49,14 +49,14 @@ function prState(issue: IssueKey): PrState {
     repo: "acme/widgets",
     number: 7,
     headSha: "head-7",
-    checks: {
-      build: { status: "completed", conclusion: "success" },
-      unit: { status: "completed", conclusion: "success" },
-    },
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: true,
-    lastEventAt: 3_000,
+    verdict: "green",
+    failing: [],
+    failingStatuses: [],
+    ciSettledAt: 3_000,
+    ciCheckRuns: [{ name: "build", id: 3 }],
+    ciSettlementGeneration: null,
+    ciSnapshot: null,
+    ciReconciled: false,
     fixAttempts: 1,
     reviewDecision: "approved",
   };
@@ -125,6 +125,24 @@ describe("derived catch-up", () => {
           ci: "green",
           review: "approved",
           fixAttempts: 1,
+        },
+      },
+    });
+  });
+
+  it("includes failed check names in a red CI catch-up verdict", async () => {
+    const { state, root } = stateForTree();
+    state.prs["acme/widgets#7"] = {
+      ...prState(root),
+      verdict: "red",
+      failing: ["lint", "unit"],
+    };
+
+    expect(await overseerCatchup(state, root)).toMatchObject({
+      prVerdicts: {
+        "acme/widgets#7": {
+          ci: "red",
+          failing: ["lint", "unit"],
         },
       },
     });

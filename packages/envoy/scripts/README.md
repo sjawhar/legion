@@ -4,8 +4,8 @@
 
 On-demand end-to-end probe for the GitHub webhook → Envoy session delivery
 path. Run it any time you suspect webhooks aren't reaching subscribed
-sessions (e.g., agents subscribed to `notifications.github.<owner>.<repo>.pr.<n>.ci`
-not seeing CI events).
+sessions (e.g., agents subscribed to `notifications.github.<owner>.<repo>.pr.<n>.checks`
+not seeing settled CI events).
 
 ### Usage
 
@@ -66,3 +66,31 @@ guarantees no real subscriber will ever match the probe traffic.
 
 - `TIMEOUT_SECONDS=60 ...` — wait longer (default 30s).
 - `LISTENER_URL=http://other-host:9020 ...` — point at a different on-prem listener.
+
+## e2e-local.sh
+
+Runs the local listener against a throwaway `nats:2.10-alpine` container. It
+posts signed public GitHub fixtures and a three-paragraph direct message,
+checks the one-warning response for a never-seen GitHub repository, rejects an
+unheld role publish before claiming it for the fake session, captures the raw
+notification envelopes, and proves both the Go prompt text and the shared
+TypeScript renderer retain one summary followed by the full direct message.
+
+Docker downloads `nats:2.10-alpine` automatically on the first run when it is
+not already cached.
+
+```bash
+packages/envoy/scripts/e2e-local.sh
+```
+
+The run writes its reusable evidence to `packages/envoy/out/e2e/`:
+
+- `envelopes.jsonl` — raw NATS envelope frames
+- `session-prompts.jsonl` — raw fake-session `prompt_async` requests
+- `rendered-ts.txt` — `renderInbound` output for every envelope
+- `rendered-go.txt` — the corresponding Go `Deliverer.Text` output
+
+Use `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` to avoid local port
+collisions. The script owns only the literal `envoy-e2e-nats` container and
+removes it on exit. Unlike `probe-webhook-e2e.sh`, it has no deployment URL or
+secret prerequisite: it validates local branch behavior only.

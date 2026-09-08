@@ -1,0 +1,15 @@
+{
+  "topic": "notifications.github.example-org.example-repo.issue.7.comment",
+  "payload_summary": "comment on example-org/example-repo#7 by octocat: Please verify the local acceptance driver.",
+  "payload": {
+    "action": "created",
+    "author": "octocat",
+    "body": "Please verify the local acceptance driver.",
+    "kind": "comment",
+    "number": "7",
+    "parent_kind": "issue",
+    "repo": "example-org/example-repo",
+    "title": "Acceptance issue",
+    "url": "https://example.invalid/example-org/example-repo/issues/7#issuecomment-1"
+  }
+}

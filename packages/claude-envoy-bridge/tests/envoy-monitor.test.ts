@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test"
 import { createServer } from "node:net"
 import { agentSubject } from "@legion/contracts"
-import { decode } from "@toon-format/toon"
 import { runEnvoyMonitor } from "../src/envoy-monitor"
 import { FakeNatsServer } from "./fake-nats-server"
 import { tmpdir } from "node:os"
@@ -68,77 +67,6 @@ test("writes native delivery frames to Claude Code's Unix socket", async () => {
   expect(await received).toBe(
     '{"type":"auth","token":"socket-token"}\n{"type":"user","message":{"role":"user","content":"Envoy native delivery"}}\n',
   )
-})
-
-test("renders an agent envelope with its sender and reply instruction", async () => {
-  const { envoyInboundMessage } = await import("../src/envoy-monitor")
-  const rendered = envoyInboundMessage(
-    JSON.stringify({
-      source: "agent",
-      source_session: "ses_sender",
-      topic: "notifications.agent.ses_reader",
-      payload_summary: "Please report the deployment result.",
-    }),
-  )
-
-  expect(decode(rendered ?? "")).toEqual({
-    envoy: {
-      topic: "notifications.agent.ses_reader",
-      from: "ses_sender",
-      reply_with: 'envoy_send(session_id="ses_sender", message="...")',
-      summary: "Please report the deployment result.",
-    },
-  })
-})
-
-test("renders a human envelope without a reply instruction", async () => {
-  const { envoyInboundMessage } = await import("../src/envoy-monitor")
-  const rendered = envoyInboundMessage(
-    JSON.stringify({
-      source: "human",
-      topic: "notifications.agent.ses_reader",
-      payload_summary: "Please report the deployment result.",
-    }),
-  )
-
-  expect(decode(rendered ?? "")).toEqual({
-    envoy: {
-      topic: "notifications.agent.ses_reader",
-      from: "human",
-      summary: "Please report the deployment result.",
-    },
-  })
-})
-
-test("renders a GitHub envelope without a reply instruction", async () => {
-  const { envoyInboundMessage } = await import("../src/envoy-monitor")
-  const rendered = envoyInboundMessage(
-    JSON.stringify({
-      source: "github",
-      topic: "notifications.github.example-org.example-repo.issue.42.comment",
-      payload_summary: "The human answered.",
-    }),
-  )
-
-  expect(decode(rendered ?? "")).toEqual({
-    envoy: {
-      topic: "notifications.github.example-org.example-repo.issue.42.comment",
-      from: "github",
-      summary: "The human answered.",
-    },
-  })
-})
-
-test("skips a GitHub dispatch echo for the originating session", async () => {
-  const { envoyInboundMessage } = await import("../src/envoy-monitor")
-  const envelope = JSON.stringify({
-    source: "github",
-    topic: "notifications.agent.ses_origin",
-    payload_summary: "Please report the deployment result.",
-    payload: JSON.stringify({ dispatch_session: "ses_origin" }),
-  })
-
-  expect(envoyInboundMessage(envelope, "ses_origin")).toBeUndefined()
 })
 
 test("registers, heartbeats, and deregisters the monitor session", async () => {
@@ -276,3 +204,4 @@ test("reports a registry outage once and clears it on the next successful heartb
     Object.assign(process.env, previous)
   }
 })
+

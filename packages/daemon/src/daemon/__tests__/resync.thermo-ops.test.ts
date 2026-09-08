@@ -31,6 +31,7 @@ it("warns once with the board-project configuration key when an open board item 
         },
       ],
     }),
+    fetchCiStatusBatch: async () => ({}),
     applyEffects: async () => {},
     now: () => now,
   };

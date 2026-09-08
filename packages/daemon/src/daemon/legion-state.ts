@@ -8,6 +8,7 @@ import {
   type LegionRole,
 } from "@legion/contracts";
 import { z } from "zod";
+import type { CheckRunRef } from "../state/types";
 
 export interface IssueNode {
   key: IssueKey;
@@ -55,11 +56,20 @@ export interface PrState {
   repo: `${string}/${string}`;
   number: number;
   headSha: string;
-  checks: Record<string, { status: string; conclusion: string | null }>;
-  firstRedEmitted: boolean;
-  settledRedEmitted: boolean;
-  greenEmitted: boolean;
-  lastEventAt: number;
+  headUpdatedAt?: number;
+  /** The last SETTLED verdict for this head; a rerun in flight makes it unknown at the next resync. */
+  verdict: "green" | "red" | null;
+  /** Failing check runs: reported by the listener or by GitHub's rollup. */
+  failing: string[];
+  /** Failing commit statuses (no check run): only GitHub's rollup reports or retires these. */
+  failingStatuses: string[];
+  ciSettledAt: number | null;
+  /** The settlement's attempt set: the latest check-run id per check name, sorted by name. Null until a settlement or a rollup with check runs is accepted. */
+  ciCheckRuns: CheckRunRef[] | null;
+  ciSettlementGeneration: number | null;
+  ciSnapshot: string | null;
+  /** True while a terminal GitHub read holds the tie at the stored attempt set; released when the set advances or a pending read clears it. */
+  ciReconciled: boolean;
   fixAttempts: number;
   reviewDecision?: "approved" | "changes_requested";
 }
@@ -84,7 +94,7 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 8;
+  version: 12;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -176,25 +186,34 @@ const TreeStateSchema = z
     recoveryEvents: z.array(RecoveryEventSchema).optional(),
   })
   .strict();
+const CheckRunRefSchema = z
+  .object({ name: z.string().min(1), id: z.number().int().positive() })
+  .strict();
+/** The attempt set as persisted: strictly increasing names, so it is sorted and duplicate-free. */
+const CheckRunSetSchema = z
+  .array(CheckRunRefSchema)
+  .refine(
+    (runs) => runs.every((run, index) => index === 0 || (runs[index - 1]?.name ?? "") < run.name),
+    {
+      message: "ciCheckRuns must be sorted by name without duplicates",
+    }
+  );
+
 const PrStateSchema = z
   .object({
     key: IssueKeySchema,
     repo: RepositorySchema,
     number: z.number().int().nonnegative(),
     headSha: z.string(),
-    checks: z.record(
-      z.string(),
-      z
-        .object({
-          status: z.string(),
-          conclusion: z.string().nullable(),
-        })
-        .strict()
-    ),
-    firstRedEmitted: z.boolean(),
-    settledRedEmitted: z.boolean(),
-    greenEmitted: z.boolean(),
-    lastEventAt: z.number(),
+    headUpdatedAt: z.number().optional(),
+    verdict: z.enum(["green", "red"]).nullable(),
+    failing: z.array(z.string()),
+    failingStatuses: z.array(z.string()),
+    ciSettledAt: z.number().nullable(),
+    ciCheckRuns: CheckRunSetSchema.nullable(),
+    ciSettlementGeneration: z.number().int().nonnegative().nullable(),
+    ciSnapshot: z.string().nullable(),
+    ciReconciled: z.boolean(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
   })
@@ -229,7 +248,7 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(8),
+    version: z.literal(12),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -270,7 +289,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 8,
+    version: 12,
     project,
     issues: {},
     trees: {},
@@ -393,6 +412,75 @@ function migrateV7State(state: unknown): unknown {
   };
 }
 
+function legacyChecksVerdict(checks: unknown): "green" | "red" | undefined {
+  if (!recordValue(checks)) return undefined;
+  const observations = Object.values(checks);
+  if (
+    observations.length === 0 ||
+    !observations.every((check) => recordValue(check) && check.status === "completed")
+  ) {
+    return undefined;
+  }
+  return observations.some(
+    (check) =>
+      recordValue(check) &&
+      check.conclusion !== "success" &&
+      check.conclusion !== "neutral" &&
+      check.conclusion !== "skipped"
+  )
+    ? "red"
+    : "green";
+}
+
+function migrateV8State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 8) return state;
+  const { prs, ...rest } = state;
+  const migratedPrs = recordValue(prs)
+    ? Object.fromEntries(
+        Object.entries(prs).map(([key, pr]) => {
+          if (!recordValue(pr)) return [key, pr];
+          const {
+            checks,
+            firstRedEmitted,
+            settledRedEmitted,
+            greenEmitted,
+            lastEventAt,
+            ...withoutLegacyCi
+          } = pr;
+          const verdict =
+            legacyChecksVerdict(checks) ??
+            (greenEmitted === true
+              ? "green"
+              : firstRedEmitted === true || settledRedEmitted === true
+                ? "red"
+                : null);
+          const ciSettledAt =
+            verdict === null ||
+            typeof lastEventAt !== "number" ||
+            !Number.isSafeInteger(lastEventAt)
+              ? null
+              : lastEventAt;
+          // v8 fenced nothing: every PR starts unfenced and unreconciled.
+          return [
+            key,
+            {
+              ...withoutLegacyCi,
+              verdict,
+              failing: [],
+              failingStatuses: [],
+              ciSettledAt,
+              ciCheckRuns: null,
+              ciSettlementGeneration: null,
+              ciSnapshot: null,
+              ciReconciled: false,
+            },
+          ];
+        })
+      )
+    : undefined;
+  return { ...rest, version: 12, ...(migratedPrs ? { prs: migratedPrs } : {}) };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -404,12 +492,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     throw error;
   }
 
-  const state = migrateV7State(migrateV6State(migrateV5State(JSON.parse(raw))));
+  const source = JSON.parse(raw);
+  const sourceVersion = recordValue(source) ? source.version : undefined;
+  const state = migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))));
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 8) {
+  if (version !== 12) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 
@@ -421,6 +511,17 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   // Zod v3 infers validated records as partial despite every mapped value being required.
   const validatedState = parsed.data as LegionState;
+  if (
+    typeof sourceVersion === "number" &&
+    Number.isSafeInteger(sourceVersion) &&
+    sourceVersion < validatedState.version
+  ) {
+    try {
+      await writeFile(`${file}.v${sourceVersion}.bak`, raw, { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      if (!hasErrnoCode(error, "EEXIST")) throw error;
+    }
+  }
   return validatedState;
 }
 

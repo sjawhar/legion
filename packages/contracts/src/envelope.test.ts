@@ -66,6 +66,55 @@ describe("EnvelopeSchema", () => {
     expect(typeof item.expires_at).toBe("number");
   });
 
+  test("accepts signal-quality envelope fields", () => {
+    const item = EnvelopeSchema.parse(
+      buildEnvelope({
+        sender: {
+          session_id: "session-1",
+          machine: "example-host",
+          cwd: "/workspace",
+          title: "Controller",
+          roles: ["legion-controller"],
+        },
+        in_reply_to: "evt-0",
+        supersedes: "evt-old",
+        urgency: "blocking",
+        expects_reply: "required",
+        expires_at: 1_725_686_400_000,
+      })
+    );
+
+    expect(item.sender).toEqual({
+      session_id: "session-1",
+      machine: "example-host",
+      cwd: "/workspace",
+      title: "Controller",
+      roles: ["legion-controller"],
+    });
+    expect(item).toMatchObject({
+      in_reply_to: "evt-0",
+      supersedes: "evt-old",
+      urgency: "blocking",
+      expects_reply: "required",
+      expires_at: 1_725_686_400_000,
+    });
+  });
+  test("rejects malformed signal-quality envelope fields", () => {
+    expectInvalidFields(
+      {
+        expects_reply: "soon",
+        sender: { session_id: "" },
+        in_reply_to: "",
+        supersedes: "",
+      },
+      ["expects_reply", "sender.session_id", "in_reply_to", "supersedes"]
+    );
+  });
+
+  test("rejects unrecognized urgency", () => {
+    expectInvalidFields({ urgency: "urgent" }, ["urgency"]);
+  });
+
   test("accepts ghostwispr source", () => {
     const item = EnvelopeSchema.parse(
       buildEnvelope({
@@ -74,7 +123,7 @@ describe("EnvelopeSchema", () => {
         source_event_id: "gw-delivery-1",
         topic: ghostWisprSubject("20260326041405", "session.ended"),
         dedupe_key: "ghostwispr.gw-delivery-1",
-        payload_summary: '{"event_type":"session_ended","session_id":"20260326041405"}',
+        payload_summary: "ghostwispr session_ended for session 20260326041405",
         trace_id: "trace-2",
       })
     );

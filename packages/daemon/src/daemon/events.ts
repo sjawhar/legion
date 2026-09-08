@@ -1,26 +1,27 @@
 import {
   controllerToken,
   EnvelopeSchema,
-  formatIssueKey,
   type IssueKey,
   parseRoleToken,
-  roleToken,
   roleTopic,
 } from "@legion/contracts";
-import { type CheckObservation, type CiEmission, reduceCheck, settle } from "./ci-reducer";
+import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { DaemonConfig } from "./config";
-import type { HeldEvent, LegionState, PrState, TreeState } from "./legion-state";
+import type { HeldEvent, LegionState, TreeState } from "./legion-state";
 import {
+  classifySettlement,
   type Effect,
   type EnvelopeJson,
+  effectiveOutcome,
   type LegionEventPayload,
-  reduceCiEmission,
   reduceGithubEvent,
+  refreshCiIdentity,
+  settleCiVerdict,
+  writeCiFence,
 } from "./reducers";
 
-const CHECK_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.check(?:\.|$)/;
+const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
 const EXCEPTION_TOPIC = "notifications.envoy.exceptions.notifications.role.";
-const SETTLE_INTERVAL_MS = 5_000;
 const MAX_RETRY_DELAY_MS = 30_000;
 const INITIAL_RETRY_DELAY_MS = 1_000;
 
@@ -53,11 +54,16 @@ interface HeldTarget {
   isActive(): boolean;
 }
 
-interface CheckInput {
+interface ChecksInput {
   repo: `${string}/${string}`;
   number: number;
-  branch?: string;
-  observation: CheckObservation;
+  sha: string;
+  failed: string[];
+  cancelledCount: number;
+  settledAt: number;
+  checkRuns: CheckRunRef[];
+  generation: number;
+  snapshot: string;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -72,91 +78,113 @@ function stringValue(value: unknown): string | undefined {
 
 function recordPayload(envelope: EnvelopeJson): JsonRecord | undefined {
   if (typeof envelope.payload !== "string") return asRecord(envelope.payload);
-  return asRecord(JSON.parse(envelope.payload));
-}
-
-function valueFrom(records: Array<JsonRecord | undefined>, key: string): unknown {
-  for (const record of records) {
-    if (record?.[key] !== undefined) return record[key];
+  try {
+    return asRecord(JSON.parse(envelope.payload));
+  } catch {
+    return undefined;
   }
-  return undefined;
 }
 
-function checkInput(subject: string, envelope: EnvelopeJson): CheckInput | undefined {
-  const match = CHECK_TOPIC.exec(subject);
+function statusGroup(
+  payload: JsonRecord,
+  key: string
+): { count: number; checks: string[] } | undefined {
+  const group = asRecord(payload[key]);
+  const count = group?.count;
+  const checks = group?.checks;
+  if (
+    typeof count !== "number" ||
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    !Array.isArray(checks) ||
+    !checks.every((check): check is string => typeof check === "string") ||
+    checks.length !== count
+  ) {
+    return undefined;
+  }
+  return { count, checks };
+}
+
+function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | undefined {
+  const match = CHECKS_TOPIC.exec(subject);
   if (!match) return undefined;
   const number = Number(match[3]);
   if (!Number.isSafeInteger(number)) return undefined;
   const repo = `${match[1]}/${match[2]}` as `${string}/${string}`;
   const payload = recordPayload(envelope);
-  if (!payload) return undefined;
-  const checkRun = asRecord(payload.check_run);
-  const checkSuite = asRecord(payload.check_suite);
-  const nestedSuite = asRecord(checkRun?.check_suite);
-  const records = [payload, checkRun, checkSuite, nestedSuite];
-  const sha = stringValue(valueFrom(records, "sha")) ?? stringValue(valueFrom(records, "head_sha"));
-  const name =
-    stringValue(valueFrom(records, "name")) ??
-    stringValue(asRecord(checkSuite?.app)?.name) ??
-    stringValue(asRecord(nestedSuite?.app)?.name);
-  const status = stringValue(valueFrom(records, "status"));
-  const rawConclusion = valueFrom(records, "conclusion");
-  const conclusion =
-    rawConclusion === null || typeof rawConclusion === "string" ? rawConclusion : undefined;
-  const branch =
-    stringValue(valueFrom(records, "branch")) ?? stringValue(valueFrom(records, "head_branch"));
-  if (!sha || !name || !status || conclusion === undefined) return undefined;
-
+  if (
+    !payload ||
+    payload.kind !== "checks" ||
+    payload.repo !== repo ||
+    payload.number !== String(number) ||
+    (payload.is_head !== undefined && payload.is_head !== true)
+  ) {
+    return undefined;
+  }
+  const sha = stringValue(payload.sha);
+  const checkRuns = attemptSet(payload.check_runs);
+  const generation =
+    typeof payload.generation === "number" &&
+    Number.isSafeInteger(payload.generation) &&
+    payload.generation >= 0
+      ? payload.generation
+      : undefined;
+  const snapshot = stringValue(payload.snapshot);
+  const settledAt =
+    payload.settled_at === undefined
+      ? envelope.issued_at
+      : typeof payload.settled_at === "number" &&
+          Number.isSafeInteger(payload.settled_at) &&
+          payload.settled_at >= 0
+        ? payload.settled_at
+        : undefined;
+  const failed = statusGroup(payload, "failed");
+  const cancelled = statusGroup(payload, "cancelled");
+  if (
+    !sha ||
+    checkRuns === undefined ||
+    generation === undefined ||
+    !snapshot ||
+    settledAt === undefined ||
+    !failed ||
+    !cancelled
+  ) {
+    return undefined;
+  }
   return {
     repo,
     number,
-    branch,
-    observation: { sha, name, status, conclusion },
+    sha,
+    failed: failed.checks,
+    cancelledCount: cancelled.count,
+    settledAt,
+    checkRuns,
+    generation,
+    snapshot,
   };
 }
 
-function issueForBranch(repo: string, branch: string): IssueKey | undefined {
-  const match = /^legion\/issue-(\d+)$/.exec(branch);
-  if (!match) return undefined;
-  const [owner, name, ...extra] = repo.split("/");
-  const number = Number(match[1]);
-  if (!owner || !name || extra.length > 0 || !Number.isSafeInteger(number)) return undefined;
-  return formatIssueKey(owner, name, number);
-}
-
-function findOrCreatePr(state: LegionState, input: CheckInput): PrState | undefined {
-  const prKey = `${input.repo}#${input.number}`;
-  const existing = state.prs[prKey];
-  if (existing) return existing;
-  let branch = input.branch;
-  if (!branch) {
-    const mapping = Object.entries(state.prByBranch).find(
-      ([branchKey, mappedPrKey]) => mappedPrKey === prKey && branchKey.startsWith(`${input.repo}@`)
-    );
-    branch = mapping?.[0].slice(input.repo.length + 1);
+/** The payload's attempt set: a non-empty list of `{name, id}` with unique names and positive ids, normalized to name order. */
+function attemptSet(value: unknown): CheckRunRef[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const runs = new Map<string, number>();
+  for (const entry of value) {
+    const record = asRecord(entry);
+    const name = record?.name;
+    const id = record?.id;
+    if (
+      typeof name !== "string" ||
+      name === "" ||
+      typeof id !== "number" ||
+      !Number.isSafeInteger(id) ||
+      id <= 0 ||
+      runs.has(name)
+    ) {
+      return undefined;
+    }
+    runs.set(name, id);
   }
-  if (!branch) return undefined;
-
-  const mappedPrKey = state.prByBranch[`${input.repo}@${branch}`];
-  if (mappedPrKey !== undefined && mappedPrKey !== prKey) return undefined;
-  const issue = issueForBranch(input.repo, branch);
-  if (!issue || !state.issues[issue]) return undefined;
-
-  const pr: PrState = {
-    key: issue,
-    repo: input.repo,
-    number: input.number,
-    headSha: input.observation.sha,
-    checks: {},
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: 0,
-    fixAttempts: 0,
-  };
-  state.prs[prKey] = pr;
-  state.prByBranch[`${input.repo}@${branch}`] = prKey;
-  return pr;
+  return sortedCheckRunRefs(runs);
 }
 
 function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {
@@ -361,69 +389,106 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     await deps.saveState();
   };
 
-  const publishCiEmissions = async (
-    pr: PrState,
-    emissions: CiEmission[],
-    envelope: EnvelopeJson
-  ): Promise<void> => {
-    const role = roleToken(deps.state.project, pr.key, "implementer");
-    for (const emission of emissions) {
-      await publishEffect(role, emission, envelope);
-      if (emission.type !== "ci-first-red") {
-        await applyEffects(
-          reduceCiEmission(deps.state, pr.repo, pr.number, emission, deps.config),
-          envelope
-        );
-      }
+  const handleChecks = async (subject: string, envelope: EnvelopeJson): Promise<boolean> => {
+    const input = checksInput(subject, envelope);
+    if (!input) {
+      console.debug(
+        `[legion] ignored malformed or non-head checks event ${envelope.event_id} subject=${subject}`
+      );
+      return false;
     }
-  };
-
-  const handleCheck = async (subject: string, envelope: EnvelopeJson): Promise<void> => {
-    const input = checkInput(subject, envelope);
-    if (!input) return;
-    const pr = findOrCreatePr(deps.state, input);
-    if (!pr) return;
-    const now = Date.now();
-    reduceCheck(pr, input.observation, now);
-    await publishCiEmissions(pr, settle(pr, now, deps.config.ciQuietMs, "eager"), envelope);
-  };
-
-  const settleChecks = async (): Promise<void> => {
-    const now = Date.now();
-    for (const pr of Object.values(deps.state.prs)) {
-      const envelope: EnvelopeJson = {
-        event_id: `ci:${pr.repo}#${pr.number}:${pr.headSha}`,
-        issued_at: now,
-      };
-      await publishCiEmissions(pr, settle(pr, now, deps.config.ciQuietMs), envelope);
+    const pr = deps.state.prs[`${input.repo}#${input.number}`];
+    if (!pr) return false;
+    if (pr.headSha !== input.sha) {
+      console.debug(
+        `[legion] ignored non-head checks event ${envelope.event_id} subject=${subject} sha=${input.sha} head_sha=${pr.headSha}`
+      );
+      return false;
     }
-    await deps.saveState();
+    const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
+    const classification = classifySettlement(pr, { ...input, verdict, failing: input.failed });
+    if (classification === "stale") {
+      console.debug(
+        `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
+      );
+      return false;
+    }
+    if (classification === "duplicate") return false;
+    if (classification === "conflict") {
+      console.warn(
+        `[legion] conflicting checks settlement ${envelope.event_id} subject=${subject} sha=${input.sha} stored_snapshot=${pr.ciSnapshot ?? "<none>"} incoming_snapshot=${input.snapshot}`
+      );
+      return false;
+    }
+    if (classification === "refresh") {
+      // Agrees with the verdict a terminal GitHub read holds at this attempt
+      // set: the listener identity moves, GitHub's authority stays.
+      refreshCiIdentity(pr, input.generation, input.snapshot, input.settledAt);
+      return true;
+    }
+    // A newer attempt set, or a later generation at a set GitHub has not read:
+    // the listener's view is authoritative for the names it reports until
+    // GitHub reads this set; names it omits keep their last known outcome.
+    const outcome = effectiveOutcome(pr, {
+      checkRuns: input.checkRuns,
+      verdict,
+      failing: input.failed,
+    });
+    writeCiFence(pr, {
+      checkRuns: input.checkRuns,
+      generation: input.generation,
+      snapshot: input.snapshot,
+    });
+    pr.ciReconciled = false;
+    await applyEffects(
+      settleCiVerdict(deps.state, pr, { ...outcome, settledAt: input.settledAt }, deps.config),
+      envelope
+    );
+    return true;
   };
 
   const handleMessage = async (subject: string, data: string): Promise<void> => {
     const envelope = EnvelopeSchema.parse(JSON.parse(data)) as EnvelopeJson;
-    if (CHECK_TOPIC.test(subject)) await handleCheck(subject, envelope);
+    let shouldSave = true;
+    if (CHECKS_TOPIC.test(subject)) shouldSave = await handleChecks(subject, envelope);
     else if (isMention(subject)) {
       await publishController(
         typeof envelope.payload === "string" ? envelope.payload : "{}",
         envelope
       );
     } else {
-      const exception = exceptionInfo(deps.state, subject, envelope);
-      if (exception) {
-        if (exception.controller) {
-          addHeld(controllerTarget, exception.roleToken, exception.original.payload, {
-            ...envelope,
-            event_id: exception.original.eventId,
-          });
-          await deps.saveState();
-        }
-        await deps.onException(exception);
+      const rawPayload = recordPayload(envelope);
+      if (
+        subject.startsWith("notifications.github.") &&
+        rawPayload &&
+        rawPayload.kind === undefined &&
+        asRecord(rawPayload.pull_request) &&
+        !("review" in rawPayload) &&
+        !("comment" in rawPayload)
+      ) {
+        console.warn(
+          "legion: ignored raw-shaped GitHub payload (nested pull_request); Envoy emits kind/action/head_sha"
+        );
       } else {
-        await applyEffects(reduceGithubEvent(deps.state, subject, envelope, deps.config), envelope);
+        const exception = exceptionInfo(deps.state, subject, envelope);
+        if (exception) {
+          if (exception.controller) {
+            addHeld(controllerTarget, exception.roleToken, exception.original.payload, {
+              ...envelope,
+              event_id: exception.original.eventId,
+            });
+            await deps.saveState();
+          }
+          await deps.onException(exception);
+        } else {
+          await applyEffects(
+            reduceGithubEvent(deps.state, subject, envelope, deps.config),
+            envelope
+          );
+        }
       }
     }
-    await deps.saveState();
+    if (shouldSave) await deps.saveState();
     console.log(`[legion] consumed event ${envelope.event_id} subject=${subject}`);
   };
 
@@ -438,9 +503,6 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       track(handleMessage(subject, data));
     }),
   ];
-  const sweepTimer = setInterval(() => {
-    track(settleChecks());
-  }, SETTLE_INTERVAL_MS);
 
   return {
     applyEffects: applyEffectsAndSave,
@@ -470,7 +532,6 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     stop(): void {
       stopped = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
-      clearInterval(sweepTimer);
       for (const timer of retryTimers) clearTimeout(timer as never);
       retryTimers.clear();
     },

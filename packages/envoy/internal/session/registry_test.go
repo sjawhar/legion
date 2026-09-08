@@ -1,8 +1,13 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -191,7 +196,6 @@ func TestSessionRegistry_NilDeleteReturnsErrNoKV(t *testing.T) {
 	}
 }
 
-
 func TestSessionRegistry_Ping_Healthy(t *testing.T) {
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
@@ -229,4 +233,198 @@ func TestSessionRegistry_Ping_NilReceiver(t *testing.T) {
 	if err := reg.Ping(); err != ErrNoKV {
 		t.Fatalf("expected ErrNoKV, got %v", err)
 	}
+}
+
+func TestSessionRegistryWatcherEvictsMalformedValue(t *testing.T) {
+	logs := captureSessionRegistryLogs(t)
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("OpenSessionRegistry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+
+	const sessionID = "ses_malformed"
+	if err := reg.Put(sessionID, SessionEntry{Port: 13381, MachineID: "example-host", Dir: "/example"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	revision, err := reg.kv.Put(sessionID, []byte("{"))
+	if err != nil {
+		t.Fatalf("put malformed value: %v", err)
+	}
+	waitForSessionEviction(t, reg, sessionID, 5*time.Second)
+
+	for _, want := range []string{
+		"level=WARN",
+		"key=" + sessionID,
+		"revision=" + strconv.FormatUint(revision, 10),
+	} {
+		waitFor(t, 5*time.Second, func() bool {
+			return strings.Contains(logs.String(), want)
+		})
+	}
+	t.Logf("session watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
+}
+
+func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("OpenSessionRegistry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+
+	const sessionID = "ses_revision"
+	raw := reg.kv
+	reg.kv = &interleavingSessionPutKeyValue{
+		KeyValue: raw,
+		afterFirstPut: func() {
+			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote", Driving: true}
+			buf, err := json.Marshal(remote)
+			if err != nil {
+				t.Fatalf("marshal remote entry: %v", err)
+			}
+			if _, err := raw.Put(sessionID, buf); err != nil {
+				t.Fatalf("put remote entry: %v", err)
+			}
+			waitFor(t, 5*time.Second, func() bool {
+				got, err := reg.Get(sessionID)
+				return err == nil && got.Port == remote.Port
+			})
+		},
+	}
+	if err := reg.Put(sessionID, SessionEntry{Port: 13381, MachineID: "local-host", Dir: "/local", Driving: true}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get after interleaving: %v", err)
+	}
+	if got.Port != 13382 || got.MachineID != "remote-host" {
+		t.Fatalf("older write-through restored local entry: %+v", got)
+	}
+}
+
+func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("OpenSessionRegistry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+
+	const sessionID = "ses_delete"
+	item := SessionEntry{Port: 13381, MachineID: "example-host", Dir: "/example"}
+	if err := reg.Put(sessionID, item); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	entry, err := reg.kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get seeded entry: %v", err)
+	}
+	reg.kv = &historyFailSessionKeyValue{
+		KeyValue: reg.kv,
+		err:      errors.New("injected history failure"),
+	}
+	if err := reg.Delete(sessionID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	reg.mu.Lock()
+	reg.cacheSessionLocked(sessionID, item, time.Time{}, entry.Revision())
+	reg.mu.Unlock()
+	if _, err := reg.Get(sessionID); err == nil {
+		t.Fatal("Get returned a session restored by a stale watcher update")
+	}
+}
+
+type interleavingSessionPutKeyValue struct {
+	natsgo.KeyValue
+
+	puts          int
+	afterFirstPut func()
+}
+
+func (kv *interleavingSessionPutKeyValue) Put(key string, value []byte) (uint64, error) {
+	kv.puts++
+	revision, err := kv.KeyValue.Put(key, value)
+	if err != nil {
+		return 0, err
+	}
+	if kv.puts == 1 {
+		kv.afterFirstPut()
+	}
+	return revision, nil
+}
+
+type historyFailSessionKeyValue struct {
+	natsgo.KeyValue
+
+	err error
+}
+
+func (kv *historyFailSessionKeyValue) History(string, ...natsgo.WatchOpt) ([]natsgo.KeyValueEntry, error) {
+	return nil, kv.err
+}
+
+func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if condition() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for observable state")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForSessionEviction(t *testing.T, reg *SessionRegistry, sessionID string, timeout time.Duration) {
+	t.Helper()
+	waitFor(t, timeout, func() bool {
+		_, getErr := reg.Get(sessionID)
+		entries, listErr := reg.List()
+		return getErr != nil && listErr == nil && len(entries) == 0
+	})
+}
+
+func captureSessionRegistryLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
+	var logs lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
+}
+
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }

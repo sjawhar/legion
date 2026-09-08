@@ -1,0 +1,19 @@
+{
+  "action": "edited",
+  "issue": {
+    "number": 7,
+    "title": "Acceptance issue",
+    "html_url": "https://example.invalid/example-org/example-repo/issues/7"
+  },
+  "comment": {
+    "body": "Please verify the completed local acceptance driver.",
+    "html_url": "https://example.invalid/example-org/example-repo/issues/7#issuecomment-1",
+    "user": { "login": "octocat" }
+  },
+  "sender": { "login": "octocat", "type": "User" },
+  "repository": {
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "owner": { "login": "example-org" }
+  }
+}

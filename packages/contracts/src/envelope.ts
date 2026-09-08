@@ -16,6 +16,19 @@ export const EnvelopeSchema = z.object({
   payload: z.string().optional(),
   payload_ref: z.string().optional(),
   trace_id: z.string().min(1),
+  sender: z
+    .object({
+      session_id: z.string().min(1),
+      machine: z.string().optional(),
+      cwd: z.string().optional(),
+      title: z.string().optional(),
+      roles: z.array(z.string()).optional(),
+    })
+    .optional(),
+  in_reply_to: z.string().min(1).optional(),
+  supersedes: z.string().min(1).optional(),
+  urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
+  expects_reply: z.enum(["none", "optional", "required"]).optional(),
 });
 
 export type Envelope = z.infer<typeof EnvelopeSchema>;

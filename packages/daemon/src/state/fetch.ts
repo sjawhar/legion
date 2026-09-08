@@ -1,4 +1,5 @@
 import {
+  type CheckRunRef,
   CiStatus,
   type CiStatusLiteral,
   type GitHubPRRef as GitHubPRRefType,
@@ -6,6 +7,7 @@ import {
   type MergeableStatusLiteral,
   ReviewState,
   type ReviewStateLiteral,
+  sortedCheckRunRefs,
 } from "./types";
 
 // =============================================================================
@@ -89,6 +91,47 @@ async function sleep(ms: number): Promise<void> {
   const delay = Promise.withResolvers<void>();
   setTimeout(delay.resolve, ms);
   await delay.promise;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+async function runGraphqlQuery(
+  query: string,
+  variables: Record<string, string>,
+  runner: CommandRunner,
+  runnerOptions: CommandRunnerOptions | undefined,
+  maxAttempts: number,
+  allowEmptyData: boolean = false
+): Promise<Record<string, unknown>> {
+  let lastError = new GitHubAPIError("All GraphQL query retry attempts failed");
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(Math.min(2 ** (attempt - 1) * 1000, 10000));
+    }
+    const command = ["gh", "api", "graphql", "-f", `query=${query}`];
+    for (const [name, value] of Object.entries(variables)) {
+      command.push("-f", `${name}=${value}`);
+    }
+    const { stdout, stderr, exitCode } = await runner(command, runnerOptions);
+    if (exitCode !== 0) {
+      lastError = new GitHubAPIError(`GraphQL query failed: ${stderr}`);
+      continue;
+    }
+    try {
+      const response = recordValue(JSON.parse(stdout));
+      const data = recordValue(response?.data);
+      if (data) return data;
+      if (allowEmptyData) return {};
+      lastError = new GitHubAPIError("GitHub returned GraphQL data in an invalid shape");
+    } catch (error) {
+      lastError = new GitHubAPIError(`Failed to parse GraphQL response: ${error}`);
+    }
+  }
+  throw lastError;
 }
 
 // =============================================================================
@@ -258,78 +301,28 @@ async function getPrReviewStateBatchWithOptions(
 
   const query = `query { ${queryParts.join(" ")} }`;
 
-  // Retry loop with exponential backoff (configurable attempts)
-  let lastError: GitHubAPIError = new GitHubAPIError("All retry attempts failed");
+  const dataObj = await runGraphqlQuery(query, {}, runner, runnerOptions, maxAttempts, true);
+  const result: Record<string, ReviewStateLiteral | null> = {};
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (attempt > 0) {
-      // Exponential backoff: 1s, 2s (min 1s, max 10s)
-      const waitMs = Math.min(2 ** (attempt - 1) * 1000, 10000);
-      await sleep(waitMs);
-    }
-
-    const { stdout, stderr, exitCode } = await runner(
-      ["gh", "api", "graphql", "-f", `query=${query}`],
-      runnerOptions
-    );
-
-    if (exitCode !== 0) {
-      lastError = new GitHubAPIError(`GraphQL query failed: ${stderr}`);
-      continue;
-    }
-
-    let response: { data?: unknown };
-    try {
-      response = JSON.parse(stdout);
-    } catch (e) {
-      lastError = new GitHubAPIError(`Failed to parse GraphQL response: ${e}`);
-      continue;
-    }
-
-    // Success - parse response
-    const rawData = response.data;
-    const dataObj: Record<string, unknown> =
-      rawData !== null &&
-      rawData !== undefined &&
-      typeof rawData === "object" &&
-      !Array.isArray(rawData)
-        ? (rawData as Record<string, unknown>)
-        : {};
-
-    const result: Record<string, ReviewStateLiteral | null> = {};
-
-    for (const [repoAlias, [_owner, _repo]] of repoAliasMap) {
-      const rawRepo = dataObj[repoAlias];
-      const repoData: Record<string, unknown> =
-        rawRepo !== null &&
-        rawRepo !== undefined &&
-        typeof rawRepo === "object" &&
-        !Array.isArray(rawRepo)
-          ? (rawRepo as Record<string, unknown>)
-          : {};
-
-      const prAliases = prAliasMap.get(repoAlias) ?? new Map();
-      for (const [prAlias, [issueId]] of prAliases) {
-        const rawPr = repoData[prAlias] as
-          | { latestReviews?: { nodes?: Array<{ state?: string }> } }
-          | null
-          | undefined;
-
-        const reviewState = rawPr?.latestReviews?.nodes?.[0]?.state ?? null;
-        if (reviewState === "APPROVED") {
-          result[issueId] = ReviewState.APPROVED;
-        } else if (reviewState === "CHANGES_REQUESTED") {
-          result[issueId] = ReviewState.CHANGES_REQUESTED;
-        } else {
-          result[issueId] = null;
-        }
+  for (const [repoAlias] of repoAliasMap) {
+    const repoData = recordValue(dataObj[repoAlias]);
+    const prAliases = prAliasMap.get(repoAlias) ?? new Map();
+    for (const [prAlias, [issueId]] of prAliases) {
+      const rawPr = recordValue(repoData?.[prAlias]);
+      const latestReviews = recordValue(rawPr?.latestReviews);
+      const nodes = latestReviews?.nodes;
+      const reviewState = Array.isArray(nodes) ? recordValue(nodes[0])?.state : undefined;
+      if (reviewState === "APPROVED") {
+        result[issueId] = ReviewState.APPROVED;
+      } else if (reviewState === "CHANGES_REQUESTED") {
+        result[issueId] = ReviewState.CHANGES_REQUESTED;
+      } else {
+        result[issueId] = null;
       }
     }
-
-    return result;
   }
 
-  throw lastError;
+  return result;
 }
 
 // =============================================================================
@@ -337,11 +330,150 @@ async function getPrReviewStateBatchWithOptions(
 // =============================================================================
 
 /**
- * Combined CI and mergeable status for a PR.
+ * Combined CI, mergeable, and failed-check status for a PR.
  */
-interface CiAndMergeStatus {
+export interface CiAndMergeStatus {
   ciStatus: CiStatusLiteral | null;
   mergeableStatus: MergeableStatusLiteral | null;
+  failingChecks?: string[];
+  /** Failing commit statuses (contexts without a check run); present with failingChecks when the rollup is failing. */
+  failingStatuses?: string[];
+  /** Check runs GitHub reports as CANCELLED; present with failingChecks when the rollup is failing. */
+  cancelledCount?: number;
+  headSha: string | null;
+  isOpen: boolean;
+  updatedAt: string | null;
+  /** The rollup's attempt set: the highest check-run id per check name, sorted by name. Status contexts have no run and are absent. */
+  checkRuns: CheckRunRef[];
+}
+
+export interface CiFetchFailure {
+  owner: string;
+  error: string;
+}
+
+export type CiFetchResult = CiAndMergeStatus | CiFetchFailure;
+
+export function isCiFetchFailure(result: CiFetchResult): result is CiFetchFailure {
+  return "error" in result;
+}
+
+// Cancelled is not failure: the listener's settlement keeps the two apart and
+// live intake uncertifies a green head on a cancelled-only settlement instead
+// of turning it red. The rollup reader draws the same line.
+const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {
+  ACTION_REQUIRED: true,
+  ERROR: true,
+  FAILURE: true,
+  STALE: true,
+  STARTUP_FAILURE: true,
+  TIMED_OUT: true,
+};
+
+interface RollupOutcome {
+  readonly failingChecks: string[];
+  readonly failingStatuses: string[];
+  readonly cancelledCount: number;
+}
+
+function rollupOutcome(nodes: readonly unknown[]): RollupOutcome {
+  const failingChecks = new Set<string>();
+  const failingStatuses = new Set<string>();
+  let cancelledCount = 0;
+  for (const node of nodes) {
+    if (typeof node !== "object" || node === null || Array.isArray(node) || !("name" in node)) {
+      continue;
+    }
+    if (typeof node.name !== "string") continue;
+    // A check run carries `conclusion`; a commit status carries `statusConclusion`.
+    const isCheckRun = "conclusion" in node;
+    const conclusion = isCheckRun
+      ? node.conclusion
+      : "statusConclusion" in node
+        ? node.statusConclusion
+        : undefined;
+    if (typeof conclusion !== "string") continue;
+    if (conclusion === "CANCELLED") cancelledCount += 1;
+    else if (FAILING_CHECK_CONCLUSIONS[conclusion]) {
+      (isCheckRun ? failingChecks : failingStatuses).add(node.name);
+    }
+  }
+  return {
+    failingChecks: [...failingChecks],
+    failingStatuses: [...failingStatuses],
+    cancelledCount,
+  };
+}
+
+function checkRunSet(nodes: readonly unknown[]): CheckRunRef[] {
+  const runs = new Map<string, number>();
+  for (const node of nodes) {
+    const record = recordValue(node);
+    const name = record?.name;
+    const databaseId = record?.databaseId;
+    if (
+      typeof name !== "string" ||
+      name === "" ||
+      typeof databaseId !== "number" ||
+      !Number.isSafeInteger(databaseId) ||
+      databaseId <= 0
+    ) {
+      continue;
+    }
+    const known = runs.get(name);
+    if (known === undefined || databaseId > known) runs.set(name, databaseId);
+  }
+  return sortedCheckRunRefs(runs);
+}
+
+interface RollupContextsPage {
+  nodes: unknown[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+function contextsPage(rollup: Record<string, unknown> | undefined): RollupContextsPage {
+  const contexts = recordValue(rollup?.contexts);
+  const pageInfo = recordValue(contexts?.pageInfo);
+  return {
+    nodes: Array.isArray(contexts?.nodes) ? contexts.nodes : [],
+    hasNextPage: pageInfo?.hasNextPage === true,
+    endCursor: typeof pageInfo?.endCursor === "string" ? pageInfo.endCursor : null,
+  };
+}
+
+async function fetchRemainingContextNodes(
+  initialPage: RollupContextsPage,
+  ref: GitHubPRRefType,
+  headSha: string,
+  runner: CommandRunner,
+  runnerOptions: CommandRunnerOptions | undefined,
+  maxAttempts: number
+): Promise<unknown[]> {
+  const nodes = [...initialPage.nodes];
+  let page = initialPage;
+  while (page.hasNextPage) {
+    if (!page.endCursor) {
+      throw new GitHubAPIError("GitHub returned a paginated check rollup without an end cursor");
+    }
+    const query = `query($after: String!) { repository(owner: "${ref.owner}", name: "${ref.repo}") { object(oid: "${headSha}") { ... on Commit { statusCheckRollup { contexts(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`;
+    const data = await runGraphqlQuery(
+      query,
+      { after: page.endCursor },
+      runner,
+      runnerOptions,
+      maxAttempts
+    );
+    const rollup = recordValue(
+      recordValue(recordValue(data.repository)?.object)?.statusCheckRollup
+    );
+    if (!rollup) {
+      throw new GitHubAPIError("GitHub returned an invalid paginated check rollup");
+    }
+    page = contextsPage(rollup);
+    nodes.push(...page.nodes);
+  }
+  return nodes;
 }
 
 /**
@@ -361,7 +493,7 @@ export async function getCiStatusBatch(
   prRefs: Record<string, GitHubPRRefType>,
   runner: CommandRunner = defaultRunner,
   runnerOptionsForOwner?: OwnerCommandRunnerOptionsProvider
-): Promise<Record<string, CiAndMergeStatus>> {
+): Promise<Record<string, CiFetchResult>> {
   if (!runnerOptionsForOwner) {
     if (runner === defaultRunner) {
       throw new Error("Owner-scoped GitHub App runner options are required for GraphQL reads");
@@ -380,7 +512,7 @@ export async function getCiStatusBatch(
     }
   }
 
-  const result: Record<string, CiAndMergeStatus> = {};
+  const result: Record<string, CiFetchResult> = {};
   for (const batch of batches.values()) {
     try {
       Object.assign(
@@ -388,13 +520,13 @@ export async function getCiStatusBatch(
         await getCiStatusBatchWithOptions(
           batch.refs,
           runner,
-          await runnerOptionsForOwner(batch.owner),
-          1
+          await runnerOptionsForOwner(batch.owner)
         )
       );
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       for (const issueId of Object.keys(batch.refs)) {
-        result[issueId] = { ciStatus: null, mergeableStatus: null };
+        result[issueId] = { owner: batch.owner, error: message };
       }
     }
   }
@@ -439,7 +571,7 @@ async function getCiStatusBatchWithOptions(
       const prAlias = `pr${prIdx}`;
       prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
       prParts.push(
-        `${prAlias}: pullRequest(number: ${prNumber}) { mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }`
+        `${prAlias}: pullRequest(number: ${prNumber}) { state updatedAt mergeable commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`
       );
     }
 
@@ -451,93 +583,81 @@ async function getCiStatusBatchWithOptions(
 
   const query = `query { ${queryParts.join(" ")} }`;
 
-  // Retry loop with exponential backoff (configurable attempts)
-  let lastError: GitHubAPIError = new GitHubAPIError("All retry attempts failed");
+  const dataObj = await runGraphqlQuery(query, {}, runner, runnerOptions, maxAttempts);
+  const result: Record<string, CiAndMergeStatus> = {};
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (attempt > 0) {
-      const waitMs = Math.min(2 ** (attempt - 1) * 1000, 10000);
-      await sleep(waitMs);
-    }
-
-    const { stdout, stderr, exitCode } = await runner(
-      ["gh", "api", "graphql", "-f", `query=${query}`],
-      runnerOptions
-    );
-
-    if (exitCode !== 0) {
-      lastError = new GitHubAPIError(`GraphQL query failed: ${stderr}`);
-      continue;
-    }
-
-    let response: { data?: unknown };
-    try {
-      response = JSON.parse(stdout);
-    } catch (e) {
-      lastError = new GitHubAPIError(`Failed to parse GraphQL response: ${e}`);
-      continue;
-    }
-
-    // Success - parse response
-    const rawData = response.data;
-    const dataObj: Record<string, unknown> =
-      rawData !== null &&
-      rawData !== undefined &&
-      typeof rawData === "object" &&
-      !Array.isArray(rawData)
-        ? (rawData as Record<string, unknown>)
-        : {};
-
-    const result: Record<string, CiAndMergeStatus> = {};
-
-    for (const [repoAlias, [_owner, _repo]] of repoAliasMap) {
-      const rawRepo = dataObj[repoAlias];
-      const repoData: Record<string, unknown> =
-        rawRepo !== null &&
-        rawRepo !== undefined &&
-        typeof rawRepo === "object" &&
-        !Array.isArray(rawRepo)
-          ? (rawRepo as Record<string, unknown>)
-          : {};
-
-      const prAliases = prAliasMap.get(repoAlias) ?? new Map();
-      for (const [prAlias, [issueId]] of prAliases) {
-        const rawPr = repoData[prAlias] as Record<string, unknown> | null | undefined;
-        if (
-          rawPr === null ||
-          rawPr === undefined ||
-          typeof rawPr !== "object" ||
-          Array.isArray(rawPr)
-        ) {
-          result[issueId] = { ciStatus: null, mergeableStatus: null };
-          continue;
-        }
-
-        // Navigate: pr.commits.nodes[0].commit.statusCheckRollup.state
-        const commits = rawPr.commits as { nodes?: unknown[] } | null | undefined;
-        const nodes = commits?.nodes;
-        if (!Array.isArray(nodes) || nodes.length === 0) {
-          result[issueId] = { ciStatus: null, mergeableStatus: null };
-          continue;
-        }
-
-        const firstNode = nodes[0] as {
-          commit?: { statusCheckRollup?: { state?: string | null } | null };
-        } | null;
-        const rollupState = firstNode?.commit?.statusCheckRollup?.state ?? null;
+  for (const [repoAlias, [owner, repo]] of repoAliasMap) {
+    const repoData = recordValue(dataObj[repoAlias]);
+    const prAliases = prAliasMap.get(repoAlias) ?? new Map();
+    for (const [prAlias, [issueId, prNumber]] of prAliases) {
+      const rawPr = recordValue(repoData?.[prAlias]);
+      if (!rawPr) {
         result[issueId] = {
-          ciStatus: mapCiRollupState(rollupState),
-          mergeableStatus: mapMergeableState(
-            typeof rawPr === "object" && rawPr !== null && "mergeable" in rawPr
-              ? ((rawPr as { mergeable?: string | null }).mergeable ?? null)
-              : null
-          ),
+          ciStatus: null,
+          mergeableStatus: null,
+          headSha: null,
+          isOpen: false,
+          updatedAt: null,
+          checkRuns: [],
         };
+        continue;
       }
-    }
 
-    return result;
+      const updatedAt = typeof rawPr.updatedAt === "string" ? rawPr.updatedAt : null;
+      const commits = recordValue(rawPr.commits);
+      const firstNode = Array.isArray(commits?.nodes) ? commits.nodes[0] : undefined;
+      const commit = recordValue(recordValue(firstNode)?.commit);
+      if (!commit) {
+        result[issueId] = {
+          ciStatus: null,
+          mergeableStatus: null,
+          headSha: null,
+          isOpen: rawPr.state === "OPEN",
+          updatedAt,
+          checkRuns: [],
+        };
+        continue;
+      }
+
+      const headSha = typeof commit.oid === "string" ? commit.oid : null;
+      const rollup = recordValue(commit.statusCheckRollup);
+      const rollupState = rollup?.state;
+      const ciStatus = mapCiRollupState(
+        typeof rollupState === "string" || rollupState === null ? rollupState : null
+      );
+      const initialContexts = contextsPage(rollup);
+      let contextNodes = initialContexts.nodes;
+      // Every page is needed for the ordering fence (the highest check-run id
+      // may sit on a later page); failing names are only read when failing.
+      if (initialContexts.hasNextPage) {
+        if (!headSha) {
+          throw new GitHubAPIError(
+            `GitHub returned a paginated check rollup without an oid for ${issueId}`
+          );
+        }
+        contextNodes = await fetchRemainingContextNodes(
+          initialContexts,
+          { owner, repo, number: prNumber },
+          headSha,
+          runner,
+          runnerOptions,
+          maxAttempts
+        );
+      }
+      const mergeable = rawPr.mergeable;
+      result[issueId] = {
+        ciStatus,
+        mergeableStatus: mapMergeableState(
+          typeof mergeable === "string" || mergeable === null ? mergeable : null
+        ),
+        ...(ciStatus === CiStatus.FAILING ? rollupOutcome(contextNodes) : {}),
+        headSha,
+        isOpen: rawPr.state === "OPEN",
+        updatedAt,
+        checkRuns: checkRunSet(contextNodes),
+      };
+    }
   }
 
-  throw lastError;
+  return result;
 }

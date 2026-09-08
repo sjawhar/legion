@@ -66,9 +66,10 @@ type SessionRegistry struct {
 	kv  nats.KeyValue
 	ttl time.Duration
 
-	mu       sync.RWMutex
-	cache    map[string]cachedSession
-	watchErr error
+	mu             sync.RWMutex
+	cache          map[string]cachedSession
+	cacheRevisions map[string]uint64
+	watchErr       error
 
 	// readyCh is closed when watch() finishes its initial scan of existing KV
 	// entries (signalled by the nil sentinel WatchAll() emits after delivering
@@ -111,10 +112,11 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		}
 	}
 	r := &SessionRegistry{
-		kv:      kv,
-		ttl:     ttl,
-		cache:   map[string]cachedSession{},
-		readyCh: make(chan struct{}),
+		kv:             kv,
+		ttl:            ttl,
+		cache:          map[string]cachedSession{},
+		cacheRevisions: map[string]uint64{},
+		readyCh:        make(chan struct{}),
 	}
 	// watch() populates the cache asynchronously via a long-lived KV watcher.
 	// The synchronous Keys()+per-key Get() loop it replaces blocks for seconds
@@ -183,14 +185,14 @@ func (r *SessionRegistry) watch() {
 		}
 		r.mu.Lock()
 		if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-			delete(r.cache, entry.Key())
+			r.evictCachedSessionLocked(entry.Key(), entry.Revision())
 		} else {
 			var item SessionEntry
-			if err := json.Unmarshal(entry.Value(), &item); err == nil {
-				r.cache[entry.Key()] = cachedSession{
-					entry:     item,
-					expiresAt: r.expiryFor(entry.Created(), item.UpdatedAt),
-				}
+			if err := json.Unmarshal(entry.Value(), &item); err != nil {
+				r.evictCachedSessionLocked(entry.Key(), entry.Revision())
+				slog.Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
+			} else {
+				r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
 			}
 		}
 		r.mu.Unlock()
@@ -327,16 +329,12 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 	if err != nil {
 		return err
 	}
-	if _, err := r.kv.Put(sessionID, buf); err != nil {
+	revision, err := r.kv.Put(sessionID, buf)
+	if err != nil {
 		return err
 	}
-	// Write through to the local cache so this session is visible immediately,
-	// even if the watcher lags or the initial scan hasn't finished yet.
 	r.mu.Lock()
-	r.cache[sessionID] = cachedSession{
-		entry:     entry,
-		expiresAt: r.expiryFor(time.Time{}, entry.UpdatedAt),
-	}
+	r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), revision)
 	r.mu.Unlock()
 	return nil
 }
@@ -359,12 +357,44 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 	if r == nil {
 		return ErrNoKV
 	}
-	if err := r.kv.Delete(sessionID); err != nil {
+	revision := r.cachedRevision(sessionID)
+	entry, err := r.kv.Get(sessionID)
+	opts := []nats.DeleteOpt{}
+	if err == nil {
+		if entry.Revision() > revision {
+			revision = entry.Revision()
+		}
+		opts = append(opts, nats.LastRevision(entry.Revision()))
+	} else if !errors.Is(err, nats.ErrKeyNotFound) {
 		return err
 	}
-	// Write through so the deletion is visible immediately.
+	if err := r.kv.Delete(sessionID, opts...); err != nil {
+		return err
+	}
+	entries, err := r.kv.History(sessionID)
+	if err == nil && len(entries) > 0 {
+		latest := entries[len(entries)-1]
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if latest.Operation() == nats.KeyValueDelete || latest.Operation() == nats.KeyValuePurge {
+			r.evictCachedSessionLocked(sessionID, latest.Revision())
+			return nil
+		}
+		var item SessionEntry
+		if err := json.Unmarshal(latest.Value(), &item); err != nil {
+			r.evictCachedSessionLocked(sessionID, latest.Revision())
+			slog.Warn("session registry cache evicted malformed value",
+				slog.String("key", latest.Key()),
+				slog.Uint64("revision", latest.Revision()),
+				slog.String("error", err.Error()),
+			)
+			return nil
+		}
+		r.cacheSessionLocked(sessionID, item, r.expiryFor(latest.Created(), item.UpdatedAt), latest.Revision())
+		return nil
+	}
 	r.mu.Lock()
-	delete(r.cache, sessionID)
+	r.evictCachedSessionLocked(sessionID, revision+1)
 	r.mu.Unlock()
 	return nil
 }
@@ -403,4 +433,26 @@ func (r *SessionRegistry) pruneLocked(now time.Time) {
 			delete(r.cache, key)
 		}
 	}
+}
+
+func (r *SessionRegistry) cachedRevision(sessionID string) uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cacheRevisions[sessionID]
+}
+
+func (r *SessionRegistry) cacheSessionLocked(sessionID string, entry SessionEntry, expiresAt time.Time, revision uint64) {
+	if revision < r.cacheRevisions[sessionID] {
+		return
+	}
+	r.cache[sessionID] = cachedSession{entry: entry, expiresAt: expiresAt}
+	r.cacheRevisions[sessionID] = revision
+}
+
+func (r *SessionRegistry) evictCachedSessionLocked(sessionID string, revision uint64) {
+	if revision < r.cacheRevisions[sessionID] {
+		return
+	}
+	delete(r.cache, sessionID)
+	r.cacheRevisions[sessionID] = revision
 }

@@ -2,7 +2,10 @@ package cistore
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -16,15 +19,9 @@ type Publisher interface {
 }
 
 // StartSummaryLoop runs a reconcile ticker in a background goroutine until ctx
-// is cancelled. On each tick it scans cached commit states and, for any commit
-// whose checks have been quiet for the debounce window and whose check set
-// changed since the last emit, publishes one rendered summary to pr.<n>.ci.
-//
-// Emit-once + debounce are enforced by MarkEmitted (a KV compare-and-swap that
-// re-validates against fresh state), so the loop is idempotent across replicas
-// and safe to run alongside a listener restart: the only in-memory state (the
-// WatchAll cache) is rebuilt from durable KV. Cancelling ctx stops the loop
-// cleanly, which avoids post-shutdown KV errors once NATS is drained.
+// is cancelled. On each tick it emits one `pr.<n>.checks` envelope when a head
+// commit has been quiet, all recorded suites are complete, and all check runs
+// are terminal. The store's CAS makes the loop idempotent across replicas.
 func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce, tick time.Duration, logger *logging.Logger) {
 	t := time.NewTicker(tick)
 	go func() {
@@ -43,55 +40,126 @@ func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce
 // runSummaryTick performs a single reconcile pass. Split out for testability.
 func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger *logging.Logger) {
 	now := time.Now().UnixMilli()
-	for _, st := range store.List() {
-		if now-st.LastEventAt < debounce.Milliseconds() {
-			continue // still within the quiet window; let more checks accumulate
+	staleBefore := now - (2 * debounce).Milliseconds()
+	for _, cached := range store.List() {
+		if now-cached.LastEventAt < debounce.Milliseconds() {
+			continue
 		}
-		h := st.Hash()
-		if h == st.LastEmitHash {
-			continue // nothing changed since the last emit
+		head, knownHead := store.Head(cached.Owner, cached.Repo, cached.Number)
+		if !knownHead {
+			head = cached.SHA
 		}
-		text, err := RenderSummary(st)
+		if cached.SHA != head || cached.SettledEmitted || !settlementReady(cached) {
+			continue
+		}
+		key := Key(cached.Owner, cached.Repo, cached.Number, cached.SHA)
+		if cached.Claim != nil {
+			claimGeneration := cached.Claim.Generation
+			if claimGeneration == cached.Generation && cached.Claim.ClaimedAt >= staleBefore {
+				continue
+			}
+			reclaimed, err := store.ReclaimSettlement(key, claimGeneration, staleBefore)
+			if err != nil {
+				logger.Warn("checks reclaim failed", slog.String("error", err.Error()), slog.String("sha", cached.SHA))
+				continue
+			}
+			if !reclaimed {
+				continue
+			}
+		}
+
+		state, claimed, err := store.ClaimSettlement(key, cached.Hash(), cached.Generation, now, debounce)
 		if err != nil {
-			logger.Error("ci summary render failed", slog.String("error", err.Error()))
+			logger.Warn("checks claim failed", slog.String("error", err.Error()), slog.String("sha", cached.SHA))
+			continue
+		}
+		if !claimed {
+			continue
+		}
+		sum := renderSummary(state)
+		issuedAt := contracts.NowMillis()
+		sum.SettledAt = issuedAt
+		payload, err := json.Marshal(sum)
+		if err != nil {
+			logger.Error("checks payload failed", slog.String("error", err.Error()))
 			continue
 		}
 		env := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         "github",
-			SourceEventID:  id.New(),
-			Topic:          contracts.GithubSubject(st.Owner, st.Repo, "pr."+st.Number+".ci"),
-			DedupeKey:      "github.ci." + st.Owner + "/" + st.Repo + ".pr." + st.Number + "." + st.SHA + "." + h,
-			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: text,
+			EventID:       id.New(),
+			Source:        "github",
+			SourceEventID: id.New(),
+			Topic:         contracts.GithubSubject(state.Owner, state.Repo, "pr."+state.Number+".checks"),
+			DedupeKey: fmt.Sprintf(
+				"github.checks.%s/%s.pr.%s.%s.g%d",
+				state.Owner,
+				state.Repo,
+				state.Number,
+				state.SHA,
+				state.Generation,
+			),
+			IssuedAt:       issuedAt,
+			PayloadSummary: settledPayloadSummary(sum),
+			Payload:        string(payload),
 			TraceID:        id.New(),
 		}
 		if err := env.Validate(); err != nil {
-			logger.Error("ci summary invalid envelope", slog.String("error", err.Error()))
+			logger.Error("checks invalid envelope", slog.String("error", err.Error()))
+			if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
+				logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
+			}
 			continue
 		}
-		// MarkEmitted before Publish: this favors exactly-once over at-least-once.
-		// A failed publish drops the summary rather than risking a double-publish,
-		// which is acceptable for a status summary — the next check event advances
-		// the hash and re-opens emission. MarkEmitted re-validates hash + debounce
-		// against fresh KV, so a stale/premature summary can never win the CAS.
-		ok, err := store.MarkEmitted(Key(st.Owner, st.Repo, st.Number, st.SHA), h, debounce)
+		held, err := store.ClaimStillHeld(key, state.Generation, state.Hash())
 		if err != nil {
-			logger.Warn("ci summary mark-emitted failed", slog.String("error", err.Error()))
+			logger.Warn("checks claim verification failed", slog.String("error", err.Error()), slog.String("sha", state.SHA))
 			continue
 		}
-		if !ok {
-			continue // stale/premature/already-emitted, or another replica won the CAS
+		if !held {
+			headMatches, headErr := store.durableHeadMatches(state)
+			if headErr != nil {
+				logger.Warn("checks head verification failed", slog.String("error", headErr.Error()), slog.String("sha", state.SHA))
+			} else if !headMatches {
+				if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
+					logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
+				}
+			}
+			continue
 		}
 		if err := pub.Publish(env); err != nil {
-			// Dropped, not retried (MarkEmitted already advanced). Log enough to
-			// trace which summary was lost. See docs/solutions/.../envoy-ci-summary.md.
-			logger.Warn("ci summary publish failed (dropped)",
+			logger.Warn("checks publish failed",
 				slog.String("error", err.Error()),
 				slog.String("topic", env.Topic),
-				slog.String("sha", st.SHA),
-				slog.String("hash", h),
+				slog.String("sha", state.SHA),
 			)
+			if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
+				logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
+			}
+			continue
+		}
+		if _, err := store.MarkSettled(key, state.Generation); err != nil {
+			logger.Warn("checks mark-settled failed", slog.String("error", err.Error()))
 		}
 	}
+}
+
+func settledPayloadSummary(sum Summary) string {
+	summary := fmt.Sprintf(
+		"checks settled on %s#%s @ %s: %d passed, %d failed, %d cancelled, %d skipped",
+		sum.Repo, sum.Number, sha7(sum.SHA), sum.Passed.Count, sum.Failed.Count,
+		sum.Cancelled.Count, sum.Skipped.Count,
+	)
+	if sum.Failed.Count > 0 {
+		summary += "; failing: " + strings.Join(sum.Failed.Checks, ", ")
+	}
+	if sum.SupersededSettlement == "true" {
+		summary += " (re-settled)"
+	}
+	return contracts.OneLineSummary(summary)
+}
+
+func sha7(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }

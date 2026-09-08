@@ -1,0 +1,15 @@
+{
+  "topic": "notifications.github.example-org.example-repo.push.branch.main",
+  "payload_summary": "push to main: Exercise the local acceptance driver (5555555) by octocat",
+  "payload": {
+    "after": "5555555555555555555555555555555555555555",
+    "before": "4444444444444444444444444444444444444444",
+    "commit_count": "1",
+    "compare_url": "https://example.invalid/example-org/example-repo/compare/4444444...5555555",
+    "head_subject": "Exercise the local acceptance driver",
+    "kind": "push",
+    "pusher": "octocat",
+    "ref": "refs/heads/main",
+    "repo": "example-org/example-repo"
+  }
+}

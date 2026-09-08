@@ -160,7 +160,6 @@ function config(stateDir: string): DaemonConfig {
     workerBudget: 6,
     maxRecursionDepth: 8,
     lingerHours: 72,
-    ciQuietMs: 30_000,
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
     gates: { design: "root-issues", merge: "human" },
@@ -260,6 +259,50 @@ describe("startDaemon", () => {
       else process.env.XDG_STATE_HOME = originalEnvironment.XDG_STATE_HOME;
     }
   });
+  it("runs CI reconciliation queries with each PR owner's implementer App token", async () => {
+    const commandOptions: CommandRunnerOptions[] = [];
+    const runner: CommandRunner = async (_command, options) => {
+      if (options) commandOptions.push(options);
+      return {
+        stdout: JSON.stringify({ data: { repo0: { pr0: null } } }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const tokenCalls: Array<{ role: string; owner: string }> = [];
+    const tokenManager = {
+      getToken: async (role: "implement" | "review", owner: string) => {
+        tokenCalls.push({ role, owner });
+        return {
+          token: `ghs_${owner}_app_token`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "3202636+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    };
+
+    await daemonIndex.createCiStatusFetcher(
+      tokenManager,
+      runner
+    )({
+      "acme/api#1": { owner: "acme", repo: "api", number: 1 },
+      "other/web#2": { owner: "other", repo: "web", number: 2 },
+    });
+
+    expect(tokenCalls).toEqual([
+      { role: "implement", owner: "acme" },
+      { role: "implement", owner: "other" },
+    ]);
+    expect(commandOptions).toHaveLength(2);
+    expect(commandOptions.map((options) => options.env?.GH_TOKEN)).toEqual([
+      "ghs_acme_app_token",
+      "ghs_other_app_token",
+    ]);
+  });
+
   it("heals missed board items and executes reconciled human approval wakes through the event pump", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
@@ -389,12 +432,107 @@ describe("startDaemon", () => {
             healed: 1,
             reconciledLabels: 2,
             excludedNullContentItems: 0,
+            ciFetchFailures: 0,
+            ciFetchFailureDetails: [],
           },
         },
       ]);
       expect(saves).toBeGreaterThan(0);
       expect(logs).toContain(
-        "[legion] resync complete: anomalies=0 healed=1 reconciled-labels=2 excluded-null-content-items=0"
+        "[legion] resync complete: anomalies=0 healed=1 reconciled-labels=2 excluded-null-content-items=0 ciFetchFailures=0"
+      );
+    } finally {
+      await daemon?.stop();
+      console.log = originalLog;
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("logs an owner CI fetch failure instead of treating its PR as closed", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const prIssue = formatIssueKey("acme", "widgets", 42);
+    state.prs["acme/widgets#7"] = {
+      key: prIssue,
+      repo: "acme/widgets",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1_000,
+      ciCheckRuns: [{ name: "build", id: 900 }],
+      ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciReconciled: false,
+      fixAttempts: 0,
+    };
+    const logs: string[] = [];
+    const originalLog = console.log;
+    let resync: (() => void) | undefined;
+    let resyncComplete: Promise<void> | undefined;
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    let tokenCalls = 0;
+    console.log = (...values: unknown[]) => logs.push(values.join(" "));
+
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => ({
+            stdout: command[0] === "sh" ? "LEGION_OMP_AGENTS=available\n" : "",
+            stderr: "",
+            exitCode: 0,
+          }),
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          fetchGitHubProjectItems: async () => ({
+            items: [],
+            excludedNullContentItems: 0,
+          }),
+          tokenManager: {
+            getToken: async () => {
+              tokenCalls += 1;
+              if (tokenCalls > 2) throw new Error("GitHub App token request failed");
+              return {
+                token: "test-token",
+                expiresAt: "2026-08-25T00:00:00.000Z",
+                gitIdentity: {
+                  name: "legion-implement[bot]",
+                  email: "1+legion-implement[bot]@users.noreply.github.com",
+                },
+              };
+            },
+          },
+          setTimeout: (callback) => {
+            resync = () => {
+              resyncComplete = Promise.resolve().then(callback);
+            };
+            return 1 as never;
+          },
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      if (!resync) throw new Error("Daemon did not schedule resync");
+      resync();
+      if (!resyncComplete) throw new Error("Daemon did not start resync");
+      await resyncComplete;
+
+      expect(state.prs["acme/widgets#7"]).toMatchObject({
+        verdict: "green",
+        ciCheckRuns: [{ name: "build", id: 900 }],
+      });
+      expect(logs).toContain(
+        "[legion] resync complete: anomalies=0 healed=0 reconciled-labels=0 excluded-null-content-items=0 ciFetchFailures=1 ciFetchFailureDetails=owner=acme error=GitHub App token request failed"
       );
     } finally {
       await daemon?.stop();

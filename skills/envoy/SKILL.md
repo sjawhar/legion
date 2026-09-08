@@ -5,289 +5,171 @@ description: Use when subscribing sessions to Envoy topics, sending agent-to-age
 
 # Envoy
 
-Envoy is Legion's event-routing subsystem. It delivers Slack, GitHub, and agent-to-agent events to OpenCode sessions.
+Envoy delivers external signals and session messages. Deliveries are at-least-once and can arrive
+out of order across topics: use `id` to deduplicate and `at` to judge freshness.
 
-## What the tools do
+## The one subscription you need for a PR
 
-- `envoy_subscribe(topics)` — make the current session RECEIVE future events on those topics
-- `envoy_unsubscribe(topics?)` — stop receiving some or all topics
-- `envoy_list()` — show the union of live local and persisted registry subscriptions, with each topic marked `live`, `registry`, or `both`
-- `envoy_send(session_id, message)` — SEND a message directly to another session
-
-## Topic formats
-
-### Agent-to-agent
-
-- Direct session route:
-  - `notifications.agent.<session_id>`
-
-Example:
-
-- `notifications.agent.ses_2e6ca3034ffejVikSZ8mDwk0mR`
-
-### Legion role claims
-
-- Role topic:
-  - `notifications.role.<role>`
-
-Legion agents receive through a daemon-minted role token. Claim the role for the current
-session with `envoy_role_set(role="<role>")`; claiming transfers its holder with
-last-claim-wins semantics. A claimant does not manually subscribe to its role topic.
-
-Legion role tokens must satisfy `^[a-z0-9][a-z0-9_-]*$` and are unique across repositories:
-
-```text
-legion-<project>-controller
-legion-<project>-<enc(owner)>__<enc(repo)>-<number>-<role>
-```
-
-`<project>` matches `[a-z0-9]+`. In owner and repository components, the injective escape
-encoding is `_` → `_u`, `.` → `_d`, and `-` → `_h`; `__` separates owner from repository.
-The daemon owns the authoritative token-to-issue map and hands the token to each process.
-Do not construct a token from a partial issue reference.
-
-Claims last through the issue's post-close linger. They survive parking and worker
-re-creation; a re-claim re-points the role to the backing session. The daemon publishes to an
-issue role only while the issue is active. Inactive issue events become daemon state and later
-surface as derived catch-up, never as raw event replay.
-
-### Legion exception lane
-
-`no_holder` and `delivery_failed` on a Legion role are daemon liveness signals, not a prompt
-for a second subscriber or a manual retry. The daemon probes the process that owns the tree:
-
-1. If it is alive, the daemon sends a control-topic directive. The extension revives or
-   re-creates the backing worker in code, then the daemon re-delivers the message.
-2. If it is dead, the daemon resurrects the root process behind a generation lock and supplies
-   derived catch-up plus the shared workspace handoffs.
-
-This keeps raw delivery failures out of architect context. Controller exception wakes are
-handled by the controller's wake routing table; every other role follows the liveness path.
-
-### GitHub
-
-GitHub topics are **resource-scoped** — every event includes the resource type and number (or, for push/workflow events, the ref or workflow filename).
-
-**Topic structure:** `notifications.github.<owner>.<repo>.<resource_type>.<number>.<event_kind>`
-
-- PR opened/closed/merged/ready:
-  - `notifications.github.<owner>.<repo>.pr.<number>`
-- Issue opened/closed/labeled:
-  - `notifications.github.<owner>.<repo>.issue.<number>`
-- Comment on a PR:
-  - `notifications.github.<owner>.<repo>.pr.<number>.comment`
-- Comment on an issue:
-  - `notifications.github.<owner>.<repo>.issue.<number>.comment`
-- PR review submitted:
-  - `notifications.github.<owner>.<repo>.pr.<number>.review`
-- Raw CI check observation (per-PR, immediate):
-  - `notifications.github.<owner>.<repo>.pr.<number>.check`
-  - Every PR-associated `check_run` publishes one raw observation per associated PR. `Payload` is JSON with `sha`, `name`, `status`, and `conclusion`; `PayloadSummary` names the check and its state.
-- CI/check summary (per-PR, per-commit, debounced):
-  - `notifications.github.<owner>.<repo>.pr.<number>.ci`
-  - The same `check_run` updates ingest-side per-commit state in JetStream KV bucket `envoy_ci_state`. Once the check set has been quiet for `ENVOY_CI_DEBOUNCE` (default `5s`), Envoy publishes one JSON summary. A new summary is emitted only when the check set changes; a new push starts a fresh tally, and a re-run that returns to running changes the tally.
-  - `PayloadSummary` is a compact JSON object (`Payload` unused): `{"kind":"ci_summary","repo":"<o>/<r>","number":"<n>","sha":"<sha>","failed":{"count":N,"checks":[...]},"running":{...},"passed":{...},"queued":{...},"skipped":{...}}`. Each status is `{count, checks}` with the full sorted name list; every status is present (`{"count":0,"checks":[]}` when empty).
-  - `check_suite` is ignored (it is a per-app rollup without a per-check name). Checks not tied to a PR are dropped, so there is no repo-wide CI topic. For non-PR visibility, use `workflow.<filename>.<action>`; individual GitHub Actions `workflow_job` events are not routed.
-- Mention events (per-resource):
-  - `notifications.github.<owner>.<repo>.pr.<number>.mention`
-  - `notifications.github.<owner>.<repo>.issue.<number>.mention`
-- Mention events (repo-wide — catches all mentions):
-  - `notifications.github.<owner>.<repo>.mention`
-- Push events (per branch/tag):
-  - `notifications.github.<owner>.<repo>.push.branch.<branch>`
-  - `notifications.github.<owner>.<repo>.push.tag.<tag>`
-  Branch and tag names with dots are sanitized to underscores (`v1.0.0` → `v1_0_0`).
-  Push events for refs other than `refs/heads/...` and `refs/tags/...` are not routed.
-- Workflow run events (per workflow file):
-  - `notifications.github.<owner>.<repo>.workflow.<filename>.<action>`
-  Filename is the basename of `workflow_run.path` with dots sanitized (`ci.yml` → `ci_yml`).
-  `action` is one of `requested`, `in_progress`, `completed`.
-
-**Using wildcards to subscribe broadly:**
-- All events in a repo: `notifications.github.<owner>.<repo>.>`
-- All PR events in a repo: `notifications.github.<owner>.<repo>.pr.>`
-- All events for a specific PR: `notifications.github.<owner>.<repo>.pr.<number>.>`
-- All issue events in a repo: `notifications.github.<owner>.<repo>.issue.>`
-- All events for a specific issue: `notifications.github.<owner>.<repo>.issue.<number>.>`
-- All push events in a repo: `notifications.github.<owner>.<repo>.push.>`
-- Pushes to main only: `notifications.github.<owner>.<repo>.push.branch.main`
-- All branch pushes: `notifications.github.<owner>.<repo>.push.branch.>`
-- All tag pushes: `notifications.github.<owner>.<repo>.push.tag.>`
-- All workflow events: `notifications.github.<owner>.<repo>.workflow.>`
-- All events for a specific workflow: `notifications.github.<owner>.<repo>.workflow.ci_yml.>`
-- Every workflow completion: `notifications.github.<owner>.<repo>.workflow.*.completed`
-
-Examples:
-
-- `notifications.github.example-org.example-repo.pr.9880` (PR #9880 state changes)
-- `notifications.github.example-org.example-repo.pr.9880.comment` (comments on PR #9880)
-- `notifications.github.example-org.example-repo.issue.9909.>` (all events on issue #9909)
-- `notifications.github.sjawhar.legion.pr.>` (all PR events across all PRs)
-- `notifications.github.sjawhar.legion.mention` (all @mentions repo-wide)
-- `notifications.github.sjawhar.legion.push.branch.main` (pushes to main)
-- `notifications.github.sjawhar.legion.workflow.ci_yml.in_progress` (CI workflow starts)
-
-### Slack
-
-- Channel message events:
-  - `notifications.slack.<team_id>.<channel_id>.message`
-- App mention events:
-  - `notifications.slack.<team_id>.<channel_id>.mention`
-- Thread message events:
-  - `notifications.slack.<team_id>.<channel_id>.thread.<normalized_ts>.message`
-- Thread mention events:
-  - `notifications.slack.<team_id>.<channel_id>.thread.<normalized_ts>.mention`
-
-Thread timestamps are normalized: `1234567890.123456` → `1234567890_123456`
-(dots replaced with underscores to make the thread ID a single NATS segment).
-
-Examples:
-
-- `notifications.slack.T01234567.C0A0DHVU8HE.message`
-- `notifications.slack.T01234567.C0A0DHVU8HE.mention`
-- `notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.message`
-- `notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.mention`
-
-### Ghost Wispr
-
-- Session started events:
-  - `notifications.ghostwispr.<session_id>.session.started`
-- Session ended events:
-  - `notifications.ghostwispr.<session_id>.session.ended`
-- Summary ready events:
-  - `notifications.ghostwispr.<session_id>.summary.ready`
-
-**Parameters:**
-- `<session_id>`: Ghost Wispr session timestamp string (e.g., `20260326041405`). Alphanumeric only, safe for NATS topic segments.
-- Supported kinds: `session.started`, `session.ended`, `summary.ready`
-
-Examples:
-
-- `notifications.ghostwispr.20260326041405.session.ended` (session ended)
-- `notifications.ghostwispr.20260326041629.summary.ready` (summary ready)
-
-### WhatsApp
-
-- Chat message events:
-  - `notifications.whatsapp.<phone>.<jid>.message`
-- Status/receipt events:
-  - `notifications.whatsapp.<phone>.<jid>.status`
-
-**Parameters:**
-- `<phone>`: Connected WhatsApp account phone number in E.164 digits-only format (no `+` prefix). Example: `15551234567`. This identifies **which WhatsApp account** the events belong to — not the remote contact.
-- `<jid>`: Remote chat's WhatsApp JID. Individual: `PHONE@s.whatsapp.net`. Group: `ID@g.us`.
-- Supported kinds: `message`, `status`
-
-> **⚠️ JID dot expansion:** JID dots (`.`) become additional NATS subject tokens. For example, `5551234567@s.whatsapp.net` splits into tokens `5551234567@s`, `whatsapp`, `net`. This means individual chat topics produce 7 tokens and group chat topics produce 6 tokens. **Always use `>` (multi-level wildcard), never `*` (single-token wildcard)**, when subscribing to a chat or phone number.
-
-Examples:
-
-- `notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message` (individual chat messages — note this expands to 7 NATS tokens)
-- `notifications.whatsapp.15551234567.120363XXX@g.us.message` (group chat messages — 6 NATS tokens)
-
-## When to use what
-
-### To receive future Slack/GitHub/WhatsApp events
-
-1. Decide the exact topic(s)
-2. Call `envoy_subscribe([...])`
-3. Optionally call `envoy_list()` to confirm
-
-### To talk directly to another agent/session
-
-1. Get the target session ID
-2. Call `envoy_send(session_id, message)`
-
-You do NOT need to subscribe in order to send or publish.
-
-**Session ids are not stable for the life of a conversation.** On OMP, `/fork` and `/handoff`
-re-mint the session id while the conversation continues (esc-esc rewinds also did, on omp
-18.1.0–18.1.2 only); the extension rebinds automatically and injects an `envoy` notice naming
-the previous and new ids. When that notice arrives, any id you shared earlier (an
-`envoy_whoami` result quoted in a message, an id a peer saved) is stale — re-run
-`envoy_whoami` and re-announce yourself. Never treat a whoami result from earlier in the
-transcript as current when identifying yourself to peers.
-
-### To wait for CI, PR checks, or other async work
-
-**Don't `sleep`-poll. Don't "check back in N minutes."** Subscribe to the event and continue with productive work — the system will wake the session when the event arrives.
-
-1. Identify the relevant topic (e.g., `notifications.github.<owner>.<repo>.pr.<num>.>` for all PR events; `.pr.<num>.check` for immediate per-check state; `.pr.<num>.ci` for the debounced PR summary; `.workflow.<filename>.completed` for a workflow run finishing)
-2. Call `envoy_subscribe([...])`
-3. Move on to other work, or end the response and let the watcher wake you
-4. The next response is triggered by the event, with the payload available in your context
-
-If you have nothing else to do, end the response. The user is not your alarm clock; do not loop with `sleep`.
-
-### Tools
-
-- `envoy_subscribe(topics)` — receive future events on those topics
-- `envoy_unsubscribe(topics?)` — stop receiving some or all topics
-- `envoy_list()` — show live and persisted subscriptions, marked by source
-- `envoy_send(session_id, message)` — send directly to a specific session (point-to-point)
-- `envoy_publish(topic, message)` — publish a normal topic to matching subscribers or route a role topic to its current holder
-- `envoy_role_set(role)` — claim a named role for the current session (exactly-one-holder)
-
-## Patterns
-
-### Subscribe controller to a specific Slack channel mentions
+Subscribe to the whole PR family, not individual event types:
 
 ```text
 envoy_subscribe([
-  "notifications.slack.T01234567.C0A0DHVU8HE.mention"
+  "notifications.github.example-org.example-repo.pr.42.>"
 ])
 ```
 
-### Subscribe to all events in a specific Slack thread
+NATS `>` matches **one or more** trailing tokens, so it does not match the lifecycle base
+`pr.42` itself. Envoy registers that concrete base automatically when you subscribe to
+`<subject>.>`, making `pr.<n>.>` the recommended default: one call receives both the lifecycle
+subject and its child events.
+
+For a typical push, this receives `pr.42` with `synchronize`, then any comments or reviews, then
+one `pr.42.checks` event when that head's checks settle. The family is `pr.42` (lifecycle),
+`pr.42.comment`, `pr.42.review`, `pr.42.mention`, and `pr.42.checks`. A closed lifecycle payload
+carries `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`.
+
+The retired literal `pr.<n>.check` and `pr.<n>.ci` topics do not receive events. Existing
+registrations remain dead; subscribe to `pr.<n>.checks` (or the recommended `pr.<n>.>`) instead.
+Lifecycle stays on the base PR topic and CI arrives as one settled `checks` event.
+
+## Inbound deliveries
+
+Envoy renders an annotated delivery before its source summary and complete payload:
 
 ```text
-envoy_subscribe([
-  "notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.>"
-])
+envoy:
+  to: you (01a0…)
+  from: 01a0bbbb-cccc-7ddd-eeee-0123456789ab (Reviewer)
+  at: "2026-09-07T04:41:12Z"
+  id: agent-message-2
+  by: "2026-09-07T05:00:00Z"
+  urgency: high
+  expects_reply: required
+  re: agent-message-1
+  supersedes: agent-message-0
+  reply_with: "envoy_send(session_id=\"01a0bbbb-cccc-7ddd-eeee-0123456789ab\", message=\"...\")"
+  reply_role: "envoy_publish(topic=\"notifications.role.legion-reviewer\", message=\"...\")"
+  summary: Deployment needs confirmation.
+  message: "Confirm the listener health check passed.\n\nThen publish the release."
+  note: body names session 01a0cccc-dddd-7eee-ffff-0123456789ab; the sender is 01a0bbbb-cccc-7ddd-eeee-0123456789ab
 ```
 
-### Subscribe to only messages in a Slack thread (not mentions)
+- `to` identifies the local inbox receiving this delivery.
+- `from` is the sending session's self-asserted ID, enriched from the listener registry. Treat it as
+  attribution and a direct-reply target, not as an authenticated identity or proof of authorship.
+- `at` is the envelope timestamp used to judge freshness.
+- `id` is the delivery identifier; supply it as `in_reply_to` when replying.
+- `by` is the expiry deadline, when the sender supplied one.
+- `urgency` is the sender's priority classification.
+- `expects_reply` states whether a reply is `none`, `optional`, or `required`.
+- `re` names the delivery this message replies to.
+- `supersedes` names an earlier delivery this one replaces.
+- `reply_with` is the direct-reply call for the sender.
+- `reply_role` is the role-publish reply call when the sender has a role.
+- `summary` is the one-line source summary.
+- `message` is the complete payload; it can contain multiple paragraphs.
+- `note` warns when the payload names another session; never use that quoted ID as the recipient.
+- `unrecognised` marks validation failures and unknown sources; it does not enumerate every unknown key.
 
-```text
-envoy_subscribe([
-  "notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.message"
-])
-```
+## Talking to another session
 
-### Subscribe to all threads in a Slack channel
+Answer an Envoy message with its `id`; the send result's `recipient` confirms the session Envoy
+targeted. Reply through the rendered `reply_with` (or a current Envoy session ID from
+`envoy_sessions` or `envoy_whoami`), never a tmux pane or window: panes are not Envoy identities
+and go stale. Put the artefact URL in the message itself. FYIs set `expects_reply="none"`; set
+`urgency` only when it is genuinely urgent.
 
-```text
-envoy_subscribe([
-  "notifications.slack.T01234567.C0A0DHVU8HE.thread.>"
-])
-```
-
-### Subscribe to all PR events for example-repo
-
-```text
-envoy_subscribe([
-  "notifications.github.example-org.example-repo.pr.>"
-])
-```
-
-### Subscribe controller to GitHub @mentions for example-repo
-
-```text
-envoy_subscribe([
-  "notifications.github.example-org.example-repo.mention"
-])
-```
-
-### Message another session directly
+Every `/v1` error response is JSON; when a field is at fault, `expected` names that field.
 
 ```text
 envoy_send(
-  session_id="ses_2e6ca3034ffejVikSZ8mDwk0mR",
-  message="Please continue the smoke test"
+  session_id="ses_example_reviewer",
+  message="Review complete: artifact://review.md",
+  in_reply_to="agent-message-2",
+  expects_reply="none"
 )
 ```
 
-### Subscribe to a specific WhatsApp contact (1:1 chat)
+## Waiting for CI or a merge
+
+Subscribe to `notifications.github.example-org.example-repo.pr.42.>` and end the turn. The single
+`pr.42.checks` event wakes you when the current head settles; a `pr.42` `closed` event with
+`merged: true` tells you the PR merged. Do not create `gh` pollers.
+Settlement waits for the head to be quiet for a few seconds, every reported check run to finish,
+and every recorded GitHub check suite to be `completed`. It covers those reported checks and suites
+for the head, not GitHub's required-checks set; until then, a silent subscription is normal.
+
+Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"` payload. Every settlement carries its attempt set `check_runs` — the latest GitHub check-run id per check name, sorted by name — plus the listener's `generation` (the record's state version) and `snapshot` (the record's hash). Consumers order same-head settlements by the attempt set, compared per shared name: no id lower and some id higher (or a new name) is newer; every shared id equal and no new name is the same set; no id higher and some lower is older; anything else is a mixed view and is dropped as a conflict (names only in the stored set are ignored — a check can vanish from GitHub's view, and a record recreated after the seven-day KV TTL starts sparse). Within one producer record per-name ids never decrease, and a consumer's fence is the per-name maximum over every view it has accepted — an accepted set merges into the fence, nothing is pruned — so the fence never decreases either: a newer attempt is newer whatever its completion time, no timestamps take part in ordering, and a name an incomplete view omitted cannot later reappear as new. At the same set the listener's `generation` orders its own settlements: lower is stale; equal is a duplicate when the `snapshot` matches and otherwise a conflict (an equal pair with a different snapshot cannot occur within one record's lifetime; a recreated record may reuse one and is dropped). A live settlement is a possibly incomplete view of the head (a missed webhook, a record recreated after the KV TTL): it decides the outcome of every name it reports — at any id the ordering accepted, including the same run observed in place — and says nothing about the rest, whose last known outcome stands; the head is red while any failure remains. A consumer that reconciles a verdict from GitHub's rollup compares the rollup's attempt set the same way, but GitHub's read is complete: its failing check runs and failing commit statuses replace the stored ones wholesale. Statuses have no check run and the listener never sees them, so a consumer keeps them apart from check-run failures: a check run that shares a status's name cannot retire it — only GitHub does (likewise a deleted check's failure). A newer rollup set merges into the fence and takes the identity (no listener generation); the same set applies GitHub's verdict and keeps the listener identity for duplicate detection; an older, mixed, or empty-over-fenced set is ignored. A terminal read (green or red) then holds the tie at that set: a live settlement at the same set is accepted only if its effective outcome — the check-run failures it reports plus the stored ones it omits and the stored commit-status failures — agrees with the reconciled verdict, refreshing the listener identity without releasing GitHub's authority; a disagreeing one is stale whatever its generation until the set advances; a pending or cancelled-only read uncertifies a green head, leaves a red one untouched, and holds nothing — it releases any authority held at that set — so the terminal live settlement that follows applies at once, subject to the ordinary generation and duplicate rules (a replay or a lower generation still does not apply). Pending is therefore not a commutative join: a pending read after a live green uncertifies it until the next terminal view. Two remainders. An in-place conclusion change on an existing run id: GitHub's view stands and the listener's is recovered by the next successful, non-skipped read at that set — the dropped delivery is not replayed. A check whose highest run is deleted on GitHub: the fence keeps that id, so a rollup reporting a lower run under the same name is older until a newer run appears. A head publishes only when at least one check has a positive run id; legacy checks without one remain in the status groups and failing names but not in `check_runs`. A legacy in-progress check whose completion is never observed holds the head unsettled until it reruns; rerun the affected check to release it.
+
+## When a subscription is silent
+
+Check the `warnings` returned by `envoy_subscribe`, then inspect the active topics with
+`envoy_list()`:
+
+```text
+envoy_subscribe([
+  "notifications.github.example-org.example-repo.pr.42.>"
+])
+// warnings: ["no GitHub event for example-org/example-repo in the stream's retention window; is the App installed there?"]
+```
+
+A warning says no GitHub event for that repository occurred within the stream's 72-hour retention
+window; it does not mean the repository was never seen. Verify the GitHub App is installed before
+relying on a wakeup.
+
+## Roles
+
+Publish to a role; do not subscribe as its holder. A successful `envoy_publish` to a role returns
+its live `holder`; an unheld role returns an error. Use `envoy_role_get(role="reviewer")` to find
+the live holder first when you need one.
+
+## Legion role claims
+
+Legion agents receive through a daemon-minted role token. Claim the assigned role with
+`envoy_role_set(role="<assigned-role>")`; a claimant does not manually subscribe to its role
+topic. Claims use last-claim-wins semantics, survive parking and worker re-creation, and remain
+through the issue's post-close linger. The daemon owns the authoritative token-to-issue map, so do
+not construct a token from a partial issue reference.
+
+## Legion exception lane
+
+`no_holder` and `delivery_failed` for a Legion role are daemon liveness signals, not reasons to
+add a second subscriber or manually retry. For example, treat a `delivery_failed` wake as the
+daemon's responsibility to revive or recreate the backing worker and re-deliver; otherwise it
+resurrects the root process with derived catch-up and the workspace handoffs. Raw delivery failures
+stay out of architect context.
+
+## Slack
+
+Use the real team ID, not a workspace slug. Slack delivers a one-line prose `summary` plus a
+structured `message` payload. The payload records `subtype` for edits, deletes, and bot messages;
+`thread_ts` for replies; and `bot_id` and `bot_name` when a bot supplied the message.
+
+```text
+envoy_subscribe([
+  "notifications.slack.T01234567.C01234567.thread.1_000.>"
+])
+```
+
+This follows every message and mention in one thread. Channel-level topics end in `.message` or
+`.mention`; thread timestamps replace dots with underscores.
+
+## Ghost Wispr
+
+Ghost Wispr topics are `notifications.ghostwispr.<session>.<kind>`, where `kind` is
+`session.started`, `session.ended`, or `summary.ready`. Their summary is concise prose and their
+payload is structured; `summary_ready` includes its status, summary, and summary metadata.
+
+```text
+envoy_subscribe([
+  "notifications.ghostwispr.session-example.summary.ready"
+])
+```
+
+## WhatsApp
+
+WhatsApp topics are `notifications.whatsapp.<phone>.<jid>.message` or `.status`. A JID contains
+dots, which become additional NATS segments, so use `>` rather than `*` for a chat.
 
 ```text
 envoy_subscribe([
@@ -295,110 +177,17 @@ envoy_subscribe([
 ])
 ```
 
-Use `>` (not `*`) to catch all event kinds despite JID dot expansion into multiple NATS tokens.
+### WhatsApp routing smoke test
 
-### Subscribe to a WhatsApp group
-
-```text
-envoy_subscribe([
-  "notifications.whatsapp.15551234567.120363XXX@g.us.>"
-])
-```
-
-### Subscribe to all WhatsApp events for an account
-
-```text
-envoy_subscribe([
-  "notifications.whatsapp.15551234567.>"
-])
-```
-
-Catches all conversations and event kinds for the specified phone number.
-
-**When to use which:**
-- **1:1 chat** — when monitoring a specific contact conversation (e.g., a bot handling customer queries)
-- **Group chat** — when monitoring a specific group for commands or events
-- **All chats for a phone** — when building a general WhatsApp event handler or dashboard for an account
-
-## Important notes
-
-- Sessions choose their own Slack/GitHub subscriptions
-- Different sessions can subscribe to different channels/repos
-- Agent-to-agent delivery uses exact session IDs
-- `envoy_list()` distinguishes `live`, `registry`, and `both`; a `live` topic is receiving now even when the listener registry has not caught up.
-- For Slack, use the real `team_id` in topics (for example `T01234567`), not a workspace slug like `acme`
-- GitHub mention routing is body-based because GitHub has no dedicated app mention webhook event
-
-## Synthetic Smoke Test (WhatsApp — NATS Routing Only)
-
-> **Important:** This procedure validates Envoy's NATS → listener → session delivery path using `envoy_publish`. It does **not** test real WhatsApp message ingestion. The generic MCP bridge (`packages/envoy/cmd/mcp/`) can bridge real WhatsApp events, but requires production configuration. See "Current Limitations" below.
->
-> **Two sessions required:** `envoy_publish` sets `source_session` to the publishing session's ID. The listener skips delivering broadcasts back to the sender (`packages/envoy/cmd/listener/main.go`). You must subscribe in one session and publish from a different session.
-
-### Step 1: Subscribe to a WhatsApp topic (Session A)
-
-```text
-envoy_subscribe([
-  "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.>"
-])
-```
-
-### Step 2: Verify subscription is active (Session A)
-
-```text
-envoy_list()
-```
-
-Confirm `notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.>` appears as `live` or `both`.
-
-### Step 3: Publish a synthetic test envelope (Session B — a different session)
+This checks Envoy routing, not real WhatsApp ingestion. In Session A, subscribe as above. From a
+different Session B, publish a synthetic message to the same `.message` topic:
 
 ```text
 envoy_publish(
   topic="notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message",
-  message="Synthetic WhatsApp smoke test: hello from envoy_publish"
+  message="Synthetic WhatsApp routing test"
 )
 ```
 
-### Step 4: Verify delivery (Session A)
-
-Session A should receive a notification containing the text "Synthetic WhatsApp smoke test: hello from envoy_publish". This confirms:
-- The topic pattern matches the subscription
-- NATS routes the message to the listener
-- The listener delivers to the subscribed session (Session A ≠ the publishing session)
-
-**If the notification does not arrive:** Check `envoy_list()` in Session A. The topic should be `live` or `both`; `registry` alone does not confirm the local subscription is receiving. Verify the topic in `envoy_publish` matches the subscription pattern. Ensure you are publishing from a **different** session than the one subscribed.
-
-### Reference: Real WhatsApp Envelope Shape
-
-When the MCP bridge (`packages/envoy/internal/mcpbridge/envelope.go`) publishes a real WhatsApp event, the Envoy envelope has this structure:
-
-```json
-{
-  "event_id": "<generated unique ID>",
-  "source": "whatsapp",
-  "source_event_id": "whatsapp://messages/15551234567/5551234567@s.whatsapp.net",
-  "topic": "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message",
-  "dedupe_key": "whatsapp.<event_id value>",
-  "issued_at": 1712345678000,
-  "payload_summary": "Hello from WhatsApp",
-  "payload_ref": "whatsapp://messages/15551234567/5551234567@s.whatsapp.net",
-  "trace_id": "<generated unique ID>"
-}
-```
-
-**Field notes:**
-- `source` is `"whatsapp"` — in contrast, `envoy_publish` sets `source: "agent"` for synthetic messages
-- `issued_at` is in **milliseconds** (Unix epoch ms), not seconds
-- `dedupe_key` is `source + "." + event_id` (e.g., `"whatsapp.cuid_abc123"`)
-- `payload_summary` is the actual message text from the MCP resource read (truncated to 200 chars), or fallback `"whatsapp event from <uri>"` if no text content
-- `payload_ref` and `source_event_id` are both the MCP resource notification URI
-- `source_session` is **omitted** (empty) — the MCP bridge is not an OpenCode session, so no echo-skip occurs
-- `expires_at` is **omitted** — the bridge does not set message expiry
-
-## Current Limitations (WhatsApp)
-
-- **No production WhatsApp event ingestion configured.** The repo contains a generic MCP→NATS bridge (`packages/envoy/cmd/mcp/` + `packages/envoy/internal/mcpbridge/`) that already supports WhatsApp topic patterns (tested in `packages/envoy/internal/integration/delivery_test.go`). However, it is not yet configured/deployed to connect to the `@sjawhar/whatsapp-mcp` server in production.
-- **Synthetic testing only.** The smoke test above uses `envoy_publish` to inject test messages into NATS. It validates Envoy delivery mechanics (NATS → listener → session), not true WhatsApp end-to-end delivery.
-- **Production wiring needed.** To receive real WhatsApp events, the MCP bridge needs to be configured with the `@sjawhar/whatsapp-mcp` server connection details (similar to how `packages/envoy/cmd/github/` and `packages/envoy/cmd/slack/` are configured for their respective platforms). The bridge would then subscribe to WhatsApp MCP resource notifications and publish Envoy envelopes to NATS automatically.
-- **Subscription + routing + delivery path is ready.** The contracts layer (`whatsappSubject` helper), NATS topic format, generic listener routing, and MCP bridge infrastructure all work. Only the production configuration connecting the bridge to the WhatsApp MCP server is missing.
+Session A should receive it. Broadcasts do not echo to their publishing session, so one session
+cannot perform both steps. Real WhatsApp delivery additionally requires a configured MCP bridge.

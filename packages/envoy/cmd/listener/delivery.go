@@ -251,6 +251,11 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 			message.finalize(false)
 			return
 		}
+		if err := contracts.ValidateWire(message.data); err != nil {
+			cfg.logger.Error("listener invalid envelope", slog.String("error", err.Error()))
+			message.finalize(false)
+			return
+		}
 		if err := item.Validate(); err != nil {
 			cfg.logger.Error("listener invalid envelope", slog.String("error", err.Error()))
 			message.finalize(false)

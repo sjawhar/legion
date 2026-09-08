@@ -27,7 +27,32 @@
     "payload_summary": { "type": "string", "minLength": 1 },
     "payload_ref": { "type": "string" },
     "payload": { "type": "string" },
-    "trace_id": { "type": "string", "minLength": 1 }
+    "trace_id": { "type": "string", "minLength": 1 },
+    "sender": {
+      "type": "object",
+      "required": ["session_id"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1 },
+        "machine": { "type": "string" },
+        "cwd": { "type": "string" },
+        "title": { "type": "string" },
+        "roles": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "in_reply_to": { "type": "string", "minLength": 1 },
+    "supersedes": { "type": "string", "minLength": 1 },
+    "urgency": {
+      "type": "string",
+      "enum": ["low", "med", "high", "blocking"]
+    },
+    "expects_reply": {
+      "type": "string",
+      "enum": ["none", "optional", "required"]
+    }
   },
   "additionalProperties": false
 }

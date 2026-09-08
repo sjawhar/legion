@@ -1,0 +1,19 @@
+{
+  "topic": "notifications.github.example-org.example-repo.pr.42",
+  "payload_summary": "pr synchronize: example-org/example-repo#42 Add local acceptance driver",
+  "payload": {
+    "action": "synchronize",
+    "author": "octocat",
+    "base_ref": "main",
+    "body": "Exercise the listener with a new head.",
+    "head_ref": "acceptance-driver",
+    "head_sha": "2222222222222222222222222222222222222222",
+    "kind": "pr",
+    "merged": "false",
+    "number": "42",
+    "repo": "example-org/example-repo",
+    "title": "Add local acceptance driver",
+    "updated_at": "2026-09-07T03:05:00Z",
+    "url": "https://example.invalid/example-org/example-repo/pull/42"
+  }
+}

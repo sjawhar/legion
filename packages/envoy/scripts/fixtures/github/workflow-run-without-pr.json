@@ -1,0 +1,21 @@
+{
+  "action": "completed",
+  "workflow_run": {
+    "id": 3002,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "head_branch": "main",
+    "head_sha": "4444444444444444444444444444444444444444",
+    "status": "completed",
+    "conclusion": "success",
+    "run_attempt": 1,
+    "pull_requests": [],
+    "html_url": "https://example.invalid/example-org/example-repo/actions/runs/3002"
+  },
+  "sender": { "login": "octocat", "type": "User" },
+  "repository": {
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "owner": { "login": "example-org" }
+  }
+}

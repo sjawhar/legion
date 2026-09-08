@@ -1,0 +1,15 @@
+{
+  "topic": "notifications.github.example-org.example-repo.pr.42.comment",
+  "payload_summary": "comment on example-org/example-repo#42 by octocat: Please review the pull request.",
+  "payload": {
+    "action": "created",
+    "author": "octocat",
+    "body": "Please review the pull request.",
+    "kind": "comment",
+    "number": "42",
+    "parent_kind": "pr",
+    "repo": "example-org/example-repo",
+    "title": "Add local acceptance driver",
+    "url": "https://example.invalid/example-org/example-repo/pull/42#issuecomment-42"
+  }
+}

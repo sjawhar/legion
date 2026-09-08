@@ -35,7 +35,6 @@ export interface DaemonConfig {
   workerBudget: number;
   maxRecursionDepth: number;
   lingerHours: number;
-  ciQuietMs: number;
   maxFixAttempts: number;
   resyncIntervalMs: number;
   gates: { design: "root-issues" | "off"; merge: "human" | "off" };
@@ -73,7 +72,6 @@ const DEFAULT_ADMISSION_CAP = 4;
 const DEFAULT_WORKER_BUDGET = 6;
 const DEFAULT_MAX_RECURSION_DEPTH = 8;
 const DEFAULT_LINGER_HOURS = 72;
-const DEFAULT_CI_QUIET_MS = 30_000;
 const DEFAULT_MAX_FIX_ATTEMPTS = 3;
 const DEFAULT_RESYNC_INTERVAL_MS = 600_000;
 const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp";
@@ -90,7 +88,6 @@ const CONFIG_SCHEMA: ConfigSchema = {
   worker_budget: null,
   max_recursion_depth: null,
   linger_hours: null,
-  ci_quiet_ms: null,
   max_fix_attempts: null,
   resync_interval_seconds: null,
   state_dir: null,
@@ -365,7 +362,6 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
     ["worker_budget", "workerBudget"],
     ["max_recursion_depth", "maxRecursionDepth"],
     ["linger_hours", "lingerHours"],
-    ["ci_quiet_ms", "ciQuietMs"],
     ["max_fix_attempts", "maxFixAttempts"],
   ] as const) {
     const value = readPositiveInteger(config[fileKey], fileKey);
@@ -483,12 +479,6 @@ export function resolveDaemonConfig(
     parseEnvPositiveInteger(env.LEGION_LINGER_HOURS, "LEGION_LINGER_HOURS"),
     DEFAULT_LINGER_HOURS
   );
-  const ciQuietMs = resolveValue(
-    opts.cliOverrides?.ciQuietMs,
-    fileNumber(fields, "ciQuietMs"),
-    parseEnvPositiveInteger(env.LEGION_CI_QUIET_MS, "LEGION_CI_QUIET_MS"),
-    DEFAULT_CI_QUIET_MS
-  );
   const maxFixAttempts = resolveValue(
     opts.cliOverrides?.maxFixAttempts,
     fileNumber(fields, "maxFixAttempts"),
@@ -507,7 +497,6 @@ export function resolveDaemonConfig(
     workerBudget: workerBudget.value,
     maxRecursionDepth: maxRecursionDepth.value,
     lingerHours: lingerHours.value,
-    ciQuietMs: ciQuietMs.value,
     maxFixAttempts: maxFixAttempts.value,
     resyncIntervalMs: resyncIntervalMs.value,
   };
@@ -557,7 +546,6 @@ export function resolveDaemonConfig(
       workerBudget: workerBudget.value,
       maxRecursionDepth: maxRecursionDepth.value,
       lingerHours: lingerHours.value,
-      ciQuietMs: ciQuietMs.value,
       maxFixAttempts: maxFixAttempts.value,
       resyncIntervalMs: resyncIntervalMs.value * (resyncIntervalMs.source === "env" ? 1000 : 1),
       gates: parsedGates,

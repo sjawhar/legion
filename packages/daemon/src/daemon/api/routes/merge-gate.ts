@@ -1,6 +1,7 @@
 import { formatIssueKey, type IssueKey, LegionDaemonApi, parseIssueKey } from "@legion/contracts";
 import { getApprovalState } from "../../approval-check";
 import type { LegionState } from "../../legion-state";
+import { resetPrHead } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import { asRecord, HttpError, requiredNumber, validateContractResponse } from "../http";
 
@@ -8,6 +9,8 @@ interface MergeGatePrSnapshot {
   repo: `${string}/${string}`;
   raw: Record<string, unknown>;
   head: { ref: string; sha: string };
+  /** The PR's lifecycle clock (GitHub `updated_at`), so a delayed older synchronize cannot rewind this head. */
+  updatedAt: number;
 }
 
 async function fetchMergeGatePr(
@@ -30,7 +33,11 @@ async function fetchMergeGatePr(
   if (typeof head.ref !== "string" || typeof head.sha !== "string") {
     throw new Error(`GitHub PR #${number} has an invalid head`);
   }
-  return { repo, raw, head: { ref: head.ref, sha: head.sha } };
+  const updatedAt = typeof raw.updated_at === "string" ? Date.parse(raw.updated_at) : Number.NaN;
+  if (Number.isNaN(updatedAt)) {
+    throw new Error(`GitHub PR #${number} has an invalid updated_at`);
+  }
+  return { repo, raw, head: { ref: head.ref, sha: head.sha }, updatedAt };
 }
 
 async function recoverPrForMergeGate(
@@ -72,11 +79,15 @@ async function recoverPrForMergeGate(
     repo,
     number,
     headSha: head.sha,
-    checks: {},
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: ctx.now(),
+    headUpdatedAt: snapshot.updatedAt,
+    verdict: null,
+    failing: [],
+    failingStatuses: [],
+    ciSettledAt: null,
+    ciCheckRuns: null,
+    ciSettlementGeneration: null,
+    ciSnapshot: null,
+    ciReconciled: false,
     fixAttempts: 0,
   };
   ctx.deps.state.prs[prKey] = pr;
@@ -114,24 +125,23 @@ export async function handleMergeGate(
   if (pr.repo !== snapshot.repo) {
     throw new Error(`GitHub returned PR #${number} from an unexpected repository`);
   }
+  // GitHub's read orders against the PR's lifecycle clock as resync does: a
+  // different head replaces the stored one unless the read is strictly older
+  // than a lifecycle update already observed (one that landed before or while
+  // the read was in flight); the same head still advances the clock, so a
+  // delayed synchronize for an intervening head is rejected as older.
   if (pr.headSha !== snapshot.head.sha) {
-    if (
-      Object.values(pr.checks).some(
-        (check) =>
-          check.status === "completed" &&
-          check.conclusion !== "success" &&
-          check.conclusion !== "neutral" &&
-          check.conclusion !== "skipped"
-      )
-    ) {
-      pr.fixAttempts += 1;
+    if (pr.headUpdatedAt !== undefined && snapshot.updatedAt < pr.headUpdatedAt) {
+      console.debug(
+        `[legion] ignored stale merge-gate head for ${pr.repo}#${pr.number} fetched=${snapshot.head.sha}@${new Date(snapshot.updatedAt).toISOString()} known=${pr.headSha}@${new Date(pr.headUpdatedAt).toISOString()}`
+      );
+    } else {
+      resetPrHead(pr, snapshot.head.sha);
+      pr.headUpdatedAt = snapshot.updatedAt;
+      await ctx.save();
     }
-    pr.headSha = snapshot.head.sha;
-    pr.checks = {};
-    pr.firstRedEmitted = false;
-    pr.settledRedEmitted = false;
-    pr.greenEmitted = false;
-    delete pr.reviewDecision;
+  } else if (pr.headUpdatedAt === undefined || snapshot.updatedAt > pr.headUpdatedAt) {
+    pr.headUpdatedAt = snapshot.updatedAt;
     await ctx.save();
   }
   const approval = await getApprovalState(

@@ -27,6 +27,7 @@ export interface CatchupOverseerPayload extends LegionEventPayload {
       sha: string;
       ci: CiVerdict;
       review: "approved" | "changes_requested" | "pending";
+      failing?: string[];
       fixAttempts: number;
     }
   >;
@@ -95,21 +96,7 @@ function stateTree(state: LegionState, tree: IssueKey): Set<IssueKey> {
 }
 
 function ciVerdict(pr: PrState): CiVerdict {
-  const checks = Object.values(pr.checks);
-  if (
-    checks.some(
-      (check) =>
-        check.status === "completed" &&
-        check.conclusion !== "success" &&
-        check.conclusion !== "neutral" &&
-        check.conclusion !== "skipped"
-    )
-  ) {
-    return "red";
-  }
-  return checks.length > 0 && checks.every((check) => check.status === "completed")
-    ? "green"
-    : "pending";
+  return pr.verdict ?? "pending";
 }
 
 export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<LegionEventPayload> {
@@ -140,6 +127,7 @@ export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<L
       issue: pr.key,
       sha: pr.headSha,
       ci: ciVerdict(pr),
+      ...(pr.verdict === "red" ? { failing: [...pr.failing, ...pr.failingStatuses] } : {}),
       review: pr.reviewDecision ?? "pending",
       fixAttempts: pr.fixAttempts,
     };

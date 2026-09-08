@@ -282,7 +282,6 @@ admission_cap: 4
 worker_budget: 6
 max_recursion_depth: 8
 linger_hours: 72
-ci_quiet_ms: 30000
 max_fix_attempts: 3
 resync_interval_seconds: 600
 state_dir: ${smoke_dir}/daemon

@@ -18,6 +18,7 @@ test("includes the session route and configured topic patterns", async () => {
   expect(output).toEqual([
     "notifications.agent.claude-qa",
     "notifications.role.qa",
+    "team.bridge",
     "team.bridge.>",
   ])
 })

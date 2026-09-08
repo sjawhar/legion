@@ -1,4 +1,5 @@
 import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
+import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
 
 export interface LegionEventPayload {
@@ -31,6 +32,319 @@ export interface ReducerConfig {
 export type CiEmission =
   | { type: "ci-green"; sha: string }
   | { type: "ci-settled-red"; sha: string; failing: string[] };
+
+/** The head's CI outcome: failing check runs and failing commit statuses (see the CI view contract). */
+export interface CiOutcome {
+  verdict: PrState["verdict"];
+  failing: string[];
+  failingStatuses: string[];
+}
+
+export interface CiSettlementInput extends CiOutcome {
+  settledAt: number;
+}
+function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+/*
+ * CI view contract. Two sources describe a head's checks:
+ *
+ * - A live settlement (Envoy listener) is a possibly incomplete view — a missed
+ *   webhook, a record recreated after the KV TTL. It decides the outcome of
+ *   every name it reports: the names in its attempt set plus the names it
+ *   lists as failing (a legacy check or status context has no run id). Every
+ *   other name keeps its last known outcome; the head is red while any failure
+ *   remains (`effectiveOutcome`).
+ * - A GitHub rollup read is a complete view: its failing check runs and failing
+ *   commit statuses replace the stored ones wholesale. Statuses have no check
+ *   run and are invisible to the listener, so they are kept apart
+ *   (`failingStatuses`): a check run that shares a status's name cannot retire
+ *   it — only GitHub does (resync).
+ *
+ * An accepted attempt set from either source merges into the stored fence:
+ * the per-name maximum over the union of names, nothing pruned
+ * (`writeCiFence`). The fence is the head's high-watermark, so a name an
+ * incomplete view omitted cannot later reappear as new. Ordering compares only
+ * the names the incoming view carries (`compareAttemptSets`).
+ */
+
+/** An attempt set: the latest GitHub check-run id per check name, sorted by name. */
+export type AttemptSet = readonly CheckRunRef[];
+
+export type AttemptSetOrder = "newer" | "equal" | "older" | "mixed";
+
+/**
+ * Orders an incoming attempt set against the stored one, per shared name:
+ * `newer` when no shared id is lower and some id is higher or a name is new;
+ * `equal` when every shared id matches and no name is new; `older` when no
+ * shared id is higher and some is lower; `mixed` otherwise. Names only in the
+ * stored set are ignored (a check can vanish from GitHub's view; a recreated
+ * listener record starts sparse). Within one producer record per-name ids never
+ * decrease, and the stored fence is the per-name maximum over every accepted
+ * view (`mergeAttemptSets`), so the fence moves in one direction without
+ * clocks: a superseded attempt is `newer` whatever its completion time; a
+ * delayed older observation is `equal` or `older`.
+ */
+export function compareAttemptSets(stored: AttemptSet, incoming: AttemptSet): AttemptSetOrder {
+  const known = new Map(stored.map((run) => [run.name, run.id]));
+  let higher = false;
+  let lower = false;
+  for (const run of incoming) {
+    const id = known.get(run.name);
+    if (id === undefined || run.id > id) higher = true;
+    else if (run.id < id) lower = true;
+  }
+  if (higher && lower) return "mixed";
+  if (higher) return "newer";
+  return lower ? "older" : "equal";
+}
+
+/** A live settlement offered to the per-head fence: its ordering identity and its outcome. */
+export interface SettlementCandidate {
+  readonly checkRuns: AttemptSet;
+  readonly generation: number;
+  readonly snapshot: string;
+  /** Compared only when a terminal GitHub read holds the tie at an equal attempt set. */
+  readonly verdict: PrState["verdict"];
+  readonly failing: readonly string[];
+}
+
+export type SettlementClassification = "stale" | "duplicate" | "conflict" | "newer" | "refresh";
+
+/**
+ * Classifies a live settlement against the per-head fence. The attempt set
+ * orders every source (`compareAttemptSets`); at an equal set the listener's
+ * generation orders its own settlements (a GitHub-authored fence has no
+ * generation and orders below every live one). When a terminal GitHub read
+ * holds the tie at that set (`ciReconciled`), a higher generation is accepted
+ * only when its effective outcome (`effectiveOutcome`) agrees — a `refresh`
+ * of the listener identity that leaves GitHub's authority in place; a
+ * disagreeing one is stale until GitHub reads the set again. Authority is
+ * released when the set advances or a pending GitHub read clears it.
+ */
+export function classifySettlement(
+  pr: PrState,
+  incoming: SettlementCandidate
+): SettlementClassification {
+  if (pr.ciCheckRuns === null) return "newer";
+  switch (compareAttemptSets(pr.ciCheckRuns, incoming.checkRuns)) {
+    case "newer":
+      return "newer";
+    case "older":
+      return "stale";
+    case "mixed":
+      return "conflict";
+    case "equal":
+      break;
+  }
+  if (pr.ciSettlementGeneration !== null) {
+    if (incoming.generation < pr.ciSettlementGeneration) return "stale";
+    if (incoming.generation === pr.ciSettlementGeneration) {
+      return incoming.snapshot === pr.ciSnapshot ? "duplicate" : "conflict";
+    }
+  }
+  if (!pr.ciReconciled) return "newer";
+  const effective = effectiveOutcome(pr, incoming);
+  return effective.verdict === pr.verdict && sameStringMultiset(effective.failing, pr.failing)
+    ? "refresh"
+    : "stale";
+}
+
+/**
+ * The outcome a live settlement establishes for the head (see the CI view
+ * contract above): the names it reports — its attempt set plus its failing
+ * names — take its outcome; every other name keeps its last known outcome, and
+ * the stored commit-status failures stand, keeping the head red.
+ */
+export function effectiveOutcome(
+  pr: PrState,
+  incoming: Pick<SettlementCandidate, "checkRuns" | "verdict" | "failing">
+): CiOutcome {
+  const reported = new Set([...incoming.checkRuns.map((run) => run.name), ...incoming.failing]);
+  const failing = [...incoming.failing, ...pr.failing.filter((name) => !reported.has(name))];
+  // Commit statuses are invisible to the listener: the stored ones stand as they are.
+  const failingStatuses = [...pr.failingStatuses];
+  if (failing.length > 0 || failingStatuses.length > 0)
+    return { verdict: "red", failing, failingStatuses };
+  return { verdict: incoming.verdict, failing: [], failingStatuses };
+}
+
+export interface CiFence {
+  readonly checkRuns: AttemptSet;
+  /** null for a fence GitHub's rollup authored (resync); the listener's state version otherwise. */
+  readonly generation: number | null;
+  readonly snapshot: string | null;
+}
+
+/**
+ * What a rollup read from GitHub may do to the stored fence: `advance` it (a
+ * newer attempt set, or nothing fenced yet — the set merges in and the
+ * identity becomes GitHub's, with no listener generation); `apply` its verdict
+ * at an equal set, keeping the listener identity for duplicate detection;
+ * apply it `unfenced` when neither the rollup nor the stored fence has a check
+ * run; or be skipped as `stale` (an older set; or no check runs where some are
+ * fenced) or a `conflict` (a mixed set). The live counterpart is
+ * `classifySettlement`.
+ */
+export type GitHubFenceEffect = "advance" | "apply" | "unfenced" | "stale" | "conflict";
+
+export function acceptGitHubFence(pr: PrState, checkRuns: AttemptSet): GitHubFenceEffect {
+  const fenced = pr.ciCheckRuns !== null && pr.ciCheckRuns.length > 0;
+  if (checkRuns.length === 0) return fenced ? "stale" : "unfenced";
+  if (pr.ciCheckRuns === null) return "advance";
+  switch (compareAttemptSets(pr.ciCheckRuns, checkRuns)) {
+    case "newer":
+      return "advance";
+    case "equal":
+      return "apply";
+    case "older":
+      return "stale";
+    case "mixed":
+      return "conflict";
+  }
+}
+
+/**
+ * Writes a fence its caller already accepted (`classifySettlement` or
+ * `acceptGitHubFence`): the attempt set merges into the stored one (see the
+ * CI view contract above); the identity is the caller's.
+ */
+export function writeCiFence(pr: PrState, fence: CiFence): void {
+  pr.ciCheckRuns = mergeAttemptSets(pr.ciCheckRuns ?? [], fence.checkRuns);
+  pr.ciSettlementGeneration = fence.generation;
+  pr.ciSnapshot = fence.snapshot;
+}
+
+/** Per-name maximum over the union of two attempt sets, in canonical name order. */
+function mergeAttemptSets(stored: AttemptSet, incoming: AttemptSet): CheckRunRef[] {
+  const merged = new Map(stored.map((run) => [run.name, run.id]));
+  for (const run of incoming) {
+    const known = merged.get(run.name);
+    if (known === undefined || run.id > known) merged.set(run.name, run.id);
+  }
+  return sortedCheckRunRefs(merged);
+}
+
+/** Refreshes the listener identity at an unchanged attempt set (`classifySettlement` returned "refresh"). */
+export function refreshCiIdentity(
+  pr: PrState,
+  generation: number,
+  snapshot: string,
+  settledAt: number
+): void {
+  pr.ciSettlementGeneration = generation;
+  pr.ciSnapshot = snapshot;
+  pr.ciSettledAt = settledAt;
+}
+
+/** The head and CI fields a reconciliation must find unchanged before it may apply — every field the read may write, plus the head's lifecycle clock: one definition for capture and comparison. */
+export type CiSnapshot = Pick<
+  PrState,
+  | "headSha"
+  | "headUpdatedAt"
+  | "verdict"
+  | "failing"
+  | "failingStatuses"
+  | "ciSettledAt"
+  | "ciCheckRuns"
+  | "ciSettlementGeneration"
+  | "ciSnapshot"
+  | "ciReconciled"
+>;
+
+export function ciSnapshot(pr: PrState): CiSnapshot {
+  return {
+    headSha: pr.headSha,
+    headUpdatedAt: pr.headUpdatedAt,
+    verdict: pr.verdict,
+    failing: [...pr.failing],
+    failingStatuses: [...pr.failingStatuses],
+    ciSettledAt: pr.ciSettledAt,
+    ciCheckRuns: pr.ciCheckRuns === null ? null : pr.ciCheckRuns.map((run) => ({ ...run })),
+    ciSettlementGeneration: pr.ciSettlementGeneration,
+    ciSnapshot: pr.ciSnapshot,
+    ciReconciled: pr.ciReconciled,
+  };
+}
+
+function sameAttemptSet(left: AttemptSet | null, right: AttemptSet | null): boolean {
+  if (left === null || right === null) return left === right;
+  return (
+    left.length === right.length &&
+    left.every((run, index) => run.name === right[index]?.name && run.id === right[index]?.id)
+  );
+}
+
+export function ciSnapshotEquals(pr: PrState, snapshot: CiSnapshot): boolean {
+  return (
+    pr.headSha === snapshot.headSha &&
+    pr.headUpdatedAt === snapshot.headUpdatedAt &&
+    pr.verdict === snapshot.verdict &&
+    pr.ciSettledAt === snapshot.ciSettledAt &&
+    sameAttemptSet(pr.ciCheckRuns, snapshot.ciCheckRuns) &&
+    pr.ciSettlementGeneration === snapshot.ciSettlementGeneration &&
+    pr.ciSnapshot === snapshot.ciSnapshot &&
+    pr.ciReconciled === snapshot.ciReconciled &&
+    pr.failing.length === snapshot.failing.length &&
+    pr.failing.every((name, index) => name === snapshot.failing[index]) &&
+    pr.failingStatuses.length === snapshot.failingStatuses.length &&
+    pr.failingStatuses.every((name, index) => name === snapshot.failingStatuses[index])
+  );
+}
+
+/** A rerun in flight, or a cancelled-only settlement: a green verdict is no longer certified. Red is preserved. */
+export function uncertifyCiVerdict(pr: PrState): void {
+  if (pr.verdict !== "green") return;
+  pr.verdict = null;
+  pr.failing = [];
+  pr.failingStatuses = [];
+}
+
+function ciVerdictEmissions(
+  pr: PrState,
+  verdict: PrState["verdict"],
+  failing: string[],
+  failingStatuses: string[]
+): CiEmission[] {
+  if (verdict === null) {
+    uncertifyCiVerdict(pr);
+    return [];
+  }
+
+  const priorVerdict = pr.verdict;
+  const priorFailing = [...pr.failing, ...pr.failingStatuses];
+  pr.verdict = verdict;
+  pr.failing = verdict === "red" ? failing : [];
+  pr.failingStatuses = verdict === "red" ? failingStatuses : [];
+  const nowFailing = [...pr.failing, ...pr.failingStatuses];
+  if (priorVerdict === verdict && sameStringMultiset(priorFailing, nowFailing)) return [];
+  return verdict === "red"
+    ? [{ type: "ci-settled-red", failing: nowFailing, sha: pr.headSha }]
+    : [{ type: "ci-green", sha: pr.headSha }];
+}
+
+export function settleCiVerdict(
+  state: LegionState,
+  pr: PrState,
+  input: CiSettlementInput,
+  config: ReducerConfig
+): Effect[] {
+  pr.ciSettledAt = input.settledAt;
+  return ciVerdictEmissions(pr, input.verdict, input.failing, input.failingStatuses).flatMap(
+    (emission) => [
+      {
+        kind: "publish" as const,
+        role: roleToken(state.project, pr.key, "implementer"),
+        payload: emission,
+      },
+      ...reduceCiEmission(state, pr.repo, pr.number, emission, config),
+    ]
+  );
+}
 
 type JsonRecord = Record<string, unknown>;
 type RoutedRole = "architect" | "implementer";
@@ -221,30 +535,16 @@ function filtered(comment: JsonRecord, config: ReducerConfig): boolean {
   );
 }
 
-function isFailingCheck(check: { status: string; conclusion: string | null }): boolean {
-  return (
-    check.status === "completed" &&
-    check.conclusion !== "success" &&
-    check.conclusion !== "neutral" &&
-    check.conclusion !== "skipped"
-  );
-}
-
-function isGreen(pr: PrState): boolean {
-  const checks = Object.values(pr.checks);
-  return (
-    checks.length > 0 &&
-    checks.every((check) => check.status === "completed" && !isFailingCheck(check))
-  );
-}
-
-function wasRed(pr: PrState): boolean {
-  return Object.values(pr.checks).some(isFailingCheck);
-}
-
 function issueForBranch(repo: string, branch: string): IssueKey | undefined {
   const match = /^legion\/issue-(\d+)$/.exec(branch);
   return match ? keyFor(repo, Number(match[1])) : undefined;
+}
+
+function updatedAt(raw: JsonRecord): number | undefined {
+  const value = stringValue(raw.updated_at);
+  if (!value) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? undefined : timestamp;
 }
 
 function registerPr(
@@ -253,9 +553,9 @@ function registerPr(
   number: number,
   branch: string | undefined,
   sha: string | undefined,
-  issuedAt: number
+  headUpdatedAt: number | undefined
 ): PrState | undefined {
-  const key = branch ? issueForBranch(repo, branch) : undefined;
+  const key = (branch ? issueForBranch(repo, branch) : undefined) ?? keyFor(repo, number);
   if (!key || !state.issues[key] || !sha) return undefined;
   const prKey = `${repo}#${number}`;
   const pr: PrState = {
@@ -263,16 +563,35 @@ function registerPr(
     repo: repo as `${string}/${string}`,
     number,
     headSha: sha,
-    checks: {},
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: issuedAt,
+    ...(headUpdatedAt === undefined ? {} : { headUpdatedAt }),
+    verdict: null,
+    failing: [],
+    failingStatuses: [],
+    ciSettledAt: null,
+    ciCheckRuns: null,
+    ciSettlementGeneration: null,
+    ciSnapshot: null,
+
+    ciReconciled: false,
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
-  state.prByBranch[`${repo}@${branch}`] = prKey;
+  if (branch) state.prByBranch[`${repo}@${branch}`] = prKey;
   return pr;
+}
+
+export function resetPrHead(pr: PrState, headSha: string): void {
+  if (pr.verdict === "red") pr.fixAttempts += 1;
+  pr.headSha = headSha;
+  pr.verdict = null;
+  pr.failing = [];
+  pr.failingStatuses = [];
+  pr.ciSettledAt = null;
+  pr.ciCheckRuns = null;
+  pr.ciSettlementGeneration = null;
+  pr.ciSnapshot = null;
+  pr.ciReconciled = false;
+  delete pr.reviewDecision;
 }
 
 function removeBranchMappings(state: LegionState, prKey: string): void {
@@ -557,7 +876,7 @@ function review(
     envelope
   );
   result.push({ kind: "approval-status", repo, pr: number, sha: pr.headSha });
-  if (isCurrentHead && decision === "approved" && prior !== "approved" && isGreen(pr)) {
+  if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.verdict === "green") {
     result.push(...route(state, pr.key, "architect", { type: "pr-ready", pr: number }, envelope));
   }
   return result;
@@ -568,45 +887,56 @@ function pullRequest(
   payload: JsonRecord,
   envelope: EnvelopeJson
 ): Effect[] | undefined {
-  const raw = asRecord(payload.pull_request);
-  if (!raw || payload.review !== undefined || payload.comment !== undefined) return undefined;
-  const repo = repository(payload);
-  const number = numberValue(raw.number);
+  if (payload.kind !== "pr") return undefined;
+  const repo = stringValue(payload.repo);
+  const number = numberValue(payload.number);
   if (!repo || number === undefined) return [];
   const prKey = `${repo}#${number}`;
-  const head = asRecord(raw.head);
-  const branch = stringValue(head?.ref);
-  const sha = stringValue(head?.sha);
+  const branch = stringValue(payload.head_ref);
+  const sha = stringValue(payload.head_sha);
+  const headUpdatedAt = updatedAt(payload);
 
   if (payload.action === "opened") {
-    const pr = registerPr(state, repo, number, branch, sha, envelope.issued_at);
+    const pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
     if (!pr) return [];
     return route(
       state,
       pr.key,
       "implementer",
-      { type: "pr-opened", pr: number, url: stringValue(raw.html_url) ?? "" },
+      { type: "pr-opened", pr: number, url: stringValue(payload.url) ?? "" },
       envelope
     );
   }
 
   let pr: PrState | undefined = state.prs[prKey];
   if (!pr && payload.action === "synchronize") {
-    pr = registerPr(state, repo, number, branch, sha, envelope.issued_at);
+    pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
   }
   if (!pr) return [];
   if (payload.action === "synchronize") {
+    if (
+      headUpdatedAt !== undefined &&
+      pr.headUpdatedAt !== undefined &&
+      headUpdatedAt < pr.headUpdatedAt
+    ) {
+      return [];
+    }
     if (!sha) return [];
-    if (wasRed(pr)) pr.fixAttempts += 1;
-    pr.headSha = sha;
-    pr.checks = {};
-    pr.firstRedEmitted = false;
-    pr.settledRedEmitted = false;
-    pr.greenEmitted = false;
-    delete pr.reviewDecision;
+    if (pr.headSha === sha) {
+      if (
+        headUpdatedAt !== undefined &&
+        (pr.headUpdatedAt === undefined || headUpdatedAt > pr.headUpdatedAt)
+      ) {
+        pr.headUpdatedAt = headUpdatedAt;
+      }
+      return [{ kind: "approval-status", repo, pr: number, sha }];
+    }
+    resetPrHead(pr, sha);
+    if (headUpdatedAt === undefined) delete pr.headUpdatedAt;
+    else pr.headUpdatedAt = headUpdatedAt;
     return [{ kind: "approval-status", repo, pr: number, sha }];
   }
-  if (payload.action === "closed" && raw.merged === false) {
+  if (payload.action === "closed" && payload.merged === "false") {
     delete state.prs[prKey];
     removeBranchMappings(state, prKey);
     return route(state, pr.key, "architect", { type: "pr-closed-unmerged", pr: number }, envelope);
@@ -620,12 +950,14 @@ export function reduceGithubEvent(
   envelope: EnvelopeJson,
   config: ReducerConfig
 ): Effect[] {
-  if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.check(?:\.|$)/.test(topic)) return [];
+  if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.checks$/.test(topic)) return [];
   const payload = payloadFrom(envelope);
   if (!payload) return [];
   const repo = repository(payload);
   // Pushes to legion issue branches carry no reducer-visible state transitions.
   if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/issue-")) return [];
+  // Only pullRequest understands Envoy's normalized GitHub envelopes. The issue, issue-comment,
+  // review, and projects_v2_item reducers still require raw GitHub nesting and ignore Envoy payloads.
   return (
     ingress(state, payload, config) ??
     subIssue(state, payload, envelope) ??
@@ -646,10 +978,10 @@ export function reduceCiEmission(
   config: ReducerConfig
 ): Effect[] {
   const pr = state.prs[`${repo}#${number}`];
-  if (!pr || pr.headSha !== emission.sha) return [];
+  if (!pr || pr.headSha !== emission.sha || pr.ciSettledAt === null) return [];
   const envelope = {
     event_id: `ci:${repo}#${number}:${emission.sha}`,
-    issued_at: pr.lastEventAt,
+    issued_at: pr.ciSettledAt,
   };
   if (emission.type === "ci-green") {
     return pr.reviewDecision === "approved"

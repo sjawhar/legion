@@ -1,4 +1,5 @@
 import { agentSubject } from "@legion/contracts"
+import { expandSubscriptionTopics } from "@legion/envoy-client/transport"
 
 export type SubscriptionTopicsOptions = {
   readonly sessionId: string
@@ -11,5 +12,5 @@ export function subscriptionTopics(options: SubscriptionTopicsOptions): readonly
     .map((topic) => topic.trim())
     .filter((topic) => topic.length > 0)
 
-  return [agentSubject(options.sessionId), ...(additional ?? [])]
+  return expandSubscriptionTopics([agentSubject(options.sessionId), ...(additional ?? [])])
 }

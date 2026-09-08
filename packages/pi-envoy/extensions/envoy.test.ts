@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
@@ -368,9 +368,20 @@ describe("envoy OMP extension", () => {
 
     await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role: "controller" });
     await fixture.tools.find((tool) => tool.name === "envoy_list")?.execute("", {});
-    await fixture.tools.find((tool) => tool.name === "envoy_send")?.execute("", {
+    const sent = await fixture.tools.find((tool) => tool.name === "envoy_send")?.execute("", {
       session_id: "ses_target",
       message: "direct",
+      in_reply_to: "event-before",
+      supersedes: "event-obsolete",
+      urgency: "blocking",
+      expects_reply: "required",
+      expires_at: 1_788_956_000_000,
+    });
+    expect(sent?.content[0]?.text).toBe("sent evt_1 to ses_target (recipient unconfirmed by listener)");
+    expect(sent?.details).toMatchObject({
+      event_id: "evt_1",
+      recipient: "ses_target",
+      confirmed: false,
     });
     await fixture.tools.find((tool) => tool.name === "envoy_publish")?.execute("", {
       topic: "team.test",
@@ -401,14 +412,42 @@ describe("envoy OMP extension", () => {
           source_session: "ses_omp",
           target_session: "ses_target",
           message: "direct",
+          in_reply_to: "event-before",
+          supersedes: "event-obsolete",
+          urgency: "blocking",
+          expects_reply: "required",
+          expires_at: 1_788_956_000_000,
+          idempotency_key: expect.any(String),
         },
       },
       {
         path: "/v1/messages/publish",
-        body: { source: "agent", source_session: "ses_omp", topic: "team.test", message: "broadcast" },
+        body: {
+          source: "agent",
+          source_session: "ses_omp",
+          topic: "team.test",
+          message: "broadcast",
+          idempotency_key: expect.any(String),
+        },
       },
       { path: "/v1/sessions", body: undefined },
     ]);
+  });
+
+  test("uses the shared metadata schema to reject an invalid urgency", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?shared-metadata-validation");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const send = fixture.tools.find((tool) => tool.name === "envoy_send");
+    const spec = envoyToolSpecs.find((candidate) => candidate.name === "envoy_send");
+    if (send === undefined || spec === undefined) throw new Error("envoy_send was not registered");
+
+    const input = { session_id: "ses_target", message: "direct", urgency: "urgent" };
+    const expected = z.object(spec.arguments).safeParse(input);
+    const actual = (send.parameters as z.ZodType).safeParse(input);
+    if (expected.success || actual.success) throw new Error("invalid urgency unexpectedly parsed");
+
+    expect(actual.error.message).toBe(expected.error.message);
   });
 
   test("surfaces a missing target session as an envoy_send tool error", async () => {
@@ -462,10 +501,31 @@ describe("envoy OMP extension", () => {
     );
 
     const topic = "notifications.github.sjawhar.legion.issue.91.>";
+    const base = "notifications.github.sjawhar.legion.issue.91";
+    expect(natsState.controls.has(base)).toBe(true);
     expect(natsState.controls.has(topic)).toBe(true);
     const lastRegistration = interestRegistrations.at(-1) as { topics?: string[] } | undefined;
-    expect(lastRegistration?.topics).toContain(topic);
+    expect(lastRegistration?.topics).toEqual(expect.arrayContaining([base, topic]));
   });
+
+  test("rejects malformed wildcard bases before opening subscriptions", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?malformed-wildcard-base");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const subscribe = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribe === undefined) throw new Error("subscription tool was not registered");
+
+    for (const topic of ["a..b.>", "a.>"]) {
+      const result = await subscribe.execute("", { topics: [topic] });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("concrete base");
+      expect(natsState.controls.has(topic)).toBe(false);
+    }
+  });
+
 
   test("re-subscribes persisted registry interests on resumed session start, skipping role lanes", async () => {
     globalThis.fetch = async (input, init) => {
@@ -494,6 +554,8 @@ describe("envoy OMP extension", () => {
     };
     await fixture.handlers.get("session_start")?.({}, resumed);
     expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.91.>")).toBe(true);
+    expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.91")).toBe(true);
+
     expect(natsState.controls.has("notifications.role.legion-controller")).toBe(false);
   });
 
@@ -694,7 +756,7 @@ describe("envoy OMP extension", () => {
         { check: "typecheck", conclusion: "failure" },
         { check: "unit", conclusion: "failure" },
       ],
-      kind: "ci_summary",
+      kind: "checks",
       number: 42,
     };
     // Query isolation gives this stateful extension its own NATS subscription.
@@ -730,8 +792,10 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("structured delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        topic: "notifications.agent.ses_omp",
+        to: "you (ses_…)",
         from: "envoy",
+        at: "1970-01-01T00:00:00Z",
+        id: "evt-toon-structured",
         summary: "CI failures",
         message: payload,
       },
@@ -772,8 +836,10 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("plain-text delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        topic: "notifications.agent.ses_omp",
+        to: "you (ses_…)",
         from: "envoy",
+        at: "1970-01-01T00:00:00Z",
+        id: "evt-toon-plain-text",
         summary: "plain text",
         message: "plain-text payload",
       },
@@ -813,8 +879,10 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("peer delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        topic: "notifications.agent.ses_omp",
+        to: "you (ses_…)",
         from: "ses_peer",
+        at: "1970-01-01T00:00:00Z",
+        id: "evt-peer-message",
         reply_with: 'envoy_send(session_id="ses_peer", message="...")',
         summary: "hello from a peer",
       },
@@ -853,14 +921,16 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("human delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        topic: "notifications.agent.ses_omp",
+        to: "you (ses_…)",
         from: "human",
+        at: "1970-01-01T00:00:00Z",
+        id: "evt-human-message",
         summary: "please review this",
       },
     });
   });
 
-  test("flags a message this session sent to itself as an echo instead of a receipt", async () => {
+  test("renders a message this session sent to itself as an ordinary delivery", async () => {
     // Query isolation gives this stateful extension its own NATS subscription.
     const { default: envoyExtension } = await import("./envoy.ts?self-echo");
     const fixture = createPi();
@@ -892,21 +962,24 @@ describe("envoy OMP extension", () => {
     const content = fixture.messages[0];
     if (content === undefined) throw new Error("echo delivery was not injected");
     const note = decode(content) as { envoy: Record<string, unknown> };
-    expect(note.envoy.echo).toContain("your own message");
-    expect(note.envoy.echo).toContain("(ses_omp)");
-    expect(note.envoy.reply_to).toBeUndefined();
-    expect(note.envoy.reply_with).toBeUndefined();
+    expect(note.envoy).toEqual({
+      to: "you (ses_…)",
+      from: "ses_omp",
+      at: "1970-01-01T00:00:00Z",
+      id: "evt-self-echo",
+      reply_with: 'envoy_send(session_id="ses_omp", message="...")',
+      summary: "note to self",
+    });
   });
-
-  test("records and skips a dispatch echo for this session", async () => {
+  test("skips a dispatch echo without suppressing a later non-echo envelope", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-echo");
     const fixture = createPi();
-    const delivered = Promise.withResolvers<void>();
+    const afterEcho = Promise.withResolvers<void>();
     envoyExtension({
       ...fixture.pi,
       sendMessage: (message, options) => {
         fixture.pi.sendMessage(message, options);
-        delivered.resolve();
+        if (message.content.includes("new message")) afterEcho.resolve();
       },
     });
     await fixture.handlers.get("session_start")?.({}, sessionContext());
@@ -951,13 +1024,14 @@ describe("envoy OMP extension", () => {
         trace_id: "trace-after-dispatch-echo",
       })
     );
-    await delivered.promise;
+    await afterEcho.promise;
 
-    expect(fixture.messages).toHaveLength(1);
-    expect(fixture.messages[0]).toContain("new message");
+    expect(fixture.messages).toHaveLength(2);
+    expect(fixture.messages[0]).toContain("Keep the thread open?");
+    expect(fixture.messages[1]).toContain("new message");
   });
 
-  test("injects malformed envelope JSON as raw text", async () => {
+  test("never exposes a malformed envelope frame", async () => {
     // Query isolation gives this stateful extension its own NATS subscription.
     const { default: envoyExtension } = await import("./envoy.ts?toon-malformed-envelope");
     const fixture = createPi();
@@ -978,8 +1052,9 @@ describe("envoy OMP extension", () => {
     const content = fixture.messages[0];
     if (content === undefined) throw new Error("malformed delivery was not injected");
     expect(decode(content)).toEqual({
-      envoy: { topic: "notifications.agent.ses_omp", message: "{this is not JSON" },
+      envoy: { topic: "notifications.agent.ses_omp", unrecognised: "payload was not JSON" },
     });
+    expect(content).not.toContain("{this is not JSON");
   });
 
   test("injects a role event forwarded to the claimed agent subject with original role-topic framing", async () => {
@@ -1032,8 +1107,9 @@ describe("envoy OMP extension", () => {
     if (roleDelivery === undefined) throw new Error("role delivery was not injected");
     expect(decode(roleDelivery)).toEqual({
       envoy: {
-        topic: "notifications.role.legion-controller",
         from: "envoy",
+        at: "1970-01-01T00:00:00Z",
+        id: "evt-role-agent-delivery",
         summary: "role message",
       },
     });
@@ -1098,8 +1174,9 @@ describe("envoy OMP extension", () => {
     if (takeoverDelivery === undefined) throw new Error("takeover delivery was not injected");
     expect(decode(takeoverDelivery)).toEqual({
       envoy: {
-        topic: "notifications.role.legion-controller",
         from: "envoy",
+        at: "1970-01-01T00:00:00Z",
+        id: "evt-role-agent-takeover",
         summary: "post-takeover role event",
       },
     });
@@ -1347,21 +1424,43 @@ describe("envoy OMP extension", () => {
       throw new Error("subscription tools were not registered");
     }
 
-    const topic = "notifications.github.o.r.pr.>";
+    const topic = "notifications.github.o.r.pr.42.>";
+    const base = "notifications.github.o.r.pr.42";
     await subscribeTool.execute("", { topics: [topic] });
-    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", base, topic]);
+    expect(natsState.controls.get(base)?.active()).toBe(true);
+    expect(natsState.controls.get(topic)?.active()).toBe(true);
 
     for (const tick of intervals) tick();
-    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", base, topic]);
+    const subscribed = await listTool.execute("", {});
+    expect(subscribed.details.interests).toEqual([
+      { topic: "notifications.agent.ses_registry", source: "both" },
+      { topic: base, source: "both" },
+      { topic, source: "both" },
+    ]);
 
     await unsubscribeTool.execute("", { topics: [topic] });
-    expect(unregistrations).toEqual([[topic]]);
+    expect(unregistrations).toEqual([[base, topic]]);
     expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry"]);
     const result = await listTool.execute("", {});
     expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
       topics: ["notifications.agent.ses_registry"],
     });
     expect(result.details.interests).toEqual([{ topic: "notifications.agent.ses_registry", source: "both" }]);
+
+    // The session's own inbox survives "remove all" and an explicit request
+    // alike: it is how direct messages reach the session, not a subscription
+    // the tool manages.
+    await subscribeTool.execute("", { topics: [topic] });
+    const inbox = "notifications.agent.ses_registry";
+    const removeAll = await unsubscribeTool.execute("", {});
+    expect(removeAll.details.removed).toEqual([base, topic]);
+    expect(natsState.controls.get(inbox)?.active()).toBe(true);
+    const explicit = await unsubscribeTool.execute("", { topics: [inbox] });
+    expect(explicit.details.removed).toEqual([]);
+    expect(natsState.controls.get(inbox)?.active()).toBe(true);
+    expect(registrations.at(-1)?.topics).toEqual([inbox]);
   });
 
   test("merges locally live subscriptions into envoy_list before the next heartbeat", async () => {
@@ -1790,41 +1889,111 @@ describe("envoy OMP extension", () => {
     expect(recovered).toBeDefined();
     expect(recovered).not.toBe(reopened);
 
-    recovered?.push("delivered after a genuine iterator death");
+    recovered?.push(
+      forwardedRoleEnvelope("legion-controller", "delivered after a genuine iterator death", "genuine-death")
+    );
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(fixture.messages.some((m) => m.includes("delivered after a genuine iterator death"))).toBe(true);
   });
 
-  test("a failed message injection does not tear down the subscription", async () => {
+  test("permits redelivery after a failed injection and warns with the envelope id", async () => {
+    // Query isolation gives this stateful extension its own NATS subscription.
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?deliver-throw");
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-retry");
     const fixture = createPi();
     let throwNext = true;
+    const failedInjection = Promise.withResolvers<void>();
+    const followingDelivery = Promise.withResolvers<void>();
     const delivered: string[] = [];
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
     const pi: TestPi = {
       ...fixture.pi,
       sendMessage: (message) => {
         if (throwNext) {
           throwNext = false;
+          failedInjection.resolve();
           throw new Error("injection rejected mid-compaction");
         }
         delivered.push(message.content);
+        if (message.content.includes("the following message proves the pump continued")) {
+          followingDelivery.resolve();
+        }
       },
     };
 
-    envoyExtension(pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pump"));
-    const controls = natsState.controls.get("notifications.agent.ses_pump");
-    expect(controls).toBeDefined();
+    try {
+      envoyExtension(pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pump"));
+      const controls = natsState.controls.get("notifications.agent.ses_pump");
+      expect(controls).toBeDefined();
 
-    controls?.push("first message hits the throwing window");
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    controls?.push("second message must still deliver");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+      const envelope = forwardedRoleEnvelope(
+        "legion-controller",
+        "the redelivery repairs the failed injection",
+        "retry-after-failure"
+      );
+      controls?.push(envelope);
+      await failedInjection.promise;
+      controls?.push(envelope);
+      controls?.push(
+        forwardedRoleEnvelope(
+          "legion-controller",
+          "the following message proves the pump continued",
+          "after-retry"
+        )
+      );
+      await followingDelivery.promise;
 
-    expect(delivered.length).toBe(1);
-    expect(delivered[0]).toContain("second message must still deliver");
+      expect(delivered).toHaveLength(2);
+      expect(delivered[0]).toContain("the redelivery repairs the failed injection");
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("evt-retry-after-failure"),
+        expect.any(Error)
+      );
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  test("deduplicates a redelivery after successful injection", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-dedupe");
+    const fixture = createPi();
+    const deliveryAfterDuplicate = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (message.content.includes("the next unique delivery proves the duplicate was skipped")) {
+          deliveryAfterDuplicate.resolve();
+        }
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_dedupe"));
+    const controls = natsState.controls.get("notifications.agent.ses_dedupe");
+    if (controls === undefined) throw new Error("agent subject was not subscribed");
+
+    const envelope = forwardedRoleEnvelope(
+      "legion-controller",
+      "only the first delivery injects",
+      "dedupe-after-success"
+    );
+    controls.push(envelope);
+    controls.push(envelope);
+    controls.push(
+      forwardedRoleEnvelope(
+        "legion-controller",
+        "the next unique delivery proves the duplicate was skipped",
+        "after-dedupe"
+      )
+    );
+    await deliveryAfterDuplicate.promise;
+
+    expect(fixture.messages).toHaveLength(2);
+    expect(fixture.messages[0]).toContain("only the first delivery injects");
   });
 
   test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
@@ -1837,7 +2006,7 @@ describe("envoy OMP extension", () => {
     const controls = natsState.controls.get("notifications.agent.ses_steer");
     expect(controls).toBeDefined();
 
-    controls?.push("steer me mid-turn");
+    controls?.push(forwardedRoleEnvelope("legion-controller", "steer me mid-turn", "steer"));
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(fixture.deliveries.length).toBe(1);
@@ -1888,7 +2057,7 @@ describe("envoy OMP extension", () => {
     expect(second).toBeDefined();
     expect(second).not.toBe(first);
 
-    second?.push("post-recovery message");
+    second?.push(forwardedRoleEnvelope("legion-controller", "post-recovery message", "recovery"));
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(fixture.messages.some((m) => m.includes("post-recovery message"))).toBe(true);
   });
@@ -1906,11 +2075,17 @@ describe("envoy OMP extension", () => {
     const fixture = createPi();
     const intervals: (() => void)[] = [];
     const notifications: string[] = [];
+    const warned = Promise.withResolvers<void>();
     const context: SessionContext = {
       cwd: "/tmp/envoy-omp-test",
       sessionManager: { getSessionId: () => "ses_heartbeat" },
       setInterval: (callback) => intervals.push(callback),
-      ui: { notify: (message) => notifications.push(message) },
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+          if (message.includes("registry heartbeat failed")) warned.resolve();
+        },
+      },
     };
 
     envoyExtension(fixture.pi);
@@ -1927,9 +2102,9 @@ describe("envoy OMP extension", () => {
     // OMP via postmortem exitAfterFatal) and no warning ever appears.
     registryDown = true;
     for (const tick of intervals) tick();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await warned.promise;
     for (const tick of intervals) tick();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await Promise.resolve();
 
     const warnings = notifications.filter((message) => message.includes("registry heartbeat failed"));
     expect(warnings).toHaveLength(1);
@@ -2107,5 +2282,85 @@ describe("envoy OMP extension", () => {
 
     expect(registered).toEqual(["ses_created"]);
     expect(natsState.controls.has("notifications.agent.ses_created")).toBe(true);
+  });
+
+  test("surfaces listener subscribe warnings in the envoy_subscribe result", async () => {
+    globalThis.fetch = async (input, init) => {
+      const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+        readonly session_id?: string;
+        readonly dir?: string;
+        readonly topics?: readonly string[];
+      };
+      if (new URL(input.toString()).pathname !== "/v1/interests/subscribe") return response({});
+      return response({
+        session_id: body.session_id ?? "ses_omp",
+        machine_id: "example-host",
+        dir: body.dir ?? "/tmp",
+        topics: body.topics ?? [],
+        warnings: ["no matching event in stream"],
+      });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?subscribe-warnings");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const subscribe = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    expect(subscribe).toBeDefined();
+    if (subscribe === undefined) return;
+
+    const result = await subscribe.execute("", { topics: ["notifications.github.example-org.example-repo.pr.7"] });
+
+    expect(result.content[0]?.text).toContain("Warnings: no matching event in stream");
+    expect(result.details).toMatchObject({ warnings: ["no matching event in stream"] });
+  });
+
+  test("returns the 50 newest rendered deliveries from envoy_inbox", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?inbox");
+    const fixture = createPi();
+    const delivered = Promise.withResolvers<void>();
+    let deliveryCount = 0;
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        deliveryCount += 1;
+        if (deliveryCount === 51) delivered.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    for (let index = 1; index <= 51; index += 1) {
+      agent.push(
+        JSON.stringify({
+          event_id: `event-${index}`,
+          source: "agent",
+          source_session: "01a00000-0000-7000-0000-000000000001",
+          topic: "notifications.agent.ses_omp",
+          dedupe_key: `dedupe-${index}`,
+          issued_at: Date.parse("2026-09-07T04:41:12Z"),
+          payload_summary: `summary-${index}`,
+        })
+      );
+    }
+    await delivered.promise;
+
+    const inbox = fixture.tools.find((tool) => tool.name === "envoy_inbox");
+    expect(inbox).toBeDefined();
+    if (inbox === undefined) return;
+    const result = await inbox.execute("", {});
+    const entries = JSON.parse(result.content[0]?.text ?? "[]") as Array<{ event_id: string }>;
+
+    expect(entries).toHaveLength(50);
+    expect(entries[0]).toMatchObject({
+      event_id: "event-51",
+      at: "2026-09-07T04:41:12Z",
+      from: "01a00000-0000-7000-0000-000000000001",
+      summary: "summary-51",
+    });
+    expect(entries.at(-1)?.event_id).toBe("event-2");
   });
 });

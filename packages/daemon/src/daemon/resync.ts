@@ -1,7 +1,22 @@
 import { formatIssueKey, type IssueKey } from "@legion/contracts";
+import { type CiFetchFailure, type CiFetchResult, isCiFetchFailure } from "../state/fetch";
+import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { LegionState } from "./legion-state";
-import { type Effect, type EnvelopeJson, type ReducerConfig, reduceGithubEvent } from "./reducers";
+import {
+  acceptGitHubFence,
+  type CiSnapshot,
+  ciSnapshot,
+  ciSnapshotEquals,
+  type Effect,
+  type EnvelopeJson,
+  type ReducerConfig,
+  reduceGithubEvent,
+  resetPrHead,
+  settleCiVerdict,
+  uncertifyCiVerdict,
+  writeCiFence,
+} from "./reducers";
 
 export type ResyncAnomaly = {
   kind: "zero-owner-tree" | "erroring-issue" | "missed-open" | "untriaged-open" | "launch-failed";
@@ -15,6 +30,8 @@ export interface LegionEventPayload {
   healed: number;
   reconciledLabels: number;
   excludedNullContentItems: number;
+  ciFetchFailures: number;
+  ciFetchFailureDetails: CiFetchFailure[];
 }
 
 export interface RunResyncDeps {
@@ -24,6 +41,7 @@ export interface RunResyncDeps {
     items: Record<string, unknown>[];
     excludedNullContentItems?: number;
   }>;
+  fetchCiStatusBatch(prRefs: Record<string, GitHubPRRef>): Promise<Record<string, CiFetchResult>>;
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
   now(): number;
 }
@@ -145,10 +163,122 @@ function hasActiveTree(state: LegionState, issue: IssueKey): boolean {
   return false;
 }
 
+async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFailure[]> {
+  const refs: Record<string, GitHubPRRef> = {};
+  const snapshots = new Map<string, CiSnapshot>();
+  for (const [prKey, pr] of Object.entries(deps.state.prs)) {
+    const [owner, repo] = pr.repo.split("/");
+    refs[prKey] = { owner, repo, number: pr.number };
+    snapshots.set(prKey, ciSnapshot(pr));
+  }
+  if (Object.keys(refs).length === 0) return [];
+
+  const statuses = await deps.fetchCiStatusBatch(refs);
+  const ciFetchFailures: CiFetchFailure[] = [];
+  const reportedFailures = new Set<string>();
+  for (const [prKey, ref] of Object.entries(refs)) {
+    const pr = deps.state.prs[prKey];
+    const status = statuses[prKey];
+    const snapshot = snapshots.get(prKey);
+    if (!pr || !status || !snapshot) continue;
+    if (isCiFetchFailure(status)) {
+      const failureKey = `${status.owner}\u0000${status.error}`;
+      if (!reportedFailures.has(failureKey)) {
+        reportedFailures.add(failureKey);
+        ciFetchFailures.push(status);
+      }
+      continue;
+    }
+    if (!ciSnapshotEquals(pr, snapshot)) {
+      console.debug(`[legion] skipped stale resync CI result ${prKey}`);
+      continue;
+    }
+    if (!status.isOpen || !status.headSha) continue;
+
+    // The PR's lifecycle clock (GitHub's updatedAt) orders head observations.
+    // A same-head read advances it, so a delayed synchronize for an intervening
+    // head is later rejected as older. A different fetched head is skipped only
+    // when its clock is strictly older than a lifecycle update already observed:
+    // the read is GitHub's current head, and at an equal clock (second
+    // resolution) it outranks a webhook — deliveries may arrive out of order, and
+    // a stale equal-clock synchronize must not block the read that corrects it.
+    // A head that moved during the read is caught by the snapshot guard above.
+    const headUpdatedAt = status.updatedAt === null ? Number.NaN : Date.parse(status.updatedAt);
+    if (pr.headSha === status.headSha) {
+      if (
+        !Number.isNaN(headUpdatedAt) &&
+        (pr.headUpdatedAt === undefined || headUpdatedAt > pr.headUpdatedAt)
+      ) {
+        pr.headUpdatedAt = headUpdatedAt;
+      }
+    } else {
+      if (!status.updatedAt) {
+        throw new Error(`GitHub CI status is missing updatedAt for ${prKey}`);
+      }
+      if (Number.isNaN(headUpdatedAt)) {
+        throw new Error(`GitHub CI status has an invalid updatedAt for ${prKey}`);
+      }
+      if (pr.headUpdatedAt !== undefined && headUpdatedAt < pr.headUpdatedAt) {
+        console.debug(
+          `[legion] ignored stale resync head for ${prKey} fetched=${status.headSha}@${status.updatedAt} known=${pr.headSha}@${new Date(pr.headUpdatedAt).toISOString()}`
+        );
+        continue;
+      }
+      resetPrHead(pr, status.headSha);
+      pr.headUpdatedAt = headUpdatedAt;
+    }
+    // GitHub's rollup carries an attempt set with no listener identity. It
+    // advances the stored fence, applies at an equal set, applies unfenced, or
+    // is an older or inconsistent view and is skipped — acceptGitHubFence decides.
+    const fenceEffect = acceptGitHubFence(pr, status.checkRuns);
+    if (fenceEffect === "stale" || fenceEffect === "conflict") {
+      console.debug(
+        `[legion] ignored ${fenceEffect} rollup for ${prKey} check_runs=${JSON.stringify(status.checkRuns)} fence=${JSON.stringify(pr.ciCheckRuns)}`
+      );
+      continue;
+    }
+    if (fenceEffect === "advance") {
+      writeCiFence(pr, { checkRuns: status.checkRuns, generation: null, snapshot: null });
+    }
+    // GitHub's read is a complete view: its failing check runs and failing
+    // statuses replace the stored ones wholesale (only GitHub can retire a
+    // failure the listener cannot see — a status context, a deleted check).
+    // Red only for actual failures; a cancelled-only failing rollup, like a
+    // pending one, uncertifies a green head and leaves a red one, failing
+    // names included, untouched.
+    const failing = status.failingChecks ?? [];
+    const failingStatuses = status.failingStatuses ?? [];
+    const verdict =
+      status.ciStatus === "passing"
+        ? "green"
+        : status.ciStatus === "failing" && failing.length + failingStatuses.length > 0
+          ? "red"
+          : null;
+    // A terminal read holds the tie at this attempt set until the set advances;
+    // a pending or cancelled-only read carries no verdict and holds nothing.
+    pr.ciReconciled = fenceEffect !== "unfenced" && verdict !== null;
+    if (verdict === null) {
+      if (status.ciStatus === "pending" || status.ciStatus === "failing") uncertifyCiVerdict(pr);
+      continue;
+    }
+    const effects = settleCiVerdict(
+      deps.state,
+      pr,
+      { verdict, failing, failingStatuses, settledAt: now },
+      deps.config
+    );
+    if (effects.length === 0) continue;
+    await deps.applyEffects(effects, {
+      event_id: `resync:${ref.owner}/${ref.repo}#${ref.number}:ci`,
+      issued_at: now,
+    });
+  }
+  return ciFetchFailures;
+}
+
 /**
- * Reads board artifacts and mechanically converges missed-open items and
- * label drift through the same reducer and effect executor that processes
- * live board events.
+ * Reads board artifacts and unsettled PR check rollups, mechanically converging
+ * missed-open items, CI verdicts, and label drift through existing effects.
  */
 export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload> {
   const now = deps.now();
@@ -160,11 +290,14 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     };
   }
 
   lastRunAt.set(deps.state, now);
   const { items, excludedNullContentItems = 0 } = await deps.fetchGitHubProjectItems();
+  const ciFetchFailureDetails = await reconcilePrs(deps, now);
   if (
     items.length > 0 &&
     deps.config.boardProjectIds.length === 0 &&
@@ -300,5 +433,7 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
     healed,
     reconciledLabels,
     excludedNullContentItems,
+    ciFetchFailures: ciFetchFailureDetails.length,
+    ciFetchFailureDetails,
   };
 }

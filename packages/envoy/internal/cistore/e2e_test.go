@@ -21,13 +21,10 @@ import (
 	"github.com/sjawhar/envoy/internal/webhook"
 )
 
-// TestEndToEndCheckRunToSummary drives the fully-wired path exactly as the
-// listener wires it: a signed check_run webhook hits the real GitHubHandler,
-// which records into a real cistore (via CIRecorderFunc) instead of publishing;
-// the real StartSummaryLoop then debounces and publishes one rendered summary to
-// pr.<n>.ci, which a live NATS subscriber receives. A second wave produces a
-// second, grown summary; a quiet period produces none.
-func TestEndToEndCheckRunToSummary(t *testing.T) {
+// TestEndToEndCheckRunToChecks drives the listener's real webhook, CI store,
+// and NATS loop. CI webhooks publish nothing raw; one settled checks envelope
+// is emitted for the PR after the quiet period.
+func TestEndToEndCheckRunToChecks(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, "nats:2.10")
 	if err != nil {
@@ -44,7 +41,6 @@ func TestEndToEndCheckRunToSummary(t *testing.T) {
 		t.Fatalf("bus connect: %v", err)
 	}
 	defer client.Conn.Close()
-
 	store, err := cistore.Open(client.Conn, cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
@@ -55,34 +51,27 @@ func TestEndToEndCheckRunToSummary(t *testing.T) {
 		t.Fatalf("cache ready: %v", err)
 	}
 
-	const secret = "s"
-	ci := webhook.CIRecorderFunc(store.Record)
+	const (
+		secret = "s"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	ci := webhook.CIRecorderFuncs{RecordFunc: store.Record, RecordSuiteFunc: store.RecordSuite, RecordHeadFunc: store.RecordHead}
 	handler := webhook.GitHubHandler(secret, "@legion", "", client, ci)
-
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()
 	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond, logging.New("e2e"))
 
-	// Subscribe before any publish. JetStream publishes are normal subject
-	// messages, so a core subscriber on the topic receives them live.
-	sub, err := client.Conn.SubscribeSync("notifications.github.o.r.pr.42.ci")
+	sub, err := client.Conn.SubscribeSync("notifications.github.example-org.example-repo.pr.42.checks")
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	defer sub.Unsubscribe()
 
-	post := func(name, status, conclusion, delivery string) {
+	postEvent := func(event, body, delivery string) {
 		t.Helper()
-		body := fmt.Sprintf(`{
-			"action": %q,
-			"check_run": {"name": %q, "status": %q, "conclusion": %q, "head_sha": "sha1",
-				"pull_requests": [{"number": 42}]},
-			"sender": {"login": "ci", "type": "Bot"},
-			"repository": {"name": "r", "owner": {"login": "o"}, "full_name": "o/r"}
-		}`, "completed", name, status, conclusion)
 		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
 		req.Header.Set("X-GitHub-Delivery", delivery)
-		req.Header.Set("X-GitHub-Event", "check_run")
+		req.Header.Set("X-GitHub-Event", event)
 		req.Header.Set("X-Hub-Signature-256", sign(secret, []byte(body)))
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
@@ -90,47 +79,43 @@ func TestEndToEndCheckRunToSummary(t *testing.T) {
 			t.Fatalf("handler status = %d, body=%s", rr.Code, rr.Body.String())
 		}
 	}
+	postEvent("pull_request", fmt.Sprintf(`{
+		"action": "opened", "number": 42,
+		"pull_request": {"head": {"sha": %q}, "updated_at": "2026-09-07T03:00:00Z"},
+		"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
+	}`, sha), "d0")
 
-	// Wave 1: two checks arrive close together.
-	post("build", "in_progress", "", "d1")
-	post("test", "in_progress", "", "d2")
+	post := func(name, status, conclusion, delivery string) {
+		t.Helper()
+		body := fmt.Sprintf(`{
+			"action": "completed",
+			"check_run": {"id": 1, "name": %q, "status": %q, "conclusion": %q, "completed_at": "2026-09-07T03:01:00Z", "head_sha": %q,
+				"pull_requests": [{"number": 42}]},
+			"sender": {"login": "ci", "type": "Bot"},
+			"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
+		}`, name, status, conclusion, sha)
+		postEvent("check_run", body, delivery)
+	}
 
+	post("build", "completed", "success", "d1")
+	post("lint", "completed", "failure", "d2")
 	msg, err := sub.NextMsg(3 * time.Second)
 	if err != nil {
-		t.Fatalf("expected a debounced summary, got: %v", err)
+		t.Fatalf("expected settled checks envelope, got: %v", err)
 	}
-	got := string(msg.Data)
-	if !strings.Contains(got, "build") || !strings.Contains(got, "test") {
-		t.Fatalf("wave-1 summary should mention both checks: %s", got)
+	var env contracts.Envelope
+	if err := json.Unmarshal(msg.Data, &env); err != nil {
+		t.Fatalf("checks envelope not JSON: %v", err)
 	}
-
-	// No re-emit for an unchanged set.
-	if m, err := sub.NextMsg(400 * time.Millisecond); err == nil {
-		t.Fatalf("unexpected extra summary for unchanged set: %s", string(m.Data))
-	}
-
-	// Wave 2: a check completes → the set changed → exactly one more summary.
-	post("build", "completed", "success", "d3")
-	msg2, err := sub.NextMsg(3 * time.Second)
-	if err != nil {
-		t.Fatalf("expected a second summary after change, got: %v", err)
-	}
-	var env2 contracts.Envelope
-	if err := json.Unmarshal(msg2.Data, &env2); err != nil {
-		t.Fatalf("wave-2 envelope not JSON: %v", err)
+	if env.Topic != "notifications.github.example-org.example-repo.pr.42.checks" {
+		t.Fatalf("topic = %q", env.Topic)
 	}
 	var sum cistore.Summary
-	if err := json.Unmarshal([]byte(env2.PayloadSummary), &sum); err != nil {
-		t.Fatalf("wave-2 payload_summary not JSON: %v\n%s", err, env2.PayloadSummary)
+	if err := json.Unmarshal([]byte(env.Payload), &sum); err != nil {
+		t.Fatalf("checks payload not JSON: %v\n%s", err, env.Payload)
 	}
-	inPassed := false
-	for _, c := range sum.Passed.Checks {
-		if c == "build" {
-			inPassed = true
-		}
-	}
-	if !inPassed || sum.Passed.Count != 1 {
-		t.Fatalf("wave-2: build should be in passed{count:1}, got passed=%+v running=%+v", sum.Passed, sum.Running)
+	if sum.Kind != "checks" || sum.Passed.Count != 1 || sum.Failed.Count != 1 {
+		t.Fatalf("unexpected checks summary: %+v", sum)
 	}
 }
 

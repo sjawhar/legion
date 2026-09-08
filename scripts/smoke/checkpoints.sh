@@ -189,8 +189,8 @@ checkpoint_six() {
   root="$(root_key)"
   require_env SMOKE_VERDICT_FRAGMENT
   require_env SMOKE_RAW_CHECK_FRAGMENT
-  state | jq -e '[.prs[] | select(.firstRedEmitted and .greenEmitted)] | length > 0' >/dev/null ||
-    fail "no PR recorded both first-red and green emissions"
+  state | jq -e '[.prs[] | select(.verdict == "green")] | length > 0' >/dev/null ||
+    fail "no PR recorded a green CI verdict"
   pane="$(tmux capture-pane -p -t "$(tree_window_id "$root")")"
   verdict_count="$(grep -Foc "$SMOKE_VERDICT_FRAGMENT" <<<"$pane")"
   [[ "$verdict_count" == "1" ]] || fail "expected one coalesced verdict, found ${verdict_count}"

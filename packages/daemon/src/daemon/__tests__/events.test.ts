@@ -1,132 +1,26 @@
 import { describe, expect, it, vi } from "bun:test";
-import {
-  controllerToken,
-  formatIssueKey,
-  type IssueKey,
-  roleToken,
-  roleTopic,
-} from "@legion/contracts";
-import type { DaemonConfig } from "../config";
+import { controllerToken, type IssueKey, roleTopic } from "@legion/contracts";
+import { overseerCatchup } from "../catchup";
 import { type EventPumpDeps, startEventPump } from "../events";
-import { type LegionState, newLegionState, type PrState } from "../legion-state";
+import type { LegionState } from "../legion-state";
+import { checkPr, config, FakeNats, prPayload, settledChecks, stateForIssue } from "./ci-fixtures";
 
-interface Subscription {
-  subject: string;
-  callback: (subject: string, data: string) => void;
-}
-
-class FakeNats {
-  readonly subscriptions: Subscription[] = [];
-
-  subscribe(subject: string, callback: (subject: string, data: string) => void): () => void {
-    const subscription = { subject, callback };
-    this.subscriptions.push(subscription);
-    return () => {
-      const index = this.subscriptions.indexOf(subscription);
-      if (index >= 0) this.subscriptions.splice(index, 1);
-    };
-  }
-
-  publish(): void {}
-
-  emit(subject: string, data: string): void {
-    for (const subscription of this.subscriptions) {
-      if (matches(subscription.subject, subject)) subscription.callback(subject, data);
-    }
-  }
-}
-
-function matches(pattern: string, subject: string): boolean {
-  const patternTokens = pattern.split(".");
-  const subjectTokens = subject.split(".");
-  for (let index = 0; index < patternTokens.length; index += 1) {
-    const token = patternTokens[index];
-    if (token === ">") return index < subjectTokens.length;
-    if (token !== "*" && token !== subjectTokens[index]) return false;
-  }
-  return patternTokens.length === subjectTokens.length;
-}
-
-function envelope(payload: Record<string, unknown>, eventId = "event-1"): string {
+function envelope(
+  payload: Record<string, unknown> | string,
+  eventId = "event-1",
+  issuedAt = 1_000
+): string {
   return JSON.stringify({
     event_id: eventId,
     source: "github",
     source_event_id: eventId,
     topic: "notifications.github.acme.widgets.issue.1.comment",
     dedupe_key: `dedupe-${eventId}`,
-    issued_at: 1_000,
+    issued_at: issuedAt,
     payload_summary: "test",
-    payload: JSON.stringify(payload),
+    payload: typeof payload === "string" ? payload : JSON.stringify(payload),
     trace_id: `trace-${eventId}`,
   });
-}
-
-function stateForIssue(released = true): {
-  state: LegionState;
-  issue: IssueKey;
-  architect: string;
-  implementer: string;
-} {
-  const state = newLegionState("omp", 2);
-  const issue = formatIssueKey("acme", "widgets", 1);
-  const architect = roleToken("omp", issue, "architect");
-  const implementer = roleToken("omp", issue, "implementer");
-  state.issues[issue] = {
-    key: issue,
-    title: "Issue one",
-    state: "open",
-    children: [],
-    released,
-    labels: [],
-  };
-  state.trees[issue] = {
-    root: issue,
-    generation: 1,
-    status: "active",
-    launchFailures: 0,
-    heldEvents: [],
-  };
-  state.roles[architect] = { issue, role: "architect" };
-  state.roles[implementer] = { issue, role: "implementer" };
-  return { state, issue, architect, implementer };
-}
-
-function config(): DaemonConfig {
-  return {
-    project: "omp",
-    legionId: "acme/1",
-    port: 13370,
-    envoyUrl: "http://127.0.0.1:9020",
-    natsUrls: ["nats://127.0.0.1:4222"],
-    ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
-    boardProjectIds: ["PVT_board"],
-    appLogins: ["legion[bot]"],
-    admissionCap: 4,
-    workerBudget: 6,
-    maxRecursionDepth: 8,
-    lingerHours: 72,
-    ciQuietMs: 5_000,
-    maxFixAttempts: 3,
-    resyncIntervalMs: 600_000,
-    gates: { design: "root-issues", merge: "human" },
-    githubApps: {},
-    stateDir: "/state",
-  };
-}
-
-function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
-  return {
-    key: issue,
-    repo: "acme/widgets",
-    number: 7,
-    headSha,
-    checks: {},
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: 0,
-    fixAttempts: 0,
-  };
 }
 
 function deps(
@@ -167,7 +61,6 @@ function issueComment(): Record<string, unknown> {
     repository: { full_name: "acme/widgets" },
   };
 }
-
 describe("core-NATS event pump", () => {
   it("reduces a GitHub envelope and publishes the resulting role event", async () => {
     const { state, architect } = stateForIssue();
@@ -194,6 +87,108 @@ describe("core-NATS event pump", () => {
       },
     ]);
     pump.stop();
+  });
+
+  it("warns and ignores a raw-shaped GitHub pull request payload", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pull_request.synchronize",
+        envelope({
+          action: "synchronize",
+          repository: { full_name: "acme/widgets" },
+          pull_request: { number: 7, head: { sha: "unexpected-head" } },
+        })
+      );
+      await pump.drain();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "legion: ignored raw-shaped GitHub payload (nested pull_request); Envoy emits kind/action/head_sha"
+      );
+      expect(state.prs["acme/widgets#7"]).toEqual(checkPr(issue));
+    } finally {
+      pump.stop();
+      warn.mockRestore();
+    }
+  });
+
+  it("routes raw review and review-comment payloads with a nested pull request", async () => {
+    const { state, issue, implementer } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        published.push({ topic, payloadJson });
+      })
+    );
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pull_request_review.submitted",
+        envelope({
+          action: "submitted",
+          repository: { full_name: "acme/widgets" },
+          pull_request: { number: 7, head: { sha: "head-1" } },
+          review: {
+            user: { login: "reviewer" },
+            state: "approved",
+            commit_id: "head-1",
+            body: "Looks good",
+          },
+        })
+      );
+      await pump.drain();
+      nats.emit(
+        "notifications.github.acme.widgets.pull_request_review_comment.created",
+        envelope({
+          action: "created",
+          repository: { full_name: "acme/widgets" },
+          pull_request: { number: 7, head: { sha: "head-1" } },
+          comment: {
+            user: { login: "reviewer" },
+            body: "Please rename this",
+            path: "src/index.ts",
+            html_url: "https://github.com/acme/widgets/pull/7#discussion_r1",
+          },
+        })
+      );
+      await pump.drain();
+
+      expect(warn).not.toHaveBeenCalled();
+      expect(state.prs["acme/widgets#7"]?.reviewDecision).toBe("approved");
+      expect(published).toEqual([
+        {
+          topic: roleTopic(implementer),
+          payloadJson: JSON.stringify({
+            type: "pr-review",
+            state: "approved",
+            author: "reviewer",
+            body: "Looks good",
+          }),
+        },
+        {
+          topic: roleTopic(implementer),
+          payloadJson: JSON.stringify({
+            type: "pr-review-comment",
+            author: "reviewer",
+            body: "Please rename this",
+            path: "src/index.ts",
+            url: "https://github.com/acme/widgets/pull/7#discussion_r1",
+          }),
+        },
+      ]);
+    } finally {
+      pump.stop();
+      warn.mockRestore();
+    }
   });
 
   it("logs the subject and event ID after consuming a GitHub envelope", async () => {
@@ -282,100 +277,9 @@ describe("core-NATS event pump", () => {
     }
   });
 
-  it("creates and eagerly routes a PR from a raw check without a branch field", async () => {
-    const { state, implementer } = stateForIssue();
+  it("does not derive a PR head from checks without a synchronize event", async () => {
+    const { state } = stateForIssue();
     state.prByBranch["acme/widgets@legion/issue-1"] = "acme/widgets#7";
-    const nats = new FakeNats();
-    const published: Array<{ topic: string; payloadJson: string }> = [];
-    const pump = startEventPump(
-      deps(state, nats, async (topic, payloadJson) => {
-        published.push({ topic, payloadJson });
-      })
-    );
-
-    nats.emit(
-      "notifications.github.acme.widgets.pr.7.check",
-      envelope({
-        repository: { full_name: "acme/widgets" },
-        check_run: {
-          head_sha: "head-1",
-          name: "unit",
-          status: "completed",
-          conclusion: "failure",
-        },
-      })
-    );
-    await flush();
-
-    expect(state.prs["acme/widgets#7"]).toEqual(
-      expect.objectContaining({
-        key: formatIssueKey("acme", "widgets", 1),
-        headSha: "head-1",
-      })
-    );
-    expect(published).toEqual([
-      {
-        topic: roleTopic(implementer),
-        payloadJson: JSON.stringify({
-          type: "ci-first-red",
-          check: "unit",
-          sha: "head-1",
-        }),
-      },
-    ]);
-    pump.stop();
-  });
-
-  it("routes raw check observations through reduceCheck and emits eager first-red only to the implementer", async () => {
-    const { state, issue, implementer } = stateForIssue();
-    state.prs["acme/widgets#7"] = checkPr(issue);
-    const nats = new FakeNats();
-    const published: Array<{ topic: string; payloadJson: string }> = [];
-    const pump = startEventPump(
-      deps(state, nats, async (topic, payloadJson) => {
-        published.push({ topic, payloadJson });
-      })
-    );
-
-    nats.emit(
-      "notifications.github.acme.widgets.pr.7.check",
-      envelope({
-        action: "opened",
-        repository: { full_name: "acme/widgets" },
-        pull_request: {
-          number: 7,
-          head: { sha: "head-1", ref: "legion/issue-1" },
-        },
-        check_run: {
-          head_sha: "head-1",
-          name: "unit",
-          status: "completed",
-          conclusion: "failure",
-        },
-      })
-    );
-    await flush();
-
-    expect(published).toEqual([
-      {
-        topic: roleTopic(implementer),
-        payloadJson: JSON.stringify({
-          type: "ci-first-red",
-          check: "unit",
-          sha: "head-1",
-        }),
-      },
-    ]);
-    expect(state.prs["acme/widgets#7"].checks).toEqual({
-      unit: { status: "completed", conclusion: "failure" },
-    });
-    pump.stop();
-  });
-
-  it("publishes settled CI emissions from the five-second sweep", async () => {
-    vi.useFakeTimers();
-    const { state, issue, implementer } = stateForIssue();
-    state.prs["acme/widgets#7"] = checkPr(issue);
     const nats = new FakeNats();
     const published: string[] = [];
     const pump = startEventPump(
@@ -384,38 +288,480 @@ describe("core-NATS event pump", () => {
       })
     );
 
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+        })
+      )
+    );
+    await pump.drain();
+
+    expect(state.prs["acme/widgets#7"]).toBeUndefined();
+    expect(published).toEqual([]);
+    pump.stop();
+  });
+
+  it("persists only accepted checks settlements, including ones without a CI emission", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const saveState = vi.fn(async () => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      }),
+      saveState,
+    });
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(settledChecks({ sha: "stale-head" }), "ignored")
+    );
+    await pump.drain();
+    expect(saveState).not.toHaveBeenCalled();
+
+    nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(settledChecks()));
+    await pump.drain();
+    expect(saveState).toHaveBeenCalled();
+    const savesAfterEmission = saveState.mock.calls.length;
+    expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({ check_runs: [{ name: "build", id: 2 }], settled_at: 2_000 }),
+        "settled-without-emission"
+      )
+    );
+    await pump.drain();
+    expect(saveState).toHaveBeenCalledTimes(savesAfterEmission + 1);
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      ciSettledAt: 2_000,
+      ciCheckRuns: [{ name: "build", id: 2 }],
+    });
+    expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+    pump.stop();
+  });
+  it("ignores checks for a SHA that is not the current head", async () => {
+    const { state, issue } = stateForIssue();
+    // A settled green head: the non-head settlement must leave it untouched.
+    const before = checkPr(issue, {
+      headSha: "current-head",
+      headUpdatedAt: 2_000,
+      verdict: "green",
+      ciSettledAt: 1_500,
+    });
+    state.prs["acme/widgets#7"] = structuredClone(before);
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      })
+    );
+
     try {
       nats.emit(
-        "notifications.github.acme.widgets.pr.7.check",
-        envelope({
-          repository: { full_name: "acme/widgets" },
-          check_run: {
-            head_sha: "head-1",
-            name: "unit",
-            status: "completed",
-            conclusion: "failure",
-          },
-        })
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(settledChecks({ sha: "settled-head" }))
       );
-      await flush();
-      vi.advanceTimersByTime(5_000);
-      await flush();
+      await pump.drain();
 
-      expect(published).toEqual([
-        JSON.stringify({ type: "ci-first-red", check: "unit", sha: "head-1" }),
-        JSON.stringify({
+      expect(state.prs["acme/widgets#7"]).toEqual(before);
+      expect(published).toEqual([]);
+      expect(debug).toHaveBeenCalledWith(
+        "[legion] ignored non-head checks event event-1 subject=notifications.github.acme.widgets.pr.7.checks sha=settled-head head_sha=current-head"
+      );
+    } finally {
+      pump.stop();
+      debug.mockRestore();
+    }
+  });
+  it("keeps a higher check-run id green settlement when a lower id arrives for the same SHA", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      })
+    );
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(
+          settledChecks({ check_runs: [{ name: "build", id: 2 }], settled_at: 2_000 }),
+          "newer-green"
+        )
+      );
+      await pump.drain();
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(
+          settledChecks({
+            check_runs: [{ name: "build", id: 1 }],
+            settled_at: 1_000,
+            failed: { count: 1, checks: ["unit"] },
+            passed: { count: 0, checks: [] },
+          }),
+          "older-red"
+        )
+      );
+      await pump.drain();
+
+      expect(state.prs["acme/widgets#7"]).toMatchObject({
+        headSha: "head-1",
+        verdict: "green",
+        failing: [],
+        failingStatuses: [],
+        ciSettledAt: 2_000,
+        ciCheckRuns: [{ name: "build", id: 2 }],
+      });
+      expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+      expect(debug).toHaveBeenCalledWith(
+        "[legion] ignored stale checks event older-red subject=notifications.github.acme.widgets.pr.7.checks sha=head-1"
+      );
+    } finally {
+      pump.stop();
+      debug.mockRestore();
+    }
+  });
+
+  it("accepts a newer synchronize despite an earlier checks wall-clock settlement", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = {
+      ...checkPr(issue),
+      headUpdatedAt: 1_000,
+    };
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      })
+    );
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          sha: "head-2",
+          settled_at: 10_000,
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+        }),
+        "head-2-settled"
+      )
+    );
+    await pump.drain();
+    nats.emit(
+      "notifications.github.acme.widgets.pull_request.synchronize",
+      envelope(
+        prPayload({
+          head_sha: "head-3",
+          updated_at: "1970-01-01T00:00:02.000Z",
+        })
+      )
+    );
+    await pump.drain();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      headSha: "head-3",
+      headUpdatedAt: 2_000,
+      verdict: null,
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: null,
+    });
+    expect(published).toEqual([]);
+    pump.stop();
+  });
+  it("clears a re-settled head's red flags before tracking the next head", async () => {
+    const { state, issue, implementer } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        published.push({ topic, payloadJson });
+      })
+    );
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          check_runs: [
+            { name: "build", id: 1 },
+            { name: "unit", id: 2 },
+          ],
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 1, checks: ["build"] },
+          failing_checks: [{ name: "unit", url: "https://example.test/checks/unit" }],
+        })
+      )
+    );
+    await flush();
+    // unit reruns green: the re-settlement reports it, so its failure clears.
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          check_runs: [
+            { name: "build", id: 1 },
+            { name: "unit", id: 3 },
+          ],
+          passed: { count: 2, checks: ["build", "unit"] },
+          generation: 1,
+          snapshot: "state-hash-2",
+          settled_at: 2_000,
+          superseded_settlement: "true",
+        })
+      )
+    );
+    await flush();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 2_000,
+      fixAttempts: 0,
+    });
+    expect(await overseerCatchup(state, issue)).toMatchObject({
+      prVerdicts: {
+        "acme/widgets#7": { sha: "head-1", ci: "green", fixAttempts: 0 },
+      },
+    });
+
+    nats.emit(
+      "notifications.github.acme.widgets.pull_request.synchronize",
+      envelope(
+        prPayload({
+          head_sha: "head-2",
+          updated_at: "2026-09-07T03:02:00Z",
+        })
+      )
+    );
+    await flush();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      headSha: "head-2",
+      verdict: null,
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: null,
+      fixAttempts: 0,
+    });
+    expect(published).toEqual([
+      {
+        topic: roleTopic(implementer),
+        payloadJson: JSON.stringify({
           type: "ci-settled-red",
           failing: ["unit"],
           sha: "head-1",
         }),
-      ]);
-      expect(state.roles[implementer]).toBeDefined();
+      },
+      {
+        topic: roleTopic(implementer),
+        payloadJson: JSON.stringify({ type: "ci-green", sha: "head-1" }),
+      },
+    ]);
+    pump.stop();
+  });
+
+  it("uncertifies a green CI verdict for a cancelled-only settled envelope", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = {
+      ...checkPr(issue),
+      verdict: "green",
+      ciSettledAt: 500,
+    };
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      })
+    );
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          passed: { count: 0, checks: [] },
+          cancelled: { count: 1, checks: ["cancelled-job"] },
+        })
+      )
+    );
+    await flush();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      verdict: null,
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1_000,
+    });
+    expect(published).toEqual([]);
+    pump.stop();
+  });
+
+  it("does not change a red CI verdict for a cancelled-only settled envelope", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = {
+      ...checkPr(issue),
+      verdict: "red",
+      failing: ["unit"],
+      failingStatuses: [],
+      ciSettledAt: 500,
+    };
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      })
+    );
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          passed: { count: 0, checks: [] },
+          cancelled: { count: 1, checks: ["cancelled-job"] },
+        })
+      )
+    );
+    await flush();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      verdict: "red",
+      failing: ["unit"],
+      failingStatuses: [],
+      ciSettledAt: 1_000,
+    });
+    expect(published).toEqual([]);
+    pump.stop();
+  });
+
+  it("accepts checks payloads without the retired is_head field", async () => {
+    const { state, issue, implementer } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        published.push({ topic, payloadJson });
+      })
+    );
+    const payload = settledChecks();
+    delete payload.is_head;
+
+    nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(payload));
+    await pump.drain();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1_000,
+    });
+    expect(published).toEqual([
+      {
+        topic: roleTopic(implementer),
+        payloadJson: JSON.stringify({ type: "ci-green", sha: "head-1" }),
+      },
+    ]);
+    pump.stop();
+  });
+
+  it("ignores an explicit non-head checks payload without failing the pump", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(settledChecks({ is_head: false }))
+      );
+      await expect(pump.drain()).resolves.toBeUndefined();
+
+      expect(state.prs["acme/widgets#7"]).toEqual(checkPr(issue));
+      expect(debug).toHaveBeenCalledWith(
+        "[legion] ignored malformed or non-head checks event event-1 subject=notifications.github.acme.widgets.pr.7.checks"
+      );
     } finally {
       pump.stop();
-      vi.useRealTimers();
+      debug.mockRestore();
     }
   });
 
+  it("ignores malformed checks payload JSON without failing the pump", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    try {
+      nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope("{", "malformed-check"));
+      await expect(pump.drain()).resolves.toBeUndefined();
+
+      expect(state.prs["acme/widgets#7"]).toEqual(checkPr(issue));
+      expect(debug).toHaveBeenCalledWith(
+        "[legion] ignored malformed or non-head checks event malformed-check subject=notifications.github.acme.widgets.pr.7.checks"
+      );
+    } finally {
+      pump.stop();
+      debug.mockRestore();
+    }
+  });
+
+  it("uses payload settled_at before envelope issued_at for the current head", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = {
+      ...checkPr(issue),
+      verdict: "green",
+      ciSettledAt: 1_500,
+    };
+    const nats = new FakeNats();
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          settled_at: 2_000,
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+        }),
+        "newer-settlement",
+        1_000
+      )
+    );
+    await pump.drain();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      headSha: "head-1",
+      verdict: "red",
+      failing: ["unit"],
+      failingStatuses: [],
+      ciSettledAt: 2_000,
+    });
+    pump.stop();
+  });
   it("persists a failed role publication and retries it with backoff", async () => {
     vi.useFakeTimers();
     const { state, issue } = stateForIssue();
@@ -626,14 +972,7 @@ describe("core-NATS event pump", () => {
     );
     nats.emit(
       "notifications.github.acme.widgets.pull_request.synchronize",
-      envelope({
-        action: "synchronize",
-        repository: { full_name: "acme/widgets" },
-        pull_request: {
-          number: 7,
-          head: { sha: "head-2", ref: "legion/issue-1" },
-        },
-      })
+      envelope(prPayload({ head_sha: "head-2" }))
     );
     await flush();
 

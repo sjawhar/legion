@@ -1,0 +1,33 @@
+{
+  "action": "opened",
+  "number": 42,
+  "pull_request": {
+    "number": 42,
+    "title": "Add local acceptance driver",
+    "body": "Exercise the listener with public fixture data.",
+    "html_url": "https://example.invalid/example-org/example-repo/pull/42",
+    "user": {
+      "login": "octocat"
+    },
+    "head": {
+      "sha": "1111111111111111111111111111111111111111",
+      "ref": "acceptance-driver"
+    },
+    "base": {
+      "ref": "main"
+    },
+    "merged": false,
+    "updated_at": "2026-09-07T03:00:00Z"
+  },
+  "sender": {
+    "login": "octocat",
+    "type": "User"
+  },
+  "repository": {
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "owner": {
+      "login": "example-org"
+    }
+  }
+}

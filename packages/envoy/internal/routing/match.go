@@ -11,7 +11,7 @@ func Match(pattern string, topic string) bool {
 		pp = pp[1:]
 
 		if part == ">" {
-			return true
+			return len(tp) > 0
 		}
 		if len(tp) == 0 {
 			return false

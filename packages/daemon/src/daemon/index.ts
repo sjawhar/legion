@@ -4,9 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { type IssueKey, roleToken, roleTopic } from "@legion/contracts";
 import { connect, StringCodec, type Subscription } from "nats";
-import type { CommandRunner } from "../state/fetch";
-import { defaultRunner } from "../state/fetch";
+import {
+  type CiFetchResult,
+  type CommandRunner,
+  defaultRunner,
+  getCiStatusBatch,
+} from "../state/fetch";
 import { fetchGitHubProjectItems, type GitHubProjectItemsResult } from "../state/github-fetch";
+import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
@@ -107,6 +112,19 @@ export function createBoardProjectItemsFetcher(
 ): () => Promise<GitHubProjectItemsResult> {
   return () =>
     fetchGitHubProjectItems(board.owner, board.number, runner, async (owner) => {
+      const lease = await tokenManager.getToken("implement", owner);
+      return {
+        env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
+      };
+    });
+}
+
+export function createCiStatusFetcher(
+  tokenManager: Pick<TokenManager, "getToken">,
+  runner: CommandRunner = defaultRunner
+): (prRefs: Record<string, GitHubPRRef>) => Promise<Record<string, CiFetchResult>> {
+  return (prRefs) =>
+    getCiStatusBatch(prRefs, runner, async (owner) => {
       const lease = await tokenManager.getToken("implement", owner);
       return {
         env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
@@ -346,17 +364,25 @@ export async function startDaemon(
     apiDeps
   );
   const ready = nats.ready();
+  const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 
   const emitResync = async (): Promise<void> => {
     const payload = await runResync({
       state,
       config,
       fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
+      fetchCiStatusBatch,
       applyEffects: eventPump.applyEffects,
       now: deps.now,
     });
     console.log(
-      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems}`
+      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems} ciFetchFailures=${payload.ciFetchFailures}${
+        payload.ciFetchFailureDetails.length === 0
+          ? ""
+          : ` ciFetchFailureDetails=${payload.ciFetchFailureDetails
+              .map(({ owner, error }) => `owner=${owner} error=${error}`)
+              .join(" ")}`
+      }`
     );
     await eventPump.publishControllerEvent(payload, {
       event_id: `resync:${randomUUID()}`,

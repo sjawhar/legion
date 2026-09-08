@@ -34,10 +34,26 @@ import (
 // initialization completes. HTTP handlers read these via atomic.Pointer to
 // avoid data races during the startup window.
 type listenerDeps struct {
-	client   *bus.Client
-	registry *store.Registry
-	sessions *session.SessionRegistry
-	ciStore  *cistore.Store
+	client     *bus.Client
+	registry   *store.Registry
+	sessions   *session.SessionRegistry
+	ciStore    *cistore.Store
+	streamName string
+	streamInfo streamInfoLookup
+}
+
+func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
+	return webhook.CIRecorderFuncs{
+		RecordFunc: func(observation contracts.CIObservation) error {
+			return deps.Load().ciStore.Record(observation)
+		},
+		RecordSuiteFunc: func(observation contracts.CIObservation) error {
+			return deps.Load().ciStore.RecordSuite(observation)
+		},
+		RecordHeadFunc: func(owner, repo, number, sha, updatedAt string) error {
+			return deps.Load().ciStore.RecordHead(owner, repo, number, sha, updatedAt)
+		},
+	}
 }
 
 // Canonical policy for the listener's durable consumer. DeliverSubject is
@@ -127,6 +143,9 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 }
 
 func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
+	if sessions == nil {
+		return false
+	}
 	_, err := sessions.Get(sessionID)
 	return err == nil
 }
@@ -222,7 +241,7 @@ func runSelfHealthLoop(logger *logging.Logger, probe func() error, terminate fun
 func readinessGate(ready func() bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !ready() {
-			http.Error(w, "service starting", http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -360,9 +379,7 @@ func main() {
 	})
 	// CI recorder folds check_run events into cistore behind the same readiness
 	// gate (deps is non-nil once init completes, so ciStore is set).
-	ciRecorder := webhook.CIRecorderFunc(func(owner, repo, number, sha, checkName, status, conclusion string) error {
-		return deps.Load().ciStore.Record(owner, repo, number, sha, checkName, status, conclusion)
-	})
+	ciRecorder := newCIRecorder(&deps)
 	if webhookCfg.GitHub != nil {
 		mux.Handle("/webhook/github", readinessGate(
 			func() bool { return deps.Load() != nil },
@@ -387,7 +404,9 @@ func main() {
 	registerV1Routes(v1, &deps, cfg.MachineID, logger)
 
 	// Serve /v1/* on the listener port for local plugin registration.
-	mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
+	v1Handler := readinessGate(func() bool { return deps.Load() != nil }, v1)
+	mux.Handle("/v1", v1Handler)
+	mux.Handle("/v1/", v1Handler)
 
 	// Phase 4: Start HTTP server (port already bound via net.Listen).
 	server := &http.Server{
@@ -551,10 +570,11 @@ func main() {
 
 	// Phase 6: Publish initialized state — readiness gate opens for /v1/*.
 	deps.Store(&listenerDeps{
-		client:   client,
-		registry: registry,
-		sessions: sessions,
-		ciStore:  ciStore,
+		client:     client,
+		registry:   registry,
+		sessions:   sessions,
+		ciStore:    ciStore,
+		streamName: bus.Stream,
 	})
 	logger.Info("envoy-listener ready (NATS connected)")
 
@@ -563,9 +583,9 @@ func main() {
 	// to prune orphaned interests from dead sessions.
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
 
-	// Phase 6b2: Start the CI summary loop. It emits one debounced, per-commit CI
-	// summary to pr.<n>.ci once a commit's checks have been quiet for the debounce
-	// window (ENVOY_CI_DEBOUNCE, default 5s). Emit-once is guarded by a KV CAS.
+	// Phase 6b2: Start the CI summary loop. It emits one pr.<n>.checks event
+	// once the head commit's checks settle; new runs re-arm settlement. The
+	// debounce window is ENVOY_CI_DEBOUNCE (default 5s).
 	ciDebounce := 5 * time.Second
 	if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
 		if d, perr := time.ParseDuration(v); perr == nil {

@@ -1,77 +1,34 @@
 # Envoy CI Notifications
+Envoy emits one settled CI result per pull-request head on
+`notifications.github.<owner>.<repo>.pr.<number>.checks`. Check runs and check
+suites are aggregated first; raw CI observations are not published.
 
-Envoy offers both immediate, per-check observations and a debounced, per-commit summary for
-each pull request. Consumers that react to a particular check use the raw observation; consumers
-that need the overall state use the summary.
+## Durable settlement state machine
 
-## Delivery paths
+Each commit uses the KV key `<owner>.<repo>.pr<number>.<sha>` in
+`envoy_ci_state`; the PR head is a separate durable `head.<owner>.<repo>.<number>`
+record. State contains checks, suites, a state-version `Generation`, `EmittedCount`,
+`SettledEmitted`, and an optional claim `{hash, generation, claimed_at}`.
 
-1. **Publish each PR-associated check.** A `check_run` produces one raw envelope per associated
-   PR on `notifications.github.<o>.<r>.pr.<n>.check`. Its `Payload` is JSON with `sha`, `name`,
-   `status`, and `conclusion`; `PayloadSummary` carries a compact display string. `check_suite`
-   is ignored because it is a per-app rollup without a per-check name, and a check without an
-   associated PR has no topic.
-2. **Fold each check into per-commit state.** The webhook handler calls
-   `cistore.Store.Record(...)`, which performs compare-and-swap read-modify-write in JetStream KV
-   bucket `envoy_ci_state`, keyed by `(owner, repo, PR number, head SHA)`.
-3. **Emit one summary per quiet burst.** A reconcile ticker (`cistore.StartSummaryLoop`) scans
-   cached commit states. When a check set has been quiet for `ENVOY_CI_DEBOUNCE` (default `5s`)
-   and changed since its last emission, it publishes a rendered JSON summary on
-   `notifications.github.<o>.<r>.pr.<n>.ci`.
+1. `Record` and `RecordSuite` CAS-update the aggregate. A new record starts at
+   generation 0; every later aggregate-hash change and every re-arm advances the
+   state version, then clears `SettledEmitted`.
+2. The reconcile loop reads its rebuildable cache and selects only a quiet,
+   terminal, current-head state without an emitted or live claim. A claim older
+   than twice the debounce interval is reclaimed.
+3. `ClaimSettlement` re-reads durable state and head, verifies the expected hash,
+   generation, terminality, and head identity, then CAS-writes the hash-bound
+   claim. A mismatch publishes nothing.
+4. The claimant renders that durable snapshot and publishes with
+   `github.checks.<owner>/<repo>.pr.<number>.<sha>.g<generation>`.
+5. `MarkSettled` records the emission in `EmittedCount` and clears its claim. A
+   publish failure calls `ReleaseClaim`, which advances the state version; a
+   generation or hash change makes cleanup refuse an obsolete claim.
 
-All summary coordination state lives in KV, so aggregation is durable, restart-safe, and correct
-across listener replicas. The only in-memory state is a rebuildable `WatchAll` read-cache.
+All local cache write-through and watcher updates carry a KV revision and only
+apply at or above the cached revision. This prevents an older claim/mark write
+from replacing a newer watcher state.
 
-## Exactly-once emit across replicas + a stale read-cache
+## Envelope
 
-Emit-once **and debounce** are enforced by compare-and-swap against fresh KV, not an in-memory flag:
-
-- `Record` retries its CAS RMW (`kv.Update(key, val, rev)` / `kv.Create`) on revision conflict, so concurrent writers — parallel webhook handlers, multiple replicas — racing on the same commit never lose an update. Retry uses a **time-budgeted, full-jitter backoff** rather than a fixed attempt count: a fixed count starves when many checks for one SHA land at once (a real bug caught in testing — 8 retries lost updates under 12-way concurrency). The budget is **2s**, kept well under the listener's 10s HTTP `WriteTimeout` because `Record` runs synchronously in the webhook handler and one `check_run` can fan out over several PRs sequentially. (The budget bounds only the retry loop; a single hung KV call can still block up to the JetStream `MaxWait` — a systemic limit of the legacy nats.go KV API, shared with `internal/store`.)
-- `MarkEmitted(key, hash, debounce)` reads fresh KV and re-validates the caller's decision before the CAS `Update`. It returns `false` (not an error) — meaning "don't emit" — when **any** of these hold: the entry already carries `hash` (already emitted), `fresh.Hash() != hash` (a `Record` landed after the loop rendered → that summary is now stale), `now - fresh.LastEventAt < debounce` (that same late `Record` reopened the quiet window → too early), or the revision moved (CAS conflict). These four guards are what make emit-once **and** debounce hold against the eventually-consistent `WatchAll` cache: a stale or premature summary can never win the CAS. Because success implies `fresh.Hash() == hash`, and the render depends only on the hashed check set plus stable identity, the loop's already-rendered summary faithfully represents what was marked.
-
-The commit hash is an order-independent SHA-256 of `{name, status, conclusion}` across all checks, so a re-run that flips a check back to `in_progress` changes the hash and re-opens emission, while an unchanged set stays quiet. Head-SHA keying means a new push starts a fresh tally.
-
-`MarkEmitted` rechecks the current hash and quiet window inside its compare-and-swap operation, so a summary rendered from a stale `WatchAll` snapshot cannot overwrite newer state or bypass the debounce window.
-
-## The MarkEmitted-then-Publish tradeoff
-
-The loop calls `MarkEmitted` **before** `Publish`. This favors exactly-once over at-least-once: a failed publish drops that summary rather than risking a double-publish. A later changed check set becomes a new candidate for emission. Dropped summaries are logged at WARN with `topic`, `sha`, and `hash`.
-
-`DedupeKey` is `github.ci.<owner>/<repo>.pr.<number>.<sha>.<hash>` — it includes the PR number, not just `<sha>.<hash>`. A `check_run` can attach to multiple PRs, so two PRs sharing a head SHA + identical check set would otherwise collide on the key, and a wildcard subscriber's `(DedupeKey, SessionID)` dedupe would suppress the second PR's summary. The PR number keeps each PR's summary independently deliverable.
-
-## Notification shape (JSON)
-
-`PayloadSummary` is a compact JSON object (same `summaryJSON` convention as every other envoy event — not a rendered text/ASCII summary). Each status is `{count, checks}` with the full sorted name list (nothing collapsed); every status is always present (`{"count":0,"checks":[]}` when empty).
-
-```json
-{
-  "kind": "ci_summary",
-  "repo": "sjawhar/legion",
-  "number": "13728",
-  "sha": "a1b2c3d9999999",
-  "failed":  { "count": 1, "checks": ["infra-tests"] },
-  "running": { "count": 2, "checks": ["build-image", "snapshots"] },
-  "passed":  { "count": 6, "checks": ["auto-approve", "classify", "detect-changes", "pr-checks-result", "review", "vercel"] },
-  "queued":  { "count": 1, "checks": ["task-tests"] },
-  "skipped": { "count": 12, "checks": ["skip-a", "...", "skip-l"] }
-}
-```
-
-`Payload` is left empty — `PayloadSummary` carries the complete structured summary.
-
-## Operational hardening
-
-- **Watcher health.** The summary loop reads only the `WatchAll` cache (no KV fallback, unlike `Record`), so a dead watcher would silently stop/stale summaries while `Ping()` still passed. `Ping()` now also returns a sticky error set when `WatchAll()` fails to start or its update stream closes, so the listener's self-health watchdog restarts the task and rebuilds the cache from durable KV.
-- **KV TTL = 7 days** (per-key, reset on each write). Long enough that an in-progress commit isn't dropped mid-flight, and a rerun days later still finds prior checks. A key only expires 7d after its *last* check event.
-- **Loop lifecycle.** `StartSummaryLoop(ctx, ...)` stops on context cancel; the listener cancels it at the start of shutdown so the ticker doesn't hit a draining NATS conn.
-- **Unknown conclusions fail loud.** All documented GitHub conclusions are classified explicitly; an unknown/future completed conclusion is surfaced as **failed**, not silently passed.
-- **KV key.** `Key` preserves `.` (a legal KV-key char, unlike in a NATS subject) so repos like `foo.bar` and `foo_bar` don't collide; only truly-invalid chars (`* > space /`) are sanitized.
-
-
-
-## Files
-
-- `packages/envoy/internal/cistore/` — `cistore.go` (state, CAS `Record`/`MarkEmitted`, `WatchAll` cache), `render.go` (pure summary rendering), `loop.go` (`StartSummaryLoop`).
-- `packages/envoy/internal/contracts/normalize.go` — `GithubCIObservations` extracts per-PR `check_run` facts and `GithubCIEnvelope` builds their raw envelopes.
-- `packages/envoy/internal/webhook/github.go` — records each check and publishes its raw observation.
-- `packages/envoy/cmd/listener/main.go` — opens the store, wires the recorder behind the readiness gate, starts the loop, pings the bucket in self-health.
+The payload is the full status summary: every check group and failing check URLs, the attempt set, generation, and snapshot. Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"` payload. Every settlement carries its attempt set `check_runs` — the latest GitHub check-run id per check name, sorted by name — plus the listener's `generation` (the record's state version) and `snapshot` (the record's hash). Consumers order same-head settlements by the attempt set, compared per shared name: no id lower and some id higher (or a new name) is newer; every shared id equal and no new name is the same set; no id higher and some lower is older; anything else is a mixed view and is dropped as a conflict (names only in the stored set are ignored — a check can vanish from GitHub's view, and a record recreated after the seven-day KV TTL starts sparse). Within one producer record per-name ids never decrease, and a consumer's fence is the per-name maximum over every view it has accepted — an accepted set merges into the fence, nothing is pruned — so the fence never decreases either: a newer attempt is newer whatever its completion time, no timestamps take part in ordering, and a name an incomplete view omitted cannot later reappear as new. At the same set the listener's `generation` orders its own settlements: lower is stale; equal is a duplicate when the `snapshot` matches and otherwise a conflict (an equal pair with a different snapshot cannot occur within one record's lifetime; a recreated record may reuse one and is dropped). A live settlement is a possibly incomplete view of the head (a missed webhook, a record recreated after the KV TTL): it decides the outcome of every name it reports — at any id the ordering accepted, including the same run observed in place — and says nothing about the rest, whose last known outcome stands; the head is red while any failure remains. A consumer that reconciles a verdict from GitHub's rollup compares the rollup's attempt set the same way, but GitHub's read is complete: its failing check runs and failing commit statuses replace the stored ones wholesale. Statuses have no check run and the listener never sees them, so a consumer keeps them apart from check-run failures: a check run that shares a status's name cannot retire it — only GitHub does (likewise a deleted check's failure). A newer rollup set merges into the fence and takes the identity (no listener generation); the same set applies GitHub's verdict and keeps the listener identity for duplicate detection; an older, mixed, or empty-over-fenced set is ignored. A terminal read (green or red) then holds the tie at that set: a live settlement at the same set is accepted only if its effective outcome — the check-run failures it reports plus the stored ones it omits and the stored commit-status failures — agrees with the reconciled verdict, refreshing the listener identity without releasing GitHub's authority; a disagreeing one is stale whatever its generation until the set advances; a pending or cancelled-only read uncertifies a green head, leaves a red one untouched, and holds nothing — it releases any authority held at that set — so the terminal live settlement that follows applies at once, subject to the ordinary generation and duplicate rules (a replay or a lower generation still does not apply). Pending is therefore not a commutative join: a pending read after a live green uncertifies it until the next terminal view. Two remainders. An in-place conclusion change on an existing run id: GitHub's view stands and the listener's is recovered by the next successful, non-skipped read at that set — the dropped delivery is not replayed. A check whose highest run is deleted on GitHub: the fence keeps that id, so a rollup reporting a lower run under the same name is older until a newer run appears. A head publishes only when at least one check has a positive run id; legacy checks without one remain in the status groups and failing names but not in `check_runs`. A legacy in-progress check whose completion is never observed holds the head unsettled until it reruns; rerun the affected check to release it. The summary waits for `ENVOY_CI_DEBOUNCE` (default `5s`), all check runs to be terminal, and every observed suite to be `completed`; heads with no suite still settle after terminal checks.
