@@ -8,6 +8,7 @@ import {
   type LegionRole,
 } from "@legion/contracts";
 import { z } from "zod";
+import type { CheckRunRef } from "../state/types";
 
 export interface IssueNode {
   key: IssueKey;
@@ -48,12 +49,6 @@ export interface TreeState {
   launchFailures: number;
   heldEvents: HeldEvent[];
   recoveryEvents?: RecoveryEvent[];
-}
-
-/** One check and its latest GitHub check-run id: the unit of a settlement's attempt set. */
-export interface CheckRunRef {
-  name: string;
-  id: number;
 }
 
 export interface PrState {

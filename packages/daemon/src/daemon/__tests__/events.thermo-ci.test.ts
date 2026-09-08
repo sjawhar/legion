@@ -1,6 +1,7 @@
 import { expect, it, vi } from "bun:test";
 import { formatIssueKey, roleToken, roleTopic } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
+import type { CheckRunRef } from "../../state/types";
 import type { DaemonConfig } from "../config";
 import { startEventPump } from "../events";
 import { type LegionState, newLegionState } from "../legion-state";
@@ -1094,7 +1095,7 @@ it("preserves a live check-run fence through a same-head status-context resync",
 /** One GitHub rollup for the head under test, as the fetcher would return it. */
 function rollup(
   ciStatus: "passing" | "failing" | "pending",
-  checkRuns: Record<string, number>,
+  checkRuns: CheckRunRef[],
   failingChecks: string[] = []
 ) {
   return {
@@ -1106,9 +1107,7 @@ function rollup(
       headSha: "head-1",
       isOpen: true,
       updatedAt: "2026-09-07T00:00:00.000Z",
-      checkRuns: Object.entries(checkRuns)
-        .sort(([left], [right]) => (left < right ? -1 : 1))
-        .map(([name, id]) => ({ name, id })),
+      checkRuns,
     },
   };
 }
@@ -1141,7 +1140,7 @@ it("a pending GitHub read holds no tie: the terminal live settlement at the same
   const { nats, published, pump } = startCiPump(state);
   try {
     // Resync sees the set while it is still running: fenced, uncertified, no authority.
-    await resyncWith(state, rollup("pending", { build: 900 }));
+    await resyncWith(state, rollup("pending", [{ name: "build", id: 900 }]));
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: null,
       ciCheckRuns: [{ name: "build", id: 900 }],
@@ -1166,7 +1165,7 @@ it("a pending GitHub read holds no tie: the terminal live settlement at the same
     expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
 
     // A later pending read at the same set uncertifies again without taking the tie...
-    await resyncWith(state, rollup("pending", { build: 900 }));
+    await resyncWith(state, rollup("pending", [{ name: "build", id: 900 }]));
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: null,
       ciSettlementGeneration: 3,
@@ -1204,7 +1203,18 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
   const applied: Effect[][] = [];
 
   // GitHub authors the fence: red at {build: 200, lint: 900}.
-  await resyncWith(state, rollup("failing", { build: 200, lint: 900 }, ["build"]), applied);
+  await resyncWith(
+    state,
+    rollup(
+      "failing",
+      [
+        { name: "build", id: 200 },
+        { name: "lint", id: 900 },
+      ],
+      ["build"]
+    ),
+    applied
+  );
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     ciCheckRuns: [
@@ -1219,7 +1229,14 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
   ]);
 
   // An older view of the head (build still at its first attempt): ignored.
-  await resyncWith(state, rollup("passing", { build: 100, lint: 900 }), applied);
+  await resyncWith(
+    state,
+    rollup("passing", [
+      { name: "build", id: 100 },
+      { name: "lint", id: 900 },
+    ]),
+    applied
+  );
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     ciCheckRuns: [
@@ -1228,7 +1245,7 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
     ],
   });
   // A view with no check runs at all where some are fenced: ignored.
-  await resyncWith(state, rollup("passing", {}), applied);
+  await resyncWith(state, rollup("passing", []), applied);
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     ciCheckRuns: [
@@ -1237,7 +1254,14 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
     ],
   });
   // A mixed view (build newer, lint older) cannot come from one consistent read: ignored.
-  await resyncWith(state, rollup("passing", { build: 300, lint: 800 }), applied);
+  await resyncWith(
+    state,
+    rollup("passing", [
+      { name: "build", id: 300 },
+      { name: "lint", id: 800 },
+    ]),
+    applied
+  );
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     ciCheckRuns: [
@@ -1248,7 +1272,14 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
   expect(publishedEmissions(applied)).toHaveLength(1);
 
   // GitHub's newer read (build re-ran as 300, green) replaces the fence.
-  await resyncWith(state, rollup("passing", { build: 300, lint: 900 }), applied);
+  await resyncWith(
+    state,
+    rollup("passing", [
+      { name: "build", id: 300 },
+      { name: "lint", id: 900 },
+    ]),
+    applied
+  );
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "green",
     ciCheckRuns: [
@@ -1337,7 +1368,7 @@ it("GitHub's authority at an attempt set survives an agreeing live refresh and c
     expect(state.prs["acme/widgets#7"]).toMatchObject({ verdict: "green", ciReconciled: false });
 
     // GitHub reads the same set red: it holds the tie there.
-    await resyncWith(state, rollup("failing", { build: 900 }, ["build"]));
+    await resyncWith(state, rollup("failing", [{ name: "build", id: 900 }], ["build"]));
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "red",
       ciSettlementGeneration: 1,
@@ -1448,7 +1479,11 @@ for (const order of orders) {
       let githubSeen = false;
       for (const step of order) {
         if (step === "R") {
-          await resyncWith(state, rollup("failing", { build: 900 }, ["build"]), applied);
+          await resyncWith(
+            state,
+            rollup("failing", [{ name: "build", id: 900 }], ["build"]),
+            applied
+          );
           githubSeen = true;
           continue;
         }
@@ -1503,7 +1538,7 @@ for (const order of [
         envelope(settledChecks({ check_runs: set, generation: 1, settled_at: 1 }))
       );
       await pump.drain();
-      await resyncWith(state, rollup("failing", { build: 900 }, ["build"]));
+      await resyncWith(state, rollup("failing", [{ name: "build", id: 900 }], ["build"]));
       const before = published.length;
       for (const step of order) {
         const generation = step === "L2" ? 2 : 3;
@@ -1555,11 +1590,7 @@ it("check names that collide with Object.prototype are ordinary attempt-set memb
     expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
 
     // The same set from GitHub applies; a re-run of "constructor" is a newer set.
-    await resyncWith(
-      state,
-      rollup("passing", Object.fromEntries(first.map((run) => [run.name, run.id]))),
-      applied
-    );
+    await resyncWith(state, rollup("passing", first), applied);
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       ciSettlementGeneration: 1,
       ciReconciled: true,
@@ -1592,7 +1623,15 @@ it("check names that collide with Object.prototype are ordinary attempt-set memb
     // A check GitHub has not shown before, named like a prototype member, is a new name: newer.
     await resyncWith(
       state,
-      rollup("failing", { __proto__: 100, constructor: 201, toString: 300 }, ["constructor"])
+      rollup(
+        "failing",
+        [
+          { name: "__proto__", id: 100 },
+          { name: "constructor", id: 201 },
+          { name: "toString", id: 300 },
+        ],
+        ["constructor"]
+      )
     );
     expect(state.prs["acme/widgets#7"]).toMatchObject({ verdict: "red", ciReconciled: true });
     nats.emit(
@@ -1693,7 +1732,14 @@ it("a superseding attempt with an earlier completion is a newer set: accepted li
     ]);
 
     // GitHub's next read describes the same latest set: applied quietly, holds the tie.
-    await resyncWith(state, rollup("passing", { build: 200, lint: 900 }), applied);
+    await resyncWith(
+      state,
+      rollup("passing", [
+        { name: "build", id: 200 },
+        { name: "lint", id: 900 },
+      ]),
+      applied
+    );
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "green",
       ciSettlementGeneration: 8,

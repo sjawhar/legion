@@ -1,5 +1,6 @@
 import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
-import type { CheckRunRef, IssueNode, LegionState, PrState, TreeState } from "./legion-state";
+import type { CheckRunRef } from "../state/types";
+import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
 
 export interface LegionEventPayload {
   type: string;

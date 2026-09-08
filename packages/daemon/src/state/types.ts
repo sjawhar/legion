@@ -81,3 +81,19 @@ export const GitHubPRRef = {
     };
   },
 };
+
+/** One check and its latest GitHub check-run id: the unit of a settlement's attempt set. */
+export interface CheckRunRef {
+  name: string;
+  id: number;
+}
+
+/**
+ * Canonical attempt set from `(name, id)` pairs with unique names: sorted by
+ * name, so equal sets compare positionally.
+ */
+export function sortedCheckRunRefs(runs: Iterable<readonly [string, number]>): CheckRunRef[] {
+  return [...runs]
+    .sort(([left], [right]) => (left < right ? -1 : 1))
+    .map(([name, id]) => ({ name, id }));
+}

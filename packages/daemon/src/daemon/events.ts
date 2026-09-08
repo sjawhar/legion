@@ -5,8 +5,9 @@ import {
   parseRoleToken,
   roleTopic,
 } from "@legion/contracts";
+import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { DaemonConfig } from "./config";
-import type { CheckRunRef, HeldEvent, LegionState, TreeState } from "./legion-state";
+import type { HeldEvent, LegionState, TreeState } from "./legion-state";
 import {
   classifySettlement,
   type Effect,
@@ -182,9 +183,7 @@ function attemptSet(value: unknown): CheckRunRef[] | undefined {
     }
     runs.set(name, id);
   }
-  return [...runs]
-    .sort(([left], [right]) => (left < right ? -1 : 1))
-    .map(([name, id]) => ({ name, id }));
+  return sortedCheckRunRefs(runs);
 }
 
 function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {

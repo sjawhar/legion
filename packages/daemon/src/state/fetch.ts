@@ -1,5 +1,5 @@
-import type { CheckRunRef } from "../daemon/legion-state";
 import {
+  type CheckRunRef,
   CiStatus,
   type CiStatusLiteral,
   type GitHubPRRef as GitHubPRRefType,
@@ -7,6 +7,7 @@ import {
   type MergeableStatusLiteral,
   ReviewState,
   type ReviewStateLiteral,
+  sortedCheckRunRefs,
 } from "./types";
 
 // =============================================================================
@@ -410,9 +411,7 @@ function checkRunSet(nodes: readonly unknown[]): CheckRunRef[] {
     const known = runs.get(name);
     if (known === undefined || databaseId > known) runs.set(name, databaseId);
   }
-  return [...runs]
-    .sort(([left], [right]) => (left < right ? -1 : 1))
-    .map(([name, id]) => ({ name, id }));
+  return sortedCheckRunRefs(runs);
 }
 
 interface RollupContextsPage {
