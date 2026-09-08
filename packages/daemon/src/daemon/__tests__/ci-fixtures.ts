@@ -1,6 +1,6 @@
 // Shared fixtures for the event-pump and resync tests: a fake core-NATS
-// connection, the daemon config, and the acme/widgets issue, tree, roles and PR
-// every CI scenario starts from.
+// connection, the daemon config, and the issue, tree, roles and PR literals the
+// CI scenarios build on.
 import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
 import type { DaemonConfig } from "../config";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
@@ -94,7 +94,7 @@ export function stateForIssue(released = true): {
   return { state, issue, architect, implementer };
 }
 
-/** An unfenced, unsettled PR at `headSha`; override the fields a scenario varies. */
+/** An unfenced, unsettled PR; override only the fields a scenario varies. */
 export function checkPr(issue: IssueKey, overrides: Partial<PrState> = {}): PrState {
   return {
     key: issue,

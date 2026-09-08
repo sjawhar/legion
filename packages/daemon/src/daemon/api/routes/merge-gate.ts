@@ -125,8 +125,14 @@ export async function handleMergeGate(
   if (pr.repo !== snapshot.repo) {
     throw new Error(`GitHub returned PR #${number} from an unexpected repository`);
   }
+  // GitHub's read is the head's current state: a different head replaces the
+  // stored one; the same head still advances the lifecycle clock, so a delayed
+  // synchronize for an intervening head is rejected as older (as resync does).
   if (pr.headSha !== snapshot.head.sha) {
     resetPrHead(pr, snapshot.head.sha);
+    pr.headUpdatedAt = snapshot.updatedAt;
+    await ctx.save();
+  } else if (pr.headUpdatedAt === undefined || snapshot.updatedAt > pr.headUpdatedAt) {
     pr.headUpdatedAt = snapshot.updatedAt;
     await ctx.save();
   }

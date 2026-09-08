@@ -3,6 +3,8 @@ import { formatIssueKey } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { type LegionState, newLegionState } from "../legion-state";
+import { reduceGithubEvent } from "../reducers";
+import { config } from "./ci-fixtures";
 
 const root = formatIssueKey("acme", "widgets", 1);
 
@@ -216,6 +218,68 @@ describe("thermonuclear API regressions", () => {
       fixAttempts: 2,
     });
     expect(state.prs["acme/widgets#17"]?.reviewDecision).toBeUndefined();
+  });
+
+  it("a same-head merge-gate read advances the lifecycle clock so a delayed intervening-head synchronize is rejected", async () => {
+    const state = stateWithRoot();
+    state.prs["acme/widgets#17"] = {
+      key: root,
+      repo: "acme/widgets",
+      number: 17,
+      headSha: "live-head",
+      headUpdatedAt: Date.parse("2026-09-07T01:00:00Z"),
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1,
+      ciCheckRuns: [{ name: "build", id: 1 }],
+      ciSettlementGeneration: 1,
+      ciSnapshot: "hash-a",
+      ciReconciled: false,
+      reviewDecision: "approved",
+      fixAttempts: 0,
+    };
+    api = startApi(state);
+    const rootSession = await startRoot(api);
+
+    // GitHub confirms live-head at 03:00 (it was briefly elsewhere in between).
+    const gate = await post(api, "/legion/v1/merge-gate", {
+      tree: root,
+      pr: 17,
+      sessionId: rootSession.sessionId,
+      secret: rootSession.secret,
+    });
+    expect(gate.status).toBe(200);
+    expect(state.prs["acme/widgets#17"]).toMatchObject({
+      headSha: "live-head",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+      verdict: "green",
+      ciSettlementGeneration: 1,
+    });
+
+    // The delayed synchronize for the intervening head at 02:00 is older: rejected.
+    reduceGithubEvent(
+      state,
+      "notifications.github.acme.widgets.pull_request.synchronize",
+      {
+        event_id: "delayed-intervening",
+        issued_at: Date.parse("2026-09-07T02:00:00Z"),
+        payload: {
+          kind: "pr",
+          action: "synchronize",
+          repo: "acme/widgets",
+          number: "17",
+          head_sha: "intervening-head",
+          updated_at: "2026-09-07T02:00:00Z",
+        },
+      },
+      config()
+    );
+    expect(state.prs["acme/widgets#17"]).toMatchObject({
+      headSha: "live-head",
+      verdict: "green",
+      ciSettlementGeneration: 1,
+    });
   });
 
   it("rejects an invalid contract before process exit can mutate lifecycle state", async () => {
