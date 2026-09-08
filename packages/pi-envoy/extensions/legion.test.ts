@@ -14,7 +14,7 @@ import type {
   PiApi,
   RegisteredTool,
   SessionContext,
-  ZodProperty,
+  ZodNumberProperty,
 } from "../src/pi-types";
 
 mock.module("nats", () => ({
@@ -137,7 +137,8 @@ function createPi(
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
   const activeTools = ["read", "task", "hub"];
-  const optional = (): ZodProperty => ({ optional: () => undefined });
+  const property = (): ZodNumberProperty => ({ optional: property, describe: property, int: property });
+  const optional = property;
   const agents =
     options.agents ??
     ({

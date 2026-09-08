@@ -128,7 +128,12 @@ export interface RegisteredTool {
 }
 
 export interface ZodProperty {
-  readonly optional: () => unknown;
+  readonly optional: () => ZodProperty;
+  readonly describe: (description: string) => ZodProperty;
+}
+
+export interface ZodNumberProperty extends ZodProperty {
+  readonly int: () => ZodProperty;
 }
 
 export type { ExtensionAgentsApi };
@@ -137,7 +142,7 @@ export interface PiApi {
   readonly zod: {
     readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
     readonly string: () => ZodProperty;
-    readonly number: () => ZodProperty;
+    readonly number: () => ZodNumberProperty;
     readonly array: (item: unknown) => ZodProperty;
     readonly enum: (values: readonly string[]) => ZodProperty;
     readonly unknown: () => ZodProperty;

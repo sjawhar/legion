@@ -20,15 +20,56 @@ const TOPIC_GUIDE =
   "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " +
   "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
 
-export const MessageMetadataSchema = z.object({
-  in_reply_to: z.string().optional(),
-  supersedes: z.string().optional(),
-  urgency: EnvelopeSchema.shape.urgency,
-  expects_reply: EnvelopeSchema.shape.expects_reply,
-  expires_at: EnvelopeSchema.shape.expires_at,
-});
+/**
+ * The slice of a Zod namespace the tool shapes are built from. Every host passes its own
+ * instance: a schema object from one Zod copy is opaque to another, and OMP's converter reads
+ * internals (`.ir`) that only the `pi.zod` it injects produces. Shapes built here with this
+ * package's `zod` import would load in the MCP bridge and fail to register in OMP.
+ *
+ * `Element` is whatever the host's `array` accepts (a Zod type for real Zod, `unknown` for
+ * OMP's structural surface); it only has to match the host's own `string`.
+ */
+export interface SchemaProperty {
+  readonly optional: () => SchemaProperty;
+  readonly describe: (description: string) => SchemaProperty;
+}
 
-export type MessageMetadataArguments = z.output<typeof MessageMetadataSchema>;
+export interface NumberSchemaProperty extends SchemaProperty {
+  readonly int: () => SchemaProperty;
+}
+
+export interface SchemaApi<Element> {
+  readonly string: () => SchemaProperty & Element;
+  readonly number: () => NumberSchemaProperty;
+  readonly array: (item: Element) => SchemaProperty;
+  readonly enum: (values: readonly string[]) => SchemaProperty;
+}
+
+export type ToolArgumentsShape = Readonly<Record<string, unknown>>;
+
+const URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options;
+const EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap().options;
+
+/** Message metadata arguments shared by envoy_send and envoy_publish, built on the host's Zod. */
+export function messageMetadataShape<Element>(schema: SchemaApi<Element>): ToolArgumentsShape {
+  return {
+    in_reply_to: schema.string().optional(),
+    supersedes: schema.string().optional(),
+    urgency: schema.enum(URGENCY_VALUES).optional(),
+    expects_reply: schema.enum(EXPECTS_REPLY_VALUES).optional(),
+    expires_at: schema.number().int().optional(),
+  };
+}
+
+export const MessageMetadataSchema = z.object(messageMetadataShape(z) as z.ZodRawShape);
+
+export type MessageMetadataArguments = {
+  readonly in_reply_to?: string;
+  readonly supersedes?: string;
+  readonly urgency?: (typeof URGENCY_VALUES)[number];
+  readonly expects_reply?: (typeof EXPECTS_REPLY_VALUES)[number];
+  readonly expires_at?: number;
+};
 
 /** Converts validated tool-wire metadata into the Envoy client's camel-case input. */
 export function toMessageMetadata(args: MessageMetadataArguments): MessageMetadataInput {
@@ -41,10 +82,9 @@ export function toMessageMetadata(args: MessageMetadataArguments): MessageMetada
   };
 }
 
-const messageArguments = {
-  message: z.string(),
-  ...MessageMetadataSchema.shape,
-};
+function messageArguments<Element>(schema: SchemaApi<Element>): ToolArgumentsShape {
+  return { message: schema.string(), ...messageMetadataShape(schema) };
+}
 
 export const EnvoyToolOperation = {
   subscribe: "subscribe",
@@ -61,10 +101,35 @@ export const EnvoyToolOperation = {
 
 export type EnvoyToolOperation = (typeof EnvoyToolOperation)[keyof typeof EnvoyToolOperation];
 
+/**
+ * What each operation's arguments parse to. The shapes above validate on the host's Zod and
+ * come back untyped, so this is the typed view a host reads after `parse`; keep it in step
+ * with the builders.
+ */
+export interface ToolArgumentsByOperation {
+  readonly subscribe: { readonly topics: readonly string[] };
+  readonly unsubscribe: { readonly topics?: readonly string[] };
+  readonly listInterests: Record<string, never>;
+  readonly inbox: Record<string, never>;
+  readonly send: MessageMetadataArguments & {
+    readonly session_id: string;
+    readonly message: string;
+  };
+  readonly publish: MessageMetadataArguments & { readonly topic: string; readonly message: string };
+  readonly setRole: { readonly role: string };
+  readonly getRole: { readonly role: string };
+  readonly whoami: Record<string, never>;
+  readonly listSessions: {
+    readonly machine?: string;
+    readonly dir?: string;
+    readonly title?: string;
+  };
+}
+
 export type ToolSpec = {
   readonly name: string;
   readonly description: string;
-  readonly arguments: z.ZodRawShape;
+  readonly arguments: <Element>(schema: SchemaApi<Element>) => ToolArgumentsShape;
   readonly operation: EnvoyToolOperation;
   readonly requiresSubscriptionCapability: boolean;
 };
@@ -73,9 +138,9 @@ export const envoyToolSpecs = [
   {
     name: "envoy_subscribe",
     description: `Subscribe this session to Envoy notification topics. ${TOPIC_GUIDE}`,
-    arguments: {
-      topics: z.array(z.string()).describe("NATS-style topic patterns to subscribe to."),
-    },
+    arguments: (schema) => ({
+      topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to."),
+    }),
     operation: EnvoyToolOperation.subscribe,
     requiresSubscriptionCapability: true,
   },
@@ -83,7 +148,7 @@ export const envoyToolSpecs = [
     name: "envoy_unsubscribe",
     description:
       "Unsubscribe this session from Envoy topics, or remove all current subscriptions if topics are omitted.",
-    arguments: { topics: z.array(z.string()).optional() },
+    arguments: (schema) => ({ topics: schema.array(schema.string()).optional() }),
     operation: EnvoyToolOperation.unsubscribe,
     requiresSubscriptionCapability: true,
   },
@@ -91,33 +156,33 @@ export const envoyToolSpecs = [
     name: "envoy_list",
     description:
       "List the current Envoy topic subscriptions for this session so you can confirm the exact topic shapes that are active.",
-    arguments: {},
+    arguments: () => ({}),
     operation: EnvoyToolOperation.listInterests,
     requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_inbox",
     description: "List this Pi session's 50 most recent rendered Envoy deliveries, newest first.",
-    arguments: {},
+    arguments: () => ({}),
     operation: EnvoyToolOperation.inbox,
     requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_send",
     description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT}`,
-    arguments: {
-      session_id: z
+    arguments: (schema) => ({
+      session_id: schema
         .string()
         .describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
-      ...messageArguments,
-    },
+      ...messageArguments(schema),
+    }),
     operation: EnvoyToolOperation.send,
     requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_publish",
     description: `Publish an Envoy message to any topic. ${DELIVERY_CONTRACT}`,
-    arguments: { topic: z.string(), ...messageArguments },
+    arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
     requiresSubscriptionCapability: false,
   },
@@ -125,14 +190,14 @@ export const envoyToolSpecs = [
     name: "envoy_role_set",
     description:
       "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session.",
-    arguments: { role: z.string() },
+    arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.setRole,
     requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_role_get",
     description: "Get the live holder of a named Envoy role.",
-    arguments: { role: z.string() },
+    arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.getRole,
     requiresSubscriptionCapability: false,
   },
@@ -140,7 +205,7 @@ export const envoyToolSpecs = [
     name: "envoy_whoami",
     description:
       "Returns this session's Envoy identity: session ID, machine ID, port, and directory.",
-    arguments: {},
+    arguments: () => ({}),
     operation: EnvoyToolOperation.whoami,
     requiresSubscriptionCapability: false,
   },
@@ -148,11 +213,11 @@ export const envoyToolSpecs = [
     name: "envoy_sessions",
     description:
       "List all live sessions registered with Envoy. Filter by optional machine, directory, or title.",
-    arguments: {
-      machine: z.string().optional(),
-      dir: z.string().optional(),
-      title: z.string().optional(),
-    },
+    arguments: (schema) => ({
+      machine: schema.string().optional(),
+      dir: schema.string().optional(),
+      title: schema.string().optional(),
+    }),
     operation: EnvoyToolOperation.listSessions,
     requiresSubscriptionCapability: false,
   },

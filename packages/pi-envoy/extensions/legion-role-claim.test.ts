@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { agentSubject, roleToken } from "@legion/contracts";
+import type { ZodNumberProperty } from "../src/pi-types";
 
 mock.module("nats", () => ({
   connect: async () => ({
@@ -96,6 +97,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     return Response.json({ session_id: sessionID, machine_id: "test", dir: "/tmp", topics: [] });
   }) as typeof fetch;
   const activeTools = ["read", "task", "hub"];
+  const property = (): ZodNumberProperty => ({ optional: property, describe: property, int: property });
   const createPi = () => ({
     agents: {
       list: () => [],
@@ -105,11 +107,11 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     },
     zod: {
       object: (shape: unknown) => shape,
-      string: () => ({ optional: () => undefined }),
-      number: () => ({ optional: () => undefined }),
-      array: () => ({ optional: () => undefined }),
-      enum: () => ({ optional: () => undefined }),
-      unknown: () => ({ optional: () => undefined }),
+      string: property,
+      number: property,
+      array: property,
+      enum: property,
+      unknown: property,
       discriminatedUnion: () => ({}),
     },
     sendMessage: () => undefined,

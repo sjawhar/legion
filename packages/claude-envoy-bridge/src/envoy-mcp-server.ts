@@ -13,6 +13,8 @@ import { machineID } from "@legion/envoy-client/machine"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
+  type ToolArgumentsByOperation,
+  type ToolSpec,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract"
 import {
@@ -28,6 +30,19 @@ import { connect } from "nats"
 import { z } from "zod"
 import { monitorSessionId } from "./monitor-identity"
 import { createThreadForwarder, type ThreadForwarder } from "./thread-forwarder"
+
+// The shared tool contract builds argument shapes on the caller's Zod so each host registers
+// schemas its runtime recognises; this bridge validates and emits JSON Schema with its own.
+function argumentsSchema(spec: ToolSpec): z.ZodObject<z.ZodRawShape> {
+  return z.object(spec.arguments(z) as z.ZodRawShape)
+}
+
+function parseArguments<Operation extends EnvoyToolOperation>(
+  spec: ToolSpec & { readonly operation: Operation },
+  input: unknown,
+): ToolArgumentsByOperation[Operation] {
+  return argumentsSchema(spec).parse(input) as ToolArgumentsByOperation[Operation]
+}
 
 // Claude Code has no native tool API, so dispatch is a tool of this MCP
 // server; it runs with the session identity the monitor uses, which is what
@@ -50,7 +65,7 @@ export const envoyMcpToolDefinitions = [
     .map((spec) => ({
       name: spec.name,
       description: spec.description,
-      inputSchema: z.toJSONSchema(z.object(spec.arguments)),
+      inputSchema: z.toJSONSchema(argumentsSchema(spec)),
     })),
   ...(dispatchConfig.url === null ? [] : [dispatchToolDefinition]),
 ]
@@ -222,7 +237,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
 
   switch (spec.operation) {
     case EnvoyToolOperation.send: {
-      const args = z.object(spec.arguments).parse(input)
+      const args = parseArguments(spec, input)
       const result = await client.send({
         source: "agent",
         sourceSessionID: sessionId,
@@ -238,7 +253,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       }
     }
     case EnvoyToolOperation.publish: {
-      const args = z.object(spec.arguments).parse(input)
+      const args = parseArguments(spec, input)
       return client.publish({
         source: "agent",
         sourceSessionID: sessionId,
@@ -248,11 +263,11 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       })
     }
     case EnvoyToolOperation.subscribe: {
-      const args = z.object(spec.arguments).parse(input)
+      const args = parseArguments(spec, input)
       return subscribeAndFollow(client, sessionId, args.topics, true)
     }
     case EnvoyToolOperation.unsubscribe: {
-      const args = z.object(spec.arguments).parse(input)
+      const args = parseArguments(spec, input)
       const topics = expandSubscriptionTopics(args.topics ?? [])
       await client.unsubscribe({ sessionID: sessionId, topics })
       const active = forwarder === undefined ? null : await forwarder
@@ -262,17 +277,17 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       return { removed }
     }
     case EnvoyToolOperation.listInterests:
-      z.object(spec.arguments).parse(input)
+      parseArguments(spec, input)
       return client.getInterest(sessionId)
     case EnvoyToolOperation.whoami:
-      z.object(spec.arguments).parse(input)
+      parseArguments(spec, input)
       return {
         session_id: sessionId,
         machine_id: machineID(),
         dir: process.cwd(),
       }
     case EnvoyToolOperation.listSessions: {
-      const args = z.object(spec.arguments).parse(input)
+      const args = parseArguments(spec, input)
       const sessions = await client.listSessions({
         ...(args.dir === undefined ? {} : { directory: args.dir }),
         ...(args.title === undefined ? {} : { title: args.title }),
@@ -283,11 +298,11 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       return sessions.filter((session) => session.machine_id === args.machine)
     }
     case EnvoyToolOperation.setRole: {
-      const args = z.object(spec.arguments).parse(input)
+      const args = parseArguments(spec, input)
       return client.setRole({ sessionID: sessionId, role: args.role })
     }
     case EnvoyToolOperation.getRole: {
-      const args = z.object(spec.arguments).parse(input)
+      const args = parseArguments(spec, input)
       return client.getRole(args.role)
     }
     default:
