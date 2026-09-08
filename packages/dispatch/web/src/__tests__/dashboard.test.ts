@@ -74,6 +74,56 @@ function detail(
 }
 
 describe("dashboard read-side rendering", () => {
+  it("a run of prose follow-ups leaves one free-text form; the body's asks read as superseded", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 17,
+      title: "Evictions",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: high\nask:\n    - askId: R\n      question: Production line?\n      header: line\n      options:\n        - label: A\n        - label: B\n    - askId: R.1\n      question: Interim?\n      header: node\n      options:\n        - label: Cordon\n        - label: Leave\n-->\n\nContext.",
+      state: "OPEN",
+      stateReason: null,
+      createdAt: now,
+      updatedAt: now,
+      authorLogin: "agent",
+    };
+    const followUp = (id: number, requestId: string, question: string): Comment => ({
+      id,
+      body: `<!-- dispatch:ask\nrequestId: ${requestId}\norigin:\n    host: omp\n-->\n\n## Context\n\nNumbers.\n\n## Question\n\n${question}`,
+      createdAt: now,
+      updatedAt: now,
+      authorLogin: "agent",
+    });
+    const comments = [
+      followUp(1, "F1", "One decision, not two: cordon all 20?"),
+      followUp(2, "F2", "Same ask with current numbers."),
+      followUp(3, "F3", "Still the two words: cordon -231 - yes/no?"),
+    ];
+    const html = renderThreadDetail(detail(issue, comments));
+
+    // Exactly one form, for the latest follow-up, free-text only.
+    expect(html.match(/class="ask-form"/g)?.length).toBe(1);
+    expect(html).toMatch(/<form class="ask-form"[^>]*data-ask-id="F3"/);
+    expect(html).toContain("Answer the follow-up");
+    expect(html).toContain('class="ask-custom-text ask-custom-text-only"');
+    expect(html).not.toContain("Other (specify)");
+    // Every earlier question — the body's two and the first two follow-ups —
+    // points down to the latest turn instead of offering a stale form.
+    for (const askId of ["R", "R.1", "F1", "F2"]) {
+      expect(html).toMatch(
+        new RegExp(
+          `data-ask-id="${askId.replace(".", "\\.")}">[\\s\\S]*?ask-superseded" href="#turn-3"`
+        )
+      );
+    }
+    expect(html.match(/ask-superseded/g)?.length).toBe(4);
+    // The prose follow-up's status renders once beneath its card; its text is
+    // not repeated as a question header.
+    expect(html).toMatch(
+      /id="turn-3"[\s\S]*?ask-history ask-history-prose" data-ask-id="F3">[\s\S]*?waiting for an answer/
+    );
+    expect(html.match(/Still the two words/g)?.length).toBe(1);
+  });
+
   it("groups threads by parent, pins blocking rows, filters by status/urgency/search, and renders badges", () => {
     const threads = [
       thread({ number: 11, title: "Later low", urgency: "low", parentNumber: 1 }),
@@ -327,11 +377,14 @@ describe("dashboard read-side rendering", () => {
 
     // Forms only for the open asks, each naming its id; the answered ask R keeps
     // its data-ask-id on the ask-history div (Playwright selects it there) but has no form.
-    expect(html).toMatch(/<form class="ask-form"[^>]*data-ask-id="R\.1"/);
+    // The follow-up is the latest turn: only its ask takes an answer; the
+    // body's unanswered R.1 is superseded and says so.
     expect(html).toMatch(/<form class="ask-form"[^>]*data-ask-id="F"/);
+    expect(html).not.toMatch(/<form class="ask-form"[^>]*data-ask-id="R\.1"/);
     expect(html).not.toMatch(/<form class="ask-form"[^>]*data-ask-id="R"/);
     expect(html).toContain('<div class="ask-history" data-ask-id="R">');
-    expect(html.match(/class="ask-form"/g)?.length).toBe(2);
+    expect(html).toMatch(/data-ask-id="R\.1">[\s\S]*?ask-superseded" href="#turn-2"/);
+    expect(html.match(/class="ask-form"/g)?.length).toBe(1);
     // The answered ask shows its answer beneath the question, and the answer
     // comment is not repeated in the conversation (one pill on the page).
     expect(html).toContain("answer-pill");

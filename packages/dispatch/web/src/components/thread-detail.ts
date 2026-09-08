@@ -57,29 +57,38 @@ function renderAnswerValues(values: readonly string[]): string {
   return values.map((value) => `<span class="answer-pill">${escapeHtml(value)}</span>`).join(" ");
 }
 
-// Beneath a question: its answer, or the fact that it is still waiting
-// (linking down to its form), or that the thread closed without one.
+// Beneath a question: its answer; or that it is still waiting (linking down to
+// its form); or that a later follow-up restated it (linking down to that turn);
+// or that the thread closed without one.
 function renderAskAnswer(
   ask: ThreadAsk,
   resolved: ResolvedAnswer | null,
-  issueOpen: boolean
+  input: ThreadDetailInput
 ): string {
   if (resolved) {
     return `<div class="ask-answer">${renderAnswerValues(resolved.values)}<span class="ask-answer-meta"> — ${escapeHtml(resolved.answer.authorLogin)} · ${escapeHtml(timeAgo(resolved.answer.createdAt))}</span></div>`;
   }
-  if (issueOpen) {
+  if (input.issue.state !== "OPEN") return `<em class="ask-waiting">never answered</em>`;
+  if (input.openAsks.includes(ask)) {
     return `<a class="ask-waiting" href="#ask-form-${escapeHtml(ask.askId)}">waiting for an answer — answer below ↓</a>`;
   }
-  return `<em class="ask-waiting">never answered</em>`;
+  const latest = input.asks.at(-1)?.source;
+  const anchor = latest?.kind === "comment" ? `#turn-${latest.commentId}` : "#detail-opening";
+  return `<a class="ask-superseded" href="${anchor}">superseded by a later follow-up ↓</a>`;
 }
 
 // A question and, directly beneath it, its answer. Used for body asks and for
-// the asks of every follow-up turn.
+// the asks of every follow-up turn. A prose ask is the turn's own text, so only
+// its status renders here.
 function renderAskHistory(
   ask: ThreadAsk,
   resolved: ResolvedAnswer | null,
-  issueOpen: boolean
+  input: ThreadDetailInput
 ): string {
+  const status = renderAskAnswer(ask, resolved, input);
+  if (ask.prose) {
+    return `<div class="ask-history ask-history-prose" data-ask-id="${escapeHtml(ask.askId)}">${status}</div>`;
+  }
   const header = escapeHtml(askHeader(ask.question, ask.index));
   const prompt = escapeHtml(ask.question.question || "");
   const options = (ask.question.options ?? [])
@@ -87,7 +96,7 @@ function renderAskHistory(
     .join(" ");
   return `<div class="ask-history" data-ask-id="${escapeHtml(ask.askId)}">
     <div class="ask-history-question"><strong class="ask-history-header">${header}</strong>${prompt ? `<span class="ask-history-prompt">${prompt}</span>` : ""}${options ? `<span class="ask-history-options">${options}</span>` : ""}</div>
-    ${renderAskAnswer(ask, resolved, issueOpen)}
+    ${status}
   </div>`;
 }
 
@@ -122,9 +131,7 @@ function renderTurnCard(
     (ask) => ask.source.kind === "comment" && ask.source.commentId === comment.id
   );
   const history = asks
-    .map((ask) =>
-      renderAskHistory(ask, answerFor(ask, input.answers), input.issue.state === "OPEN")
-    )
+    .map((ask) => renderAskHistory(ask, answerFor(ask, input.answers), input))
     .join("");
   return `<article class="comment turn-card" id="turn-${comment.id}" data-comment-id="${comment.id}">
     <header><strong>${escapeHtml(comment.authorLogin)}</strong><span class="comment-tag">follow-up</span><span>${escapeHtml(timeAgo(comment.createdAt))}</span>${renderCompactOrigin(marker.origin)}</header>
@@ -301,9 +308,7 @@ export function renderOpeningAsks(input: ThreadDetailInput): string {
   const bodyAsks = input.asks.filter((ask) => ask.source.kind === "body");
   if (bodyAsks.length === 0) return "";
   return `<h2>Question${bodyAsks.length > 1 ? "s" : ""}</h2>${bodyAsks
-    .map((ask) =>
-      renderAskHistory(ask, answerFor(ask, input.answers), input.issue.state === "OPEN")
-    )
+    .map((ask) => renderAskHistory(ask, answerFor(ask, input.answers), input))
     .join("")}`;
 }
 

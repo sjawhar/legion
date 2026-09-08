@@ -31,15 +31,19 @@ export function askHeader(question: MarkerQuestion, index: number): string {
 /**
  * The human-readable summary written below an answer marker: header, prompt,
  * and the chosen values, so the GitHub comment carries the full context even
- * where no dashboard renders the structured view.
+ * where no dashboard renders the structured view. A prose ask's prompt is the
+ * whole follow-up, so only its first line is quoted.
  */
 export function summarizeAnswer(
   question: MarkerQuestion,
   values: QuestionAnswer,
-  index = 0
+  index = 0,
+  prose = false
 ): string {
-  const header = askHeader(question, index);
-  const prompt = question.question?.trim();
+  const header = prose ? "Answer" : askHeader(question, index);
+  const prompt = prose
+    ? (question.question ?? "").trim().split("\n")[0]?.trim()
+    : question.question?.trim();
   const head = prompt ? `**${header}** — ${prompt}` : `**${header}**`;
   return `${head}\n${values.join(", ") || "No answer"}`;
 }
@@ -52,20 +56,28 @@ export function summarizeAnswer(
 export function renderAskForm(input: AskFormInput): string {
   const { ask } = input;
   const askId = escapeHtml(ask.askId);
-  const options = (ask.question.options ?? [])
-    .map((option) => renderOption(ask.question, option))
-    .join("");
+  const optionList = ask.question.options ?? [];
+  const options = optionList.map((option) => renderOption(ask.question, option)).join("");
   const asked = input.askedAt ? ` · asked ${escapeHtml(timeAgo(input.askedAt))}` : "";
   // The turn that asked: the opening section or the follow-up's card.
   const anchor = ask.source.kind === "body" ? "#detail-opening" : `#turn-${ask.source.commentId}`;
+  // A prose ask has no header of its own; the form is titled by the turn it answers.
+  const title = ask.prose
+    ? "Answer the follow-up"
+    : `Answer: ${escapeHtml(askHeader(ask.question, ask.index))} <span class="ask-form-prompt">— ${escapeHtml(ask.question.question)}</span>`;
   // Free-response is always offered. Agents can't opt out; humans may
-  // have an answer that doesn't fit any of the canned options.
-  return `<form class="ask-form" id="ask-form-${askId}" data-action="ask-answer" data-ask-id="${askId}">
-    <h2>Answer: ${escapeHtml(askHeader(ask.question, ask.index))} <span class="ask-form-prompt">— ${escapeHtml(ask.question.question)}</span></h2>
-    <a class="ask-form-anchor" href="${anchor}">↑ question${asked}</a>
-    <div class="ask-options">${options}</div>
+  // have an answer that doesn't fit any of the canned options. Without
+  // options it is the whole form.
+  const freeText =
+    optionList.length === 0
+      ? `<textarea class="ask-custom-text ask-custom-text-only" name="custom" rows="3" placeholder="Type your answer"></textarea>`
+      : `<div class="ask-options">${options}</div>
     <label class="ask-custom-toggle"><input type="checkbox" name="custom-enabled"> Other (specify)</label>
-    <textarea class="ask-custom-text" name="custom" rows="3" placeholder="Type your answer"></textarea>
+    <textarea class="ask-custom-text" name="custom" rows="3" placeholder="Type your answer"></textarea>`;
+  return `<form class="ask-form" id="ask-form-${askId}" data-action="ask-answer" data-ask-id="${askId}">
+    <h2>${title}</h2>
+    <a class="ask-form-anchor" href="${anchor}">↑ question${asked}</a>
+    ${freeText}
     <div class="form-actions">
       <button type="submit" ${input.pending ? "disabled" : ""}>Submit answer</button>
       ${input.error ? `<span class="form-error">${escapeHtml(input.error)}</span>` : ""}

@@ -29,16 +29,21 @@ test("one form per open ask, answers beneath their questions, needs-you in the s
 }) => {
   await page.goto(`${dashboard.url}/${THREAD}`);
   const forms = page.locator("#detail-ask-forms form.ask-form");
+  // The follow-up is the latest turn: its two asks take answers; the body's
+  // unanswered Rollout ask was restated there and reads as superseded.
   await expect(forms).toHaveCount(2);
-  await expect(forms.nth(0)).toHaveAttribute("data-ask-id", "R12.1");
-  await expect(forms.nth(1)).toHaveAttribute("data-ask-id", "F1");
+  await expect(forms.nth(0)).toHaveAttribute("data-ask-id", "F1");
+  await expect(forms.nth(1)).toHaveAttribute("data-ask-id", "F1.1");
   await expect(
     page.locator('#detail-opening-asks .ask-history[data-ask-id="R12"] .answer-pill')
   ).toHaveText("Env var");
+  await expect(
+    page.locator('#detail-opening-asks .ask-history[data-ask-id="R12.1"] .ask-superseded')
+  ).toHaveAttribute("href", "#turn-103");
   await expect(page.locator("#turn-103")).toContainText(
     "The bot cannot be told apart from real submitters."
   );
-  await expect(page.locator("#turn-103 .ask-waiting")).toBeVisible();
+  await expect(page.locator('#turn-103 .ask-history[data-ask-id="F1"] .ask-waiting')).toBeVisible();
   await expect(page.locator('.thread-row[data-thread-number="12"] .state-needs-you')).toHaveText(
     "needs you"
   );
@@ -121,34 +126,44 @@ test("an event answering one ask removes only its form; a half-filled sibling ke
     createdAt: new Date().toISOString(),
   });
   await dashboard.emit(COMMENT_EVENT);
-  await expect(forms).toHaveCount(4);
-  await expect(forms.nth(2)).toHaveAttribute("data-ask-id", "F2\\");
-  await expect(forms.nth(3)).toHaveAttribute("data-ask-id", 'F2\\"');
+  // The new follow-up supersedes F1/F1.1: only its two asks keep forms.
+  await expect(forms).toHaveCount(2);
+  await expect(forms.nth(0)).toHaveAttribute("data-ask-id", "F2\\");
+  await expect(forms.nth(1)).toHaveAttribute("data-ask-id", 'F2\\"');
+  await expect(
+    page.locator('#turn-103 .ask-history[data-ask-id="F1"] .ask-superseded')
+  ).toHaveCount(1);
 
-  const formB = page.locator('form[data-ask-id="F1"]');
-  await formB.locator('input[value="E2E_SUBMITTER"]').check();
+  // Playwright's CSS parser rejects a trailing backslash inside quotes; the
+  // form is the first of the two the new turn owns.
+  const formB = forms.nth(0);
+  await formB.locator('input[value="Yes"]').check();
   await formB.locator('input[name="custom-enabled"]').check();
   const custom = formB.locator('textarea[name="custom"]');
   await custom.fill("half-typed custom answer");
   await expect(custom).toBeFocused();
 
+  // An answer to a superseded ask still lands beneath its question; an answer
+  // to the sibling removes only the sibling's form.
   dashboard.addComment(REPO, 12, {
     body: answerComment(12, "R12.1", "Next week"),
     author: "sami",
     createdAt: new Date().toISOString(),
   });
+  dashboard.addComment(REPO, 12, {
+    body: answerComment(12, 'F2\\"', "No"),
+    author: "sami",
+    createdAt: new Date().toISOString(),
+  });
   await dashboard.emit(COMMENT_EVENT);
-  await expect(page.locator('form[data-ask-id="R12.1"]')).toHaveCount(0);
   await expect(
     page.locator('#detail-opening-asks .ask-history[data-ask-id="R12.1"] .answer-pill')
   ).toHaveText("Next week");
-  await expect(forms).toHaveCount(3);
-  await expect(forms.nth(0)).toHaveAttribute("data-ask-id", "F1");
-  await expect(forms.nth(1)).toHaveAttribute("data-ask-id", "F2\\");
-  await expect(forms.nth(2)).toHaveAttribute("data-ask-id", 'F2\\"');
+  await expect(forms).toHaveCount(1);
+  await expect(forms.nth(0)).toHaveAttribute("data-ask-id", "F2\\");
   await expect(custom).toHaveValue("half-typed custom answer");
   await expect(custom).toBeFocused();
-  await expect(formB.locator('input[value="E2E_SUBMITTER"]')).toBeChecked();
+  await expect(formB.locator('input[value="Yes"]')).toBeChecked();
   await expect(formB.locator('input[name="custom-enabled"]')).toBeChecked();
 });
 
@@ -172,7 +187,7 @@ test("a failed answer post keeps the half-filled form, shows the error, and lets
   await expect(custom).toHaveValue("use the org-level secret");
   await expect(form.locator("button[type=submit]")).toBeEnabled();
   // The optimistic answer was withdrawn: the question is still waiting.
-  await expect(page.locator("#turn-103 .ask-waiting")).toBeVisible();
+  await expect(page.locator('#turn-103 .ask-history[data-ask-id="F1"] .ask-waiting')).toBeVisible();
   expect(dashboard.posted).toEqual([]);
 
   await form.locator("button[type=submit]").click();

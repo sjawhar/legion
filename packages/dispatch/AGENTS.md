@@ -43,12 +43,16 @@ state instead of an empty sidebar.
 
 ## Conversations
 
-A thread's questions come from the issue body and from every `dispatch:ask` follow-up
-comment (`web/src/asks.ts`); an ask is open until an answer comment names its `askId`
-(a legacy answer without `forAsk` settles the body's asks by index). The detail view renders
-one form per open ask (`#detail-ask-forms`) and each answer beneath the question it settles;
-the sidebar's `needs you` badge counts open asks from the last 30 comments returned by the
-search query, or from the full comment list once loaded.
+A thread is a sequence of turns: the issue body, then every `dispatch:ask` follow-up comment
+(`web/src/asks.ts`). An ask is answered when an answer comment names its `askId` (a legacy
+answer without `forAsk` settles the body's asks by index). Only the latest turn's unanswered
+asks are open; unanswered asks of earlier turns are superseded — the follow-up restated the
+question — and render as "superseded by a later follow-up" linking to that turn. A follow-up
+with no `ask` list is one free-text ask whose question is the text under its `## Question`.
+The detail view renders one form per open ask (`#detail-ask-forms`; a free-text ask gets a
+textarea only) and each answer beneath the question it settles; the sidebar's `needs you`
+badge counts open asks from the last 30 comments returned by the search query, or from the
+full comment list once loaded.
 
 Painting never rebuilds the page: every action and event calls one `paint()` (`web/src/main.ts`);
 `web/src/dom.ts` writes a region only when its markup changed since the last paint and

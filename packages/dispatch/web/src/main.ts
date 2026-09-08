@@ -415,7 +415,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
       issue.number,
       askId,
       [values],
-      summarizeAnswer(ask.question, values, ask.index)
+      summarizeAnswer(ask.question, values, ask.index, ask.prose === true)
     );
     const placeholder = optimisticComment(body);
     appendComment(key, placeholder);
@@ -719,10 +719,12 @@ function attachDom(controller: DashboardController, root: HTMLElement): () => vo
     if (form.dataset.action === "ask-answer") {
       const askId = form.dataset.askId ?? "";
       const custom = String(formData.get("custom") ?? "").trim();
-      const values: QuestionAnswer =
-        formData.has("custom-enabled") && custom
-          ? [custom]
-          : formData.getAll("answer").map(String).filter(Boolean);
+      const chosen = formData.getAll("answer").map(String).filter(Boolean);
+      // The typed text is the answer when "Other" is ticked, or when the form
+      // offered nothing to tick (a prose follow-up).
+      const freeText =
+        formData.has("custom-enabled") || !form.querySelector("input[name='answer']");
+      const values: QuestionAnswer = freeText && custom ? [custom] : chosen;
       void controller.submitAskAnswer(askId, values).then(paint, paint);
       paint();
     }

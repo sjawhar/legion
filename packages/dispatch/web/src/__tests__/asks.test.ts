@@ -6,6 +6,8 @@ import {
   collectAnswers,
   collectAsks,
   openAsks,
+  proseQuestion,
+  supersededAsks,
   type ThreadAnswer,
   type ThreadAsk,
 } from "../asks";
@@ -56,14 +58,15 @@ describe("collectAsks", () => {
 });
 
 describe("answers", () => {
-  it("maps a named answer to its ask and leaves the others open", () => {
+  it("maps a named answer to its ask; the follow-up supersedes the body's other open ask", () => {
     const answers = collectAnswers([
       comment(40, buildAnswerMarkerComment(12, "R.1", [["large"]], "s")),
     ]);
     const asks = collectAsks(newBody, [followUp]);
     expect(answerFor(asks[1] as ThreadAsk, answers)?.values).toEqual(["large"]);
     expect(answerFor(asks[0] as ThreadAsk, answers)).toBeNull();
-    expect(openAsks(asks, answers).map((ask) => ask.askId)).toEqual(["R", "F"]);
+    expect(openAsks(asks, answers).map((ask) => ask.askId)).toEqual(["F"]);
+    expect(supersededAsks(asks, answers).map((ask) => ask.askId)).toEqual(["R"]);
     expect(answerTargets(answers[0] as ThreadAnswer, asks).map((ask) => ask.askId)).toEqual([
       "R.1",
     ]);
@@ -91,5 +94,59 @@ describe("answers", () => {
       comment(42, buildAnswerMarkerComment(12, "nope", [["x"]], "s")),
     ]);
     expect(answerTargets(answers[0] as ThreadAnswer, collectAsks(newBody, []))).toEqual([]);
+  });
+});
+
+const proseFollowUp = (id: number, requestId: string, question: string): Comment =>
+  comment(
+    id,
+    `<!-- dispatch:ask\nrequestId: ${requestId}\norigin:\n    host: omp\n-->\n\n## Context\n\nMore numbers.\n\n## Question\n\n${question}`,
+    "agent"
+  );
+
+describe("prose follow-ups", () => {
+  it("reads the question from the ## Question section, or the whole comment without it", () => {
+    expect(proseQuestion(proseFollowUp(1, "P", "Cordon -231 - yes/no?").body)).toBe(
+      "Cordon -231 - yes/no?"
+    );
+    expect(proseQuestion("<!-- dispatch:ask\nrequestId: P\n-->\n\nJust asking.")).toBe(
+      "Just asking."
+    );
+  });
+
+  it("becomes one free-text ask keyed by the follow-up's request id", () => {
+    const asks = collectAsks(newBody, [proseFollowUp(50, "P", "Cordon -231 - yes/no?")]);
+    expect(asks.at(-1)).toEqual({
+      askId: "P",
+      question: { question: "Cordon -231 - yes/no?" },
+      index: 0,
+      source: { kind: "comment", commentId: 50 },
+      prose: true,
+    });
+  });
+
+  it("many unanswered follow-ups leave exactly one open ask: the latest", () => {
+    const comments = [1, 2, 3, 4, 5].map((n) => proseFollowUp(100 + n, `P${n}`, `Round ${n}?`));
+    const asks = collectAsks(newBody, comments);
+    expect(openAsks(asks, []).map((ask) => ask.askId)).toEqual(["P5"]);
+    expect(supersededAsks(asks, []).map((ask) => ask.askId)).toEqual([
+      "R",
+      "R.1",
+      "P1",
+      "P2",
+      "P3",
+      "P4",
+    ]);
+  });
+
+  it("an answer to the latest prose ask settles it; a later answer to a superseded ask still resolves", () => {
+    const comments = [proseFollowUp(50, "P", "Cordon?")];
+    const asks = collectAsks(newBody, comments);
+    const answers = collectAnswers([
+      comment(60, buildAnswerMarkerComment(12, "P", [["yes"]], "s")),
+      comment(61, buildAnswerMarkerComment(12, "R", [["A"]], "s")),
+    ]);
+    expect(openAsks(asks, answers)).toEqual([]);
+    expect(answerFor(asks[0] as ThreadAsk, answers)?.values).toEqual(["A"]);
   });
 });
