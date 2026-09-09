@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { controllerToken, formatIssueKey, roleToken, roleTopic } from "@legion/contracts";
+import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
@@ -95,7 +96,7 @@ function daemonTestDependencies(
       runner: async (command) => {
         if (command[0] === "sh") {
           return {
-            stdout: "LEGION_OMP_AGENTS=available\n",
+            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
             stderr: "",
             exitCode: 0,
           };
@@ -118,6 +119,7 @@ function daemonTestDependencies(
       },
       resolveDaemonEnvironment: async () => daemonEnvironment,
       statPrompt: async () => {},
+      readPluginManifest: async () => validLegionPluginManifest,
       envoyPublish: async (topic, payload) => {
         publications.push({ topic, payload: JSON.parse(payload) });
       },
@@ -167,6 +169,11 @@ function config(stateDir: string): DaemonConfig {
     stateDir,
   };
 }
+
+const validLegionPluginManifest = JSON.stringify({
+  version: "0.9.0",
+  omp: { extensions: ["dist/envoy.js", "dist/legion.js"] },
+});
 
 const daemonEnvironment: DaemonEnvironment = {
   commands: {
@@ -343,12 +350,13 @@ describe("startDaemon", () => {
           },
           createNatsTransport: async () => new FakeNats(),
           runner: async () => ({
-            stdout: "LEGION_OMP_AGENTS=available\n",
+            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
             stderr: "",
             exitCode: 0,
           }),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async (topic, payload) => {
             published.push({ topic, payload: JSON.parse(payload) });
           },
@@ -482,12 +490,14 @@ describe("startDaemon", () => {
           saveState: async () => {},
           createNatsTransport: async () => new FakeNats(),
           runner: async (command) => ({
-            stdout: command[0] === "sh" ? "LEGION_OMP_AGENTS=available\n" : "",
+            stdout:
+              command[0] === "sh" ? "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n" : "",
             stderr: "",
             exitCode: 0,
           }),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           fetchGitHubProjectItems: async () => ({
             items: [],
@@ -632,7 +642,11 @@ describe("startDaemon", () => {
           createNatsTransport: async () => nats,
           runner: async (command) => {
             if (command[0] === "sh") {
-              return { stdout: "LEGION_OMP_AGENTS=available\n", stderr: "", exitCode: 0 };
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
             }
             if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
               const workspaceDir = command[3];
@@ -653,6 +667,7 @@ describe("startDaemon", () => {
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           fetchGitHubProjectItems: async () => ({
             items: [],
@@ -717,12 +732,13 @@ describe("startDaemon", () => {
           },
           createNatsTransport: async () => nats,
           runner: async () => ({
-            stdout: "LEGION_OMP_AGENTS=available\n",
+            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
             stderr: "",
             exitCode: 0,
           }),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           fetchGitHubProjectItems: async () => ({
             items: [],
@@ -842,6 +858,137 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("rejects an installed pi-legion-envoy that omp does not actually load (disabled or unregistered) before accepting daemon work", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    let loadedState = false;
+    let natsCreated = false;
+    let capturedManifestPath: string | undefined;
+    let shProbeCalls = 0;
+    let probeCommand: string[] | undefined;
+
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            runner: async (command) => {
+              if (command[0] !== "sh") throw new Error(`Unexpected command: ${command.join(" ")}`);
+              shProbeCalls += 1;
+              if (shProbeCalls === 1) {
+                // First sh-shaped probe: verifyOmpAgentsCapability.
+                return { stdout: "LEGION_OMP_AGENTS=available\n", stderr: "", exitCode: 0 };
+              }
+              // Second sh-shaped probe: verifyLegionPluginLoaded. The plugin is
+              // disabled/unregistered, so the marker never appears.
+              probeCommand = command;
+              return { stdout: "", stderr: "LEGION_PLUGIN_LOADED=no\n", exitCode: 0 };
+            },
+            resolveDaemonEnvironment: async () => daemonEnvironment,
+            readPluginManifest: async (manifestPath) => {
+              capturedManifestPath = manifestPath;
+              return JSON.stringify({ version: "0.8.5", omp: { extensions: ["dist/legion.js"] } });
+            },
+            tokenManager: {
+              getToken: async () => ({
+                token: "test-token",
+                expiresAt: "2099-01-01T00:00:00.000Z",
+                gitIdentity: {
+                  name: "legion-implementer[bot]",
+                  email: "1+legion-implementer[bot]@users.noreply.github.com",
+                },
+              }),
+            },
+            loadState: async () => {
+              loadedState = true;
+              return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+            },
+            createNatsTransport: async () => {
+              natsCreated = true;
+              throw new Error("NATS must not start after a failed plugin load check");
+            },
+          },
+        })
+      ).rejects.toThrow(
+        "pi-legion-envoy 0.8.5 is installed but not loaded by omp (disabled or unregistered); run omp plugin list"
+      );
+
+      expect(probeCommand?.slice(0, 4)).toEqual([
+        "sh",
+        "-c",
+        expect.stringContaining('models --extension "$1" --json >/dev/null'),
+        "sh",
+      ]);
+      expect(probeCommand?.[2]).not.toContain("--no-extensions");
+      expect(capturedManifestPath).toBe(
+        path.join(getPluginsNodeModules(), "@sjawhar", "pi-legion-envoy", "package.json")
+      );
+      expect(loadedState).toBeFalse();
+      expect(natsCreated).toBeFalse();
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an installed pi-legion-envoy that omp actually loads, without requiring a manifest read", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const nats = new FakeNats();
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    let manifestReadCount = 0;
+
+    const daemon = await startDaemon(daemonConfig, {
+      deps: {
+        loadState: async () => state,
+        saveState: async () => {},
+        createNatsTransport: async () => nats,
+        runner: async () => ({
+          stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+          stderr: "",
+          exitCode: 0,
+        }),
+        resolveDaemonEnvironment: async () => daemonEnvironment,
+        statPrompt: async () => {},
+        readPluginManifest: async () => {
+          manifestReadCount += 1;
+          return validLegionPluginManifest;
+        },
+        envoyPublish: async () => {},
+        fetchGitHubProjectItems: async () => ({
+          items: [],
+          excludedNullContentItems: 0,
+        }),
+        tokenManager: {
+          getToken: async () => ({
+            token: "test-token",
+            expiresAt: "2026-08-25T00:00:00.000Z",
+            gitIdentity: {
+              name: "legion-implement[bot]",
+              email: "1+legion-implement[bot]@users.noreply.github.com",
+            },
+          }),
+        },
+        setTimeout: () => 1 as never,
+        clearTimeout: () => {},
+        setInterval: () => 1 as never,
+        clearInterval: () => {},
+        onSignal: () => {},
+        exit: () => {},
+        now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+      },
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/state`);
+      expect(response.status).toBe(200);
+      // The load probe passing is the gate; the manifest read is only a
+      // best-effort version hint for the (unused, on this path) error message.
+      expect(manifestReadCount).toBe(0);
+    } finally {
+      await daemon.stop();
+      await nats.close();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
 
   it("closes API and NATS while surfacing a rejected tracked event during stop", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
@@ -855,11 +1002,12 @@ describe("startDaemon", () => {
         createNatsTransport: async () => nats,
         runner: async () => ({
           stdout: "[]",
-          stderr: "LEGION_OMP_AGENTS=available\n",
+          stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
           exitCode: 0,
         }),
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
+        readPluginManifest: async () => validLegionPluginManifest,
         envoyPublish: async () => {},
         fetchGitHubProjectItems: async () => ({
           items: [],

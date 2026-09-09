@@ -16,6 +16,7 @@
   "dependencies": {
     "@legion/contracts": "workspace:*",
     "@legion/workspace": "workspace:*",
+    "@oh-my-pi/pi-utils": "^18.1.15",
     "citty": "^0.2.0",
     "nats": "^2.29.2",
     "yaml": "^2.8.3",

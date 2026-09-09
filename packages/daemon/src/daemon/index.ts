@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { type IssueKey, roleToken, roleTopic } from "@legion/contracts";
+import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import { connect, StringCodec, type Subscription } from "nats";
 import {
   type CiFetchResult,
@@ -50,6 +51,7 @@ interface DaemonDependencies {
   runner: CommandRunner;
   statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
   readProcessCmdline?: ProcessManagerDeps["readProcessCmdline"];
+  readPluginManifest(manifestPath: string): Promise<string>;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   fetchGitHubProjectItems(): Promise<GitHubProjectItemsResult>;
   tokenManager: Pick<TokenManager, "getToken">;
@@ -223,6 +225,74 @@ async function verifyOmpAgentsCapability(
   }
 }
 
+// Read by legion.ts (packages/pi-envoy/extensions/legion.ts) on load: proves the
+// extension actually loaded through OMP's own extension pipeline, not merely that
+// its manifest file exists on disk. A manifest-only check would pass even when the
+// plugin is disabled (`omp plugin disable`) or unregistered, in which case OMP's
+// ambient discovery silently skips it and every spawned session is Legion-less.
+const LEGION_LOADED_MARKER = "LEGION_PLUGIN_LOADED=yes";
+const LEGION_LOAD_PROBE = `export default function probeLegionPluginLoaded(pi) {
+  const loaded = globalThis[Symbol.for("legion.pi-envoy.legion-loaded")];
+  process.stderr.write(loaded ? "LEGION_PLUGIN_LOADED=yes\\n" : "LEGION_PLUGIN_LOADED=no\\n");
+}
+`;
+
+// A daemon and the OMP sessions it spawns share one ambient environment (Legion
+// never sets `--profile`/`OMP_PROFILE` for spawned sessions), so this probe's
+// invocation — no `--extension` beyond the probe's own — matches the daemon's real
+// spawn shape closely enough that ambient discovery resolves the same plugin root
+// a spawned session will load from.
+//
+// Known gap: this probe runs from the daemon's own cwd, not a spawned root's
+// `workspace.workspaceDir`. A target repo that commits `.omp/plugin-overrides.json`
+// disabling `pi-legion-envoy` passes this boot gate but still launches a
+// Legion-less session. That is caught at runtime instead: such a session never
+// calls `/process/started` or `/worker/started`, and the boot handshake treats an
+// unclaimed boot token as a launch failure (see T5/T9).
+async function verifyLegionPluginLoaded(
+  ompInvocation: string,
+  runner: CommandRunner,
+  readPluginManifest: (manifestPath: string) => Promise<string>
+): Promise<void> {
+  const probeDir = await mkdtemp(path.join(os.tmpdir(), "legion-plugin-probe-"));
+  const probePath = path.join(probeDir, "probe.mjs");
+  try {
+    await writeFile(probePath, LEGION_LOAD_PROBE, "utf8");
+    const result = await runner([
+      "sh",
+      "-c",
+      `${ompInvocation} models --extension "$1" --json >/dev/null`,
+      "sh",
+      probePath,
+    ]);
+    if (
+      result.exitCode === 0 &&
+      (result.stderr.includes(LEGION_LOADED_MARKER) || result.stdout.includes(LEGION_LOADED_MARKER))
+    ) {
+      return;
+    }
+    // The manifest read is a best-effort version hint for the error message only —
+    // it is not part of the pass/fail gate above.
+    const manifestPath = path.join(
+      getPluginsNodeModules(),
+      "@sjawhar",
+      "pi-legion-envoy",
+      "package.json"
+    );
+    const version = await readPluginManifest(manifestPath)
+      .then((raw) => {
+        const manifest: { readonly version?: string } = JSON.parse(raw);
+        return manifest.version;
+      })
+      .catch(() => undefined);
+    throw new Error(
+      `[legion] pi-legion-envoy${version ? ` ${version}` : ""} is installed but not loaded by omp (disabled or unregistered); run omp plugin list`
+    );
+  } finally {
+    await rm(probeDir, { recursive: true, force: true });
+  }
+}
+
 function defaultDependencies(config: DaemonConfig): DaemonDependencies {
   const board = projectBoard(config.legionId);
   const tokenManager = new TokenManager(config.githubApps);
@@ -233,6 +303,7 @@ function defaultDependencies(config: DaemonConfig): DaemonDependencies {
     runner: defaultRunner,
     resolveDaemonEnvironment,
     statPrompt: stat,
+    readPluginManifest: (manifestPath) => readFile(manifestPath, "utf8"),
     envoyPublish: (topic, payloadJson) => publishToEnvoy(config, topic, payloadJson),
     fetchGitHubProjectItems: createBoardProjectItemsFetcher(board, tokenManager),
     tokenManager,
@@ -256,12 +327,13 @@ export async function startDaemon(
 ): Promise<DaemonHandle> {
   const board = projectBoard(config.legionId);
   const deps = { ...defaultDependencies(config), ...options.deps };
-  config.appLogins = await resolveConfiguredAppLogins(config, deps.tokenManager, board.owner);
   const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
     run: deps.runner,
   });
   const runner = createDaemonRunner(environment, deps.runner);
   await verifyOmpAgentsCapability(environment.ompInvocation, runner);
+  await verifyLegionPluginLoaded(environment.ompInvocation, runner, deps.readPluginManifest);
+  config.appLogins = await resolveConfiguredAppLogins(config, deps.tokenManager, board.owner);
   await deps.tokenManager.getToken("implement", board.owner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {

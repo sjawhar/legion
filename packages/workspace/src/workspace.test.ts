@@ -172,7 +172,7 @@ describe("provisionIssueWorkspace", () => {
       calls.flatMap(({ cmd }) => cmd).some((argument) => argument.startsWith("user."))
     ).toBeFalse();
     expect(await readFile(path.join(workspaceDir, ".omp", "config.yml"), "utf8")).toBe(
-      `task:\n  maxRecursionDepth: 11\nextensions:\n  - ${extensionPackage}\n`
+      "task:\n  maxRecursionDepth: 11\n"
     );
     expect(spec).toEqual({ repoCloneDir, workspaceDir, bookmark });
   });

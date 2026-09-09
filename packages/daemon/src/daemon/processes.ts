@@ -672,7 +672,7 @@ export class ProcessManager {
       ...(this.deps.config.dispatchMcpUrl === undefined
         ? []
         : ["-e", `DISPATCH_MCP_URL=${this.deps.config.dispatchMcpUrl}`]),
-      `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation}${resumeArgument} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
+      `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation}${resumeArgument} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     tree.locator = { tmuxSession: session, tmuxWindowId };
     tree.status = "active";
@@ -702,7 +702,7 @@ export class ProcessManager {
       ...(this.deps.config.dispatchMcpUrl === undefined
         ? []
         : ["-e", `DISPATCH_MCP_URL=${this.deps.config.dispatchMcpUrl}`]),
-      `cd ${shellPath(controllerDir)} && ${this.deps.ompInvocation} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
+      `cd ${shellPath(controllerDir)} && ${this.deps.ompInvocation} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     this.deps.state.controllerLocator = { tmuxSession: session, tmuxWindowId };
     await this.deps.saveState();
@@ -712,7 +712,7 @@ export class ProcessManager {
     await mkdir(path.join(directory, ".omp"), { recursive: true });
     await writeFile(
       path.join(directory, ".omp", "config.yml"),
-      `task:\n  maxRecursionDepth: ${maxRecursionDepth}\nextensions:\n  - ${EXTENSION_PACKAGE}\n`,
+      `task:\n  maxRecursionDepth: ${maxRecursionDepth}\n`,
       "utf8"
     );
   }

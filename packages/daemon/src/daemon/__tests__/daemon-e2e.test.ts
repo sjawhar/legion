@@ -252,7 +252,7 @@ describe("daemon end-to-end", () => {
         if (command[0] === "sh") {
           return {
             stdout: "",
-            stderr: "LEGION_OMP_AGENTS=available\n",
+            stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
             exitCode: 0,
           };
         }

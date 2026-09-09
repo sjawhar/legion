@@ -1,8 +1,8 @@
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, mock, test } from "bun:test";
 import { agentSubject, roleToken } from "@legion/contracts";
 import { startLegionApi } from "../../daemon/src/daemon/api";
 import { newLegionState } from "../../daemon/src/daemon/legion-state";
@@ -17,19 +17,23 @@ import type {
   ZodNumberProperty,
 } from "../src/pi-types";
 
+let natsConnectCallCount = 0;
 mock.module("nats", () => ({
-  connect: async () => ({
-    close: async () => undefined,
-    drain: async () => undefined,
-    isClosed: () => false,
-    publish: () => undefined,
-    subscribe: () => ({
-      unsubscribe: () => undefined,
-      [Symbol.asyncIterator]: async function* () {
-        await new Promise<never>(() => undefined);
-      },
-    }),
-  }),
+  connect: async () => {
+    natsConnectCallCount += 1;
+    return {
+      close: async () => undefined,
+      drain: async () => undefined,
+      isClosed: () => false,
+      publish: () => undefined,
+      subscribe: () => ({
+        unsubscribe: () => undefined,
+        [Symbol.asyncIterator]: async function* () {
+          await new Promise<never>(() => undefined);
+        },
+      }),
+    };
+  },
   StringCodec: () => ({
     decode: (data: Uint8Array) => new TextDecoder().decode(data),
     encode: (text: string) => new TextEncoder().encode(text),
@@ -112,6 +116,7 @@ const temporaryPaths: string[] = [];
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  natsConnectCallCount = 0;
   for (const key of environmentKeys) {
     const value = originalEnvironment[key];
     if (value === undefined) delete process.env[key];
@@ -123,7 +128,11 @@ afterEach(async () => {
 });
 
 function createPi(
-  options: { readonly agents?: ExtensionAgentsApi; readonly omitAgents?: boolean } = {}
+  options: {
+    readonly agents?: ExtensionAgentsApi;
+    readonly omitAgents?: boolean;
+    readonly skipEnvoyExtension?: boolean;
+  } = {}
 ): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
@@ -138,7 +147,11 @@ function createPi(
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
   const activeTools = ["read", "task", "hub"];
-  const property = (): ZodNumberProperty => ({ optional: property, describe: property, int: property });
+  const property = (): ZodNumberProperty => ({
+    optional: property,
+    describe: property,
+    int: property,
+  });
   const optional = property;
   const agents =
     options.agents ??
@@ -184,7 +197,7 @@ function createPi(
     registerMessageRenderer: () => undefined,
   };
   if (options.omitAgents) Reflect.deleteProperty(pi, "agents");
-  envoyExtension(pi as never);
+  if (!options.skipEnvoyExtension) envoyExtension(pi as never);
   return { commands, handlers, tools, sentMessages, activeTools, pi };
 }
 
@@ -341,6 +354,29 @@ describe("Legion OMP extension", () => {
         0
       )
     ).toThrow("both controller and tree launch markers");
+  });
+  test("stays inert on session_start without LEGION_TREE, LEGION_ROLE, or LEGION_CONTROLLER in the environment", async () => {
+    delete process.env.LEGION_TREE;
+    delete process.env.LEGION_ROLE;
+    delete process.env.LEGION_CONTROLLER;
+    delete process.env.LEGION_CONTROLLER_SECRET;
+    let fetchCalls = 0;
+    globalThis.fetch = (async (_input, _init): Promise<Response> => {
+      fetchCalls += 1;
+      throw new Error("session_start must not call the daemon without Legion env vars");
+    }) as typeof fetch;
+    const fixture = createPi({ skipEnvoyExtension: true });
+    const natsConnectCallsBefore = natsConnectCallCount;
+
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined)
+      throw new Error("Legion session_start handler was not registered");
+    await sessionStart({}, sessionContext("ses_inert"));
+
+    expect(fixture.tools).toHaveLength(0);
+    expect(fetchCalls).toBe(0);
+    expect(natsConnectCallCount).toBe(natsConnectCallsBefore);
   });
   test("restores root liveness from session_start when the host omits task depth", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];

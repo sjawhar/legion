@@ -54,7 +54,8 @@ it("refuses to start a human merge gate with no resolvable GitHub App login", as
           close: async () => {},
         }),
         runner: async (command) => ({
-          stdout: command[0] === "sh" ? "LEGION_OMP_AGENTS=available\n" : "",
+          stdout:
+            command[0] === "sh" ? "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n" : "",
           stderr: "",
           exitCode: 0,
         }),

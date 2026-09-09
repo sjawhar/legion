@@ -16,7 +16,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui",
+    "build": "bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils",
     "prepack": "./scripts/prepack.sh",
     "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",
@@ -29,6 +29,7 @@
     "@legion/envoy-client": "workspace:*",
     "@legion/workspace": "workspace:*",
     "@oh-my-pi/pi-tui": "^18.1.15",
+    "@oh-my-pi/pi-utils": "^18.1.15",
     "@toon-format/toon": "^4.1.1",
     "@types/bun": "latest",
     "nats": "^2.29.2",
