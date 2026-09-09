@@ -117,9 +117,10 @@ func TestComputeRequestIDsIgnoreCallerSuppliedAskIDs(t *testing.T) {
 }
 
 type fakeIssue struct {
-	state string
-	body  string
-	pull  bool
+	state  string
+	body   string
+	pull   bool
+	labels []string
 }
 
 type fakeComment struct {
@@ -131,11 +132,12 @@ type fakeComment struct {
 // records "<method> <path>[?query]" for assertions. Issues and comments are
 // stateful so follow-up tests can seed a thread and read back what was posted.
 type fakeGitHub struct {
-	calls     []string
-	issues    map[int]fakeIssue
-	comments  map[int][]fakeComment
-	nextIssue int
-	nextID    int64
+	calls             []string
+	issues            map[int]fakeIssue
+	comments          map[int][]fakeComment
+	nextIssue         int
+	nextID            int64
+	failNextLabelCall bool
 }
 
 func newDispatchTestServer(t *testing.T) (*github.Client, *fakeGitHub) {
@@ -183,6 +185,36 @@ func newDispatchTestServer(t *testing.T) (*github.Client, *fakeGitHub) {
 			pull = `,"pull_request":{"url":"https://api.github.com/x"}`
 		}
 		fmt.Fprintf(w, `{"number":%d,"node_id":"node-%d","state":%q,"body":%q,"html_url":%q%s}`, n, n, issue.state, issue.body, issueURL(r, n), pull)
+	})
+	mux.HandleFunc("PATCH /repos/{owner}/{repo}/issues/{number}", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		n := number(r)
+		var req struct {
+			Body *string `json:"body"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		issue := gh.issues[n]
+		if req.Body != nil {
+			issue.body = *req.Body
+		}
+		gh.issues[n] = issue
+		fmt.Fprintf(w, `{"number":%d,"body":%q,"html_url":%q}`, n, issue.body, issueURL(r, n))
+	})
+	mux.HandleFunc("POST /repos/{owner}/{repo}/issues/{number}/labels", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if gh.failNextLabelCall {
+			gh.failNextLabelCall = false
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"message":"boom"}`)
+			return
+		}
+		n := number(r)
+		var req []string
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		issue := gh.issues[n]
+		issue.labels = append(issue.labels, req...)
+		gh.issues[n] = issue
+		fmt.Fprint(w, "[]")
 	})
 	// GET .../issues/{number}/comments (list) and GET .../issues/comments/{id}
 	// (one comment) overlap for ServeMux, so one handler serves both. The list
@@ -503,8 +535,10 @@ func TestContinueThreadPostsAskCommentAndCreatesNoIssue(t *testing.T) {
 	if result.Comment != "https://github.com/acme/widgets/issues/42#issuecomment-1001" {
 		t.Errorf("result.Comment: %q", result.Comment)
 	}
-	if countCalls(gh.calls, "POST /repos/acme/widgets/issues") != countCalls(gh.calls, "POST /repos/acme/widgets/issues/42/comments") {
-		t.Errorf("a follow-up must not create an issue: %v", gh.calls)
+	for _, c := range gh.calls {
+		if c == "POST /repos/acme/widgets/issues" {
+			t.Errorf("a follow-up must not create an issue: %v", gh.calls)
+		}
 	}
 	if callsContain(gh.calls, "/search/issues") {
 		t.Errorf("a follow-up dedupes over comments, not the issue search: %v", gh.calls)
@@ -587,15 +621,123 @@ func TestContinueThreadDedupesAcrossCommentPages(t *testing.T) {
 	}
 }
 
+// TestContinueThreadAdoptsPlainOpenIssue: a plain open issue with no thread
+// marker is adopted on first continuation instead of refused — the body
+// keeps its original text under a new thread marker, the dispatch label is
+// added, and the follow-up ask still posts as a normal comment.
+func TestContinueThreadAdoptsPlainOpenIssue(t *testing.T) {
+	client, gh := newDispatchTestServer(t)
+	gh.issues[42] = fakeIssue{state: "open", body: "just an issue"}
+	result, err := Dispatch(context.Background(), client, DispatchInput{
+		Repo: "acme/widgets", Thread: "42", Context: "C", Question: "Q",
+	})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if result.Thread != 42 {
+		t.Fatalf("result: %+v", result)
+	}
+	issue := gh.issues[42]
+	wantMarker, err := BuildMetaMarker(MetaMarker{RequestID: requestID(fmt.Sprintf("acme/widgets|%d|adopt", 42)), Urgency: UrgencyMed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := wantMarker + "\n\njust an issue"; issue.body != want {
+		t.Errorf("adopted body:\ngot  %q\nwant %q", issue.body, want)
+	}
+	if len(issue.labels) != 1 || issue.labels[0] != dispatchLabel {
+		t.Errorf("expected the dispatch label added, got %v", issue.labels)
+	}
+	if len(gh.comments[42]) != 1 {
+		t.Fatalf("expected the follow-up ask posted as a comment, got %d", len(gh.comments[42]))
+	}
+	if ParseAskMarker(gh.comments[42][0].body) == nil {
+		t.Errorf("posted comment has no ask marker: %q", gh.comments[42][0].body)
+	}
+	if got := countCalls(gh.calls, "PATCH /repos/acme/widgets/issues/42"); got != 1 {
+		t.Errorf("expected exactly one body edit, got %d: %v", got, gh.calls)
+	}
+	if got := countCalls(gh.calls, "/repos/acme/widgets/issues/42/labels"); got != 1 {
+		t.Errorf("expected exactly one label call, got %d: %v", got, gh.calls)
+	}
+	if got := countCalls(gh.calls, "GET /repos/acme/widgets/issues/42/comments"); got != 1 {
+		t.Errorf("dedupe must list comments exactly once, got %d: %v", got, gh.calls)
+	}
+	if callsContain(gh.calls, "/search/issues") {
+		t.Errorf("adoption must not search for an existing thread: %v", gh.calls)
+	}
+}
+
+// TestContinueThreadAdoptsEmptyBody: adopting an issue with no body leaves no
+// dangling blank-line separator — the marker is the whole body, with a
+// single trailing newline, not the two-newline separator used when there is
+// real content to keep apart from the marker.
+func TestContinueThreadAdoptsEmptyBody(t *testing.T) {
+	client, gh := newDispatchTestServer(t)
+	gh.issues[42] = fakeIssue{state: "open", body: ""}
+	if _, err := Dispatch(context.Background(), client, DispatchInput{Repo: "acme/widgets", Thread: "42", Context: "C", Question: "Q"}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	wantMarker, err := BuildMetaMarker(MetaMarker{RequestID: requestID(fmt.Sprintf("acme/widgets|%d|adopt", 42)), Urgency: UrgencyMed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := wantMarker + "\n"; gh.issues[42].body != want {
+		t.Errorf("adopted empty body:\ngot  %q\nwant %q", gh.issues[42].body, want)
+	}
+}
+
+// TestContinueThreadAdoptionRetriesLabelAfterFailure: the body edit and the
+// label add are two separate calls. If the body edit succeeds but the label
+// add then fails, a retry must not see "already a thread" (marker present)
+// and skip the label — it must still add it, idempotently, before the ask
+// posts. Otherwise the issue is a thread with an invisible marker but no
+// `dispatch-thread` label, and the dashboard's label search never finds it.
+func TestContinueThreadAdoptionRetriesLabelAfterFailure(t *testing.T) {
+	client, gh := newDispatchTestServer(t)
+	gh.issues[42] = fakeIssue{state: "open", body: "just an issue"}
+	gh.failNextLabelCall = true
+
+	if _, err := Dispatch(context.Background(), client, DispatchInput{Repo: "acme/widgets", Thread: "42", Context: "C", Question: "Q"}); err == nil {
+		t.Fatalf("expected the first call to fail when the label call fails")
+	}
+	if len(gh.comments[42]) != 0 {
+		t.Fatalf("the ask must not post when the label call fails: %v", gh.comments[42])
+	}
+	if ParseMetaMarker(gh.issues[42].body) == nil {
+		t.Fatalf("the body edit must have applied before the failed label call: %q", gh.issues[42].body)
+	}
+
+	result, err := Dispatch(context.Background(), client, DispatchInput{Repo: "acme/widgets", Thread: "42", Context: "C", Question: "Q"})
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if result.Thread != 42 {
+		t.Errorf("result: %+v", result)
+	}
+	if len(gh.issues[42].labels) != 1 || gh.issues[42].labels[0] != dispatchLabel {
+		t.Errorf("expected the label added on retry, got %v", gh.issues[42].labels)
+	}
+	if len(gh.comments[42]) != 1 {
+		t.Fatalf("expected exactly one ask posted across both attempts, got %d", len(gh.comments[42]))
+	}
+	if got := countCalls(gh.calls, "PATCH /repos/acme/widgets/issues/42"); got != 1 {
+		t.Errorf("the body must be edited only once — the marker was already there on retry, got %d: %v", got, gh.calls)
+	}
+	if got := countCalls(gh.calls, "/repos/acme/widgets/issues/42/labels"); got != 2 {
+		t.Errorf("expected two label attempts (the failed one plus the retry), got %d: %v", got, gh.calls)
+	}
+}
+
 func TestContinueThreadRefusesNonThreadsAndClosedThreads(t *testing.T) {
 	cases := []struct {
 		name  string
 		issue fakeIssue
 		want  string
 	}{
-		{"plain issue", fakeIssue{state: "open", body: "just an issue"}, "#42 is not a dispatch thread"},
 		{"pull request", fakeIssue{state: "open", body: threadBody(t), pull: true}, "#42 is not a dispatch thread"},
 		{"closed thread", fakeIssue{state: "closed", body: threadBody(t)}, "#42 is closed; open a new thread"},
+		{"closed plain issue", fakeIssue{state: "closed", body: "just an issue"}, "#42 is closed; open a new thread"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -607,6 +749,9 @@ func TestContinueThreadRefusesNonThreadsAndClosedThreads(t *testing.T) {
 			}
 			if len(gh.comments[42]) != 0 {
 				t.Errorf("nothing may be posted: %v", gh.comments[42])
+			}
+			if len(gh.issues[42].labels) != 0 {
+				t.Errorf("a refused call must not adopt the issue: %v", gh.issues[42].labels)
 			}
 		})
 	}
