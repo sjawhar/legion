@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as os from "node:os";
+import { logger } from "../log";
 
 // Suppress console.error during tests
 const originalError = console.error;
@@ -70,6 +71,62 @@ describe("envoy plugin init", () => {
       expect(elapsed).toBeLessThan(6000);
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  });
+});
+
+describe("Dispatch tool gating", () => {
+  it("keeps Envoy available and logs once when Dispatch is unconfigured", async () => {
+    const previous = { ...process.env };
+    delete process.env.DISPATCH_URL;
+    delete process.env.DISPATCH_TOKEN;
+    delete process.env.DISPATCH_MCP_URL;
+    process.env.HOME = "/nonexistent-home-for-dispatch-gating";
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381"),
+      } as never);
+
+      expect(Object.keys(hooks.tool).filter((name) => name.startsWith("dispatch_"))).toEqual([]);
+      expect(hooks.tool.envoy_list).toBeDefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "envoy: dispatch tools disabled — no Dispatch URL configured"
+      );
+      hooks.dispose();
+    } finally {
+      warn.mockRestore();
+      process.env = previous;
+    }
+  });
+
+  it("keeps Envoy available and logs the missing bearer token once", async () => {
+    const previous = { ...process.env };
+    process.env.DISPATCH_URL = "http://127.0.0.1:8766";
+    delete process.env.DISPATCH_TOKEN;
+    delete process.env.DISPATCH_MCP_URL;
+    process.env.HOME = "/nonexistent-home-for-dispatch-gating";
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381"),
+      } as never);
+
+      expect(Object.keys(hooks.tool).filter((name) => name.startsWith("dispatch_"))).toEqual([]);
+      expect(hooks.tool.envoy_list).toBeDefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "envoy: dispatch tools disabled — dispatch.token must be a non-empty bearer token"
+      );
+      hooks.dispose();
+    } finally {
+      warn.mockRestore();
+      process.env = previous;
     }
   });
 });

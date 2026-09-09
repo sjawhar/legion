@@ -46,10 +46,14 @@ const sessionsSpec = toolSpec("envoy_sessions");
 
 export default async (input: { serverUrl: URL }) => {
   const cwd = process.cwd();
-  // One loader for the shared envoy.json contract. An invalid file refuses to
-  // load rather than run with dispatch silently off.
+  // Dispatch configuration never prevents Envoy from loading. Disabled native
+  // tools are visible in the host log, including normal unconfigured installs.
   const dispatchConfig = resolveDispatchConfig(process.env, { cwd });
-  if (dispatchConfig.error !== null) throw new Error(`[envoy-plugin] ${dispatchConfig.error}`);
+  if (!dispatchConfig.enabled) {
+    logger.warn(
+      `envoy: dispatch tools disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}`
+    );
+  }
   const envoyDefaults = envoyDefaultsFromEnvironment(process.env);
   const envoy = createEnvoyClient({ baseUrl: envoyDefaults.envoyUrl, fetch: globalThis.fetch });
   let activeSessionID: string | null = null;

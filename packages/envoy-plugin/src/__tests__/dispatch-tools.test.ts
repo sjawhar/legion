@@ -1,5 +1,6 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { tool } from "@opencode-ai/plugin/tool";
+import { logger } from "../log";
 import initPlugin from "../server";
 
 const expectedDispatchTools = [
@@ -56,6 +57,7 @@ test("registers every native Dispatch tool with its shared schema and executes a
   });
   process.env.DISPATCH_URL = `http://127.0.0.1:${service.port}`;
   process.env.DISPATCH_TOKEN = "test-token";
+  const warn = spyOn(logger, "warn").mockImplementation(() => {});
 
   let dispose: (() => void) | undefined;
   try {
@@ -99,7 +101,9 @@ test("registers every native Dispatch tool with its shared schema and executes a
         origin: { host: "opencode", cwd: "/tmp/opencode-workspace" },
       },
     });
+    expect(warn).not.toHaveBeenCalled();
   } finally {
+    warn.mockRestore();
     dispose?.();
     service.stop(true);
     process.env = { ...previous };

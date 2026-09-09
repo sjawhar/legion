@@ -57,6 +57,7 @@ test("exposes every shared Dispatch tool with its required JSON Schema fields wh
   process.env["DISPATCH_URL"] = "http://127.0.0.1:1"
   process.env["DISPATCH_TOKEN"] = "test-token"
   delete process.env["DISPATCH_MCP_URL"]
+  const stderr = captureStderr()
   try {
     const module = await loadServer("dispatch-enabled")
     const definitions = module.envoyMcpToolDefinitions
@@ -76,8 +77,10 @@ test("exposes every shared Dispatch tool with its required JSON Schema fields wh
         ...requiredDispatchFields[definition.name as (typeof dispatchToolNames)[number]],
       ])
     }
+    expect(stderr.lines).toEqual([])
   } finally {
     process.env = previous
+    stderr.restore()
   }
 })
 
@@ -88,6 +91,7 @@ test("omits all Dispatch tools when Dispatch is not enabled", async () => {
   delete process.env["DISPATCH_TOKEN"]
   delete process.env["DISPATCH_MCP_URL"]
   process.env["HOME"] = "/nonexistent-home-for-dispatch-gating"
+  const stderr = captureStderr()
   try {
     const module = await loadServer("dispatch-disabled")
 
@@ -95,7 +99,35 @@ test("omits all Dispatch tools when Dispatch is not enabled", async () => {
     expect(module.envoyMcpToolDefinitions.map((definition) => definition.name)).toEqual(
       envoyToolSpecs.filter((spec) => spec.name !== "envoy_inbox").map(({ name }) => name),
     )
+    expect(stderr.lines).toEqual([
+      "envoy-mcp: Dispatch tools disabled — no Dispatch URL configured\n",
+    ])
   } finally {
+    stderr.restore()
+    process.env = previous
+  }
+})
+
+test("omits Dispatch tools and logs the missing bearer token once", async () => {
+  // given
+  const previous = { ...process.env }
+  process.env["DISPATCH_URL"] = "http://127.0.0.1:8766"
+  delete process.env["DISPATCH_TOKEN"]
+  delete process.env["DISPATCH_MCP_URL"]
+  process.env["HOME"] = "/nonexistent-home-for-dispatch-gating"
+  const stderr = captureStderr()
+  try {
+    const module = await loadServer("dispatch-token-disabled")
+
+    // then
+    expect(module.envoyMcpToolDefinitions.map((definition) => definition.name)).toEqual(
+      envoyToolSpecs.filter((spec) => spec.name !== "envoy_inbox").map(({ name }) => name),
+    )
+    expect(stderr.lines).toEqual([
+      "envoy-mcp: Dispatch tools disabled — dispatch.token must be a non-empty bearer token\n",
+    ])
+  } finally {
+    stderr.restore()
     process.env = previous
   }
 })

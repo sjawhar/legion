@@ -43,8 +43,10 @@ function parseArguments<Operation extends EnvoyToolOperation>(
 // Dispatch operation when the shared configuration resolves. Claude exposes no
 // session title; the monitor session identity is attached to each request.
 const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() })
-if (dispatchConfig.error !== null) {
-  process.stderr.write(`envoy-mcp: Dispatch tools disabled — ${dispatchConfig.error}\n`)
+if (!dispatchConfig.enabled) {
+  process.stderr.write(
+    `envoy-mcp: Dispatch tools disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}\n`,
+  )
 }
 
 const dispatchToolDefinitions = dispatchToolSpecs.map((spec) => ({
