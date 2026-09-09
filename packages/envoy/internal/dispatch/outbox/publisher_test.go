@@ -178,6 +178,11 @@ func TestRunMarksEventPublishedAfterRouteFailure(t *testing.T) {
 	if publishedAt(t, database, event.ID) == nil {
 		t.Fatal("event was not marked published after a route publish failure")
 	}
+	time.Sleep(retryInterval + time.Second)
+	published := publisher.all()
+	if len(published) != 1 || published[0].Topic != "notifications.dispatch.issue.T-1.message.created" {
+		t.Fatalf("published issue events after route failure = %#v, want exactly one issue-topic event", published)
+	}
 }
 
 func TestRunRetriesFailedIssuePublication(t *testing.T) {

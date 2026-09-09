@@ -120,15 +120,17 @@ func (b *Broker) SubscriberCount() int {
 	return len(b.subscribers)
 }
 
-// Publish fans a committed event out to local subscribers. A slow disconnected
-// SSE client cannot block mutations; it reconnects with Last-Event-ID to replay.
+// Publish fans a committed event out to local subscribers. An overflowed SSE
+// client is disconnected before it can advance its replay cursor past an event.
 func (b *Broker) Publish(e model.Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, ch := range b.subscribers {
+	for id, ch := range b.subscribers {
 		select {
 		case ch <- e:
 		default:
+			delete(b.subscribers, id)
+			close(ch)
 		}
 	}
 }
