@@ -3,11 +3,15 @@ import * as os from "node:os";
 
 // Suppress console.error during tests
 const originalError = console.error;
+const originalDispatchToken = process.env.DISPATCH_TOKEN;
 beforeEach(() => {
   console.error = mock(() => {});
+  process.env.DISPATCH_TOKEN ??= "test-token";
 });
 afterEach(() => {
   console.error = originalError;
+  if (originalDispatchToken === undefined) delete process.env.DISPATCH_TOKEN;
+  else process.env.DISPATCH_TOKEN = originalDispatchToken;
 });
 
 describe("envoy plugin init", () => {
@@ -421,8 +425,8 @@ describe("invalid ENVOY_HEARTBEAT_MS falls back to the default (fix 6)", () => {
   });
 });
 
-describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#4)", () => {
-  async function runHook(tool: string, output: string): Promise<string[][]> {
+describe("tool.execute.after auto-subscribes native Dispatch mutations", () => {
+  async function runHook(toolName: string, metadata: unknown): Promise<string[][]> {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
     const subscribed: string[][] = [];
@@ -448,8 +452,8 @@ describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#
       const after = hooks["tool.execute.after"];
       expect(after).toBeDefined();
       await after?.(
-        { tool, sessionID: "ses_dispatch", callID: "call_1", args: {} },
-        { title: "Dispatch", output, metadata: {} }
+        { tool: toolName, sessionID: "ses_dispatch", callID: "call_1", args: {} },
+        { title: "Dispatch", output: "Opened ask ask-742", metadata }
       );
       return subscribed;
     } finally {
@@ -458,26 +462,23 @@ describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#
     }
   }
 
-  it("subscribes the calling session to the new thread's GitHub topic", async () => {
-    const output = JSON.stringify({
-      thread: 742,
-      url: "https://github.com/sjawhar/legion/issues/742",
+  it("subscribes the calling session to a native Dispatch mutation topic", async () => {
+    const subscribed = await runHook("dispatch_ask", {
+      issue: "DSP-742",
+      topic: "notifications.dispatch.issue.DSP-742.>",
+      ask: "ask-742",
     });
-    const subscribed = await runHook("dispatch", output);
-    // `>` needs at least one more token, so the client registers the thread's own
-    // subject beside the wildcard: lifecycle events and comments both arrive.
+    // `>` needs at least one more token, so the client registers the issue's
+    // own subject beside the wildcard: lifecycle events and replies both arrive.
     expect(subscribed).toContainEqual([
       "ses_dispatch",
-      "notifications.github.sjawhar.legion.issue.742",
-      "notifications.github.sjawhar.legion.issue.742.>",
+      "notifications.dispatch.issue.DSP-742",
+      "notifications.dispatch.issue.DSP-742.>",
     ]);
   });
 
-  it("does not subscribe for unrelated tools", async () => {
-    const output = JSON.stringify({
-      url: "https://github.com/sjawhar/legion/issues/9",
-    });
-    const subscribed = await runHook("envoy_subscribe", output);
+  it("does not subscribe when a tool result carries no Dispatch topic", async () => {
+    const subscribed = await runHook("envoy_subscribe", {});
     expect(subscribed.length).toBe(0);
   });
 });

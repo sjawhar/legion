@@ -11,23 +11,24 @@ integration to deliver Envoy traffic into a live session, including idle session
   Monitor stdout is rendered by Claude Code as a Monitor event, waking the session for inbound
   Envoy traffic.
 - `bin/envoy-send.ts` sends a direct message through Envoy's local Go listener HTTP API.
-- `.mcp.json` mounts one MCP server for every Claude session: `envoy`, whose tools are the
-  shared Envoy messaging contract plus `dispatch`, which raises a durable question to Sami as a
-  GitHub issue thread or continues one. `dispatch` is offered only when `dispatch.enabled` is set
-  in `envoy.json` or `DISPATCH_MCP_URL` names the service endpoint; each call fills the target
-  repo from the session's working directory, mints its GitHub token with `gh auth token` there,
-  stamps the thread with the Claude session id, and subscribes the session to the thread's
-  topic so the reply routes back through the monitor as a steer.
+- `.mcp.json` mounts one MCP server for every Claude session: `envoy`, whose tools are the shared
+  Envoy messaging contract plus `dispatch_issue`, `dispatch_ask`, `dispatch_comment`,
+  `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
+  `dispatch_artifact`, and `dispatch_read`. The native Dispatch tools are offered only when
+  `dispatch.enabled` resolves a server URL and bearer token in envoy.json or when `DISPATCH_URL`
+  and `DISPATCH_TOKEN` provide them. Each call fills the target repo from the session's working
+  directory, stamps it with the Claude session id, and subscribes the session to mutation topics
+  so replies arrive back through Envoy.
 - The MCP server is also the session's topic consumer. Envoy pushes nothing to a session that
   consumes NATS itself, and the monitor listens only on `notifications.agent.<session-id>`, so
-  for every topic the session follows — a dispatch thread, or anything passed to
+  for every topic the session follows — a Dispatch mutation or anything passed to
   `envoy_subscribe` — the server subscribes NATS (`ENVOY_NATS_URL`, the monitor's broker) and
   republishes each envelope on the session's agent subject, where the monitor renders it.
   `envoy_unsubscribe` stops the forwarding; closing the session drains the connection. A manual
   `envoy_subscribe` rejects before recording an interest if its NATS forwarder is unavailable;
-  dispatch thread auto-subscription remains best-effort and reports the gap on stderr.
+  Dispatch auto-subscription remains best-effort and reports the gap on stderr.
 - `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
-  `dispatch` skill (when to raise a question) alongside the tool itself.
+  `dispatch` skill (when to raise a question) alongside the tools.
 
 ## Inbound rendering
 
@@ -49,7 +50,7 @@ claude --plugin-dir packages/claude-envoy-bridge
 ```
 
 The monitor and the `envoy` MCP tools identify the session by Claude Code's
-`CLAUDE_CODE_SESSION_ID`, so messages, `envoy_whoami`, and dispatch threads all name one session.
+`CLAUDE_CODE_SESSION_ID`, so messages, `envoy_whoami`, and native Dispatch operations all name one session.
 `ENVOY_SESSION_ID` is an explicit override for controlled QA. If neither is available, the
 monitor exits with an actionable error rather than subscribing to a made-up address. No Claude
 configuration-file changes are required.
