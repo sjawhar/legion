@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { LegionDaemonApi } from "@legion/contracts";
 import type { RouteContext } from "../context";
 import { appRoleForLegionRole } from "../github";
-import { validateContractResponse } from "../http";
+import { requiredString, validateContractResponse } from "../http";
 
 export async function handleProvisioningCredential(
   ctx: RouteContext,
@@ -24,9 +24,10 @@ export async function handleGrants(
 ): Promise<Response> {
   const { tree, issue } = ctx.requireTreeIssue(body);
   const capability = ctx.auth.requireSessionCapability(body, tree, issue);
+  const sessionId = requiredString(body, "sessionId");
   const grantId = randomUUID();
   const expiresAt = ctx.now() + ctx.grantTtlMs;
-  ctx.auth.setGrant(grantId, { issue, role: capability.role, expiresAt });
+  ctx.auth.setGrant(grantId, { issue, role: capability.role, sessionId, expiresAt });
   return Response.json(
     validateContractResponse(LegionDaemonApi.Grant.response, {
       grantId,

@@ -160,6 +160,13 @@ export const LegionDaemonApi = {
     }),
     response: z.object({}),
   },
+  PhaseComplete: {
+    request: z.strictObject({
+      grantId: nonEmptyString,
+      summary: nonEmptyString,
+    }),
+    response: z.object({}),
+  },
   SpawnWorker: {
     request: architectCapability.extend({
       issue: nonEmptyString,
@@ -252,6 +259,7 @@ export type RoleBackingInput = InputOf<typeof LegionDaemonApi.RoleBacking.reques
 export type WorkerStartedInput = InputOf<typeof LegionDaemonApi.WorkerStarted.request>;
 export type WorkerStartedResponse = OutputOf<typeof LegionDaemonApi.WorkerStarted.response>;
 export type WorkerReadyInput = InputOf<typeof LegionDaemonApi.WorkerReady.request>;
+export type PhaseCompleteInput = InputOf<typeof LegionDaemonApi.PhaseComplete.request>;
 export type SpawnWorkerInput = InputOf<typeof LegionDaemonApi.SpawnWorker.request>;
 export type SpawnWorkerResponse = OutputOf<typeof LegionDaemonApi.SpawnWorker.response>;
 export type PhaseInput = InputOf<typeof LegionDaemonApi.Phase.request>;

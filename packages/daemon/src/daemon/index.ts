@@ -13,6 +13,7 @@ import {
 import { fetchGitHubProjectItems, type GitHubProjectItemsResult } from "../state/github-fetch";
 import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
+import { EnvoyPublishError } from "./api/http";
 import { setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, type GitHubAppRole, loadConfig } from "./config";
@@ -130,11 +131,6 @@ export function createCiStatusFetcher(
     });
 }
 
-/** An Envoy publish failure carrying the HTTP status, so callers can distinguish "no holder" (404) from other rejections. */
-export interface EnvoyPublishError extends Error {
-  status?: number;
-}
-
 async function publishToEnvoy(
   config: DaemonConfig,
   topic: string,
@@ -146,9 +142,7 @@ async function publishToEnvoy(
     body: JSON.stringify({ topic, message: payloadJson, payload: payloadJson }),
   });
   if (!response.ok) {
-    const error = new Error(`Envoy publish to ${topic} failed with status ${response.status}`);
-    (error as EnvoyPublishError).status = response.status;
-    throw error;
+    throw new EnvoyPublishError(topic, response.status);
   }
 }
 async function verifyOmpAgentsCapability(

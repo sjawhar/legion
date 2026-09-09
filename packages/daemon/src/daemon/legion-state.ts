@@ -118,7 +118,7 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 14;
+  version: 15;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -133,7 +133,10 @@ export interface LegionState {
   /** A closed-unmerged PR's `headUpdatedAt` at close, keyed by `repo#number`: keeps an older `opened`/`synchronize` redelivery from recreating a PR this state has already deleted (see `pullRequest` in reducers.ts). Pruned past 30 days by `pruneStalePrTombstones`. */
   prTombstones: Record<string, number>;
   admission: { cap: number; active: IssueKey[]; queue: IssueKey[] };
-  phases: Record<IssueKey, { phase: string; sessionId: string } | undefined>;
+  phases: Record<
+    IssueKey,
+    { phase: string; sessionId: string; completed?: { summary: string; at: string } } | undefined
+  >;
   controllerHeldEvents: HeldEvent[];
   controllerCapabilityHash?: string;
 }
@@ -292,11 +295,12 @@ const PhaseSchema = z
   .object({
     phase: z.string(),
     sessionId: z.string(),
+    completed: z.object({ summary: z.string(), at: z.string() }).strict().optional(),
   })
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(14),
+    version: z.literal(15),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -340,7 +344,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 14,
+    version: 15,
     project,
     issues: {},
     trees: {},
@@ -577,6 +581,14 @@ function migrateV13State(state: unknown): unknown {
     : undefined;
   return { ...rest, version: 14, ...(migratedRoles ? { roles: migratedRoles } : {}) };
 }
+
+/** v14 -> v15: `state.phases` entries gain an optional `completed` marker (set when a phase
+ * finishes with no live architect holder to deliver it to); a pure version bump, since existing
+ * phase entries already validate as-is with the field absent. */
+function migrateV14State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 14) return state;
+  return { ...state, version: 15 };
+}
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -590,14 +602,16 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV13State(
-    migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
+  const state = migrateV14State(
+    migrateV13State(
+      migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
+    )
   );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 14) {
+  if (version !== 15) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

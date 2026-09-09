@@ -2,9 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
+import {
+  controllerToken,
+  formatIssueKey,
+  type IssueKey,
+  roleToken,
+  roleTopic,
+} from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
+import { EnvoyPublishError } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { reduceGithubEvent } from "../reducers";
 
@@ -122,6 +129,7 @@ describe("Legion HTTP API", () => {
     onTreeReady?: (tree: IssueKey) => Promise<void>;
     onControllerReady?: () => Promise<void>;
     getToken?: LegionApiDeps["tokenManager"]["getToken"];
+    envoyPublish?: LegionApiDeps["envoyPublish"];
   }) {
     const runner =
       options?.runner ??
@@ -221,9 +229,11 @@ describe("Legion HTTP API", () => {
           if (treeState) treeState.status = "closed";
         },
       },
-      envoyPublish: async (topic, payload) => {
-        publications.push({ topic, payload });
-      },
+      envoyPublish:
+        options?.envoyPublish ??
+        (async (topic, payload) => {
+          publications.push({ topic, payload });
+        }),
       onControllerReady: options?.onControllerReady ?? (async () => {}),
       onControllerEvent: async (payload) => {
         publications.push({
@@ -2285,5 +2295,557 @@ describe("Legion HTTP API", () => {
 
     expect(spawn.response.status).toBe(400);
     expect(spawnedWorkers).toEqual([]);
+  });
+
+  async function mintGrant(issue: IssueKey, sessionId: string, secret: string): Promise<string> {
+    const grant = await json<{ grantId: string }>("/legion/v1/grants", {
+      tree: root,
+      issue,
+      sessionId,
+      secret,
+    });
+    if (grant.response.status !== 200) {
+      throw new Error(`grant was not minted: ${grant.response.status}`);
+    }
+    return grant.body.grantId;
+  }
+
+  it("publishes phase-complete to the tree's architect, clears the phase, and keeps the worker's role claim", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Verified the acceptance criteria",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(publications).toContainEqual({
+      topic: roleTopic(roleToken(state.project, root, "architect")),
+      payload: JSON.stringify({
+        type: "phase-complete",
+        issue: root,
+        role: "tester",
+        summary: "Verified the acceptance criteria",
+      }),
+    });
+    expect(state.phases[root]).toBeUndefined();
+    expect(state.roles[token]).toMatchObject({ issue: root, role: "tester", generation: 1 });
+  });
+
+  it("publishes phase-complete for a child issue to the ROOT's architect, not the child's own", async () => {
+    await start();
+    state.issues[root].children.push(child);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    const token = roleToken(state.project, child, "implementer");
+    state.roles[token] = {
+      issue: child,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@43",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, child, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: child,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_implementer",
+      agentId: "agt_implementer",
+      ompSessionFile: "/tmp/implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[child] = { phase: "implementer", sessionId: "ses_implementer" };
+    const grantId = await mintGrant(child, "ses_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Implemented the change",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(publications).toContainEqual({
+      topic: roleTopic(roleToken(state.project, root, "architect")),
+      payload: JSON.stringify({
+        type: "phase-complete",
+        issue: child,
+        role: "implementer",
+        summary: "Implemented the change",
+      }),
+    });
+    expect(
+      publications.some((publication) =>
+        publication.topic.includes(roleToken(state.project, child, "architect"))
+      )
+    ).toBeFalse();
+    expect(state.phases[child]).toBeUndefined();
+  });
+
+  it("rejects a duplicate phase/complete once the architect has reassigned the issue to a later phase", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+    const body = { grantId, summary: "Verified the acceptance criteria" };
+
+    const first = await json("/legion/v1/phase/complete", body);
+    expect(first.response.status).toBe(200);
+    expect(state.phases[root]).toBeUndefined();
+
+    // The architect reassigns the same issue to a later phase (a fresh worker/started call for a
+    // different role would set exactly this); the tester's own claim never changes. Grants are
+    // read-only, reusable-until-expiry tokens, so the same grantId is still valid here.
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+
+    const duplicate = await json<{ error: string }>("/legion/v1/phase/complete", body);
+
+    expect(duplicate.response.status).toBe(409);
+    expect(duplicate.body.error).toBe("Phase for acme/widgets#1 is no longer owned by this worker");
+    expect(state.phases[root]).toEqual({ phase: "implementer", sessionId: "ses_implementer" });
+    expect(
+      publications.filter(
+        (publication) =>
+          publication.topic === roleTopic(roleToken(state.project, root, "architect"))
+      )
+    ).toHaveLength(1);
+  });
+
+  it("rejects phase/complete with an expired grant", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+
+    now += 60_001;
+    const complete = await json<{ error: string }>("/legion/v1/phase/complete", {
+      grantId,
+      summary: "smoke",
+    });
+
+    expect(complete.response.status).toBe(403);
+    expect(complete.body.error).toBe("Invalid or expired grant");
+    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(publications).toEqual([]);
+  });
+
+  it("rejects phase/complete when the grant's session no longer matches the worker's claim", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+    // A respawn between minting the grant and redeeming it moves the claim onto a new session;
+    // the grant is still unexpired, but it no longer names the worker that currently owns the role.
+    const claim = state.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    claim.sessionId = "ses_tester_respawned";
+
+    const complete = await json<{ error: string }>("/legion/v1/phase/complete", {
+      grantId,
+      summary: "smoke",
+    });
+
+    expect(complete.response.status).toBe(409);
+    expect(complete.body.error).toBe("Grant does not match the worker currently holding this role");
+    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(publications).toEqual([]);
+  });
+
+  it("marks the phase completed and returns 202 when the architect has no live holder, without dropping the completion", async () => {
+    await start({
+      envoyPublish: async (topic) => {
+        throw new EnvoyPublishError(topic, 404);
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", { grantId, summary: "smoke" });
+
+    expect(complete.response.status).toBe(202);
+    // The completion is recorded, not dropped: state (the source of truth) keeps the phase with
+    // a `completed` marker so `overseerCatchup` replays it and `routeActive` treats the issue as
+    // having no active phase, instead of losing the report entirely.
+    expect(state.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      completed: { summary: "smoke", at: new Date(now).toISOString() },
+    });
+    expect(state.roles[token]).toMatchObject({ issue: root, role: "tester", generation: 1 });
+  });
+
+  it("delivers an already-completed phase's report once the architect reappears, on a repeat completion call", async () => {
+    let holderLive = false;
+    await start({
+      envoyPublish: async (topic, payload) => {
+        if (!holderLive) throw new EnvoyPublishError(topic, 404);
+        publications.push({ topic, payload });
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+
+    const first = await json("/legion/v1/phase/complete", {
+      grantId: await mintGrant(root, "ses_tester", started.body.secret),
+      summary: "smoke",
+    });
+    expect(first.response.status).toBe(202);
+    expect(state.phases[root]?.completed).toBeDefined();
+
+    // The architect reappears; the same worker (its role claim was never touched) reports again.
+    // The claim/phase-ownership checks still pass because completing a phase never clears the
+    // claim or reassigns the phase to anyone else — only a fresh assignment would.
+    holderLive = true;
+    const retry = await json("/legion/v1/phase/complete", {
+      grantId: await mintGrant(root, "ses_tester", started.body.secret),
+      summary: "smoke",
+    });
+
+    expect(retry.response.status).toBe(200);
+    expect(state.phases[root]).toBeUndefined();
+    expect(publications).toEqual([
+      {
+        topic: roleTopic(roleToken(state.project, root, "architect")),
+        payload: JSON.stringify({
+          type: "phase-complete",
+          issue: root,
+          role: "tester",
+          summary: "smoke",
+        }),
+      },
+    ]);
+  });
+
+  it("serializes two concurrent completions for the same phase: one succeeds, the other 409s, and only one publish happens", async () => {
+    await start({
+      envoyPublish: async (topic, payload) => {
+        // A deliberate delay keeps both concurrent requests' handlers in flight at once, so the
+        // test actually exercises the capture-before-publish ordering rather than two requests
+        // that happen to run fully sequentially.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        publications.push({ topic, payload });
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+    const body = { grantId, summary: "Verified the acceptance criteria" };
+
+    const [first, second] = await Promise.all([
+      json<{ error: string }>("/legion/v1/phase/complete", body),
+      json<{ error: string }>("/legion/v1/phase/complete", body),
+    ]);
+
+    const statuses = [first.response.status, second.response.status].sort();
+    expect(statuses).toEqual([200, 409]);
+    const rejected = first.response.status === 409 ? first : second;
+    expect(rejected.body.error).toBe(`Phase for ${root} is no longer owned by this worker`);
+    expect(publications).toHaveLength(1);
+    expect(state.phases[root]).toBeUndefined();
+  });
+
+  it("rejects phase/complete with 502 and leaves the phase intact when Envoy publish fails for a reason other than no-holder, then succeeds idempotently on retry", async () => {
+    let failPublish = true;
+    await start({
+      envoyPublish: async (topic, payload) => {
+        if (failPublish) throw new EnvoyPublishError(topic, 500);
+        publications.push({ topic, payload });
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+    const body = { grantId, summary: "Verified the acceptance criteria" };
+
+    const failed = await json("/legion/v1/phase/complete", body);
+
+    expect(failed.response.status).toBe(502);
+    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(publications).toEqual([]);
+
+    failPublish = false;
+    const retried = await json("/legion/v1/phase/complete", body);
+
+    expect(retried.response.status).toBe(200);
+    expect(state.phases[root]).toBeUndefined();
+    expect(publications).toEqual([
+      {
+        topic: roleTopic(roleToken(state.project, root, "architect")),
+        payload: JSON.stringify({
+          type: "phase-complete",
+          issue: root,
+          role: "tester",
+          summary: "Verified the acceptance criteria",
+        }),
+      },
+    ]);
+  });
+
+  it("restores the phase and returns 500 when saving fails after the in-memory delete, then succeeds on retry with a duplicate publish", async () => {
+    let failSave = false;
+    await start({
+      saveState: async () => {
+        if (failSave) throw new Error("disk full");
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+    const body = { grantId, summary: "Verified the acceptance criteria" };
+
+    failSave = true;
+    const failed = await json("/legion/v1/phase/complete", body);
+
+    expect(failed.response.status).toBe(500);
+    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+
+    failSave = false;
+    const retried = await json("/legion/v1/phase/complete", body);
+
+    expect(retried.response.status).toBe(200);
+    expect(state.phases[root]).toBeUndefined();
+    expect(publications).toEqual([
+      {
+        topic: roleTopic(roleToken(state.project, root, "architect")),
+        payload: JSON.stringify({
+          type: "phase-complete",
+          issue: root,
+          role: "tester",
+          summary: "Verified the acceptance criteria",
+        }),
+      },
+      {
+        topic: roleTopic(roleToken(state.project, root, "architect")),
+        payload: JSON.stringify({
+          type: "phase-complete",
+          issue: root,
+          role: "tester",
+          summary: "Verified the acceptance criteria",
+        }),
+      },
+    ]);
   });
 });

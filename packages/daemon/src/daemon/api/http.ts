@@ -15,6 +15,18 @@ export class HttpError extends Error {
   }
 }
 
+/** Raised by `publishToEnvoy` (`../index.ts`) for a non-2xx Envoy response. `status` carries
+ * Envoy's own HTTP status verbatim so callers can distinguish "no live session holds this role"
+ * (404) from a genuine delivery failure without parsing the error message. */
+export class EnvoyPublishError extends Error {
+  constructor(
+    readonly topic: string,
+    readonly status: number
+  ) {
+    super(`Envoy publish to ${topic} failed with status ${status}`);
+  }
+}
+
 export function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new HttpError(400, "Expected a JSON object");

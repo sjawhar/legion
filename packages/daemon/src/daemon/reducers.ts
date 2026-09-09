@@ -480,7 +480,10 @@ function routeToken(
 /**
  * Routes an event about `issue` to whichever role the shared routing table
  * names: the issue's active phase worker (`state.phases[issue]`, written by
- * `handlePhase`), or the tree's architect when no phase is active. A closed
+ * `handlePhase`/`spawnWorker`/`workerReady`), or the tree's architect when no
+ * phase is active — which includes a phase whose worker already reported
+ * completion (`phase.completed` set by `handlePhaseComplete` when no
+ * architect was live to receive it) as well as no phase at all. A closed
  * tree instead wakes the controller so a human can decide whether to resume
  * it.
  */
@@ -506,8 +509,9 @@ export function routeActive(
       `state.phases[${issue}] has an unrecognized phase: ${JSON.stringify(phase.phase)}`
     );
   }
-  const token = phase
-    ? roleToken(state.project, issue, phase.phase as LegionRole)
+  const activePhase = phase && !phase.completed ? phase : undefined;
+  const token = activePhase
+    ? roleToken(state.project, issue, activePhase.phase as LegionRole)
     : roleToken(state.project, tree.root, "architect");
   return [{ kind: "publish", role: token, payload }];
 }

@@ -1,4 +1,4 @@
-import { type IssueKey, type LegionRole, parseIssueKey } from "@legion/contracts";
+import { type IssueKey, isLegionRole, type LegionRole, parseIssueKey } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
 import { buildRoleEnv, modeToRole, type TokenManager } from "./github-apps";
 import type { LegionState, PrState } from "./legion-state";
@@ -31,6 +31,10 @@ export interface CatchupOverseerPayload extends LegionEventPayload {
       fixAttempts: number;
     }
   >;
+  /** Phases that finished with no live architect holder to deliver `phase-complete` to
+   * (`state.phases[issue].completed`, set by `handlePhaseComplete`), replayed here so a
+   * resurrected or reconnecting architect learns them instead of losing them. */
+  phaseCompletions: Array<{ issue: IssueKey; role: LegionRole; summary: string; at: string }>;
 }
 
 export type CatchupUnhandled =
@@ -133,7 +137,22 @@ export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<L
     };
   }
 
-  return { type: "catchup-overseer", gates, childCounts, prVerdicts };
+  const phaseCompletions: CatchupOverseerPayload["phaseCompletions"] = [];
+  for (const issue of [...issues].sort()) {
+    const phase = s.phases[issue];
+    if (!phase?.completed) continue;
+    if (!isLegionRole(phase.phase)) {
+      throw new Error(`state.phases[${issue}] has an unrecognized phase: ${phase.phase}`);
+    }
+    phaseCompletions.push({
+      issue,
+      role: phase.phase,
+      summary: phase.completed.summary,
+      at: phase.completed.at,
+    });
+  }
+
+  return { type: "catchup-overseer", gates, childCounts, prVerdicts, phaseCompletions };
 }
 
 function artifactsFor(state: LegionState, issue: IssueKey): Artifact[] {

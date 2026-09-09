@@ -350,7 +350,10 @@ export class ProcessManager {
               .catch(() => false)
           : false;
         if (client && alive) {
+          const sessionId = claim.sessionId;
           await client.prompt(task);
+          this.deps.state.phases[issue] = { phase: role, sessionId };
+          await this.deps.saveState();
           return { status: "resumed", roleToken: token };
         }
         await this.retireWorkerLocator(token, claim.locator);
@@ -383,6 +386,7 @@ export class ProcessManager {
     if (!task || !claim.locator) return;
     const client = await this.workerClient(token, claim.locator.socketPath);
     await client.prompt(task);
+    this.deps.state.phases[issue] = { phase: role, sessionId };
     delete claim.pendingAssignment;
     await this.deps.saveState();
   }
