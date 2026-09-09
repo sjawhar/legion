@@ -547,9 +547,8 @@ export function pruneStalePrTombstones(state: LegionState, now: number): void {
   }
 }
 
-/** Renamed from the original `migrateV12State` T5 defined (bumped 12->13): #814 independently
- * claimed v13 for the PR-tombstone migration above, so this worker-locator migration becomes
- * the v13->v14 step instead. Same defaults/cutover as originally authored, just re-numbered. */
+/** v13 -> v14: worker role claims gain the per-process locator/identity fields; a legacy claim
+ * that names a session but has no resumable locator drops that identity (it cannot be resumed). */
 function migrateV13State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 13) return state;
   const { roles, ...rest } = state;

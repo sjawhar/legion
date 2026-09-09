@@ -918,7 +918,7 @@ describe("ProcessManager", () => {
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
         if (command[1] === "new-window") {
           newWindowCalls += 1;
-          return { stdout: "@77\n", exitCode: 0 };
+          return { stdout: "@77 %1 4242\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },

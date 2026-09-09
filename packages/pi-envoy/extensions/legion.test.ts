@@ -804,9 +804,7 @@ describe("Legion OMP extension", () => {
     });
     expect(await jjBookmarks(workspace)).toContain("legion/issue-43");
     expect(await gitConfig(repo, "credential.helper")).toBe(TEST_CREDENTIAL_HELPER);
-    expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toContain(
-      "extensions:"
-    );
+    expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toBe("");
   });
   test("replaces copied machine spawn blocks with one authoritative reservation", async () => {
     const tree = "owner/repo#42";
