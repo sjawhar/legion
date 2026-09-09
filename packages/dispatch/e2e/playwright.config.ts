@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:8766";
+const e2ePort = process.env.DISPATCH_E2E_PORT ?? "8777";
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${e2ePort}`;
 
 export default defineConfig({
   testDir: ".",
@@ -20,7 +21,7 @@ export default defineConfig({
     : {
         webServer: {
           command: "bash e2e/run-server.sh",
-          port: 8766,
+          port: Number(e2ePort),
           reuseExistingServer: !process.env.CI,
         },
       }),

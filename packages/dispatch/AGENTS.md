@@ -36,10 +36,11 @@ bun test
 
 `bun run e2e` drives Playwright against the real Go Dispatch server and
 Postgres. The harness runs `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects an already deployed server. It defaults
-`DATABASE_URL` to the Lane C development database and uses the trusted
-`X-Dispatch-User` header identity for `alice` and `bob`; do not replace it
-with a fixture server.
+`PLAYWRIGHT_BASE_URL` selects an already deployed server. The harness defaults
+to `DISPATCH_E2E_PORT=8777`, which keeps its temporary server separate from
+the production listener on port 8766. It defaults `DATABASE_URL` to the Lane C
+development database and uses the trusted `X-Dispatch-User` header identity
+for `alice` and `bob`; do not replace it with a fixture server.
 
 `e2e/seed.ts` truncates the test database before each scenario. For a deployed
 server, set `PLAYWRIGHT_DATABASE_URL` for the same database and
