@@ -747,6 +747,60 @@ func TestArtifactSlugsIncludeExtensions(t *testing.T) {
 	}
 }
 
+func TestArtifactSlugsDisambiguateNormalizedNameCollisions(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	markdown := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "report.md",
+	}, "report.md", "text/markdown", []byte("# Report"), "alice")
+	if markdown.Code != http.StatusCreated {
+		t.Fatalf("upload report.md: status=%d body=%s", markdown.Code, markdown.Body.String())
+	}
+	dashed := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "report-md",
+	}, "report-md", "application/octet-stream", []byte("report"), "alice")
+	if dashed.Code != http.StatusCreated {
+		t.Fatalf("upload report-md: status=%d body=%s", dashed.Code, dashed.Body.String())
+	}
+	versioned := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "report.md",
+	}, "report.md", "text/markdown", []byte("# Revision"), "alice")
+	if versioned.Code != http.StatusCreated {
+		t.Fatalf("upload report.md version 2: status=%d body=%s", versioned.Code, versioned.Body.String())
+	}
+	first := decodeBody[struct {
+		Artifact struct {
+			Slug string `json:"slug"`
+		} `json:"artifact"`
+	}](t, markdown)
+	second := decodeBody[struct {
+		Artifact struct {
+			Slug string `json:"slug"`
+		} `json:"artifact"`
+	}](t, dashed)
+	version := decodeBody[struct {
+		Version struct {
+			Number int `json:"number"`
+		} `json:"version"`
+	}](t, versioned)
+	if first.Artifact.Slug != "report-md" || second.Artifact.Slug != "report-md-2" || version.Version.Number != 2 {
+		t.Fatalf("artifact collision result: got slugs %q, %q and version %d; want report-md, report-md-2, 2", first.Artifact.Slug, second.Artifact.Slug, version.Version.Number)
+	}
+}
+
 func TestConcurrentPrimarySelectionsSerialize(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{

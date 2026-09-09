@@ -113,6 +113,11 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	artifact, err = s.findArtifactByName(r.Context(), tx, issueKey, name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
+		slug, err := s.nextArtifactSlug(r.Context(), tx, issueKey, name)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		if primary {
 			if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = false where issue_key = $1 and is_primary`, issueKey); err != nil {
 				s.writeHandlerError(w, err)
@@ -128,7 +133,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 			insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
 			values ($1, $2, $3, $4, $5, $6)
 			returning id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
-		`, issueKey, artifactSlug(name), name, kind, primary, actorJSON).Scan(
+		`, issueKey, slug, name, kind, primary, actorJSON).Scan(
 			&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &actorJSON, &artifact.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, err)
@@ -612,6 +617,23 @@ func artifactSlug(name string) string {
 		return "artifact"
 	}
 	return result
+}
+
+func (s *server) nextArtifactSlug(ctx context.Context, q issueQueryer, issueKey, name string) (string, error) {
+	base := artifactSlug(name)
+	for suffix := 1; ; suffix++ {
+		candidate := base
+		if suffix > 1 {
+			candidate = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		var inUse bool
+		if err := q.QueryRow(ctx, `select exists(select 1 from artifacts where issue_key = $1 and slug = $2)`, issueKey, candidate).Scan(&inUse); err != nil {
+			return "", err
+		}
+		if !inUse {
+			return candidate, nil
+		}
+	}
 }
 
 func extension(name string) string {
