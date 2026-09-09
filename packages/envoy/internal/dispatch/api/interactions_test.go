@@ -10,85 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
-
-type interactionDocs struct {
-	*docs.NoopAPI
-	text       string
-	applyErr   error
-	applyCalls []replaceCall
-}
-
-type replaceCall struct {
-	artifactID string
-	anchor     model.Anchor
-	with       string
-	actor      model.Actor
-}
-
-func (d *interactionDocs) Text(ctx context.Context, artifactID string) (string, error) {
-	if d.text != "" {
-		return d.text, nil
-	}
-	return d.NoopAPI.Text(ctx, artifactID)
-}
-
-func (d *interactionDocs) ApplyReplace(_ context.Context, artifactID string, anchor model.Anchor, with string, actor model.Actor) error {
-	if d.applyErr != nil {
-		return d.applyErr
-	}
-	d.applyCalls = append(d.applyCalls, replaceCall{artifactID: artifactID, anchor: anchor, with: with, actor: actor})
-	return nil
-}
-
-func (d *interactionDocs) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error) {
-	live, err := d.Text(ctx, artifactID)
-	if err != nil {
-		return model.Version{}, false, err
-	}
-	var version model.Version
-	var markdown *string
-	var authors []byte
-	if err := tx.QueryRow(ctx, `
-		select number, named, summary, authors, created_at, markdown
-		from artifact_versions
-		where artifact_id = $1
-		order by number desc
-		limit 1
-	`, artifactID).Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &markdown); err != nil {
-		return model.Version{}, false, err
-	}
-	if err := json.Unmarshal(authors, &version.Authors); err != nil {
-		return model.Version{}, false, err
-	}
-	if markdown != nil && *markdown == live {
-		return version, false, nil
-	}
-	authors, err = json.Marshal([]model.Actor{actor})
-	if err != nil {
-		return model.Version{}, false, err
-	}
-	if err := tx.QueryRow(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, authors)
-		select $1, max(number) + 1, $2, $3
-		from artifact_versions
-		where artifact_id = $1
-		returning number, named, summary, authors, created_at
-	`, artifactID, live, authors).Scan(
-		&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt,
-	); err != nil {
-		return model.Version{}, false, err
-	}
-	if err := json.Unmarshal(authors, &version.Authors); err != nil {
-		return model.Version{}, false, err
-	}
-	return version, true, nil
-}
 
 func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (http.Handler, *store.Store) {
 	t.Helper()
@@ -346,12 +272,20 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 }
 
 func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
-	var stub *interactionDocs
+	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		stub = &interactionDocs{NoopAPI: docs.NewNoopAPI(database), text: "The clever brown fox"}
-		return stub
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() {
+			if err := documentService.Shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
+		return documentService
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Dirty document", "The quick brown fox")
+	if err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The clever brown fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("change live document: %v", err)
+	}
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Why brown?", "anchor": map[string]any{"artifact": "spec", "quote": "brown"},
 	}, "alice")
@@ -373,11 +307,33 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 		Type   string `json:"type"`
 		Notify bool   `json:"notify"`
 	}
+
 	if err := json.NewDecoder(events.Body).Decode(&log); err != nil {
 		t.Fatalf("decode dirty document events: %v", err)
 	}
 	if len(log) != 3 || log[1].Type != "artifact.version" || log[1].Notify || log[2].Type != "ask.opened" || !log[2].Notify {
 		t.Fatalf("dirty document events = %#v; want non-notifying unnamed artifact.version before notifying ask.opened", log)
+	}
+}
+
+func TestDocumentEditMapsMissingAndAmbiguousTargets(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Document edits", "same same")
+	ambiguous := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "same", "with": "changed"}},
+	}, "alice")
+	if ambiguous.Code != http.StatusConflict || !strings.Contains(ambiguous.Body.String(), `"code":"TARGET_AMBIGUOUS"`) {
+		t.Fatalf("ambiguous edit: status=%d body=%s", ambiguous.Code, ambiguous.Body.String())
+	}
+	missing := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "missing", "with": "changed"}},
+	}, "alice")
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), `"code":"TARGET_NOT_FOUND"`) {
+		t.Fatalf("missing edit: status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"same same"`) {
+		t.Fatalf("failed edit changed document: status=%d body=%s", text.Code, text.Body.String())
 	}
 }
 
@@ -474,11 +430,16 @@ func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
 	}
 }
 
-func TestSuggestionAcceptUsesDocumentInterface(t *testing.T) {
-	var stub *interactionDocs
+func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
+	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		stub = &interactionDocs{NoopAPI: docs.NewNoopAPI(database)}
-		return stub
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() {
+			if err := documentService.Shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
+		return documentService
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Accept suggestion", "The quick brown fox")
 
@@ -496,23 +457,12 @@ func TestSuggestionAcceptUsesDocumentInterface(t *testing.T) {
 	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `"resolved":true`) || !strings.Contains(accepted.Body.String(), `"accepted":true`) {
 		t.Fatalf("accept suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
-	if len(stub.applyCalls) != 1 || stub.applyCalls[0].artifactID != issue.PrimaryArtifactID || stub.applyCalls[0].anchor.Quote != "brown" || stub.applyCalls[0].with != "red" || stub.applyCalls[0].actor.ID != "alice" {
-		t.Fatalf("document replacement calls = %#v", stub.applyCalls)
+	markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("read accepted document: %v", err)
 	}
-}
-
-func TestSuggestionAcceptReportsUnavailableDocumentService(t *testing.T) {
-	handler := newTestHandler(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Unavailable document", "The quick brown fox")
-	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
-	})
-	comment := decodeBody[struct {
-		ID string `json:"id"`
-	}](t, suggestion)
-	unavailable := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-	if unavailable.Code != http.StatusNotImplemented || !strings.Contains(unavailable.Body.String(), `"code":"DOC_SERVICE_UNAVAILABLE"`) {
-		t.Fatalf("unavailable suggestion accept: status=%d body=%s", unavailable.Code, unavailable.Body.String())
+	if markdown != "The quick red fox" {
+		t.Fatalf("accepted document = %q; want replacement applied", markdown)
 	}
 }
 

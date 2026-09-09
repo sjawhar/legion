@@ -17,6 +17,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -109,6 +111,14 @@ func main() {
 		}
 	}
 
+	broker := events.NewBroker()
+	documentService := docs.New(docs.Deps{
+		Store:      database,
+		Events:     broker,
+		Identity:   requestIdentity,
+		AgentToken: boot.AgentToken,
+	})
+
 	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
 		SigningKey:    signingKey,
 		WebDistDir:    webDistDir,
@@ -119,6 +129,8 @@ func main() {
 		AgentToken:    boot.AgentToken,
 		RepoProjects:  boot.RepoProjects,
 		ServerURL:     serverURL,
+		Docs:          documentService,
+		Events:        broker,
 		App:           appCfg,
 		AppSource:     appSource,
 	})
@@ -153,6 +165,9 @@ func main() {
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("dispatch: shutdown", "error", err)
+	}
+	if err := documentService.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("dispatch: shutdown document service", "error", err)
 	}
 }
 

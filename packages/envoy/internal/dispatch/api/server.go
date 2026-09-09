@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 var (
@@ -54,11 +55,16 @@ func NewDeps(input DepsInput) (Deps, error) {
 	if err != nil {
 		return Deps{}, err
 	}
-	if input.Docs == nil {
-		input.Docs = docs.NewNoopAPI(input.Store)
-	}
 	if input.Events == nil {
 		input.Events = events.NewBroker()
+	}
+	if input.Docs == nil {
+		input.Docs = docs.New(docs.Deps{
+			Store:      input.Store,
+			Events:     input.Events,
+			Identity:   input.Identity,
+			AgentToken: input.AgentToken,
+		})
 	}
 	return Deps{
 		Store:        input.Store,
@@ -130,6 +136,11 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/me/state", s.getUserState)
 	mux.HandleFunc("PUT /api/v1/me/issues/{key}/state", s.putUserState)
 	mux.HandleFunc("GET /api/v1/events", s.streamEvents)
+	if websocket, ok := deps.Docs.(interface {
+		ServeHTTP(http.ResponseWriter, *http.Request)
+	}); ok {
+		mux.Handle("GET /ws/doc/{room}", http.HandlerFunc(websocket.ServeHTTP))
+	}
 }
 
 type apiError struct {
@@ -159,8 +170,21 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
-	if errors.Is(err, docs.ErrServiceUnavailable) {
-		writeError(w, "DOC_SERVICE_UNAVAILABLE", http.StatusNotImplemented, err.Error())
+	var targetAmbiguous *text.ErrTargetAmbiguous
+	if errors.As(err, &targetAmbiguous) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":      targetAmbiguous.Error(),
+			"code":       "TARGET_AMBIGUOUS",
+			"candidates": targetAmbiguous.Candidates,
+		})
+		return
+	}
+	if errors.Is(err, text.ErrTargetNotFound) {
+		writeError(w, "TARGET_NOT_FOUND", http.StatusNotFound, err.Error())
+		return
+	}
+	if errors.Is(err, docs.ErrIssueClosed) {
+		writeError(w, "ISSUE_CLOSED", http.StatusConflict, err.Error())
 		return
 	}
 	if errors.Is(err, pgx.ErrNoRows) {

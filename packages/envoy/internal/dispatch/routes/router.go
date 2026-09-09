@@ -21,6 +21,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -58,6 +60,8 @@ type AppContextOptions struct {
 	AgentToken    string
 	RepoProjects  string
 	ServerURL     string
+	Docs          docs.API
+	Events        *events.Broker
 	App           *auth.AppConfig
 	AppSource     string
 }
@@ -79,6 +83,8 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		AgentToken:      opts.AgentToken,
 		RepoProjectsRaw: opts.RepoProjects,
 		ServerURL:       opts.ServerURL,
+		Docs:            opts.Docs,
+		Events:          opts.Events,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)

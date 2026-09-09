@@ -354,10 +354,6 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	version, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, input.Summary, actor)
 	if err != nil {
-		if errors.Is(err, docs.ErrServiceUnavailable) {
-			writeError(w, "DOC_SERVICE_UNAVAILABLE", http.StatusNotImplemented, err.Error())
-			return
-		}
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -404,10 +400,6 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	applied, err := s.deps.Docs.ApplyOps(r.Context(), artifact.ID, input.Ops, actor)
 	if err != nil {
-		if errors.Is(err, docs.ErrServiceUnavailable) {
-			writeError(w, "DOC_SERVICE_UNAVAILABLE", http.StatusNotImplemented, err.Error())
-			return
-		}
 		s.writeHandlerError(w, err)
 		return
 	}
