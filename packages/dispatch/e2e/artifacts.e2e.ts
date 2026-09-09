@@ -84,6 +84,10 @@ test("artifacts upload, version, primary selection, references, and phone layout
   );
 
   await createComment(issue.key, {
+    body: `See dispatch://${issue.key}/artifact/notes-md@v1 before deciding.`,
+  });
+
+  await createComment(issue.key, {
     body: `See dispatch://${issue.key}/artifact/diagram-png before deciding.`,
   });
   await page.reload();
@@ -97,9 +101,17 @@ test("artifacts upload, version, primary selection, references, and phone layout
     }
   });
   await diagram.getByLabel("Referenced by").getByRole("link", { name: "diagram.png" }).click();
-  await expect(page).toHaveURL(`/issues/${issue.key}/artifact/diagram-png`);
+  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/diagram-png`);
   await expect(page.getByTestId("artifact-diagram-png")).toHaveClass(/ring-2/);
   expect(documentRequests).toEqual([]);
+
+  await expect(notes.getByLabel("Referenced by")).toContainText("notes.md");
+  await notes.getByLabel("Referenced by").getByRole("link", { name: "notes.md" }).click();
+  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/notes-md?v=1`);
+  await expect(page.getByRole("heading", { name: "Version 1" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Document version 1" })).toContainText(
+    "Review notes"
+  );
   await page.screenshot({ path: testInfo.outputPath("artifacts-tab.png"), fullPage: true });
 
   if (testInfo.project.name === "iphone") {

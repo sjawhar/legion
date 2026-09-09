@@ -11,8 +11,17 @@ test("composer turns typed dispatch and pasted same-origin links into reference 
   ).toEqual([
     { href: "/issues/CORE-1/spec", reference: "dispatch://CORE-1/spec" },
     {
-      href: "/issues/CORE-1/artifact/design",
+      href: "/issues/CORE-1/artifacts/design",
       reference: "dispatch://CORE-1/artifact/design",
+    },
+  ]);
+});
+
+test("composer emits canonical browser routes for versioned dispatch references", () => {
+  expect(composerReferences("dispatch://CORE-1/artifact/design@v3")).toEqual([
+    {
+      href: "/issues/CORE-1/artifacts/design?v=3",
+      reference: "dispatch://CORE-1/artifact/design@v3",
     },
   ]);
 });

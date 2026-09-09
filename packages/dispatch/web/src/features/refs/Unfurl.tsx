@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
 import { type ComposerReference, composerReferences } from "../margin/Composer";
+import { parseDispatchReference } from "./routes";
 
 interface UnfurlProps {
   body: string;
@@ -18,32 +19,31 @@ function excerpt(markdown: string | null | undefined): string | undefined {
   return text === undefined || text.length === 0 ? undefined : text.slice(0, 160);
 }
 
-function issueKey(reference: ComposerReference): string | undefined {
-  return reference.reference.match(/^dispatch:\/\/([A-Z][A-Z0-9-]*)/)?.[1];
-}
-
-function artifactSlug(reference: ComposerReference): string | undefined {
-  return reference.reference.match(/^dispatch:\/\/[A-Z][A-Z0-9-]*\/artifact\/([^@/]+)/)?.[1];
-}
-
 function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {
-  const key = issueKey(reference);
+  const route = parseDispatchReference(reference.reference);
+  const key = route?.key;
+  const version = route?.kind === "artifact" ? route.version : undefined;
   const issue = useQuery({
     enabled: key !== undefined,
     queryKey: ["issue", key],
     queryFn: () => api.getIssue(key ?? ""),
   });
   const artifact = issue.data?.artifacts?.find(
-    (candidate) => candidate.slug === artifactSlug(reference)
+    (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
   );
   const text = useQuery({
     enabled: artifact?.kind === "doc",
-    queryKey: ["artifact", artifact?.id, "text"],
-    queryFn: () => api.getArtifactText(artifact?.id ?? ""),
+    queryKey: ["artifact", artifact?.id, version ?? "text"],
+    queryFn: () =>
+      version === undefined
+        ? api.getArtifactText(artifact?.id ?? "")
+        : api.getArtifactVersion(artifact?.id ?? "", version),
   });
   const title = artifact === undefined ? issue.data?.title : artifact.name;
+  const markdown =
+    text.data !== undefined && "markdown" in text.data ? text.data.markdown : undefined;
   const description =
-    excerpt(text.data?.markdown) ?? (artifact === undefined ? issue.data?.status : undefined);
+    excerpt(markdown) ?? (artifact === undefined ? issue.data?.status : undefined);
 
   return (
     <a
@@ -94,10 +94,10 @@ function GitHubUnfurl({ href, path }: { href: string; path: string }): ReactNode
 export function Unfurl({ body }: UnfurlProps): ReactNode {
   const dispatch = composerReferences(body);
   const github = [...body.matchAll(/https:\/\/github\.com\/[^\s<>"]+/g)]
-    .map((match) => ({
-      href: match[0].replace(/[),.;:!?]+$/, ""),
-      path: githubReference(match[0]),
-    }))
+    .map((match) => {
+      const href = match[0].replace(/[),.;:!?]+$/, "");
+      return { href, path: githubReference(href) };
+    })
     .filter(
       (reference): reference is { href: string; path: string } => reference.path !== undefined
     );

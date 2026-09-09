@@ -10,6 +10,7 @@ import type {
   Version,
 } from "../../api/types";
 import { VersionDiff } from "../doc/VersionDiff";
+import { parseIssuePath } from "../refs/routes";
 import { Unfurl } from "../refs/Unfurl";
 import { Upload } from "./Upload";
 
@@ -114,7 +115,8 @@ function isText(content: ArtifactVersionContent | undefined): content is Artifac
 function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
   const queryClient = useQueryClient();
   const { pathname } = useLocation();
-  const highlighted = pathname.match(/^\/issues\/[^/]+\/artifact\/([^/]+)$/)?.[1] === artifact.slug;
+  const route = parseIssuePath(pathname);
+  const highlighted = route?.kind === "artifact" && route.slug === artifact.slug;
   const [showAllVersions, setShowAllVersions] = useState(false);
   const versions = [...artifact.versions].sort((left, right) => right.number - left.number);
   const namedVersions = versions.filter((version) => version.named);

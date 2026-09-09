@@ -12,6 +12,12 @@ import {
 
 import { api } from "../../api/client";
 import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
+import {
+  buildDispatchReference,
+  buildIssuePath,
+  parseDispatchReference,
+  parseIssuePath,
+} from "../refs/routes";
 
 export interface ComposerReference {
   href: string;
@@ -39,40 +45,6 @@ function trimReference(value: string): string {
   return value.replace(/[),.;:!?]+$/, "");
 }
 
-function dispatchReference(value: string): ComposerReference | undefined {
-  const match = value.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9-]*)(?:\/(spec|artifact\/[^/?#\s]+(?:@v\d+)?|ask\/[^/?#\s]+|comment\/[^/?#\s]+))?$/
-  );
-  if (match === null) {
-    return undefined;
-  }
-  const key = match[1];
-  const target = match[2];
-  if (key === undefined) {
-    return undefined;
-  }
-  if (target === undefined) {
-    return { href: `/issues/${key}`, reference: `dispatch://${key}` };
-  }
-  if (target === "spec") {
-    return { href: `/issues/${key}/spec`, reference: `dispatch://${key}/spec` };
-  }
-  if (target.startsWith("artifact/")) {
-    const artifact = target.slice("artifact/".length);
-    const [slug, version] = artifact.split("@v");
-    const href =
-      version === undefined
-        ? `/issues/${key}/artifact/${slug}`
-        : `/issues/${key}/artifact/${slug}?v=${version}`;
-    return { href, reference: `dispatch://${key}/artifact/${artifact}` };
-  }
-  const [kind, id] = target.split("/");
-  return {
-    href: `/issues/${key}/${kind === "ask" ? "asks" : "comments"}/${id}`,
-    reference: `dispatch://${key}/${target}`,
-  };
-}
-
 function appReference(value: string, appOrigin: string): ComposerReference | undefined {
   let url: URL;
   try {
@@ -83,36 +55,10 @@ function appReference(value: string, appOrigin: string): ComposerReference | und
   if (url.origin !== appOrigin) {
     return undefined;
   }
-  const match = url.pathname.match(
-    /^\/issues\/([A-Z][A-Z0-9-]*)(?:\/(spec|artifact\/[^/]+|asks\/[^/]+|comments\/[^/]+))?$/
-  );
-  if (match === null) {
-    return undefined;
-  }
-  const key = match[1];
-  const target = match[2];
-  if (key === undefined) {
-    return undefined;
-  }
-  if (target === undefined) {
-    return { href: url.pathname, reference: `dispatch://${key}` };
-  }
-  if (target === "spec") {
-    return { href: url.pathname, reference: `dispatch://${key}/spec` };
-  }
-  if (target.startsWith("artifact/")) {
-    const slug = target.slice("artifact/".length);
-    const version = url.searchParams.get("v");
-    return {
-      href: `${url.pathname}${url.search}`,
-      reference: `dispatch://${key}/artifact/${slug}${version === null ? "" : `@v${version}`}`,
-    };
-  }
-  const [kind, id] = target.split("/");
-  return {
-    href: url.pathname,
-    reference: `dispatch://${key}/${kind === "asks" ? "ask" : "comment"}/${id}`,
-  };
+  const route = parseIssuePath(url.pathname, url.search);
+  return route === undefined
+    ? undefined
+    : { href: buildIssuePath(route), reference: buildDispatchReference(route) };
 }
 
 export function composerReferences(
@@ -122,9 +68,16 @@ export function composerReferences(
   const references: ComposerReference[] = [];
   for (const raw of body.match(/(?:dispatch:\/\/|https?:\/\/)\S+/g) ?? []) {
     const value = trimReference(raw);
-    const reference = value.startsWith("dispatch://")
-      ? dispatchReference(value)
-      : appReference(value, appOrigin);
+    let reference: ComposerReference | undefined;
+    if (value.startsWith("dispatch://")) {
+      const route = parseDispatchReference(value);
+      reference =
+        route === undefined
+          ? undefined
+          : { href: buildIssuePath(route), reference: buildDispatchReference(route) };
+    } else {
+      reference = appReference(value, appOrigin);
+    }
     if (
       reference !== undefined &&
       !references.some((existing) => existing.reference === reference.reference)
@@ -213,7 +166,10 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
     },
     onSuccess: ({ artifact }) => {
       setBody((current) =>
-        appendReference(current, `dispatch://${issueKey}/artifact/${artifact.slug}`)
+        appendReference(
+          current,
+          buildDispatchReference({ key: issueKey, kind: "artifact", slug: artifact.slug })
+        )
       );
       void queryClient.invalidateQueries({ queryKey: ["artifacts", issueKey] });
       void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
@@ -331,7 +287,9 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
             <div className="space-y-1" key={issue.key}>
               <button
                 className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
-                onClick={() => addReference(`dispatch://${issue.key}`)}
+                onClick={() =>
+                  addReference(buildDispatchReference({ key: issue.key, kind: "issue" }))
+                }
                 type="button"
               >
                 {issue.key}: {issue.title}
@@ -343,7 +301,15 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
                 <button
                   className="ml-3 block w-[calc(100%-0.75rem)] rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
                   key={artifact.id}
-                  onClick={() => addReference(`dispatch://${issue.key}/artifact/${artifact.slug}`)}
+                  onClick={() =>
+                    addReference(
+                      buildDispatchReference({
+                        key: issue.key,
+                        kind: "artifact",
+                        slug: artifact.slug,
+                      })
+                    )
+                  }
                   type="button"
                 >
                   {artifact.name}
