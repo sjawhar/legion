@@ -22,6 +22,17 @@ export interface BootToken {
   sessionId?: string;
 }
 
+export interface WorkerBootToken {
+  tree: IssueKey;
+  issue: IssueKey;
+  role: LegionRole;
+  generation: number;
+  /** The claim's existing sessionId at mint time, for a respawn of an already-known agent. */
+  expectedSessionId?: string;
+  /** The session that actually consumed this token; set once, blocks replay. */
+  sessionId?: string;
+}
+
 export function secretHash(secret: string): Buffer {
   return createHash("sha256").update(secret).digest();
 }
@@ -49,6 +60,7 @@ export function equalSecretHash(expectedHash: string, supplied: string): boolean
 export class CapabilityService {
   private readonly capabilities = new Map<string, SessionCapability>();
   private readonly bootTokens = new Map<string, BootToken>();
+  private readonly workerBootTokens = new Map<string, WorkerBootToken>();
   private readonly grants = new Map<string, Grant>();
 
   constructor(private readonly now: () => number) {}
@@ -126,6 +138,14 @@ export class CapabilityService {
 
   getBootToken(token: string): BootToken | undefined {
     return this.bootTokens.get(token);
+  }
+
+  registerWorkerBootToken(bootToken: string, info: Omit<WorkerBootToken, "sessionId">): void {
+    this.workerBootTokens.set(bootToken, { ...info });
+  }
+
+  getWorkerBootToken(token: string): WorkerBootToken | undefined {
+    return this.workerBootTokens.get(token);
   }
 }
 

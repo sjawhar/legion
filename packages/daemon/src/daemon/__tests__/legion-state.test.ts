@@ -84,14 +84,17 @@ function legacyV8State(pr: Record<string, unknown>) {
     ciReconciled: _ciReconciled,
     ...legacyPr
   } = current.prs[prKey];
-  return {
-    current,
-    legacy: {
-      ...current,
-      version: 8,
-      prs: { ...current.prs, [prKey]: { ...legacyPr, ...pr } },
-    },
+  const legacy = {
+    ...current,
+    version: 8,
+    prs: { ...current.prs, [prKey]: { ...legacyPr, ...pr } },
   };
+  // The v12 -> v13 migration drops a legacy worker's session identity when it has no
+  // resumable locator; `legacy.roles` (spread from `current` above) keeps the original
+  // full-identity object, but the post-migration expectation must reflect the cutover.
+  const implementerToken = roleToken(initialState.project, issue, "implementer");
+  current.roles = { ...current.roles, [implementerToken]: { issue, role: "implementer" } };
+  return { current, legacy };
 }
 
 describe("legion state", () => {
@@ -105,9 +108,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v13 state with a valid project and admission capacity", () => {
+  it("initializes empty v14 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 13,
+      version: 14,
       project: "omp",
       issues: {},
       trees: {},
@@ -264,6 +267,8 @@ describe("legion state", () => {
     const migrated = await loadState(file, initialState);
     const expected = stateWithTree();
     delete expected.trees[issue].locator;
+    const implementerToken = roleToken(initialState.project, issue, "implementer");
+    expected.roles[implementerToken] = { issue, role: "implementer" };
 
     expect(migrated).toEqual(expected);
   });
@@ -355,6 +360,8 @@ describe("legion state", () => {
     expected.issues[issue].children = [retainedChild];
     expected.issues[retainedChild] = legacy.issues[retainedChild];
     expected.trees[issue].heldEvents = [retainedHeldEvent];
+    const implementerToken = roleToken(initialState.project, issue, "implementer");
+    expected.roles[implementerToken] = { issue, role: "implementer" };
 
     expect(await loadState(file, initialState)).toEqual(expected);
   });
@@ -430,8 +437,62 @@ describe("legion state", () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v12-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
+    // A locator keeps the v13 -> v14 worker-identity migration (tested below) from touching
+    // this claim, so the only observable change through the full chain is the version bump
+    // this test names.
+    const implementerToken = roleToken(initialState.project, issue, "implementer");
+    current.roles = {
+      ...current.roles,
+      [implementerToken]: {
+        ...current.roles[implementerToken],
+        locator: {
+          tmuxSession: "legion-omp-project",
+          tmuxWindowId: "@42",
+          tmuxPaneId: "%1",
+          socketPath: "/tmp/implementer.sock",
+        },
+      },
+    };
     const v12State = { ...current, version: 12 };
     await writeFile(file, JSON.stringify(v12State), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v12 state by dropping a legacy worker's session identity when it has no resumable locator", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v12-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    await writeFile(file, JSON.stringify({ ...current, version: 12 }), "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    const token = roleToken(initialState.project, issue, "implementer");
+    expect(migrated).toEqual({
+      ...current,
+      roles: { ...current.roles, [token]: { issue, role: "implementer" } },
+    });
+  });
+
+  it("keeps a v12 worker's session identity intact when a resumable locator is already present", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v12-locator-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const token = roleToken(initialState.project, issue, "implementer");
+    current.roles[token] = {
+      issue,
+      role: "implementer",
+      sessionId: "ses_123",
+      agentId: "agt_implementer",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+        ompSessionFile: "/tmp/implementer-session.json",
+      },
+    };
+    await writeFile(file, JSON.stringify({ ...current, version: 12 }), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
   });

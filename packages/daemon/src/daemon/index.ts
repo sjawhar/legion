@@ -29,6 +29,7 @@ import { loadState, saveState } from "./legion-state";
 import { createNatsTransport, type NatsTransport } from "./nats-transport";
 import { daemonCredentialHelper, ProcessManager, type ProcessManagerDeps } from "./processes";
 import { runResync } from "./resync";
+import { connectWorkerRpc } from "./worker-rpc";
 
 const LINGER_SWEEP_INTERVAL_MS = 60_000;
 const OMP_AGENTS_CAPABILITY_MARKER = "LEGION_OMP_AGENTS=available";
@@ -58,6 +59,7 @@ interface DaemonDependencies {
   setInterval(callback: () => void, delayMs: number): unknown;
   clearInterval(timer: unknown): void;
   onSignal(signal: NodeJS.Signals, listener: () => void): void;
+  connectWorkerRpc: ProcessManagerDeps["connectWorkerRpc"];
   exit(code: number): void;
   now(): number;
 }
@@ -271,6 +273,7 @@ function defaultDependencies(config: DaemonConfig): DaemonDependencies {
     onSignal: (signal, listener) => {
       process.on(signal, listener);
     },
+    connectWorkerRpc,
     exit: (code) => {
       process.exit(code);
     },
@@ -347,6 +350,9 @@ async function startDaemonLocked(
     natsRequest: (subject, data) => nats.request(subject, data),
     mintControllerCapability: async () => api.mintControllerCapability(),
     mintBootToken: (tree, generation) => api.mintBootToken(tree, generation),
+    mintWorkerBootToken: (tree, issue, role, generation, expectedSessionId) =>
+      api.mintWorkerBootToken(tree, issue, role, generation, expectedSessionId),
+    connectWorkerRpc: deps.connectWorkerRpc,
     provisioningToken: async (owner) =>
       (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
@@ -355,6 +361,12 @@ async function startDaemonLocked(
     now: deps.now,
   });
 
+  // reconcileAdmission is now awaited further down (see the comment near its call), once
+  // `api` is assigned: its promotion cascade calls back into `mintBootToken`/
+  // `mintControllerCapability` closures that read `api` by reference.
+  void processManager.reconnectWorkers().catch((error) => {
+    console.error(`[legion] worker reconnection failed:`, error);
+  });
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
     const payload = await overseerCatchup(state, tree);
     await deps.envoyPublish(

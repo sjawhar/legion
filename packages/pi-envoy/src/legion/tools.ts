@@ -2,6 +2,7 @@ import {
   ARCHITECT_MUTABLE_LABELS,
   type ArchitectMutableLabel,
   isArchitectMutableLabel,
+  LEGION_ROLES,
   type LegionRole,
 } from "@legion/contracts";
 import type { LegionDaemonClient } from "./daemon-client";
@@ -32,6 +33,7 @@ const LEGION_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
   request_refile: ["issue", "rationale"],
   issue_close: ["issue", "comment"],
   merge_gate: ["pr"],
+  spawn_worker: ["issue", "role", "task"],
 };
 
 function legionToolSchema(pi: PiApi): unknown {
@@ -47,6 +49,7 @@ function legionToolSchema(pi: PiApi): unknown {
       "request_refile",
       "issue_close",
       "merge_gate",
+      "spawn_worker",
     ]),
     title: z.string().optional(),
     body: z.string().optional(),
@@ -59,6 +62,8 @@ function legionToolSchema(pi: PiApi): unknown {
     rationale: z.string().optional(),
     comment: z.string().optional(),
     pr: z.number().optional(),
+    role: z.enum(LEGION_ROLES).optional(),
+    task: z.string().optional(),
   });
 }
 
@@ -212,6 +217,20 @@ export function createLegionTool(deps: {
               ...(comment === undefined ? {} : { comment }),
             });
             return jsonSuccess({});
+          }
+          case "spawn_worker": {
+            const role = parameters.role;
+            if (typeof role !== "string" || !LEGION_ROLES.includes(role as LegionRole)) {
+              throw new Error("spawn_worker requires a valid Legion role");
+            }
+            return jsonSuccess(await daemon.spawnWorker({
+              tree: architect.tree,
+              sessionId,
+              secret: architect.secret,
+              issue: stringInput("issue"),
+              role: role as LegionRole,
+              task: stringInput("task"),
+            }));
           }
           default:
             throw new Error(`Unsupported legion operation: ${String(parameters.op)}`);

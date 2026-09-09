@@ -45,6 +45,13 @@ describe("Legion HTTP API", () => {
     role: string;
     agentId: string;
   }>;
+  let spawnedWorkers: Array<{ tree: IssueKey; issue: IssueKey; role: string; task: string }>;
+  let workerReadyCalls: Array<{
+    issue: IssueKey;
+    role: string;
+    sessionId: string;
+    generation: number;
+  }>;
   let now: number;
   let controllerSecret: string;
 
@@ -56,6 +63,8 @@ describe("Legion HTTP API", () => {
     closedTrees = [];
     admissions = [];
     backingRegistrations = [];
+    spawnedWorkers = [];
+    workerReadyCalls = [];
     now = 1_700_000_000_000;
     state = newLegionState("omp", 2);
     state.issues[root] = {
@@ -112,6 +121,7 @@ describe("Legion HTTP API", () => {
     admit?: (issue: IssueKey) => "spawned" | "queued";
     onTreeReady?: (tree: IssueKey) => Promise<void>;
     onControllerReady?: () => Promise<void>;
+    getToken?: LegionApiDeps["tokenManager"]["getToken"];
   }) {
     const runner =
       options?.runner ??
@@ -165,17 +175,19 @@ describe("Legion HTTP API", () => {
       state: options?.state ?? state,
       runner,
       tokenManager: {
-        getToken: async (role, owner) => {
-          tokenRoles.push(role);
-          return {
-            token: `minted-${role}-${owner}`,
-            expiresAt: "2099-01-01T00:00:00.000Z",
-            gitIdentity: {
-              name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
-              email: `42+legion-${role}[bot]@users.noreply.github.com`,
-            },
-          };
-        },
+        getToken:
+          options?.getToken ??
+          (async (role, owner) => {
+            tokenRoles.push(role);
+            return {
+              token: `minted-${role}-${owner}`,
+              expiresAt: "2099-01-01T00:00:00.000Z",
+              gitIdentity: {
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
+                email: `42+legion-${role}[bot]@users.noreply.github.com`,
+              },
+            };
+          }),
       },
       processManager: {
         admit: (issue) => {
@@ -189,6 +201,14 @@ describe("Legion HTTP API", () => {
           backingRegistrations.push({ tree, issue, role, agentId });
         },
         markTreeReady: () => {},
+        markControllerReady: () => {},
+        spawnWorker: async (tree, issue, role, task) => {
+          spawnedWorkers.push({ tree, issue, role, task });
+          return { status: "spawned", roleToken: roleToken(state.project, issue, role) };
+        },
+        workerReady: (issue, role, sessionId, generation) => {
+          workerReadyCalls.push({ issue, role, sessionId, generation });
+        },
         beginLinger: (tree) => {
           const treeState = state.trees[tree];
           if (treeState) treeState.status = "lingering";
@@ -1740,5 +1760,530 @@ describe("Legion HTTP API", () => {
       finalCommentRef: "https://github.com/acme/widgets/issues/1#issuecomment-99",
     });
     expect(state.trees[root]).toMatchObject({ status: "lingering" });
+  });
+
+  it("registers a worker session and phase from a valid worker boot token", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+
+    const started = await json<{
+      roleToken: string;
+      secret: string;
+      gitName: string;
+      gitEmail: string;
+    }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+
+    expect(started.response.status).toBe(200);
+    expect(started.body.roleToken).toBe(token);
+    expect(started.body.gitName).toBe("legion-implement[bot]");
+    expect(state.roles[token]).toMatchObject({
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      locator: { ompSessionFile: "/tmp/tester.json" },
+    });
+    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+  });
+
+  it("rejects a worker boot token that has already been consumed", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const body = {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    };
+
+    expect((await json("/legion/v1/worker/started", body)).response.status).toBe(200);
+    const replay = await json("/legion/v1/worker/started", { ...body, sessionId: "ses_tester_2" });
+    expect(replay.response.status).toBe(403);
+  });
+
+  it("accepts a same-session worker/started replay as idempotent, reissuing a secret", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const body = {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    };
+
+    const first = await json<{ secret: string; roleToken: string }>(
+      "/legion/v1/worker/started",
+      body
+    );
+    expect(first.response.status).toBe(200);
+    const retry = await json<{ secret: string; roleToken: string }>(
+      "/legion/v1/worker/started",
+      body
+    );
+    expect(retry.response.status).toBe(200);
+    expect(retry.body.roleToken).toBe(token);
+    expect(state.roles[token]).toMatchObject({ sessionId: "ses_tester", agentId: "agt_tester" });
+  });
+
+  it("retries cleanly after a transient tokenForIssue failure, leaving exactly one claim", async () => {
+    let calls = 0;
+    await start({
+      getToken: async (role, owner) => {
+        calls += 1;
+        if (calls === 1) throw new Error("GitHub token service unavailable");
+        return {
+          token: `minted-${role}-${owner}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "42+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const body = {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    };
+
+    const first = await request("/legion/v1/worker/started", body);
+    expect(first.status).toBe(500);
+    expect(state.roles[token]).toEqual({
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    });
+
+    const retry = await json<{ secret: string; roleToken: string }>(
+      "/legion/v1/worker/started",
+      body
+    );
+    expect(retry.response.status).toBe(200);
+    expect(retry.body.secret).toBeString();
+    expect(retry.body.roleToken).toBe(token);
+    expect(Object.keys(state.roles)).toEqual([token]);
+    expect(state.roles[token]).toMatchObject({ sessionId: "ses_tester", agentId: "agt_tester" });
+  });
+
+  it("rolls back the claim and phase mutations when the state save fails, leaving a clean retry", async () => {
+    let saveCalls = 0;
+    await start({
+      mintController: false,
+      saveState: async () => {
+        saveCalls += 1;
+        if (saveCalls === 1) throw new Error("disk full");
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const body = {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    };
+
+    const first = await request("/legion/v1/worker/started", body);
+    expect(first.status).toBe(500);
+    expect(state.roles[token]).toEqual({
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    });
+    expect(state.phases[root]).toBeUndefined();
+
+    const retry = await json<{ secret: string; roleToken: string }>(
+      "/legion/v1/worker/started",
+      body
+    );
+    expect(retry.response.status).toBe(200);
+    expect(state.roles[token]).toMatchObject({ sessionId: "ses_tester", agentId: "agt_tester" });
+    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+  });
+
+  it("rejects a worker/started sessionId that differs from the boot token's expected respawn session", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      sessionId: "ses_original",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1, "ses_original");
+    if (!bootToken) throw new Error("worker boot token was not minted");
+
+    const mismatched = await json("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_different",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(mismatched.response.status).toBe(409);
+
+    const resumed = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_original",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(resumed.response.status).toBe(200);
+  });
+
+  it("recovers a phase worker's session capability from its persisted boot token after a daemon restart", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    api?.stop();
+    await start({ state });
+    const stale = await json("/legion/v1/worker/ready", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      sessionId: "ses_tester",
+      generation: 1,
+      secret: started.body.secret,
+    });
+    expect(stale.response.status).toBe(403);
+
+    const recovered = await json<WorkerSessionResponse>("/legion/v1/worker-session", {
+      sessionId: "ses_tester",
+      recoveryToken: bootToken,
+    });
+    expect(recovered.response.status).toBe(200);
+    expect(recovered.body).toEqual({
+      tree: root,
+      issue: root,
+      role: "tester",
+      secret: expect.any(String),
+    });
+    expect(
+      (
+        await json("/legion/v1/worker/ready", {
+          tree: root,
+          issue: root,
+          role: "tester",
+          sessionId: "ses_tester",
+          generation: 1,
+          secret: recovered.body.secret,
+        })
+      ).response.status
+    ).toBe(200);
+
+    const wrongToken = await json("/legion/v1/worker-session", {
+      sessionId: "ses_tester",
+      recoveryToken: "not-a-daemon-issued-token",
+    });
+    expect(wrongToken.response.status).toBe(403);
+  });
+
+  it("delivers a worker's pending assignment through the process manager on worker/ready", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+
+    const ready = await json("/legion/v1/worker/ready", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      sessionId: "ses_tester",
+      generation: 1,
+      secret: started.body.secret,
+    });
+
+    expect(ready.response.status).toBe(200);
+    expect(workerReadyCalls).toEqual([
+      { issue: root, role: "tester", sessionId: "ses_tester", generation: 1 },
+    ]);
+  });
+
+  it("rejects worker/ready when the session's role does not match the requested role", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+
+    const ready = await json("/legion/v1/worker/ready", {
+      tree: root,
+      issue: root,
+      role: "reviewer",
+      sessionId: "ses_tester",
+      generation: 1,
+      secret: started.body.secret,
+    });
+
+    expect(ready.response.status).toBe(403);
+    expect(workerReadyCalls).toEqual([]);
+  });
+
+  it("spawns a worker through the architect capability and forwards to the process manager", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const spawn = await json<{ status: string; roleToken: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_root",
+      secret: started.body.secret,
+      role: "planner",
+      task: "plan #1",
+    });
+
+    expect(spawn.response.status).toBe(200);
+    expect(spawn.body).toEqual({
+      status: "spawned",
+      roleToken: roleToken(state.project, root, "planner"),
+    });
+    expect(spawnedWorkers).toEqual([{ tree: root, issue: root, role: "planner", task: "plan #1" }]);
+  });
+
+  it("refuses spawn_worker for a non-architect session capability", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+
+    const spawn = await json("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_tester",
+      secret: started.body.secret,
+      role: "planner",
+      task: "plan #1",
+    });
+
+    expect(spawn.response.status).toBe(403);
+    expect(spawnedWorkers).toEqual([]);
+  });
+
+  it("rejects spawn_worker for the root issue's own architect role", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const spawn = await json("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_root",
+      secret: started.body.secret,
+      role: "architect",
+      task: "reboot",
+    });
+
+    expect(spawn.response.status).toBe(400);
+    expect(spawnedWorkers).toEqual([]);
   });
 });

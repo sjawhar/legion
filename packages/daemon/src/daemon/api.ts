@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { type IssueKey, LegionDaemonApi, type LegionRole } from "@legion/contracts";
+import {
+  type IssueKey,
+  LegionDaemonApi,
+  type LegionRole,
+  type SpawnWorkerResponse,
+} from "@legion/contracts";
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
 import { CapabilityService, ControllerGate, secretHash, spawnCapabilityKey } from "./api/auth";
@@ -40,7 +45,10 @@ import {
   handlePhase,
   handleRoleBacking,
   handleSpawnToken,
+  handleSpawnWorker,
+  handleWorkerReady,
   handleWorkerSession,
+  handleWorkerStarted,
 } from "./api/routes/workers";
 import type { LegionState } from "./legion-state";
 
@@ -65,9 +73,22 @@ export interface LegionApiProcessManager {
     role: LegionRole,
     agentId: string
   ): void | Promise<void>;
+  spawnWorker(
+    tree: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    task: string
+  ): Promise<SpawnWorkerResponse>;
+  workerReady(
+    issue: IssueKey,
+    role: LegionRole,
+    sessionId: string,
+    generation: number
+  ): void | Promise<void>;
   markProcessDead(tree: IssueKey): void | Promise<void>;
   closeTree(tree: IssueKey): void | Promise<void>;
   markTreeReady(tree: IssueKey): void | Promise<void>;
+  markControllerReady(): void | Promise<void>;
   beginLinger(tree: IssueKey): void;
 }
 
@@ -87,6 +108,13 @@ export interface LegionApi {
   server: Bun.Server<undefined>;
   mintControllerCapability(): Promise<string>;
   mintBootToken(tree: IssueKey, generation: number): Promise<string>;
+  mintWorkerBootToken(
+    tree: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    generation: number,
+    expectedSessionId?: string
+  ): Promise<string>;
   stop(): void;
 }
 
@@ -135,6 +163,18 @@ const ROUTES: Record<string, RouteEntry> = {
     handler: handleSpawnToken,
   },
   "/legion/v1/phase": { request: LegionDaemonApi.Phase.request, handler: handlePhase },
+  "/legion/v1/worker/started": {
+    request: LegionDaemonApi.WorkerStarted.request,
+    handler: handleWorkerStarted,
+  },
+  "/legion/v1/worker/ready": {
+    request: LegionDaemonApi.WorkerReady.request,
+    handler: handleWorkerReady,
+  },
+  "/legion/v1/worker/spawn": {
+    request: LegionDaemonApi.SpawnWorker.request,
+    handler: handleSpawnWorker,
+  },
   "/legion/v1/worker-session": {
     request: LegionDaemonApi.WorkerSession.request,
     handler: handleWorkerSession,
@@ -246,6 +286,11 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         role: "architect",
       };
       await save();
+      return bootToken;
+    },
+    mintWorkerBootToken: async (tree, issue, role, generation, expectedSessionId) => {
+      const bootToken = randomUUID();
+      auth.registerWorkerBootToken(bootToken, { tree, issue, role, generation, expectedSessionId });
       return bootToken;
     },
     mintControllerCapability: async () => {

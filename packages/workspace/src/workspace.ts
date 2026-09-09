@@ -26,22 +26,6 @@ export interface ProvisionIssueWorkspaceDeps {
   readonly credentialHelper: string;
   readonly extensionPackage: string;
   readonly stateDir: string;
-  readonly maxRecursionDepth?: number;
-}
-
-function maxRecursionDepth(configuredDepth?: number): number {
-  if (configuredDepth !== undefined) {
-    if (!Number.isSafeInteger(configuredDepth) || configuredDepth <= 0) {
-      throw new Error("Configured Legion max recursion depth must be a positive integer");
-    }
-    return configuredDepth;
-  }
-  const raw = process.env.LEGION_MAX_RECURSION_DEPTH;
-  const depth = Number(raw);
-  if (!raw || !Number.isSafeInteger(depth) || depth <= 0) {
-    throw new Error("LEGION_MAX_RECURSION_DEPTH must be a positive integer");
-  }
-  return depth;
 }
 
 function commandFailure(result: RunResult, cmd: string[]): Error {
@@ -180,14 +164,10 @@ async function createWorkspace(
   if (retry.exitCode !== 0) throw commandFailure(retry, recoveryWorkspaceArgs);
 }
 
-async function writeOmpConfig(workspaceDir: string, depth: number): Promise<void> {
+async function writeOmpConfig(workspaceDir: string): Promise<void> {
   const ompDir = path.join(workspaceDir, ".omp");
   await mkdir(ompDir, { recursive: true });
-  await writeFile(
-    path.join(ompDir, "config.yml"),
-    `task:\n  maxRecursionDepth: ${depth}\n`,
-    "utf8"
-  );
+  await writeFile(path.join(ompDir, "config.yml"), "", "utf8");
 }
 
 export async function provisionIssueWorkspace(
@@ -267,7 +247,7 @@ export async function provisionIssueWorkspace(
     "credential.interactive",
     "false",
   ]);
-  await writeOmpConfig(workspaceDir, maxRecursionDepth(deps.maxRecursionDepth));
+  await writeOmpConfig(workspaceDir);
 
   return { repoCloneDir, workspaceDir, bookmark };
 }

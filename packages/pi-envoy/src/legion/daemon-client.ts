@@ -16,9 +16,9 @@ import {
   type IssueTextInput,
   type LabelsInput,
   type LabelsResponse,
+  LegionDaemonApi,
   type MergeGateInput,
   type MergeGateResponse,
-  LegionDaemonApi,
   type PhaseInput,
   type PhaseResponse,
   type ProcessExitInput,
@@ -30,10 +30,15 @@ import {
   type RoleBackingInput,
   type SpawnTokenInput,
   type SpawnTokenResponse,
+  type SpawnWorkerInput,
+  type SpawnWorkerResponse,
   type WaveReleaseInput,
   type WaveReleaseResponse,
+  type WorkerReadyInput,
   type WorkerSessionInput,
   type WorkerSessionResponse,
+  type WorkerStartedInput,
+  type WorkerStartedResponse,
 } from "@legion/contracts";
 
 type ResponseSchema<T> = { parse(value: unknown): T };
@@ -55,6 +60,9 @@ export interface LegionDaemonClient {
   readonly escalate: (input: EscalateInput) => Promise<void>;
   readonly issueClose: (input: IssueCloseInput) => Promise<void>;
   readonly spawnToken: (input: SpawnTokenInput) => Promise<SpawnTokenResponse>;
+  readonly spawnWorker: (input: SpawnWorkerInput) => Promise<SpawnWorkerResponse>;
+  readonly workerStarted: (input: WorkerStartedInput) => Promise<WorkerStartedResponse>;
+  readonly workerReady: (input: WorkerReadyInput) => Promise<void>;
   readonly roleBacking: (input: RoleBackingInput) => Promise<void>;
   readonly phase: (input: PhaseInput) => Promise<PhaseResponse>;
   readonly gatesApprove: (input: ControllerIssueInput) => Promise<void>;
@@ -114,7 +122,6 @@ function sessionCapability(
 
 const WORKER_SESSION_PATH = "/legion/v1/worker-session";
 
-
 export function createLegionDaemonClient(
   baseUrl: string,
   fetchFn: typeof fetch = fetch,
@@ -122,11 +129,7 @@ export function createLegionDaemonClient(
 ): LegionDaemonClient {
   const endpoint = baseUrl.replace(/\/+$/, "");
 
-  const postOnce = async <T>(
-    path: string,
-    body: object,
-    schema: ResponseSchema<T>
-  ): Promise<T> => {
+  const postOnce = async <T>(path: string, body: object, schema: ResponseSchema<T>): Promise<T> => {
     const response = await fetchFn(`${endpoint}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -184,8 +187,7 @@ export function createLegionDaemonClient(
       post("/legion/v1/process/started", input, LegionDaemonApi.ProcessStarted.response),
     processReady: (input) =>
       noContent("/legion/v1/process/ready", input, LegionDaemonApi.ProcessReady.response),
-    mergeGate: (input) =>
-      post("/legion/v1/merge-gate", input, LegionDaemonApi.MergeGate.response),
+    mergeGate: (input) => post("/legion/v1/merge-gate", input, LegionDaemonApi.MergeGate.response),
     issueCreate: (input) => post("/legion/v1/issues", input, LegionDaemonApi.IssueCreate.response),
     waveRelease: (input) =>
       post("/legion/v1/waves/release", input, LegionDaemonApi.WaveRelease.response),
@@ -202,6 +204,12 @@ export function createLegionDaemonClient(
     escalate: (input) => noContent("/legion/v1/escalate", input, LegionDaemonApi.Escalate.response),
     spawnToken: (input) =>
       post("/legion/v1/spawn-token", input, LegionDaemonApi.SpawnToken.response),
+    spawnWorker: (input) =>
+      post("/legion/v1/worker/spawn", input, LegionDaemonApi.SpawnWorker.response),
+    workerStarted: (input) =>
+      post("/legion/v1/worker/started", input, LegionDaemonApi.WorkerStarted.response),
+    workerReady: (input) =>
+      noContent("/legion/v1/worker/ready", input, LegionDaemonApi.WorkerReady.response),
     roleBacking: (input) =>
       noContent("/legion/v1/role-backing", input, LegionDaemonApi.RoleBacking.response),
     issueClose: (input) =>
