@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -216,6 +215,34 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	if !ok {
 		return
 	}
+	if action == "accept" || action == "reject" {
+		comment, err := s.loadCommentRow(r.Context(), s.deps.Store.Pool, `
+			select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
+			from comments where id = $1
+		`, r.PathValue("id"))
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if comment.Suggestion == nil {
+			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept and reject require a suggestion")
+			return
+		}
+		if comment.Suggestion.Accepted != nil {
+			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
+			return
+		}
+		if action == "accept" {
+			if comment.Anchor == nil {
+				writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
+				return
+			}
+			if err := s.deps.Docs.ApplyReplace(r.Context(), comment.Anchor.ArtifactID, *comment.Anchor, comment.Suggestion.ReplaceWith, actor); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -249,16 +276,12 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept and reject require a suggestion")
 			return
 		}
+		if comment.Suggestion.Accepted != nil {
+			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
+			return
+		}
 		accepted := action == "accept"
 		if accepted {
-			if comment.Anchor == nil {
-				writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
-				return
-			}
-			if err := s.deps.Docs.ApplyReplace(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, *comment.Anchor, comment.Suggestion.ReplaceWith, actor); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
 			eventType = "suggestion.accepted"
 		} else {
 			eventType = "suggestion.rejected"
@@ -270,8 +293,17 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		if _, err := tx.Exec(r.Context(), `update comments set resolved = true, suggestion = $2 where id = $1`, comment.ID, suggestion); err != nil {
+		result, err := tx.Exec(r.Context(), `
+			update comments
+			set resolved = true, suggestion = $2
+			where id = $1 and suggestion->>'accepted' is null
+		`, comment.ID, suggestion)
+		if err != nil {
 			s.writeHandlerError(w, err)
+			return
+		}
+		if result.RowsAffected() != 1 {
+			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
 			return
 		}
 	}

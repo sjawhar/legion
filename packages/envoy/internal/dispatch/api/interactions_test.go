@@ -500,6 +500,10 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	if markdown != "The quick red fox" {
 		t.Fatalf("accepted document = %q; want replacement applied", markdown)
 	}
+	repeated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if repeated.Code != http.StatusConflict || !strings.Contains(repeated.Body.String(), `"code":"ALREADY_ACTIONED"`) {
+		t.Fatalf("repeat accept: status=%d body=%s", repeated.Code, repeated.Body.String())
+	}
 }
 
 func TestInboxOrdersOpenAsksAcrossIssues(t *testing.T) {
