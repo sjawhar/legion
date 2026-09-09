@@ -423,10 +423,7 @@ export class DispatchClient {
       this.#resolvedIssues.set(issueReference, Promise.resolve(created.key));
       return created.key;
     } catch (error) {
-      if (
-        error instanceof DispatchServiceError &&
-        (error.status === 409 || error.status === 500)
-      ) {
+      if (error instanceof DispatchServiceError && (error.status === 409 || error.status === 500)) {
         return this.#resolveIssue(issueReference);
       }
       throw error;

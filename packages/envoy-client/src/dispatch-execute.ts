@@ -24,15 +24,35 @@ import {
   type IssueDetails,
 } from "./dispatch-http";
 
+/**
+ * Tool arguments as the model supplied them. The tool's Zod schema validates
+ * them before use; the named keys are the ones the executor inspects itself,
+ * everything else is forwarded to the API unchanged.
+ */
+type ToolArguments = {
+  readonly urgency?: unknown;
+  readonly ref?: unknown;
+  readonly issue?: unknown;
+  readonly artifact?: unknown;
+  readonly version?: unknown;
+  readonly anchor?: unknown;
+  readonly options?: unknown;
+  readonly ops?: unknown;
+} & Record<string, unknown>;
+
+type ExecutorEnvironment = {
+  readonly LEGION_ISSUE?: string;
+} & Record<string, string | undefined>;
+
 export interface ExecuteDispatchToolInput {
   readonly tool: string;
-  readonly args: Record<string, unknown>;
+  readonly args: ToolArguments;
   readonly cwd: string;
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
   readonly config: DispatchConfigResolution;
-  readonly env?: Record<string, string | undefined>;
+  readonly env?: ExecutorEnvironment;
   readonly fetchImpl?: typeof fetch;
   readonly exec?: ExecFn;
 }
@@ -79,8 +99,8 @@ function optionalNumber(args: Record<string, unknown>, name: string): number | u
   return typeof value === "number" ? value : undefined;
 }
 
-function askUrgency(args: Record<string, unknown>): AskUrgency | undefined {
-  const value = args["urgency"];
+function askUrgency(args: ToolArguments): AskUrgency | undefined {
+  const value = args.urgency;
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
 
@@ -113,13 +133,13 @@ function toolSchema(tool: string): z.ZodObject<z.ZodRawShape> {
 
 async function resolveIssueArguments(
   tool: string,
-  args: Record<string, unknown>,
+  args: ToolArguments,
   cwd: string,
-  env: Record<string, string | undefined>,
+  env: ExecutorEnvironment,
   exec: ExecFn
-): Promise<{ args: Record<string, unknown>; ref: ParsedDispatchRef | null }> {
+): Promise<{ args: ToolArguments; ref: ParsedDispatchRef | null }> {
   if (tool === "dispatch_issue") return { args, ref: null };
-  const refArgument = args["ref"];
+  const refArgument = args.ref;
   const ref =
     typeof refArgument === "string"
       ? (parseDispatchRef(refArgument) ??
@@ -127,9 +147,9 @@ async function resolveIssueArguments(
           throw new Error("ref must be a valid dispatch:// reference");
         })())
       : null;
-  const issueArgument = args["issue"];
-  const artifactArgument = args["artifact"];
-  const versionArgument = args["version"];
+  const issueArgument = args.issue;
+  const artifactArgument = args.artifact;
+  const versionArgument = args.version;
   if (issueArgument !== undefined || ref !== null) {
     return {
       args: {
@@ -145,7 +165,7 @@ async function resolveIssueArguments(
       ref,
     };
   }
-  const legionIssue = env["LEGION_ISSUE"];
+  const legionIssue = env.LEGION_ISSUE;
   if (!legionIssue) throw new Error("issue is required; supply issue or set LEGION_ISSUE");
   const repo = await resolveCwdRepo(cwd, exec);
   if (!repo) throw new Error("issue is required; LEGION_ISSUE needs a GitHub repository in cwd");
@@ -288,7 +308,7 @@ export async function executeDispatchTool(
   // The tool's strict Zod schema has validated every argument by the time it is
   // read below: unknown keys and wrong types are rejected here, so a structured
   // argument only needs the contract's shape named when it is forwarded.
-  const args = toolSchema(input.tool).parse(issueArguments.args) as Record<string, unknown>;
+  const args = toolSchema(input.tool).parse(issueArguments.args) as ToolArguments;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = new DispatchClient(input.config.url, input.config.token, input.fetchImpl);
   const issueKey =
@@ -319,11 +339,11 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_ask": {
-      const anchorArgs = asObject(args["anchor"]);
+      const anchorArgs = asObject(args.anchor);
       const resolved = anchorArgs
         ? await resolveArtifact(client, issue(), stringArg(anchorArgs, "artifact"))
         : undefined;
-      const options = args["options"];
+      const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
       const custom = optionalBoolean(args, "custom");
       const urgency = askUrgency(args);
@@ -400,7 +420,7 @@ export async function executeDispatchTool(
     }
     case "dispatch_doc_edit": {
       const resolved = await resolveArtifact(client, issue(), stringArg(args, "artifact"));
-      const ops = args["ops"] as EditOperation[];
+      const ops = args.ops as EditOperation[];
       const summary = optionalString(args, "summary");
       const edited = await client.docEdit(resolved.artifact.id, {
         ops,
