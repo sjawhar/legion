@@ -17,7 +17,7 @@ import (
 const maxCommentBody16 = 2000
 
 func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	artifactID := strings.TrimSpace(r.URL.Query().Get("artifact"))

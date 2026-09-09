@@ -14,7 +14,7 @@ type userIssueState struct {
 }
 
 func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireActor(w, r, nil)
+	actor, ok := s.requireHuman(w, r)
 	if !ok {
 		return
 	}

@@ -204,50 +204,74 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	slog.Error("dispatch: API handler failed", "error", err)
 }
 
-func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor, error) {
+func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
 	if authorization != "" {
 		if s.deps.AgentToken == "" || authorization != "Bearer "+s.deps.AgentToken {
-			return model.Actor{}, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
+			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
-		if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
-			return model.Actor{}, errorf(http.StatusBadRequest, "ACTOR_KIND", "bearer callers require actor.kind session")
-		}
-		return *supplied, nil
+		return model.Actor{}, false, nil
 	}
 	if s.deps.Identity == nil {
-		return model.Actor{}, errorf(http.StatusInternalServerError, "IDENTITY_ERROR", "identity service unavailable")
+		return model.Actor{}, false, errorf(http.StatusInternalServerError, "IDENTITY_ERROR", "identity service unavailable")
 	}
 	login, err := s.deps.Identity.Login(r)
 	if err != nil {
+		return model.Actor{}, false, err
+	}
+	return model.Actor{Kind: "user", ID: login}, true, nil
+}
+
+func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor, error) {
+	actor, present, err := s.optionalActor(r)
+	if err != nil {
 		return model.Actor{}, err
 	}
-	return model.Actor{Kind: "user", ID: login}, nil
+	if present {
+		return actor, nil
+	}
+	if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
+		return model.Actor{}, errorf(http.StatusBadRequest, "ACTOR_KIND", "bearer callers require actor.kind session")
+	}
+	return *supplied, nil
+}
+
+func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrLoginNotAllowed) {
+		identity.WriteError(w, err)
+		return
+	}
+	s.writeHandlerError(w, err)
+}
+
+func (s *server) requireAuthenticated(w http.ResponseWriter, r *http.Request) bool {
+	if _, _, err := s.optionalActor(r); err != nil {
+		s.writeAuthenticationError(w, err)
+		return false
+	}
+	return true
 }
 
 func (s *server) requireActor(w http.ResponseWriter, r *http.Request, supplied *model.Actor) (model.Actor, bool) {
 	actor, err := s.actorFrom(r, supplied)
-	if err == nil {
-		return actor, true
-	}
-	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrLoginNotAllowed) {
-		identity.WriteError(w, err)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
 		return model.Actor{}, false
 	}
-	s.writeHandlerError(w, err)
-	return model.Actor{}, false
+	return actor, true
 }
 
 func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
-	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); authorization != "" {
-		if s.deps.AgentToken == "" || authorization != "Bearer "+s.deps.AgentToken {
-			writeError(w, "UNAUTHORIZED", http.StatusUnauthorized, "invalid bearer token")
-			return model.Actor{}, false
-		}
+	actor, present, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
+		return model.Actor{}, false
+	}
+	if !present {
 		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "only users may perform this action")
 		return model.Actor{}, false
 	}
-	return s.requireActor(w, r, nil)
+	return actor, true
 }
 
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {

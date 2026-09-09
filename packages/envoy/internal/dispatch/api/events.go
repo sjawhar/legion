@@ -13,7 +13,7 @@ import (
 )
 
 func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	query := r.URL.Query()
@@ -67,7 +67,7 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	sinceRaw := r.URL.Query().Get("since")

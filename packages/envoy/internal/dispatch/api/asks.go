@@ -235,7 +235,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	ask, err := s.loadAsk(r.Context(), s.deps.Store.Pool, r.PathValue("id"))

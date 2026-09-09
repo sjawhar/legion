@@ -704,6 +704,75 @@ func TestActorAuthenticationRules(t *testing.T) {
 	}
 }
 
+func TestBearerReadRoutesDoNotRequireActor(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := agentRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "TEST",
+		"title":   "Bearer reads",
+		"spec":    "# Read me",
+		"actor":   map[string]string{"kind": "session", "id": "abcdef0123456789"},
+	}, "agent-token")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key               string `json:"key"`
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, created)
+	askResponse := agentRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Is this readable?",
+		"actor":    map[string]string{"kind": "session", "id": "abcdef0123456789"},
+	}, "agent-token")
+	if askResponse.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", askResponse.Code, askResponse.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, askResponse)
+	comment := agentRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":  "A readable comment",
+		"actor": map[string]string{"kind": "session", "id": "abcdef0123456789"},
+	}, "agent-token")
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("create comment: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+
+	for _, target := range []string{
+		"/api/v1/projects",
+		"/api/v1/issues",
+		"/api/v1/issues/resolve?ref=" + issue.Key,
+		"/api/v1/issues/" + issue.Key,
+		"/api/v1/issues/" + issue.Key + "/events",
+		"/api/v1/issues/" + issue.Key + "/artifacts",
+		"/api/v1/asks/" + ask.ID,
+		"/api/v1/issues/" + issue.Key + "/comments",
+		"/api/v1/artifacts/" + issue.PrimaryArtifactID,
+		"/api/v1/artifacts/" + issue.PrimaryArtifactID + "/text",
+		"/api/v1/artifacts/" + issue.PrimaryArtifactID + "/versions/1",
+	} {
+		t.Run(target, func(t *testing.T) {
+			response := agentRequest(t, handler, http.MethodGet, target, nil, "agent-token")
+			if response.Code != http.StatusOK {
+				t.Fatalf("bearer read: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	inbox := agentRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "agent-token")
+	if inbox.Code != http.StatusForbidden || !strings.Contains(inbox.Body.String(), `"code":"HUMAN_ONLY"`) {
+		t.Fatalf("bearer inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	anonymous := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "")
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous issue read: status=%d body=%s", anonymous.Code, anonymous.Body.String())
+	}
+}
+
 func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -727,7 +796,7 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct SSE request: %v", err)
 	}
-	request.Header.Set("X-Dispatch-User", "alice")
+	request.Header.Set("Authorization", "Bearer agent-token")
 	responseChannel := make(chan *http.Response, 1)
 	errorChannel := make(chan error, 1)
 	go func() {
@@ -771,7 +840,7 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct resumed SSE request: %v", err)
 	}
-	resumeRequest.Header.Set("X-Dispatch-User", "alice")
+	resumeRequest.Header.Set("Authorization", "Bearer agent-token")
 	resumeRequest.Header.Set("Last-Event-ID", "1")
 	resumed, err := http.DefaultClient.Do(resumeRequest)
 	if err != nil {
@@ -827,6 +896,10 @@ func TestPerUserIssueStateIsIsolated(t *testing.T) {
 	bob := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "bob")
 	if bob.Code != http.StatusOK || strings.Contains(bob.Body.String(), issue.Key) {
 		t.Fatalf("Bob state leaked Alice pin: status=%d body=%s", bob.Code, bob.Body.String())
+	}
+	session := agentRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "agent-token")
+	if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"HUMAN_ONLY"`) {
+		t.Fatalf("session state: status=%d body=%s", session.Code, session.Body.String())
 	}
 }
 

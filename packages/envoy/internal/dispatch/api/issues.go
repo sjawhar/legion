@@ -19,7 +19,7 @@ type issueQueryer interface {
 }
 
 func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
@@ -212,7 +212,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	issue, err := s.loadIssue(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
@@ -400,7 +400,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) resolveIssue(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	key, err := s.resolveIssueRef(r.Context(), r.URL.Query().Get("ref"))

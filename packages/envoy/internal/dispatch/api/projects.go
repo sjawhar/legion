@@ -8,7 +8,7 @@ import (
 )
 
 func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `select key, name from projects order by key`)

@@ -23,7 +23,7 @@ import (
 const maxArtifactBlobSize = 25 << 20
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	artifacts, err := s.loadArtifacts(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
@@ -242,7 +242,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	artifact, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
@@ -262,7 +262,7 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	artifact, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
@@ -283,7 +283,7 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	number, err := strconv.Atoi(r.PathValue("number"))
@@ -408,9 +408,6 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) setPrimaryArtifact(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
-		return
-	}
 	var input struct {
 		Actor *model.Actor `json:"actor"`
 	}

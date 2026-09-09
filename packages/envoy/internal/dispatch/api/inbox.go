@@ -18,7 +18,7 @@ type inboxAsk struct {
 }
 
 func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireActor(w, r, nil); !ok {
+	if _, ok := s.requireHuman(w, r); !ok {
 		return
 	}
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
