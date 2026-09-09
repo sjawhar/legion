@@ -24,6 +24,7 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Dispatch tool | `extensions/envoy.ts` (the `registerTool` block), `@legion/envoy-client/dispatch-call` (`executeDispatch`), `@legion/envoy-client/dispatch-contract` (`DISPATCH_TOOL_JSON_SCHEMA`) | Native tool, gated on `resolveDispatchConfig`; reads session id/title from the tool context on every call and hands them to `executeDispatch`; `tool_result` auto-subscribes the session to the thread |
 | Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon appends each as `--append-system-prompt` |
+| Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/README.md` | Claims a role and receives a message from a real, installed-plugin `omp` TUI session against a live Envoy; see `scripts/README.md` for the runbook |
 
 ## Critical conventions
 
@@ -32,3 +33,4 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
+- `scripts/smoke-delivery.sh` is a manual, real end-to-end smoke against the installed plugin; never wire it into CI without live Envoy/NATS and a configured model provider.
