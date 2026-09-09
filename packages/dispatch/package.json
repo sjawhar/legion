@@ -7,7 +7,7 @@
     "dev": "vite --config web/vite.config.ts",
     "build:web": "vite build --config web/vite.config.ts",
     "test": "bun test web/src",
-    "e2e": "playwright test --config e2e/playwright.config.ts",
+    "e2e": "bun run build:web && playwright test --config e2e/playwright.config.ts",
     "e2e:install": "playwright install chromium",
     "typecheck": "bunx tsc --noEmit",
     "lint": "bunx biome check web/src e2e"

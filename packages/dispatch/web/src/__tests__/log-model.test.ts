@@ -1,12 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Event } from "../api/types";
-import {
-  buildLogItems,
-  dismissEvent,
-  isPinnedEvent,
-  pinnedEventIds,
-  setEventPinned,
-} from "../features/issue/log-model";
+import { buildLogItems } from "../features/issue/log-model";
 
 function event(overrides: Partial<Event> = {}): Event {
   return {
@@ -56,13 +50,4 @@ test("log model omits dismissed events and places a new divider at the read boun
     { kind: "new-divider" },
     { event: event({ id: 1, seq: 1 }), folded: false, kind: "event" },
   ]);
-});
-
-test("log model stores pinned event ids alongside dismissed ids", () => {
-  const source = event({ id: 7 });
-  const pinned = setEventPinned(["event:2"], source, true);
-
-  expect(isPinnedEvent(pinned, source)).toBe(true);
-  expect(pinnedEventIds(pinned)).toEqual(["7"]);
-  expect(dismissEvent(pinned, source)).toEqual(["event:2", "pinned_items:event:7", "event:7"]);
 });

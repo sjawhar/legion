@@ -14,6 +14,7 @@ import type {
 } from "../../api/types";
 import { DocEditor } from "../doc/DocEditor";
 import { DocView } from "../doc/DocView";
+import { parseIssuePath } from "../refs/routes";
 import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
 import { LogTab } from "./LogTab";
@@ -23,9 +24,9 @@ const issueStatuses = [
   "icebox",
   "backlog",
   "todo",
-  "in progress",
+  "in_progress",
   "testing",
-  "needs review",
+  "needs_review",
   "retro",
   "done",
 ];
@@ -47,10 +48,19 @@ function stateForIssue(state: UserState | undefined, issueKey: string): UserIssu
   return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false };
 }
 
+function safeExternalHref(value: string): string | undefined {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
-  const match = link.url.match(
-    /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:issues|pull)\/(\d+)\/?$/
-  );
+  const href = safeExternalHref(link.url);
+  const match =
+    href?.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:issues|pull)\/(\d+)\/?$/) ?? null;
   const githubIssue = useQuery({
     enabled: match !== null,
     queryKey: ["github-link", link.url],
@@ -63,6 +73,13 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
     retry: false,
   });
 
+  if (href === undefined) {
+    return (
+      <span className="text-sm text-slate-600" title="Unsafe external link">
+        {link.url}
+      </span>
+    );
+  }
   if (match === null || githubIssue.isError) {
     const unavailable =
       githubIssue.error instanceof ApiError &&
@@ -70,7 +87,7 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
     return (
       <a
         className="text-sm text-sky-700 underline hover:text-sky-900"
-        href={link.url}
+        href={href}
         title={unavailable ? "GitHub details are unavailable for this sign-in." : undefined}
       >
         {link.url}
@@ -79,7 +96,7 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   }
   if (githubIssue.data === undefined) {
     return (
-      <a className="text-sm text-sky-700 underline" href={link.url}>
+      <a className="text-sm text-sky-700 underline" href={href}>
         {link.url}
       </a>
     );
@@ -87,7 +104,7 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   return (
     <a
       className="inline-flex items-center gap-2 text-sm text-sky-700 underline hover:text-sky-900"
-      href={link.url}
+      href={href}
     >
       <span>{githubIssue.data.title}</span>
       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
@@ -97,10 +114,19 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   );
 }
 
-function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }): ReactNode {
+function IssueHeader({
+  isClosed,
+  issue,
+  state,
+}: {
+  isClosed: boolean;
+  issue: Issue;
+  state: UserIssueState;
+}): ReactNode {
   const queryClient = useQueryClient();
   const [title, setTitle] = useState(issue.title);
   const [route, setRoute] = useState(issue.route ?? "");
+  const [routeDirty, setRouteDirty] = useState(false);
   const events = useQuery({
     queryKey: ["events", issue.key, "active-sessions"],
     queryFn: () => api.getIssueEvents(issue.key, { limit: 200 }),
@@ -128,11 +154,15 @@ function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }):
   });
 
   useEffect(() => setTitle(issue.title), [issue.title]);
-  useEffect(() => setRoute(issue.route ?? ""), [issue.route]);
+  useEffect(() => {
+    if (!routeDirty) {
+      setRoute(issue.route ?? "");
+    }
+  }, [issue.route, routeDirty]);
 
   const saveTitle = () => {
     const next = title.trim();
-    if (next !== "" && next !== issue.title) {
+    if (!isClosed && next !== "" && next !== issue.title) {
       updateIssue.mutate({ title: next });
     } else {
       setTitle(issue.title);
@@ -145,8 +175,8 @@ function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }):
   };
   const saveRoute = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (route === "" || routePattern.test(route)) {
-      updateIssue.mutate({ route });
+    if (!isClosed && (route === "" || routePattern.test(route))) {
+      updateIssue.mutate({ route }, { onSuccess: () => setRouteDirty(false) });
     }
   };
   const routeIsValid = route === "" || routePattern.test(route);
@@ -170,6 +200,7 @@ function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }):
         onBlur={saveTitle}
         onChange={(event) => setTitle(event.target.value)}
         onKeyDown={saveTitleOnEnter}
+        disabled={isClosed}
         value={title}
       />
       <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -212,13 +243,17 @@ function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }):
           aria-describedby="issue-route-help"
           className="min-w-64 rounded border px-2 py-1 text-sm outline-none focus:border-sky-500"
           id="issue-route"
-          onChange={(event) => setRoute(event.target.value)}
+          onChange={(event) => {
+            setRouteDirty(true);
+            setRoute(event.target.value);
+          }}
           placeholder="role:legion-controller-core"
+          disabled={isClosed}
           value={route}
         />
         <button
           className="rounded border border-slate-300 px-2 py-1 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
-          disabled={!routeIsValid || updateIssue.isPending}
+          disabled={isClosed || !routeIsValid || updateIssue.isPending}
           type="submit"
         >
           Save route
@@ -336,18 +371,12 @@ function ArtifactVersionView({
 }
 
 export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
-  const { key, "*": nestedPath } = useParams();
-  const { search } = useLocation();
-  const isSpecRoute = nestedPath === "spec";
-  const artifactRouteSlug = nestedPath?.match(/^artifact\/([^/]+)$/)?.[1];
-  const versionMatch = nestedPath?.match(/^artifacts\/([^/]+)\/versions\/(\d+)$/);
-  const versionRoute =
-    versionMatch === null || versionMatch === undefined
-      ? undefined
-      : {
-          artifactId: versionMatch[1],
-          version: Number(versionMatch[2]),
-        };
+  const { key } = useParams();
+  const { pathname, search } = useLocation();
+  const route = parseIssuePath(pathname, search);
+  const artifactRoute = route?.kind === "artifact" ? route : undefined;
+  const artifactRouteSlug = artifactRoute?.slug;
+  const isSpecRoute = route?.kind === "spec";
   const query = new URLSearchParams(search);
   const from = Number(query.get("from"));
   const to = Number(query.get("to"));
@@ -388,14 +417,20 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
   const activeTab: IssueTab =
     artifactRouteSlug !== undefined && selectedArtifact.kind !== "doc"
       ? "log"
-      : versionRoute === undefined && !isSpecRoute && artifactRouteSlug === undefined
+      : artifactRoute?.version === undefined && !isSpecRoute && artifactRouteSlug === undefined
         ? tab
         : "spec";
   const tabID = `issue-${activeTab}-tab`;
   const panelID = `issue-${activeTab}-panel`;
+  const isClosed = issue.data.closed_at !== null;
   return (
     <section>
-      <IssueHeader issue={issue.data} state={issueState} />
+      {isClosed ? (
+        <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+          This issue is closed.
+        </p>
+      ) : null}
+      <IssueHeader isClosed={isClosed} issue={issue.data} state={issueState} />
       <BoardStrip issue={issue.data} state={issueState} />
       <div className="mb-4 flex gap-2 border-b border-slate-200" role="tablist">
         <button
@@ -446,19 +481,20 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
       </div>
       <div aria-labelledby={tabID} id={panelID} role="tabpanel">
         {activeTab === "spec" ? (
-          versionRoute === undefined ? (
+          artifactRoute?.version === undefined ? (
             <DocEditor
               artifact={selectedArtifact}
-              isClosed={issue.data.closed_at !== null}
+              isClosed={isClosed}
+              key={selectedArtifact.id}
               user={user}
             />
           ) : (
             <ArtifactVersionView
-              artifactId={versionRoute.artifactId}
+              artifactId={selectedArtifact.id}
               from={highlight?.from}
               issueKey={issue.data.key}
               to={highlight?.to}
-              version={versionRoute.version}
+              version={artifactRoute.version}
             />
           )
         ) : activeTab === "log" ? (

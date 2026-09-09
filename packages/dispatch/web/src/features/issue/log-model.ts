@@ -19,19 +19,6 @@ export function pinnedEventIds(dismissed: string[]): string[] {
     .map((item) => item.slice(prefix.length));
 }
 
-export function setEventPinned(dismissed: string[], event: Event, pinned: boolean): string[] {
-  const marker = `${pinnedItemPrefix}${eventItemId(event)}`;
-  if (pinned) {
-    return dismissed.includes(marker) ? dismissed : [...dismissed, marker];
-  }
-  return dismissed.filter((item) => item !== marker);
-}
-
-export function dismissEvent(dismissed: string[], event: Event): string[] {
-  const item = eventItemId(event);
-  return dismissed.includes(item) ? dismissed : [...dismissed, item];
-}
-
 export function buildLogItems(
   events: Event[],
   dismissed: string[],

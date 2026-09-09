@@ -124,6 +124,21 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   await alicePage.getByRole("tab", { name: "Log" }).click();
   await expect(alicePage.getByText("Ask answered: Newest ask")).toBeVisible();
   await alicePage.screenshot({ path: testInfo.outputPath("issue-page.png"), fullPage: true });
+
+  const inboxContext = await asUser(browser, "alice");
+  const inboxPage = await inboxContext.newPage();
+  await inboxPage.goto("/");
+  await expect(inboxPage.locator("[data-testid^=ask-]")).toHaveCount(2);
+  await alicePage.getByLabel("Status").selectOption("done");
+  await expect
+    .poll(() => getIssue(firstIssue.key))
+    .toMatchObject({
+      closed_at: expect.any(String),
+      status: "done",
+    });
+  await expect(alicePage.getByText("This issue is closed.")).toBeVisible();
+  await expect(inboxPage.locator("[data-testid^=ask-]")).toHaveCount(1);
+  await inboxContext.close();
   await alicePage.getByRole("button", { name: "Pin issue" }).click();
   await alicePage.goto("/");
   await alicePage.goto(`/issues/${firstIssue.key}`);

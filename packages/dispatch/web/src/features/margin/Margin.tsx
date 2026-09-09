@@ -14,6 +14,7 @@ import { api } from "../../api/client";
 import type { Anchor, Ask, Comment, Event } from "../../api/types";
 import { AskCard } from "../inbox/AskCard";
 import { pinnedEventIds } from "../issue/log-model";
+import { buildIssuePath, parseIssuePath } from "../refs/routes";
 import { Unfurl } from "../refs/Unfurl";
 import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
 import { SelectionMenu } from "./SelectionMenu";
@@ -97,10 +98,6 @@ function issueKeyFromPath(pathname: string): string | undefined {
   return pathname.match(/^\/issues\/([^/]+)/)?.[1];
 }
 
-function artifactSlugFromPath(pathname: string): string | undefined {
-  return pathname.match(/^\/issues\/[^/]+\/artifact\/([^/]+)/)?.[1];
-}
-
 function newestFirst<T extends { created_at: string }>(items: T[]): T[] {
   return [...items].sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
@@ -153,12 +150,14 @@ function eventLabel(event: Event): string {
 }
 
 function CommentCard({
+  artifactSlug,
   comment,
   depth,
   onAction,
   onReply,
   selected,
 }: {
+  artifactSlug: string;
   comment: Comment;
   depth: number;
   onAction: (id: string, action: "accept" | "reject" | "resolve") => void;
@@ -186,7 +185,12 @@ function CommentCard({
           Text changed.{" "}
           <Link
             className="underline"
-            to={`/issues/${comment.issue_key}/artifacts/${anchor.artifact_id}/versions/${anchor.version}?from=${anchor.from}&to=${anchor.to}`}
+            to={`${buildIssuePath({
+              key: comment.issue_key,
+              kind: "artifact",
+              slug: artifactSlug,
+              version: anchor.version,
+            })}&from=${anchor.from}&to=${anchor.to}`}
           >
             View original text
           </Link>
@@ -277,7 +281,8 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
   const sheetDragOrigin = useRef<number | undefined>(undefined);
   const sheetDragMoved = useRef(false);
   const issueKey = issueKeyFromPath(pathname);
-  const routeArtifactSlug = artifactSlugFromPath(pathname);
+  const route = parseIssuePath(pathname);
+  const routeArtifactSlug = route?.kind === "artifact" ? route.slug : undefined;
   const routeItemId = pathname.match(/^\/issues\/[^/]+\/(?:asks|comments)\/([^/]+)$/)?.[1];
   const issue = useQuery({
     enabled: issueKey !== undefined,
@@ -459,6 +464,12 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
   const closeComposer = () => setComposer(undefined);
   const isClosed = issue.data?.closed_at !== null && issue.data !== undefined;
 
+  useEffect(() => {
+    if (isClosed) {
+      setComposer(undefined);
+    }
+  }, [isClosed]);
+
   return (
     <aside
       className={`fixed inset-x-0 bottom-0 z-10 border-t border-slate-200 bg-white shadow-[0_-8px_24px_rgba(15,23,42,0.08)] ${
@@ -541,7 +552,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
         ) : null}
         {tab === "comments" && visibleArtifact !== undefined ? (
           <div className="space-y-3 pt-3">
-            {composer === undefined ? null : (
+            {composer === undefined || isClosed ? null : (
               <Composer
                 anchor={composer.anchor}
                 kind={composer.kind}
@@ -573,6 +584,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
                       </div>
                     ) : (
                       <CommentCard
+                        artifactSlug={visibleArtifact.slug}
                         comment={item.comment}
                         depth={item.depth}
                         onAction={(commentID, kind) => action.mutate({ id: commentID, kind })}

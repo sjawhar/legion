@@ -6,7 +6,7 @@ import { MemoryRouter, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Comment, Issue } from "../../api/types";
-import { Margin, MarginProvider } from "./Margin";
+import { Margin, MarginProvider, useMargin } from "./Margin";
 
 const issue: Issue = {
   artifacts: [
@@ -67,6 +67,70 @@ function CommentLink(): ReactNode {
     </button>
   );
 }
+
+function SelectionButton(): ReactNode {
+  const { setSelection } = useMargin();
+
+  return (
+    <button
+      onClick={() =>
+        setSelection({
+          artifact: "artifact-1",
+          artifactId: "artifact-1",
+          canSuggest: true,
+          from: 0,
+          quote: "Review",
+          rect: { bottom: 0, left: 0, right: 0, top: 0 },
+          to: 6,
+        })
+      }
+      type="button"
+    >
+      Select text
+    </button>
+  );
+}
+
+test("Margin hides an open composer when its issue closes", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+
+  const view = render(
+    <MemoryRouter initialEntries={["/issues/CORE-1"]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <SelectionButton />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("No comments, asks, or suggestions on this document.");
+    fireEvent.click(screen.getByRole("button", { name: "Select text" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await screen.findByLabelText("Ask composer");
+
+    queryClient.setQueryData(["issue", issue.key], {
+      ...issue,
+      closed_at: "2026-09-09T01:00:00Z",
+    });
+
+    await waitFor(() => expect(screen.queryByLabelText("Ask composer")).toBeNull());
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+  }
+});
 
 test("a comment deep link activates Comments and scrolls its card from Pinned", async () => {
   const queryClient = new QueryClient({

@@ -23,14 +23,31 @@ const defaultDatabaseUrl =
   "postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable";
 const execFileAsync = promisify(execFile);
 
-export async function resetDatabase(): Promise<void> {
-  const databaseUrl =
+function databaseUrl(): string {
+  return (
     globalThis.process.env.PLAYWRIGHT_DATABASE_URL ??
     globalThis.process.env.DATABASE_URL ??
-    defaultDatabaseUrl;
+    defaultDatabaseUrl
+  );
+}
 
+function sqlLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+export async function insertExternalLink(issueKey: string, url: string): Promise<void> {
   await execFileAsync("psql", [
-    databaseUrl,
+    databaseUrl(),
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-c",
+    `INSERT INTO issue_external_links (issue_key, url, kind) VALUES (${sqlLiteral(issueKey)}, ${sqlLiteral(url)}, 'url')`,
+  ]);
+}
+
+export async function resetDatabase(): Promise<void> {
+  await execFileAsync("psql", [
+    databaseUrl(),
     "-v",
     "ON_ERROR_STOP=1",
     "-c",

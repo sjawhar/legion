@@ -37,20 +37,18 @@ export function uploadErrorMessage(error: unknown): string {
 
 interface UploadProps {
   issueKey: string;
-  onUploaded?: (result: UploadResult) => void;
 }
 
-export function Upload({ issueKey, onUploaded }: UploadProps): ReactNode {
+export function Upload({ issueKey }: UploadProps): ReactNode {
   const queryClient = useQueryClient();
   const input = useRef<HTMLInputElement>(null);
   const [summary, setSummary] = useState("");
   const upload = useMutation({
     mutationFn: (file: File) =>
       uploadFile(issueKey, file, { summary: summary.trim() === "" ? undefined : summary.trim() }),
-    onSuccess: (result) => {
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["artifacts", issueKey] });
       void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
-      onUploaded?.(result);
     },
   });
   const selectFile = (event: ChangeEvent<HTMLInputElement>) => {
