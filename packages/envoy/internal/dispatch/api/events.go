@@ -16,17 +16,44 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireActor(w, r, nil); !ok {
 		return
 	}
-	after, err := parseNonNegativeInt(r.URL.Query().Get("after"), "after")
+	query := r.URL.Query()
+	after, err := parseNonNegativeInt(query.Get("after"), "after")
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	limit, err := parseEventLimit(r.URL.Query().Get("limit"))
+	before, err := parseNonNegativeInt(query.Get("before"), "before")
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events, err := s.readEvents(r.Context(), r.PathValue("key"), after, limit)
+	ids, err := parseEventIDs(query.Get("ids"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	descending, err := parseEventOrder(query.Get("order"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	limit, err := parseEventLimit(query.Get("limit"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if query.Has("after") && (query.Has("before") || descending) {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "after cannot be combined with before or order=desc"))
+		return
+	}
+	events, err := s.readEvents(r.Context(), r.PathValue("key"), eventListOptions{
+		after:      after,
+		before:     before,
+		hasBefore:  query.Has("before"),
+		descending: descending || query.Has("before"),
+		ids:        ids,
+		limit:      limit,
+	})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -99,12 +126,42 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) readEvents(ctx context.Context, issueKey string, after int64, limit int) ([]model.Event, error) {
+type eventListOptions struct {
+	after      int64
+	before     int64
+	hasBefore  bool
+	descending bool
+	ids        []int64
+	limit      int
+}
+
+func (s *server) readEvents(ctx context.Context, issueKey string, options eventListOptions) ([]model.Event, error) {
+	if len(options.ids) > 0 {
+		return s.readEventRows(ctx, `
+			select id, issue_key, seq, type, actor, notify, created_at, payload
+			from events where issue_key = $1 and id = any($2)
+			order by seq asc
+		`, issueKey, options.ids)
+	}
+	if options.descending {
+		if options.hasBefore {
+			return s.readEventRows(ctx, `
+				select id, issue_key, seq, type, actor, notify, created_at, payload
+				from events where issue_key = $1 and seq < $2
+				order by seq desc limit $3
+			`, issueKey, options.before, options.limit)
+		}
+		return s.readEventRows(ctx, `
+			select id, issue_key, seq, type, actor, notify, created_at, payload
+			from events where issue_key = $1
+			order by seq desc limit $2
+		`, issueKey, options.limit)
+	}
 	return s.readEventRows(ctx, `
 		select id, issue_key, seq, type, actor, notify, created_at, payload
 		from events where issue_key = $1 and seq > $2
 		order by seq asc limit $3
-	`, issueKey, after, limit)
+	`, issueKey, options.after, options.limit)
 }
 
 func (s *server) readEventsAfterID(ctx context.Context, after int64) ([]model.Event, error) {
@@ -168,4 +225,34 @@ func parseEventLimit(raw string) (int, error) {
 		return 0, errorf(http.StatusBadRequest, "INVALID_QUERY", "limit must be between 1 and 200")
 	}
 	return limit, nil
+}
+
+func parseEventOrder(raw string) (bool, error) {
+	switch strings.TrimSpace(raw) {
+	case "", "asc":
+		return false, nil
+	case "desc":
+		return true, nil
+	default:
+		return false, errorf(http.StatusBadRequest, "INVALID_QUERY", "order must be asc or desc")
+	}
+}
+
+func parseEventIDs(raw string) ([]int64, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > 50 {
+		return nil, errorf(http.StatusBadRequest, "INVALID_QUERY", "ids must include at most 50 values")
+	}
+	ids := make([]int64, len(parts))
+	for index, part := range parts {
+		id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+		if err != nil || id < 1 {
+			return nil, errorf(http.StatusBadRequest, "INVALID_QUERY", "ids must be positive integers")
+		}
+		ids[index] = id
+	}
+	return ids, nil
 }

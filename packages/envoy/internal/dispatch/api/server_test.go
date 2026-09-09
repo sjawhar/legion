@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -567,6 +568,109 @@ func TestIssueRouteVersionEventsAndChildStatus(t *testing.T) {
 	}
 	if len(parentLog) != 2 || parentLog[1].Type != "child.status" || !parentLog[1].Notify {
 		t.Fatalf("parent events: got %#v, want child.status notification", parentLog)
+	}
+}
+
+func TestListIssueEventsSupportsNewestCursorAndIDLookup(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	issueResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Event queries",
+	}, "alice")
+	if issueResponse.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", issueResponse.Code, issueResponse.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, issueResponse)
+
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin event seed transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	broker := events.NewBroker()
+	eventIDs := make(map[int]int64, 249)
+	for wantSeq := 2; wantSeq <= 250; wantSeq++ {
+		event, err := broker.Append(ctx, tx, model.Event{
+			IssueKey: issue.Key,
+			Type:     "test.seeded",
+			Actor:    model.Actor{Kind: "session", ID: "seed-session-0123456789"},
+			Payload:  map[string]any{"seq": wantSeq},
+		})
+		if err != nil {
+			t.Fatalf("append event %d: %v", wantSeq, err)
+		}
+		if event.Seq != wantSeq {
+			t.Fatalf("seed event sequence: got %d, want %d", event.Seq, wantSeq)
+		}
+		eventIDs[wantSeq] = event.ID
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit event seed transaction: %v", err)
+	}
+
+	type listedEvent struct {
+		ID  int64 `json:"id"`
+		Seq int   `json:"seq"`
+	}
+	newest := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events?order=desc", nil, "alice")
+	if newest.Code != http.StatusOK {
+		t.Fatalf("list newest events: status=%d body=%s", newest.Code, newest.Body.String())
+	}
+	newestLog := decodeBody[[]listedEvent](t, newest)
+	if len(newestLog) != 200 {
+		t.Fatalf("newest events: got %d, want 200", len(newestLog))
+	}
+	for index, event := range newestLog {
+		if want := 250 - index; event.Seq != want {
+			t.Fatalf("newest event %d: got sequence %d, want %d", index, event.Seq, want)
+		}
+	}
+
+	before := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events?before=51", nil, "alice")
+	if before.Code != http.StatusOK {
+		t.Fatalf("list events before cursor: status=%d body=%s", before.Code, before.Body.String())
+	}
+	beforeLog := decodeBody[[]listedEvent](t, before)
+	if len(beforeLog) != 50 {
+		t.Fatalf("events before cursor: got %d, want 50", len(beforeLog))
+	}
+	for index, event := range beforeLog {
+		if want := 50 - index; event.Seq != want {
+			t.Fatalf("event before cursor %d: got sequence %d, want %d", index, event.Seq, want)
+		}
+	}
+
+	ids := dispatchRequest(t, handler, http.MethodGet,
+		"/api/v1/issues/"+issue.Key+"/events?ids="+fmt.Sprintf("%d,%d,%d", eventIDs[250], eventIDs[2], eventIDs[100]),
+		nil, "alice")
+	if ids.Code != http.StatusOK {
+		t.Fatalf("list event IDs: status=%d body=%s", ids.Code, ids.Body.String())
+	}
+	idLog := decodeBody[[]listedEvent](t, ids)
+	for index, want := range []int{2, 100, 250} {
+		if len(idLog) != 3 || idLog[index].Seq != want {
+			t.Fatalf("events by ID: got %#v, want sequences [2 100 250]", idLog)
+		}
+	}
+
+	for _, target := range []string{
+		"/api/v1/issues/" + issue.Key + "/events?ids=" + strings.Repeat("1,", 50) + "1",
+		"/api/v1/issues/" + issue.Key + "/events?after=0&before=10",
+		"/api/v1/issues/" + issue.Key + "/events?after=0&order=desc",
+		"/api/v1/issues/" + issue.Key + "/events?after=not-a-number",
+		"/api/v1/issues/" + issue.Key + "/events?before=not-a-number",
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_QUERY"`) {
+			t.Fatalf("reject invalid event query %q: status=%d body=%s", target, response.Code, response.Body.String())
+		}
 	}
 }
 

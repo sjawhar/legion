@@ -61,6 +61,7 @@ printed connection string is also the expected
 | `/api/v1/comments/{id}/resolve` | POST | `Identity` or bearer | Mark a comment resolved. |
 | `/api/v1/comments/{id}/accept` | POST | `Identity` | Apply and accept an anchored suggestion. |
 | `/api/v1/comments/{id}/reject` | POST | `Identity` | Reject a suggestion. |
+| `/api/v1/issues/{key}/events` | GET | `Identity` or bearer | List events: `after` (ascending), `order=desc` with optional exclusive `before` (descending), or up to 50 exact `ids` (ascending); paged requests are capped at 200. |
 | `/api/v1/issues/{key}/messages` | POST | `Identity` or bearer | Post a short issue message. |
 | `/api/v1/artifacts/{id}` | GET | `Identity` or bearer | Read an artifact, including posts that reference it. |
 
