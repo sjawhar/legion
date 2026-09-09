@@ -126,6 +126,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     },
     registerTool: () => undefined,
     registerCommand: () => undefined,
+    registerMessageRenderer: () => undefined,
   });
   const envoyPi = createPi();
   const legionPi = createPi();

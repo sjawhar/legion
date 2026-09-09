@@ -26,6 +26,7 @@ import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
 import { toolFailure, toolSuccess } from "../src/tool-result";
+import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
 
@@ -128,6 +129,7 @@ export default function envoyExtension(pi: PiApi): void {
   }[] = [];
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
+  registerEnvoyMessageRenderer(pi);
 
   const ensureConnection = async (): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;

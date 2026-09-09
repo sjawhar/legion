@@ -12,7 +12,7 @@ if ! jq -e '.omp.extensions == ["dist/envoy.js"]' package.json >/dev/null; then
 fi
 # Only the envoy extension ships: the legion extension is daemon
 # infrastructure, loaded from repo checkouts.
-bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent
+bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui
 rm -f dist/legion.js
 rm -rf dist/skills
 cp -r ../../skills dist/skills

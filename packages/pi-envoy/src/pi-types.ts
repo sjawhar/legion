@@ -1,4 +1,5 @@
 import type { ExtensionAgentsApi } from "@oh-my-pi/pi-coding-agent";
+import type { Component } from "@oh-my-pi/pi-tui";
 
 /**
  * Oh My Pi host surface shared by both extension entries.
@@ -136,6 +137,49 @@ export interface ZodNumberProperty extends ZodProperty {
   readonly int: () => ZodProperty;
 }
 
+export interface MessageRenderOptions {
+  readonly expanded: boolean;
+}
+
+/**
+ * The slice of the host `Theme` a message renderer needs to paint a bordered
+ * card: color/style helpers for exactly the tokens this package renders
+ * with, and the rounded box-drawing glyphs.
+ */
+export interface MessageRendererTheme {
+  readonly fg: (
+    color: "borderMuted" | "customMessageLabel" | "customMessageText",
+    text: string
+  ) => string;
+  readonly bold: (text: string) => string;
+  readonly boxRound: {
+    readonly topLeft: string;
+    readonly topRight: string;
+    readonly bottomLeft: string;
+    readonly bottomRight: string;
+    readonly horizontal: string;
+    readonly vertical: string;
+  };
+}
+
+/**
+ * Extension-injected message entry handed to a registered {@link
+ * MessageRenderer}. Envoy only ever sends string content (see
+ * `PiApi["sendMessage"]` below), so this narrows the host's wider
+ * `string | (TextContent | ImageContent)[]` union to what this package
+ * actually produces.
+ */
+export interface RenderableMessage {
+  readonly customType: string;
+  readonly content: string;
+}
+
+export type MessageRenderer = (
+  message: RenderableMessage,
+  options: MessageRenderOptions,
+  theme: MessageRendererTheme
+) => Component | undefined;
+
 export type { ExtensionAgentsApi };
 
 export interface PiApi {
@@ -171,4 +215,5 @@ export interface PiApi {
       readonly handler: (args: string, context: CommandContext) => Promise<void>;
     }
   ) => void;
+  readonly registerMessageRenderer: (customType: string, renderer: MessageRenderer) => void;
 }
