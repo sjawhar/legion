@@ -304,6 +304,121 @@ func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
 		t.Fatalf("settled version authors = %#v, want only %v", version.Authors, editor)
 	}
 }
+func TestReresolveAnchorsClosesRowsBeforeUpdating(t *testing.T) {
+	service, artifactID := newTestService(t)
+	anchorJSON, err := json.Marshal(model.Anchor{ArtifactID: artifactID, Version: 1, Quote: "before", To: len("before")})
+	if err != nil {
+		t.Fatalf("encode anchor: %v", err)
+	}
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin anchor transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := tx.Exec(context.Background(), `
+		insert into asks (issue_key, author, question, anchor)
+		values ('DOC-1', '{"kind":"user","id":"alice"}', 'Question?', $1)
+	`, anchorJSON); err != nil {
+		t.Fatalf("create anchored ask: %v", err)
+	}
+	if err := service.reresolveAnchors(context.Background(), tx, artifactID, "after"); err != nil {
+		t.Fatalf("reresolve anchors: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit anchor transaction: %v", err)
+	}
+}
+
+
+func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		content := doc.GetText("content")
+		transact(func(tx *crdt.Transaction) {
+			content.Delete(tx, 0, content.Len())
+			content.Insert(tx, 0, "after", nil)
+		})
+	}); err != nil {
+		t.Fatalf("apply first update: %v", err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	stale := state.gen
+	state.mu.Unlock()
+	service.scheduleSettle(artifactID)
+	state.mu.Lock()
+	current := state.gen
+	state.mu.Unlock()
+
+	service.settleRoom(artifactID, stale)
+	var versions int
+	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count versions after stale settle: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("versions after stale settle = %d, want 1", versions)
+	}
+	service.settleRoom(artifactID, current)
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+}
+
+func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 5 * time.Millisecond
+	seedServiceText(t, service, artifactID, "before")
+
+	blocker, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin blocker transaction: %v", err)
+	}
+	defer blocker.Rollback(context.Background())
+	if _, err := blocker.Exec(context.Background(), `select 1 from artifacts where id = $1 for update`, artifactID); err != nil {
+		t.Fatalf("lock document artifact: %v", err)
+	}
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		content := doc.GetText("content")
+		transact(func(tx *crdt.Transaction) {
+			content.Delete(tx, 0, content.Len())
+			content.Insert(tx, 0, "after", nil)
+		})
+	}); err != nil {
+		t.Fatalf("apply document update: %v", err)
+	}
+	locked := false
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		if err := service.store.Pool.QueryRow(context.Background(), `
+			select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("inspect database locks: %v", err)
+		}
+		if waiting > 0 {
+			locked = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !locked {
+		t.Fatal("settlement did not wait on the document lock")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- service.Shutdown(ctx) }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown waited on the blocked settlement")
+	}
+}
 
 func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
 	service, _ := newTestService(t)

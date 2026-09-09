@@ -39,21 +39,24 @@ type Deps struct {
 
 // Service owns live Yjs documents and their durable Dispatch versions.
 type Service struct {
-	srv         *websocket.Server
-	store       *store.Store
-	persistence *PgVersioned
-	events      *events.Broker
-	identity    identity.Identity
-	agentToken  string
-	settle      time.Duration
+	srv            *websocket.Server
+	store          *store.Store
+	persistence    *PgVersioned
+	events         *events.Broker
+	identity       identity.Identity
+	agentToken     string
+	settle         time.Duration
 	rooms          sync.Map
 	nextConnection atomic.Uint64
+	stopping       atomic.Bool
+	settleWG       sync.WaitGroup
 }
 
 type roomState struct {
 	connected map[uint64]model.Actor
 	pending   map[string]model.Actor
 	settle    *time.Timer
+	gen       uint64
 	mu        sync.Mutex
 }
 
@@ -108,17 +111,20 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Shutdown stops timers and flushes ygo's document persistence workers.
+// Shutdown stops queued settlements, joins any already-running callbacks, and
+// flushes ygo's document persistence workers.
 func (s *Service) Shutdown(ctx context.Context) error {
+	s.stopping.Store(true)
 	s.rooms.Range(func(_, value any) bool {
 		room := value.(*roomState)
 		room.mu.Lock()
-		if room.settle != nil {
-			room.settle.Stop()
+		if room.settle != nil && room.settle.Stop() {
+			s.settleWG.Done()
 		}
 		room.mu.Unlock()
 		return true
 	})
+	s.waitSettles(ctx)
 	return s.srv.Shutdown(ctx)
 }
 
@@ -178,9 +184,6 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 // SnapshotVersion returns the current immutable version, adding an unnamed
 // version only when the live text has diverged since the previous one.
 func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error) {
-	state := s.room(artifactID)
-	state.mu.Lock()
-	defer state.mu.Unlock()
 	markdown, err := s.Text(ctx, artifactID)
 	if err != nil {
 		return model.Version{}, false, err
@@ -189,16 +192,19 @@ func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID str
 	if err != nil {
 		return model.Version{}, false, err
 	}
-	if latest.markdown != markdown {
-		state.pending[actorKey(actor)] = actor
-		version, err := writeVersion(ctx, tx, artifactID, markdown, false, nil, actorSlice(state.pending))
-		if err != nil {
-			return model.Version{}, false, err
-		}
-		state.pending = make(map[string]model.Actor)
-		return version, true, nil
+	if latest.markdown == markdown {
+		return latest.Version, false, nil
 	}
-	return latest.Version, false, nil
+	state := s.room(artifactID)
+	state.mu.Lock()
+	state.pending[actorKey(actor)] = actor
+	authors := actorSlice(state.pending)
+	state.mu.Unlock()
+	version, err := writeVersion(ctx, tx, artifactID, markdown, false, nil, authors)
+	if err != nil {
+		return model.Version{}, false, err
+	}
+	return version, true, nil
 }
 
 // ApplyOps resolves every requested operation before it changes the Yjs room,
@@ -244,9 +250,15 @@ func (s *Service) ApplyReplace(ctx context.Context, artifactID string, anchor mo
 func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error) {
 	state := s.room(artifactID)
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	state.pending[actorKey(actor)] = actor
+	generation := state.gen
+	pending := make(map[string]model.Actor, len(state.pending))
+	for key, pendingActor := range state.pending {
+		pending[key] = pendingActor
+	}
+	state.mu.Unlock()
 
+	_, joinedTransaction := txFromContext(ctx)
 	var version model.Version
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		var open bool
@@ -264,11 +276,17 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 		if err != nil {
 			return err
 		}
-		version, err = writeVersion(ctx, tx, artifactID, markdown, true, new(summary), actorSlice(state.pending))
+		version, err = writeVersion(ctx, tx, artifactID, markdown, true, new(summary), actorSlice(pending))
 		return err
 	})
-	if err == nil {
-		state.pending = make(map[string]model.Actor)
+	if err == nil && !joinedTransaction {
+		state.mu.Lock()
+		if state.gen == generation {
+			for key := range pending {
+				delete(state.pending, key)
+			}
+		}
+		state.mu.Unlock()
 	}
 	return version, err
 }
@@ -381,55 +399,78 @@ func (s *Service) onLoadDocument(_ context.Context, room string, doc *crdt.Doc) 
 }
 
 func (s *Service) scheduleSettle(room string) {
-	state := s.room(room)
-	state.mu.Lock()
-	if state.settle != nil {
-		state.settle.Stop()
+	if s.stopping.Load() {
+		return
 	}
-	state.settle = time.AfterFunc(s.settle, func() { s.settleRoom(room) })
-	state.mu.Unlock()
-}
-
-func (s *Service) settleRoom(room string) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if s.stopping.Load() {
+		return
+	}
+	state.gen++
+	generation := state.gen
+	if state.settle != nil && state.settle.Stop() {
+		s.settleWG.Done()
+	}
+	s.settleWG.Add(1)
+	state.settle = time.AfterFunc(s.settle, func() {
+		defer s.settleWG.Done()
+		s.settleRoom(room, generation)
+	})
+}
 
-	markdown, err := s.Text(context.Background(), room)
+func (s *Service) settleRoom(room string, generation uint64) {
+	state := s.room(room)
+	state.mu.Lock()
+	if s.stopping.Load() || state.gen != generation {
+		state.mu.Unlock()
+		return
+	}
+	doc := s.srv.GetDoc(room)
+	if doc == nil {
+		state.mu.Unlock()
+		return
+	}
+	markdown := doc.GetText("content").ToString()
+	pending := make(map[string]model.Actor, len(state.pending))
+	for key, actor := range state.pending {
+		pending[key] = actor
+	}
+	state.mu.Unlock()
+
+	ctx := context.Background()
+	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		return
 	}
-	tx, err := s.store.Pool.Begin(context.Background())
-	if err != nil {
-		return
-	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback(ctx)
 	var issueKey, artifactName string
 	var open bool
-	if err := tx.QueryRow(context.Background(), `
+	if err := tx.QueryRow(ctx, `
 		select a.issue_key, a.name, i.closed_at is null
 		from artifacts a join issues i on i.key = a.issue_key
 		where a.id = $1 for update
 	`, room).Scan(&issueKey, &artifactName, &open); err != nil || !open {
 		return
 	}
-	latest, err := latestVersion(context.Background(), tx, room)
+	latest, err := latestVersion(ctx, tx, room)
 	if err != nil || latest.markdown == markdown {
 		return
 	}
-	authors := actorSlice(state.pending)
-	version, err := writeVersion(context.Background(), tx, room, markdown, false, nil, authors)
+	authors := actorSlice(pending)
+	version, err := writeVersion(ctx, tx, room, markdown, false, nil, authors)
 	if err != nil {
 		return
 	}
-	if err := s.reresolveAnchors(context.Background(), tx, room, markdown); err != nil {
+	if err := s.reresolveAnchors(ctx, tx, room, markdown); err != nil {
 		return
 	}
 	eventActor := model.Actor{}
 	if len(authors) > 0 {
 		eventActor = authors[0]
 	}
-	event, err := s.events.Append(context.Background(), tx, model.Event{
+	event, err := s.events.Append(ctx, tx, model.Event{
 		IssueKey: issueKey,
 		Type:     "artifact.version",
 		Actor:    eventActor,
@@ -438,11 +479,29 @@ func (s *Service) settleRoom(room string) {
 	if err != nil {
 		return
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return
 	}
-	state.pending = make(map[string]model.Actor)
+	state.mu.Lock()
+	if state.gen == generation {
+		for key := range pending {
+			delete(state.pending, key)
+		}
+	}
+	state.mu.Unlock()
 	s.events.Publish(event)
+}
+
+func (s *Service) waitSettles(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		s.settleWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 func (s *Service) reresolveAnchors(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error {
@@ -460,33 +519,37 @@ func (s *Service) reresolveAnchors(ctx context.Context, tx pgx.Tx, artifactID, m
 		if err != nil {
 			return fmt.Errorf("list %s anchors: %w", target.table, err)
 		}
+		type row struct {
+			id      string
+			encoded []byte
+		}
+		var anchored []row
 		for rows.Next() {
-			var id string
-			var encoded []byte
-			if err := rows.Scan(&id, &encoded); err != nil {
+			var anchor row
+			if err := rows.Scan(&anchor.id, &anchor.encoded); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan %s anchor: %w", target.table, err)
 			}
-			var anchor model.Anchor
-			if err := json.Unmarshal(encoded, &anchor); err != nil {
-				rows.Close()
-				return fmt.Errorf("decode %s anchor: %w", target.table, err)
-			}
-			encoded, err = json.Marshal(text.Reresolve(markdown, anchor))
-			if err != nil {
-				rows.Close()
-				return fmt.Errorf("encode %s anchor: %w", target.table, err)
-			}
-			if _, err := tx.Exec(ctx, fmt.Sprintf(`update %s set anchor = $2 where id = $1`, target.table), id, encoded); err != nil {
-				rows.Close()
-				return fmt.Errorf("update %s anchor: %w", target.table, err)
-			}
+			anchored = append(anchored, anchor)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			return fmt.Errorf("list %s anchors: %w", target.table, err)
 		}
 		rows.Close()
+		for _, row := range anchored {
+			var anchor model.Anchor
+			if err := json.Unmarshal(row.encoded, &anchor); err != nil {
+				return fmt.Errorf("decode %s anchor: %w", target.table, err)
+			}
+			encoded, err := json.Marshal(text.Reresolve(markdown, anchor))
+			if err != nil {
+				return fmt.Errorf("encode %s anchor: %w", target.table, err)
+			}
+			if _, err := tx.Exec(ctx, fmt.Sprintf(`update %s set anchor = $2 where id = $1`, target.table), row.id, encoded); err != nil {
+				return fmt.Errorf("update %s anchor: %w", target.table, err)
+			}
+		}
 	}
 	return nil
 }
