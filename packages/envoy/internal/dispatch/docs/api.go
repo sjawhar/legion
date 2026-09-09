@@ -23,6 +23,7 @@ type API interface {
 	SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error
 	ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) error
 	Text(ctx context.Context, artifactID string) (string, error)
+	SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error)
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error)
 	ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, with string, actor model.Actor) error
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error)
@@ -109,6 +110,52 @@ func (n *NoopAPI) Text(ctx context.Context, artifactID string) (string, error) {
 		return "", fmt.Errorf("artifact %s is not a document", artifactID)
 	}
 	return *markdown, nil
+}
+
+// SnapshotVersion captures live text only when it diverges from the latest
+// immutable version. It runs in the transaction which stores the anchor.
+func (n *NoopAPI) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error) {
+	live, err := n.Text(ctx, artifactID)
+	if err != nil {
+		return model.Version{}, false, err
+	}
+	var version model.Version
+	var markdown *string
+	var authors []byte
+	if err := tx.QueryRow(ctx, `
+		select number, named, summary, authors, created_at, markdown
+		from artifact_versions
+		where artifact_id = $1
+		order by number desc
+		limit 1
+	`, artifactID).Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &markdown); err != nil {
+		return model.Version{}, false, fmt.Errorf("read latest document version: %w", err)
+	}
+	if err := json.Unmarshal(authors, &version.Authors); err != nil {
+		return model.Version{}, false, fmt.Errorf("decode document version authors: %w", err)
+	}
+	if markdown != nil && *markdown == live {
+		return version, false, nil
+	}
+	authors, err = json.Marshal([]model.Actor{actor})
+	if err != nil {
+		return model.Version{}, false, fmt.Errorf("encode document authors: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		select $1, max(number) + 1, $2, $3
+		from artifact_versions
+		where artifact_id = $1
+		returning number, named, summary, authors, created_at
+	`, artifactID, live, authors).Scan(
+		&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt,
+	); err != nil {
+		return model.Version{}, false, fmt.Errorf("write unnamed document version: %w", err)
+	}
+	if err := json.Unmarshal(authors, &version.Authors); err != nil {
+		return model.Version{}, false, fmt.Errorf("decode document version authors: %w", err)
+	}
+	return version, true, nil
 }
 
 // ApplyOps is unavailable until the ygo-backed implementation lands.

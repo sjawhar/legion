@@ -27,7 +27,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		       a.anchor, a.state, a.answer, a.created_at, i.key, i.title
 		from asks a
 		join issues i on i.key = a.issue_key
-		where a.state = 'open' and ($1 = '' or i.project_key = $1)
+		where a.state = 'open' and i.closed_at is null and ($1 = '' or i.project_key = $1)
 		order by a.created_at desc, a.id desc
 	`, project)
 	if err != nil {

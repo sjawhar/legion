@@ -43,3 +43,19 @@ func TestExtractRejectsMalformedDispatchVersion(t *testing.T) {
 		t.Fatalf("malformed dispatch version produced references %#v", got)
 	}
 }
+
+func TestExtractTrimsMarkdownLinkDelimiter(t *testing.T) {
+	got := Extract("[ask](https://dispatch.example/issues/LEGION-1/asks/abc)", "https://dispatch.example")
+	want := []Ref{{Kind: "ask", IssueKey: "LEGION-1", ID: "abc"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v; want %#v", got, want)
+	}
+}
+
+func TestExtractTrimsParenthesizedDispatchReference(t *testing.T) {
+	got := Extract("(dispatch://LEGION-1/spec)", "https://dispatch.example")
+	want := []Ref{{Kind: "artifact", IssueKey: "LEGION-1", ID: "spec"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v; want %#v", got, want)
+	}
+}

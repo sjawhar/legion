@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -43,6 +44,50 @@ func (d *interactionDocs) ApplyReplace(_ context.Context, artifactID string, anc
 	}
 	d.applyCalls = append(d.applyCalls, replaceCall{artifactID: artifactID, anchor: anchor, with: with, actor: actor})
 	return nil
+}
+
+func (d *interactionDocs) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error) {
+	live, err := d.Text(ctx, artifactID)
+	if err != nil {
+		return model.Version{}, false, err
+	}
+	var version model.Version
+	var markdown *string
+	var authors []byte
+	if err := tx.QueryRow(ctx, `
+		select number, named, summary, authors, created_at, markdown
+		from artifact_versions
+		where artifact_id = $1
+		order by number desc
+		limit 1
+	`, artifactID).Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &markdown); err != nil {
+		return model.Version{}, false, err
+	}
+	if err := json.Unmarshal(authors, &version.Authors); err != nil {
+		return model.Version{}, false, err
+	}
+	if markdown != nil && *markdown == live {
+		return version, false, nil
+	}
+	authors, err = json.Marshal([]model.Actor{actor})
+	if err != nil {
+		return model.Version{}, false, err
+	}
+	if err := tx.QueryRow(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		select $1, max(number) + 1, $2, $3
+		from artifact_versions
+		where artifact_id = $1
+		returning number, named, summary, authors, created_at
+	`, artifactID, live, authors).Scan(
+		&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt,
+	); err != nil {
+		return model.Version{}, false, err
+	}
+	if err := json.Unmarshal(authors, &version.Authors); err != nil {
+		return model.Version{}, false, err
+	}
+	return version, true, nil
 }
 
 func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (http.Handler, *store.Store) {
@@ -186,6 +231,29 @@ func TestAnchoredAskAnswerAndInbox(t *testing.T) {
 	}
 }
 
+func TestClosedIssueAsksCannotBeAnsweredOrShown(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Closed ask", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Will this close?", "actor": sessionActor(),
+	})
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "closed"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	answer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{}, "alice")
+	if answer.Code != http.StatusConflict || !strings.Contains(answer.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("answer ask on closed issue: status=%d body=%s", answer.Code, answer.Body.String())
+	}
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox?project=TEST", nil, "alice")
+	if inbox.Code != http.StatusOK || strings.Contains(inbox.Body.String(), ask.ID) {
+		t.Fatalf("closed issue ask appeared in inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+}
+
 func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ambiguous ask", "the quick the fox")
@@ -250,6 +318,19 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 		t.Fatalf("invalid selected answer: status=%d body=%s", invalidAnswer.Code, invalidAnswer.Body.String())
 	}
 
+	customSingle := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Choose only one", "custom": true, "actor": sessionActor(),
+	})
+	customAsk := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, customSingle)
+	multipleSelected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+customAsk.ID+"/answer", map[string]any{
+		"selected": []string{"first", "second"},
+	}, "alice")
+	if multipleSelected.Code != http.StatusBadRequest || !strings.Contains(multipleSelected.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("multiple answers for single-select custom ask: status=%d body=%s", multipleSelected.Code, multipleSelected.Body.String())
+	}
+
 	tooLongComment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": strings.Repeat("a", 2001), "actor": sessionActor(),
 	})
@@ -271,9 +352,9 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 		return stub
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Dirty document", "The quick brown fox")
-	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
-		"question": "Why brown?", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "actor": sessionActor(),
-	})
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Why brown?", "anchor": map[string]any{"artifact": "spec", "quote": "brown"},
+	}, "alice")
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create ask against changed document: status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -287,8 +368,43 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 	if version.Code != http.StatusOK || !strings.Contains(version.Body.String(), `"markdown":"The clever brown fox"`) || !strings.Contains(version.Body.String(), `"named":false`) {
 		t.Fatalf("unnamed anchor version: status=%d body=%s", version.Code, version.Body.String())
 	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	var log []struct {
+		Type   string `json:"type"`
+		Notify bool   `json:"notify"`
+	}
+	if err := json.NewDecoder(events.Body).Decode(&log); err != nil {
+		t.Fatalf("decode dirty document events: %v", err)
+	}
+	if len(log) != 3 || log[1].Type != "artifact.version" || log[1].Notify || log[2].Type != "ask.opened" || !log[2].Notify {
+		t.Fatalf("dirty document events = %#v; want non-notifying unnamed artifact.version before notifying ask.opened", log)
+	}
 }
 
+func TestAnchorsKeepCleanDocumentAtExistingVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Clean document", "The quick brown fox")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Why brown?", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask against unchanged document: status=%d body=%s", created.Code, created.Body.String())
+	}
+	version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions/2", nil, "alice")
+	if version.Code != http.StatusNotFound {
+		t.Fatalf("unexpected snapshot for unchanged document: status=%d body=%s", version.Code, version.Body.String())
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	var cleanLog []struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(events.Body).Decode(&cleanLog); err != nil {
+		t.Fatalf("decode clean document events: %v", err)
+	}
+	if len(cleanLog) != 2 || cleanLog[0].Type != "issue.created" || cleanLog[1].Type != "ask.opened" {
+		t.Fatalf("clean document events = %#v; want issue.created then ask.opened", cleanLog)
+	}
+}
 func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Comments", "The quick brown fox")

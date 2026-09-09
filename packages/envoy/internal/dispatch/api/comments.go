@@ -106,7 +106,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	anchor, artifactName, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, actor)
+	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -153,6 +153,20 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	events := []model.Event{}
+	if snapshot != nil {
+		snapshotEvent, err := s.appendEvent(r.Context(), tx, model.Event{
+			IssueKey: issueKey,
+			Type:     "artifact.version",
+			Actor:    actor,
+			Payload:  map[string]any{"artifact_id": anchor.ArtifactID, "name": artifactName, "version": *snapshot},
+		})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		events = append(events, snapshotEvent)
+	}
 	event, err := s.appendEvent(r.Context(), tx, model.Event{
 		IssueKey: issueKey,
 		Type:     "comment.created",
@@ -163,11 +177,12 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	events = append(events, event)
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(events...)
 	writeJSON(w, http.StatusCreated, comment)
 }
 

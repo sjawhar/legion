@@ -23,7 +23,7 @@ type Ref struct {
 func Extract(body, serverURL string) []Ref {
 	refs := []Ref{}
 	for _, raw := range referencePattern.FindAllString(body, -1) {
-		raw = strings.TrimRight(raw, ".,;:!?")
+		raw = trimReference(raw)
 		if raw == "" {
 			continue
 		}
@@ -40,6 +40,35 @@ func Extract(body, serverURL string) []Ref {
 		refs = append(refs, Ref{Kind: "url", ID: raw})
 	}
 	return refs
+}
+
+func trimReference(raw string) string {
+	for {
+		trimmed := strings.TrimRight(raw, ".,;:!?")
+		if trimmed != raw {
+			raw = trimmed
+			continue
+		}
+		if raw == "" {
+			return raw
+		}
+		last := raw[len(raw)-1]
+		var opener byte
+		switch last {
+		case ')':
+			opener = '('
+		case ']':
+			opener = '['
+		case '>':
+			opener = '<'
+		default:
+			return raw
+		}
+		if strings.Count(raw, string(opener)) >= strings.Count(raw, string(last)) {
+			return raw
+		}
+		raw = raw[:len(raw)-1]
+	}
 }
 
 func parseDispatch(value string) (Ref, bool) {

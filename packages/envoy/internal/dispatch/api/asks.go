@@ -82,7 +82,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 		return
 	}
-	anchor, _, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, actor)
+	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -127,16 +127,31 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	events := []model.Event{}
+	if snapshot != nil {
+		snapshotEvent, err := s.appendEvent(r.Context(), tx, model.Event{
+			IssueKey: issueKey,
+			Type:     "artifact.version",
+			Actor:    actor,
+			Payload:  map[string]any{"artifact_id": anchor.ArtifactID, "name": artifactName, "version": *snapshot},
+		})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		events = append(events, snapshotEvent)
+	}
 	event, err := s.appendEvent(r.Context(), tx, model.Event{IssueKey: issueKey, Type: "ask.opened", Actor: actor, Payload: ask})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	events = append(events, event)
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(events...)
 	writeJSON(w, http.StatusCreated, ask)
 }
 
@@ -168,6 +183,19 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if ask.State != "open" {
 		writeError(w, "ASK_CLOSED", http.StatusConflict, "ask is already answered")
+		return
+	}
+	var issueOpen bool
+	if err := tx.QueryRow(r.Context(), `select closed_at is null from issues where key = $1 for update`, ask.IssueKey).Scan(&issueOpen); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if !issueOpen {
+		writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
+		return
+	}
+	if !ask.Multiple && len(input.Selected) > 1 {
+		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "single-select asks accept at most one selected answer")
 		return
 	}
 	if !ask.Custom && !selectedOptions(ask.Options, input.Selected) {
