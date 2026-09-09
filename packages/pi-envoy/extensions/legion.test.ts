@@ -89,6 +89,10 @@ const environmentKeys = [
   "LEGION_ISSUE",
   "LEGION_WORKSPACE",
   "LEGION_STATE_DIR",
+  "HOME",
+  "DISPATCH_URL",
+  "DISPATCH_TOKEN",
+  "DISPATCH_MCP_URL",
 ] as const;
 const originalEnvironment: Record<(typeof environmentKeys)[number], string | undefined> = {
   ENVOY_NATS_URL: process.env.ENVOY_NATS_URL,
@@ -103,6 +107,10 @@ const originalEnvironment: Record<(typeof environmentKeys)[number], string | und
   LEGION_ISSUE: process.env.LEGION_ISSUE,
   LEGION_WORKSPACE: process.env.LEGION_WORKSPACE,
   LEGION_STATE_DIR: process.env.LEGION_STATE_DIR,
+  HOME: process.env.HOME,
+  DISPATCH_URL: process.env.DISPATCH_URL,
+  DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
+  DISPATCH_MCP_URL: process.env.DISPATCH_MCP_URL,
 };
 
 const temporaryPaths: string[] = [];
@@ -143,6 +151,13 @@ function createPi(): {
   const optional = property;
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   process.env.LEGION_STATE_DIR ??= "/tmp/legion-state";
+  // The envoy extension registers the dispatch tools whenever the developer's own
+  // ~/.config/opencode/envoy.json enables dispatch; this fixture's zod stub is not a real
+  // schema builder, so the resolution must see no user config and no DISPATCH_* override.
+  process.env.HOME = "/nonexistent-home-for-legion-tests";
+  delete process.env.DISPATCH_URL;
+  delete process.env.DISPATCH_TOKEN;
+  delete process.env.DISPATCH_MCP_URL;
   const pi: TestPi = {
     zod: {
       object: (shape) => shape,
