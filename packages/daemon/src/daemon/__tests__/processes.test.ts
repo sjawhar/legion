@@ -262,7 +262,7 @@ describe("ProcessManager", () => {
     await processes.spawnRoot(root);
 
     expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toBe(
-      `task:\n  maxRecursionDepth: 8\nextensions:\n  - ${path.resolve(import.meta.dir, "../../../../pi-envoy")}\n`
+      "task:\n  maxRecursionDepth: 8\n"
     );
     expect(state.trees[root]).toMatchObject({
       generation: 1,
@@ -348,7 +348,7 @@ describe("ProcessManager", () => {
         "PATH=/full/bin:/usr/bin",
         "-e",
         "DISPATCH_MCP_URL=http://127.0.0.1:18766/mcp",
-        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../pi-envoy")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)"`,
+        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)"`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
@@ -537,7 +537,7 @@ describe("ProcessManager", () => {
     expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
   });
 
-  it("passes the packaged extension root to OMP discovery for root and controller windows", async () => {
+  it("passes the packaged role prompt path to OMP for root and controller windows, without an --extension flag", async () => {
     const stateDir = await temporaryDir();
     const ompInvocation = "/opt/oh-my-pi/18.0.3/omp";
     const panePath = "/full/bin:/usr/bin";
@@ -559,8 +559,8 @@ describe("ProcessManager", () => {
     const extensionDir = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const windows = commands.filter((command) => command[1] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
-      `cd ${workspaceDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)"`,
-      `cd ${controllerDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
+      `cd ${workspaceDir} && ${ompInvocation} --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)"`,
+      `cd ${controllerDir} && ${ompInvocation} --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
     ]);
     expect(windows.map((command) => command.includes(`PATH=${panePath}`))).toEqual([true, true]);
   });
@@ -958,7 +958,7 @@ describe("ProcessManager", () => {
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --extension ${extension} --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
     );
   });
 
@@ -987,7 +987,7 @@ describe("ProcessManager", () => {
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
     );
   });
 
@@ -1017,7 +1017,7 @@ describe("ProcessManager", () => {
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
     );
   });
 

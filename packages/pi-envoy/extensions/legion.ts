@@ -11,6 +11,7 @@ import {
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { messageFor } from "@legion/envoy-client/errors";
 import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
+import { logger } from "@oh-my-pi/pi-utils";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import {
   generation,
@@ -27,12 +28,6 @@ import {
 import { createLegionDaemonClient } from "../src/legion/daemon-client";
 import { installWorkerGhShim, workerGhEnvironment } from "../src/legion/gh-shim";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
-import type {
-  CommandContext,
-  PiApi,
-  SessionContext,
-  ToolCallEventResult,
-} from "../src/pi-types";
 import { legionSpawnBlockPattern, parseWorkerSpawn, workerAgentId } from "../src/legion/spawn";
 import { createLegionTool } from "../src/legion/tools";
 import {
@@ -52,9 +47,18 @@ import {
   workerSessions,
 } from "../src/legion/worker-budget";
 import { runWorkspaceCommand, setJjIdentity } from "../src/legion/workspace-helpers";
+import type { CommandContext, PiApi, SessionContext, ToolCallEventResult } from "../src/pi-types";
 import { claimEnvoyRole, deleteEnvoyInterest } from "./envoy";
 
+// Read by the daemon's startup probe extension (packages/daemon/src/daemon/index.ts,
+// verifyLegionPluginLoaded) to prove this extension actually loaded from an ambient
+// installed-plugin discovery — not just that a manifest file exists, which stays true
+// even when the plugin is disabled or unregistered in OMP's own plugin registry.
+const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
+
 export default function legionExtension(pi: PiApi): void {
+  logger.debug("extension instance loaded", { extension: import.meta.url });
+  (globalThis as Record<symbol, unknown>)[LEGION_LOADED_MARKER] = import.meta.url;
   const agents = pi.agents;
   const defaults = envoyDefaultsFromEnvironment(process.env);
   let rootSessionID: string | undefined;
@@ -332,9 +336,7 @@ export default function legionExtension(pi: PiApi): void {
       return;
     }
     const project = process.env.LEGION_PROJECT;
-    const spawn = project
-      ? parseWorkerSpawn(event.prompt, project)
-      : undefined;
+    const spawn = project ? parseWorkerSpawn(event.prompt, project) : undefined;
     if (!spawn) {
       if (isRootSession(process.env, context)) await bootstrapRoot(context);
       return;
@@ -424,11 +426,7 @@ export default function legionExtension(pi: PiApi): void {
         });
         const tree = requiredEnvironment(process.env, "LEGION_TREE");
         const depth = context.taskDepth ?? 0;
-        const maxDepth = positiveIntegerEnvironment(
-          process.env,
-          "LEGION_MAX_RECURSION_DEPTH",
-          "8"
-        );
+        const maxDepth = positiveIntegerEnvironment(process.env, "LEGION_MAX_RECURSION_DEPTH", "8");
         if (role === "architect" && depth + 2 > maxDepth) {
           throw new Error(
             `sub-architect at depth ${depth} would place its workers at the recursion cap ` +

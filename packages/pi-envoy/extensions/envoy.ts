@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
 import { executeDispatch } from "@legion/envoy-client/dispatch-call";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import {
@@ -12,16 +13,16 @@ import {
   parseDispatchCall,
 } from "@legion/envoy-client/dispatch-contract";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
-import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
-  toMessageMetadata,
   type MessageMetadataArguments,
+  toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient, expandSubscriptionTopics } from "@legion/envoy-client/transport";
+import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
@@ -29,15 +30,10 @@ import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
-
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 
-type LegionRoleClaim = (
-  sessionID: string,
-  role: string,
-  context?: SessionContext
-) => Promise<void>;
+type LegionRoleClaim = (sessionID: string, role: string, context?: SessionContext) => Promise<void>;
 
 type LegionRoleClaimReady = {
   readonly promise: Promise<LegionRoleClaim>;
@@ -107,6 +103,7 @@ function resolveSkillsDirectory(): string {
 const SKILLS_DIRECTORY = resolveSkillsDirectory();
 
 export default function envoyExtension(pi: PiApi): void {
+  logger.debug("extension instance loaded", { extension: import.meta.url });
   const defaults = envoyDefaultsFromEnvironment(process.env);
   // One loader for the shared envoy.json contract: the dispatch tool is
   // registered only where it names a service, and an invalid file is reported
@@ -219,7 +216,6 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
-
   const pump = async (topic: string, subscription: Subscription): Promise<void> => {
     try {
       for await (const message of subscription) {
@@ -316,7 +312,7 @@ export default function envoyExtension(pi: PiApi): void {
           heartbeatOutageNotified = true;
           context.ui.notify(
             `envoy: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat`,
-            "warning",
+            "warning"
           );
         })
         .finally(() => {
@@ -490,7 +486,9 @@ export default function envoyExtension(pi: PiApi): void {
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
       const deregistration =
-        sessionID === "" ? Promise.resolve() : client.unregisterSession(sessionID).catch(() => undefined);
+        sessionID === ""
+          ? Promise.resolve()
+          : client.unregisterSession(sessionID).catch(() => undefined);
       const draining = connection?.drain().catch(() => undefined) ?? Promise.resolve();
       await Promise.race([
         Promise.allSettled([deregistration, draining]).then(() => undefined),
@@ -579,7 +577,7 @@ export default function envoyExtension(pi: PiApi): void {
           const added: string[] = [];
           const already: string[] = [];
           for (const topic of topicsFor(parameters)) {
-            (await subscribe(topic) ? added : already).push(topic);
+            ((await subscribe(topic)) ? added : already).push(topic);
           }
           let warnings: readonly string[] | undefined;
           let registrationError: string | undefined;
@@ -657,11 +655,14 @@ export default function envoyExtension(pi: PiApi): void {
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
           const confirmation = result.confirmed ? "" : " (recipient unconfirmed by listener)";
-          return toolSuccess(`sent ${result.envelope.event_id} to ${result.recipient}${confirmation}`, {
-            event_id: result.envelope.event_id,
-            recipient: result.recipient,
-            confirmed: result.confirmed,
-          });
+          return toolSuccess(
+            `sent ${result.envelope.event_id} to ${result.recipient}${confirmation}`,
+            {
+              event_id: result.envelope.event_id,
+              recipient: result.recipient,
+              confirmed: result.confirmed,
+            }
+          );
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
@@ -759,4 +760,3 @@ function topicsFor(
   if (!isStringArray(value)) throw new TypeError("topics must be strings");
   return expandSubscriptionTopics(value);
 }
-

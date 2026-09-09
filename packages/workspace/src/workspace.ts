@@ -180,16 +180,12 @@ async function createWorkspace(
   if (retry.exitCode !== 0) throw commandFailure(retry, recoveryWorkspaceArgs);
 }
 
-async function writeOmpConfig(
-  workspaceDir: string,
-  depth: number,
-  extensionPackage: string
-): Promise<void> {
+async function writeOmpConfig(workspaceDir: string, depth: number): Promise<void> {
   const ompDir = path.join(workspaceDir, ".omp");
   await mkdir(ompDir, { recursive: true });
   await writeFile(
     path.join(ompDir, "config.yml"),
-    `task:\n  maxRecursionDepth: ${depth}\nextensions:\n  - ${extensionPackage}\n`,
+    `task:\n  maxRecursionDepth: ${depth}\n`,
     "utf8"
   );
 }
@@ -271,11 +267,7 @@ export async function provisionIssueWorkspace(
     "credential.interactive",
     "false",
   ]);
-  await writeOmpConfig(
-    workspaceDir,
-    maxRecursionDepth(deps.maxRecursionDepth),
-    deps.extensionPackage
-  );
+  await writeOmpConfig(workspaceDir, maxRecursionDepth(deps.maxRecursionDepth));
 
   return { repoCloneDir, workspaceDir, bookmark };
 }

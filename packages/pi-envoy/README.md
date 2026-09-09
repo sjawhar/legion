@@ -45,8 +45,8 @@ set -g set-clipboard on
 This package declares two OMP extension entries in `package.json`: `extensions/envoy.ts`
 (Envoy messaging, subscriptions, and steering delivery) and `extensions/legion.ts` (the
 Legion lifecycle: root bootstrap, worker spawning, budgets, and daemon capabilities).
-Loading the package directory with OMP's `--extension` flag — as the Legion daemon does
-when it launches trees and workers — loads both.
+`extensions/legion.ts` is inert without `LEGION_TREE`, `LEGION_ROLE`, or `LEGION_CONTROLLER`
+set in the environment, so loading both alongside each other is safe for every session.
 
 For local development of the messaging extension alone, link the entry into OMP:
 
@@ -56,23 +56,25 @@ ln -sfn "$PWD/packages/pi-envoy/extensions/envoy.ts" \
 ```
 
 The repository root `package.json` likewise loads only `extensions/envoy.ts` for dev
-sessions inside this repo: the Legion extension is meant to be loaded by the daemon with
-its environment prepared, not by ambient dev sessions.
+sessions inside this repo, since `legion.ts` needs nothing from a repo checkout beyond
+what the installed package already ships.
 
 ## Published package
 
 Released installs come from npm as `@sjawhar/pi-legion-envoy`. The tarball is
-self-contained: it ships only `dist/envoy.js` — bundling every dependency except the
-OMP host package — and the repo `skills/` tree staged beside it at `dist/skills` so
-`resources_discover` serves the Legion skills from the installed package. The published
-manifest exposes only `dist/envoy.js` — matching the repository root — while the
-committed manifest keeps the TypeScript entries for repo checkouts; `extensions/legion.ts`
-is daemon infrastructure and is not packed at all.
+self-contained: it ships `dist/envoy.js` and `dist/legion.js` — bundling every
+dependency except the OMP host package — and the repo `skills/` tree staged beside it
+at `dist/skills` so `resources_discover` serves the Legion skills from the installed
+package. The published manifest exposes both `dist/envoy.js` and `dist/legion.js`, while
+the committed manifest keeps the TypeScript entries for repo checkouts. The Legion
+daemon spawns every session against this one installed package instead of also loading
+a repo checkout with OMP's `--extension` flag, so a daemon session ends up with exactly
+one instance of each extension.
 
-`.github/workflows/release-pi-envoy.yaml` performs that manifest rewrite around
-`bun pm pack` and restores the committed file before tagging. Packing with the committed
-source manifest is refused by `scripts/prepack.sh`, because such a tarball would point
-OMP at extension files it does not contain.
+`.github/workflows/release.yaml` performs that manifest rewrite around `bun pm pack`
+and restores the committed file before tagging. Packing with the committed source
+manifest is refused by `scripts/prepack.sh`, because such a tarball would point OMP at
+extension files it does not contain.
 
 ## Dispatch
 
