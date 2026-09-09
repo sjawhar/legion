@@ -12,7 +12,6 @@ import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
 import { useMargin } from "../margin/Margin";
 import { anchorDecorationExtension, setActiveAnchorIds, setAnchorDecorations } from "./anchors";
 import { DocView } from "./DocView";
-import { selectionToAnchor } from "./text-offsets";
 import { VersionDiff } from "./VersionDiff";
 
 interface DocEditorProps {
@@ -68,7 +67,7 @@ function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNo
   anchorHover.current = setHoveredItemId;
   anchorSelect.current = selectItem;
   selectionHandler.current = (view) => {
-    const { from, to } = selectionToAnchor(view);
+    const { from, to } = view.state.selection.main;
     if (from === to) {
       setSelection(undefined);
       return;
