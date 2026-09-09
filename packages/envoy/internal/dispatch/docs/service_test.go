@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -806,7 +807,7 @@ func TestCancelledTextLoadDoesNotQuarantineRoom(t *testing.T) {
 	}
 }
 
-func TestAppendFailureClosesDocumentConnectionAndQuarantinesRoom(t *testing.T) {
+func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 	database := openTestStore(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -831,17 +832,141 @@ func TestAppendFailureClosesDocumentConnectionAndQuarantinesRoom(t *testing.T) {
 	if err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text before persistence failure: %v", err)
 	}
-	waitForRoomFailure(t, service, artifactID)
-	waitForNoLiveDocument(t, service, artifactID)
 	connection.SetReadDeadline(time.Now().Add(time.Second))
 	for {
 		if _, _, err := connection.ReadMessage(); err != nil {
 			break
 		}
 	}
-	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
-		t.Fatalf("append failure = %v, want ErrServiceUnavailable", err)
+	_ = connection.Close()
+	waitForNoLiveDocument(t, service, artifactID)
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "before" {
+		t.Fatalf("reloaded text after append failure = %q (%v), want persisted text before", got, err)
 	}
+}
+
+func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{
+		Store:       database,
+		Persistence: &failingOnceVersionedStore{VersionedStore: NewPgVersioned(database)},
+		Events:      events.NewBroker(),
+		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, "before")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if connection != nil {
+		_ = connection.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("first failed-room access: response=%#v err=%v, want HTTP 503", response, err)
+	}
+	connection, response, err = gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("reloaded room access: response=%#v err=%v", response, err)
+	}
+	_ = connection.Close()
+}
+
+func TestNamedVersionIndexesDocumentReferences(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.ReplaceText(context.Background(), artifactID, "See dispatch://DOC-1/artifact/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("replace document text: %v", err)
+	}
+	if _, err := service.NamedVersion(context.Background(), artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write named version: %v", err)
+	}
+	var references int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from refs
+		where from_kind = 'artifact' and from_id = $1 and to_kind = 'artifact' and to_id = 'DOC-1/spec'
+	`, artifactID).Scan(&references); err != nil {
+		t.Fatalf("count document references: %v", err)
+	}
+	if references != 1 {
+		t.Fatalf("document references = %d, want 1", references)
+	}
+}
+
+func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	first := model.Actor{Kind: "user", ID: "alice"}
+	second := model.Actor{Kind: "user", ID: "bob"}
+	if err := service.ReplaceText(context.Background(), artifactID, "after", first); err != nil {
+		t.Fatalf("replace document text: %v", err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
+	blocker, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin blocker transaction: %v", err)
+	}
+	if _, err := blocker.Exec(context.Background(), `select 1 from artifacts where id = $1 for update`, artifactID); err != nil {
+		t.Fatalf("lock document artifact: %v", err)
+	}
+	settled := make(chan struct{})
+	go func() {
+		service.settleRoom(artifactID, generation)
+		close(settled)
+	}()
+	waitForDatabaseLock(t, service.store)
+	service.recordActor(artifactID, second)
+	if err := blocker.Commit(context.Background()); err != nil {
+		t.Fatalf("release document lock: %v", err)
+	}
+	select {
+	case <-settled:
+	case <-time.After(time.Second):
+		t.Fatal("settlement did not complete")
+	}
+	version := waitForDocumentVersion(t, service.store, artifactID, 2)
+	if len(version.Authors) != 2 || version.Authors[0] != first || version.Authors[1] != second {
+		t.Fatalf("settled version authors = %#v, want %v and %v", version.Authors, first, second)
+	}
+}
+
+func waitForDatabaseLock(t *testing.T, database *store.Store) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("inspect database locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("settlement did not wait on the document lock")
+}
+
+type failingOnceVersionedStore struct {
+	VersionedStore
+	loads atomic.Int32
+}
+
+func (s *failingOnceVersionedStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+	if s.loads.Add(1) == 1 {
+		return persistence.LoadResult{}, errors.New("transient load failure")
+	}
+	return s.VersionedStore.Load(ctx, room)
 }
 
 func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {

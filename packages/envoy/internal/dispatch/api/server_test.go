@@ -1325,3 +1325,42 @@ func TestIssueExternalLinksRequireAbsoluteHTTPURLs(t *testing.T) {
 		t.Fatalf("accept HTTP external link: status=%d body=%s", valid.Code, valid.Body.String())
 	}
 }
+
+func TestDocumentUploadIndexesDispatchReferences(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Document references",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	uploaded := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "notes.md",
+	}, "notes.md", "text/markdown", []byte("See dispatch://TEST-1/artifact/spec."), "alice")
+	artifact := decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, uploaded)
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload document: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	var references int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from refs
+		where from_kind = 'artifact' and from_id = $1 and to_kind = 'artifact' and to_id = 'TEST-1/spec'
+	`, artifact.Artifact.ID).Scan(&references); err != nil {
+		t.Fatalf("count uploaded document references: %v", err)
+	}
+	if references != 1 {
+		t.Fatalf("uploaded document references = %d, want 1", references)
+	}
+}

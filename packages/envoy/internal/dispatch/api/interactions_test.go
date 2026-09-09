@@ -715,3 +715,33 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 		t.Fatalf("closed is not a valid lifecycle status: status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 }
+
+func TestEditArtifactCreatesNamedVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Edit version", "before")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"summary": "Change opening",
+		"actor":   sessionActor(),
+	})
+	var result struct {
+		Applied int           `json:"applied"`
+		Version model.Version `json:"version"`
+	}
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	result = decodeBody[struct {
+		Applied int           `json:"applied"`
+		Version model.Version `json:"version"`
+	}](t, edited)
+	if result.Applied != 1 || !result.Version.Named || result.Version.Summary == nil || *result.Version.Summary != "Change opening" {
+		t.Fatalf("edit result = %#v, want named version with summary", result)
+	}
+	unchanged := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{}, "actor": sessionActor(),
+	})
+	if unchanged.Code != http.StatusOK || !strings.Contains(unchanged.Body.String(), `"applied":0`) || !strings.Contains(unchanged.Body.String(), `"version":null`) {
+		t.Fatalf("empty edit result: status=%d body=%s", unchanged.Code, unchanged.Body.String())
+	}
+}

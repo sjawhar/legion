@@ -71,6 +71,7 @@ type roomState struct {
 	settle          *time.Timer
 	gen             uint64
 	failed          error
+	failedDone     chan struct{}
 	closed          bool
 	mu              sync.Mutex
 }
@@ -90,8 +91,8 @@ type connectionState struct {
 type connectionContextKey struct{}
 
 // servicePersistenceAdapter observes ygo's otherwise asynchronous persistence
-// callbacks. A failed update quarantines the room rather than allowing live
-// state that cannot survive an eviction.
+// callbacks. A failed update evicts its room so the next access reloads durable
+// state instead of retaining unsaved live state.
 type servicePersistenceAdapter struct {
 	store   VersionedStore
 	service *Service
@@ -110,6 +111,9 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
+	if a.service.roomFailed(room) {
+		return nil
+	}
 	_, err := a.store.AppendUpdate(context.Background(), room, update)
 	if err != nil {
 		a.service.failRoom(room, err)
@@ -118,6 +122,9 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 }
 
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
+	if a.service.roomFailed(room) {
+		return nil
+	}
 	_, err := a.store.AppendUpdate(ctx, room, update)
 	if err != nil {
 		a.service.failRoom(room, err)
@@ -189,7 +196,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if room == "" {
 		room = path.Base(r.URL.Path)
 	}
-	if err := s.roomFailure(room); err != nil {
+	if err := s.awaitRoomRecovery(r.Context(), room); err != nil {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -276,7 +283,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 // Text returns the current Yjs text, loading and rendering persisted state when
 // the document room is not resident.
 func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
-	if err := s.roomFailure(artifactID); err != nil {
+	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return "", err
 	}
 	if doc := s.srv.GetDoc(artifactID); doc != nil {
@@ -288,7 +295,7 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 			return "", err
 		}
 		s.failRoom(artifactID, err)
-		return "", s.roomFailure(artifactID)
+		return "", fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
 	}
 	if len(loaded.Update) == 0 {
 		return "", nil
@@ -296,7 +303,7 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	doc := crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
-		return "", s.roomFailure(artifactID)
+		return "", fmt.Errorf("%w: decode live document: %v", ErrServiceUnavailable, err)
 	}
 	return doc.GetText("content").ToString(), nil
 }
@@ -519,7 +526,7 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 }
 
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
-	if err := s.roomFailure(info.Room); err != nil {
+	if err := s.awaitRoomRecovery(ctx, info.Room); err != nil {
 		return err
 	}
 	if s.roomClosed(info.Room) {
@@ -536,7 +543,7 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 }
 
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
-	if err := s.roomFailure(room); err != nil {
+	if err := s.awaitRoomRecovery(ctx, room); err != nil {
 		return err
 	}
 	open, err := s.issueOpen(ctx, room)
@@ -589,10 +596,6 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	markdown := doc.GetText("content").ToString()
-	pending := make(map[string]model.Actor, len(state.pending))
-	for key, actor := range state.pending {
-		pending[key] = actor
-	}
 	state.mu.Unlock()
 
 	ctx := context.Background()
@@ -611,7 +614,26 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	latest, err := latestVersion(ctx, tx, room)
-	if err != nil || latest.markdown == markdown {
+	if err != nil {
+		return
+	}
+	state.mu.Lock()
+	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
+		state.mu.Unlock()
+		return
+	}
+	doc = s.srv.GetDoc(room)
+	if doc == nil {
+		state.mu.Unlock()
+		return
+	}
+	markdown = doc.GetText("content").ToString()
+	pending := make(map[string]model.Actor, len(state.pending))
+	for key, actor := range state.pending {
+		pending[key] = actor
+	}
+	state.mu.Unlock()
+	if latest.markdown == markdown {
 		return
 	}
 	authors := actorSlice(pending)
@@ -709,6 +731,8 @@ func (s *Service) failRoom(room string, cause error) {
 		return
 	}
 	state.failed = cause
+	state.failedDone = make(chan struct{})
+	done := state.failedDone
 	state.gen++
 	if state.settle != nil && state.settle.Stop() {
 		s.settleWG.Done()
@@ -716,6 +740,8 @@ func (s *Service) failRoom(room string, cause error) {
 	state.mu.Unlock()
 	go func() {
 		_ = s.srv.CloseRoom(room, true)
+		s.rooms.CompareAndDelete(room, state)
+		close(done)
 	}()
 }
 
@@ -727,6 +753,36 @@ func (s *Service) roomFailure(room string) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %v", ErrServiceUnavailable, state.failed)
+}
+
+func (s *Service) roomFailed(room string) bool {
+	value, ok := s.rooms.Load(room)
+	if !ok {
+		return false
+	}
+	state := value.(*roomState)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.failed != nil
+}
+
+// awaitRoomRecovery waits for a failed room's forced eviction. Its next caller
+// then reloads the persisted document into a new room state.
+func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
+	state := s.room(room)
+	state.mu.Lock()
+	failure := state.failed
+	done := state.failedDone
+	state.mu.Unlock()
+	if failure == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Service) roomClosed(room string) bool {
@@ -930,7 +986,33 @@ func writeVersion(ctx context.Context, tx pgx.Tx, artifactID, markdown string, n
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return model.Version{}, fmt.Errorf("decode document version authors: %w", err)
 	}
+	if err := indexDocumentReferences(ctx, tx, artifactID, markdown); err != nil {
+		return model.Version{}, err
+	}
 	return version, nil
+}
+
+func indexDocumentReferences(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error {
+	if _, err := tx.Exec(ctx, `delete from refs where from_kind = 'artifact' and from_id = $1`, artifactID); err != nil {
+		return fmt.Errorf("clear document references: %w", err)
+	}
+	for _, ref := range text.Extract(markdown, "") {
+		if ref.Kind == "url" {
+			continue
+		}
+		toID := ref.ID
+		if ref.Kind == "artifact" {
+			toID = ref.IssueKey + "/" + ref.ID
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into refs (from_kind, from_id, to_kind, to_id)
+			values ('artifact', $1, $2, $3)
+			on conflict do nothing
+		`, artifactID, ref.Kind, toID); err != nil {
+			return fmt.Errorf("write document reference: %w", err)
+		}
+	}
+	return nil
 }
 
 type textMutation struct {

@@ -203,6 +203,10 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
+		if err := s.replaceRefs(r.Context(), tx, "artifact", artifact.ID, string(content)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	} else {
 		size := len(content)
 		if err := tx.QueryRow(r.Context(), `
