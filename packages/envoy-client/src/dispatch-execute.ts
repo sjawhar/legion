@@ -77,7 +77,7 @@ function optionalNumber(args: Record<string, unknown>, name: string): number | u
 }
 
 function parseDispatchRef(ref: string): ParsedDispatchRef | null {
-  const match = ref.match(/^dispatch:\/\/([^/]+)(?:\/(?:spec|artifacts?\/([^/@]+)(?:@v(\d+))?))?$/);
+  const match = ref.match(/^dispatch:\/\/([^/]+)(?:\/(?:spec|artifacts\/([^/@]+)(?:@v(\d+))?))?$/);
   if (!match) return null;
   const [, issue, artifact, version] = match;
   if (!issue) return null;

@@ -150,6 +150,25 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/valid dispatch/);
   });
 
+  test("rejects a legacy singular artifact dispatch reference", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { ref: "dispatch://DSP-42/artifact/spec" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(/valid dispatch/);
+  });
+
   test("renders a no-new-version document edit and forwards its summary", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
