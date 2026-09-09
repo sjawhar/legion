@@ -1129,7 +1129,13 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 		})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		failure = &postApplyFailureDocs{
-			API: documentService, applied: make(chan struct{}), release: make(chan struct{}),
+			API:                documentService,
+			beforeApply:        make(chan struct{}),
+			releaseBeforeApply: make(chan struct{}),
+			beforeEvict:        make(chan struct{}),
+			releaseEvict:       make(chan struct{}),
+			applied:            make(chan struct{}),
+			release:            make(chan struct{}),
 		}
 		return failure
 	})
@@ -1150,9 +1156,20 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 			"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
 		})
 	}()
+	waitForBeforeApply(t, failure)
+	if _, err := documentService.ApplyOps(context.Background(), issue.PrimaryArtifactID, []model.EditOp{{Op: "replace", Find: "before", With: "before"}}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("apply live update before transactional edit: %v", err)
+	}
+	waitForDocumentUpdate(t, persistenceStore)
+	waitForSecondReplacementOrCommentLock(t, database, make(chan struct{}))
+	close(failure.releaseBeforeApply)
 	waitForPostApply(t, failure)
 	waitForDocumentUpdate(t, persistenceStore)
+	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
 	close(failure.release)
+	waitForBeforeEvict(t, failure)
+	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
+	close(failure.releaseEvict)
 	handlerResponse := awaitResponse(t, responses)
 	if handlerResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
@@ -1258,11 +1275,16 @@ func (s *recordingVersionedStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx,
 
 type postApplyFailureDocs struct {
 	docs.API
-	applied chan struct{}
-	release chan struct{}
+	beforeApply        chan struct{}
+	releaseBeforeApply chan struct{}
+	beforeEvict        chan struct{}
+	releaseEvict       chan struct{}
+	applied            chan struct{}
+	release            chan struct{}
 }
 
 func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
+	d.waitBeforeApply()
 	applied, err := d.API.ApplyOps(ctx, artifactID, ops, actor)
 	if err != nil {
 		return 0, err
@@ -1273,12 +1295,29 @@ func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, 
 }
 
 func (d *postApplyFailureDocs) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, replacement string, actor model.Actor) error {
+	d.waitBeforeApply()
 	if err := d.API.ApplyReplace(ctx, artifactID, anchor, replacement, actor); err != nil {
 		return err
 	}
 	close(d.applied)
 	<-d.release
 	return errors.New("forced post-apply failure")
+}
+
+func (d *postApplyFailureDocs) Evict(ctx context.Context, artifactID string) error {
+	if d.beforeEvict != nil {
+		close(d.beforeEvict)
+		<-d.releaseEvict
+	}
+	return d.API.Evict(ctx, artifactID)
+}
+
+func (d *postApplyFailureDocs) waitBeforeApply() {
+	if d.beforeApply == nil {
+		return
+	}
+	close(d.beforeApply)
+	<-d.releaseBeforeApply
 }
 
 func drainDocumentUpdates(store *recordingVersionedStore) {
@@ -1288,6 +1327,24 @@ func drainDocumentUpdates(store *recordingVersionedStore) {
 		default:
 			return
 		}
+	}
+}
+
+func waitForBeforeApply(t *testing.T, docs *postApplyFailureDocs) {
+	t.Helper()
+	select {
+	case <-docs.beforeApply:
+	case <-time.After(time.Second):
+		t.Fatal("document mutation did not reach pre-apply gate")
+	}
+}
+
+func waitForBeforeEvict(t *testing.T, docs *postApplyFailureDocs) {
+	t.Helper()
+	select {
+	case <-docs.beforeEvict:
+	case <-time.After(time.Second):
+		t.Fatal("document mutation did not reach eviction gate")
 	}
 }
 

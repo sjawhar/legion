@@ -203,6 +203,37 @@ func TestEvictDropsUnconnectedRoomAndCancelsSettlement(t *testing.T) {
 	}
 }
 
+func TestTransactionalApplyDoesNotScheduleSettlement(t *testing.T) {
+	service, artifactID := newTestService(t)
+	const settleInterval = 50 * time.Millisecond
+	service.settle = settleInterval
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transactional edit: %v", err)
+	}
+	if _, err := service.ApplyOps(WithTx(ctx, tx), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+		t.Fatalf("apply transactional edit: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit transactional edit: %v", err)
+	}
+	time.Sleep(3 * settleInterval)
+	var versions int
+	if err := service.store.Pool.QueryRow(ctx, `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count transactional edit versions: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("versions after transactional edit = %d, want 1", versions)
+	}
+	if got, err := service.Text(ctx, artifactID); err != nil || got != "after" {
+		t.Fatalf("document after transactional edit = %q (%v), want after", got, err)
+	}
+}
+
 func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "one two one")

@@ -73,6 +73,7 @@ type roomState struct {
 	pendingVersions map[int]versionPending
 	settle          *time.Timer
 	gen             uint64
+	suppressSettle  int
 	failed          error
 	failedDone      chan struct{}
 	closed          bool
@@ -238,8 +239,22 @@ func (s *Service) cancelSuppressedPersistence(room string, slot *suppressSlot) {
 func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) bool) error {
 	tx, joinedTransaction := txFromContext(ctx)
 	var slot *suppressSlot
+	var state *roomState
 	if joinedTransaction {
 		slot = s.prepareSuppressedPersistence(artifactID)
+		state = s.room(artifactID)
+		state.mu.Lock()
+		state.gen++
+		if state.settle != nil && state.settle.Stop() {
+			s.settleWG.Done()
+		}
+		state.suppressSettle++
+		state.mu.Unlock()
+		defer func() {
+			state.mu.Lock()
+			state.suppressSettle--
+			state.mu.Unlock()
+		}()
 	}
 	changed := false
 	var updates [][]byte
@@ -719,7 +734,7 @@ func (s *Service) scheduleSettle(room string) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if s.stopping.Load() || state.closed || state.failed != nil {
+	if s.stopping.Load() || state.closed || state.failed != nil || state.suppressSettle > 0 {
 		return
 	}
 	state.gen++
