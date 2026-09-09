@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -112,21 +113,25 @@ func (ctx *AppContext) App() *auth.AppConfig {
 	return ctx.app
 }
 
+const (
+	pendingStateTTL = 10 * time.Minute
+	maxPendingStates = 1000
+)
+
 type router struct {
-	ctx *AppContext
-	// pendingStates holds opaque state tokens emitted by /auth/start. The
-	// callback validates and consumes them. Bounded because tokens are
-	// removed on consume or implicitly when the process restarts.
-	pendingStates sync.Map // map[string]pendingState
+	ctx           *AppContext
+	pendingMu     sync.Mutex
+	pendingStates map[string]pendingState
 }
 
 type pendingState struct {
-	next string // optional `?next=` redirect target, sanitized
+	next      string
+	expiresAt time.Time
 }
 
 // New returns an http.Handler that serves all dispatch routes.
 func New(ctx *AppContext) http.Handler {
-	r := &router{ctx: ctx}
+	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/start", r.authStart)
 	mux.HandleFunc("GET /auth/callback", r.authCallback)
@@ -154,7 +159,10 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	next := sanitizeNext(req.URL.Query().Get("next"))
-	r.pendingStates.Store(state, pendingState{next: next})
+	if !r.putPendingState(state, next) {
+		writeError(w, http.StatusTooManyRequests, "too many pending sign-in attempts")
+		return
+	}
 	redirectURI := callbackURL(req)
 	target := auth.BuildAuthorizeURL(app.ClientID, redirectURI, state)
 	http.Redirect(w, req, target, http.StatusFound)
@@ -171,12 +179,11 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rawPending, ok := r.pendingStates.LoadAndDelete(state)
+	pending, ok := r.takePendingState(state)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
 		return
 	}
-	pending := rawPending.(pendingState)
 	tokens, err := auth.ExchangeCode(req.Context(), app.ClientID, app.ClientSecret, code, callbackURL(req), r.ctx.HTTPClient)
 	if err != nil {
 		slog.Warn("dispatch: oauth code exchange failed", "error", err)
@@ -256,6 +263,10 @@ func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) 
 	login, err := r.ctx.Identity.Login(req)
 	if err != nil {
 		identity.WriteError(w, err)
+		return "", false
+	}
+	if _, allowed := r.ctx.AllowedLogins[login]; !allowed {
+		identity.WriteError(w, identity.ErrLoginNotAllowed)
 		return "", false
 	}
 	return login, true
@@ -382,6 +393,33 @@ func sanitizeNext(raw string) string {
 		return "/"
 	}
 	return raw
+}
+
+func (r *router) putPendingState(token, next string) bool {
+	now := time.Now()
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	for token, pending := range r.pendingStates {
+		if !pending.expiresAt.After(now) {
+			delete(r.pendingStates, token)
+		}
+	}
+	if len(r.pendingStates) >= maxPendingStates {
+		return false
+	}
+	r.pendingStates[token] = pendingState{next: next, expiresAt: now.Add(pendingStateTTL)}
+	return true
+}
+
+func (r *router) takePendingState(token string) (pendingState, bool) {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	pending, ok := r.pendingStates[token]
+	if !ok {
+		return pendingState{}, false
+	}
+	delete(r.pendingStates, token)
+	return pending, pending.expiresAt.After(time.Now())
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

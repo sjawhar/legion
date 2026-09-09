@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -171,6 +172,83 @@ func TestGitHubProxyUsesHeaderIdentity(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Errorf("proxy status: got %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestCookieLoginRechecksAllowedLogins(t *testing.T) {
+	allowed := map[string]struct{}{"sjawhar": {}}
+	ctx, err := BuildAppContext(AppContextOptions{
+		SigningKey:    "signing-key",
+		Users:         &memoryUserStore{users: map[string]*auth.User{}},
+		Identity:      identity.CookieIdentity{SigningKey: "signing-key"},
+		AllowedLogins: allowed,
+	})
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	handler := New(ctx)
+	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", "signing-key"))
+	if err != nil {
+		t.Fatalf("parse session cookie: %v", err)
+	}
+	request.AddCookie(cookie)
+	allowedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(allowedResponse, request)
+	if allowedResponse.Code != http.StatusOK {
+		t.Fatalf("allowed cookie status: got %d, want %d", allowedResponse.Code, http.StatusOK)
+	}
+
+	delete(allowed, "sjawhar")
+	revokedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(revokedResponse, request)
+	if revokedResponse.Code != http.StatusForbidden || !strings.Contains(revokedResponse.Body.String(), `"code":"LOGIN_NOT_ALLOWED"`) {
+		t.Fatalf("revoked cookie status: got %d body=%s, want LOGIN_NOT_ALLOWED", revokedResponse.Code, revokedResponse.Body.String())
+	}
+}
+
+func TestAuthStartCapsPendingStates(t *testing.T) {
+	handler, _ := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	for requestNumber := range 1000 {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+		if response.Code != http.StatusFound {
+			t.Fatalf("start %d status: got %d, want %d", requestNumber, response.Code, http.StatusFound)
+		}
+	}
+	overflow := httptest.NewRecorder()
+	handler.ServeHTTP(overflow, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+	if overflow.Code != http.StatusTooManyRequests {
+		t.Fatalf("overflow status: got %d body=%s, want %d", overflow.Code, overflow.Body.String(), http.StatusTooManyRequests)
+	}
+}
+
+func TestOAuthCallbackRejectsExpiredPendingState(t *testing.T) {
+	_, ctx := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, map[string]struct{}{"sjawhar": {}})
+	router := &router{
+		ctx: ctx,
+		pendingStates: map[string]pendingState{
+			"expired": {next: "/", expiresAt: time.Now().Add(-time.Second)},
+		},
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code=code&state=expired", nil)
+	response := httptest.NewRecorder()
+	router.authCallback(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid or expired state") {
+		t.Fatalf("expired callback status: got %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAuthStartEvictsExpiredPendingStates(t *testing.T) {
+	_, ctx := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	router := &router{ctx: ctx, pendingStates: make(map[string]pendingState, maxPendingStates)}
+	for token := range maxPendingStates {
+		router.pendingStates[fmt.Sprintf("expired-%d", token)] = pendingState{expiresAt: time.Now().Add(-time.Second)}
+	}
+	response := httptest.NewRecorder()
+	router.authStart(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+	if response.Code != http.StatusFound || len(router.pendingStates) != 1 {
+		t.Fatalf("expired-state eviction: status=%d states=%d, want redirect with one fresh state", response.Code, len(router.pendingStates))
 	}
 }
 
