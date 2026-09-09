@@ -73,36 +73,95 @@ function MermaidDiagram({ source }: MermaidDiagramProps): ReactNode {
   );
 }
 
-function sourceOffsets(node: unknown): Record<string, string> {
-  if (
-    typeof node !== "object" ||
-    node === null ||
-    !("position" in node) ||
-    typeof node.position !== "object" ||
-    node.position === null ||
-    !("start" in node.position) ||
-    !("end" in node.position) ||
-    typeof node.position.start !== "object" ||
-    node.position.start === null ||
-    typeof node.position.end !== "object" ||
-    node.position.end === null ||
-    !("offset" in node.position.start) ||
-    !("offset" in node.position.end) ||
-    typeof node.position.start.offset !== "number" ||
-    typeof node.position.end.offset !== "number"
-  ) {
-    return {};
-  }
-  return {
-    "data-dispatch-from": String(node.position.start.offset),
-    "data-dispatch-to": String(node.position.end.offset),
+interface MarkdownNode {
+  children?: unknown;
+  position?: { end?: { offset?: unknown }; start?: { offset?: unknown } };
+  type?: unknown;
+  value?: unknown;
+}
+
+interface SourceTextSegment {
+  from: number;
+  renderedFrom: number;
+  renderedTo: number;
+  to: number;
+}
+
+function markdownNode(value: unknown): MarkdownNode | undefined {
+  return typeof value === "object" && value !== null ? (value as MarkdownNode) : undefined;
+}
+
+function sourceTextSegments(node: unknown): SourceTextSegment[] {
+  const segments: SourceTextSegment[] = [];
+  let renderedOffset = 0;
+  const visit = (value: unknown) => {
+    const current = markdownNode(value);
+    if (current === undefined) {
+      return;
+    }
+    if (current.type === "text" && typeof current.value === "string") {
+      const renderedFrom = renderedOffset;
+      renderedOffset += current.value.length;
+      const from = current.position?.start?.offset;
+      const to = current.position?.end?.offset;
+      if (typeof from === "number" && typeof to === "number") {
+        segments.push({ from, renderedFrom, renderedTo: renderedOffset, to });
+      }
+      return;
+    }
+    if (Array.isArray(current.children)) {
+      for (const child of current.children) {
+        visit(child);
+      }
+    }
   };
+  visit(node);
+  return segments;
+}
+
+function markdownSourceSegments(node: unknown): Record<string, string> {
+  const segments = sourceTextSegments(node);
+  return segments.length === 0 ? {} : { "data-dispatch-segments": JSON.stringify(segments) };
 }
 
 function closestMappedBlock(root: HTMLElement, node: Node): HTMLElement | undefined {
   const element = node instanceof HTMLElement ? node : node.parentElement;
-  const block = element?.closest<HTMLElement>("[data-dispatch-from]");
+  const block = element?.closest<HTMLElement>("[data-dispatch-segments]");
   return block !== null && block !== undefined && root.contains(block) ? block : undefined;
+}
+
+function sourceSegments(block: HTMLElement): SourceTextSegment[] {
+  const value = block.dataset.dispatchSegments;
+  if (value === undefined) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (segment): segment is SourceTextSegment =>
+        typeof segment === "object" &&
+        segment !== null &&
+        "from" in segment &&
+        "renderedFrom" in segment &&
+        "renderedTo" in segment &&
+        "to" in segment &&
+        typeof segment.from === "number" &&
+        typeof segment.renderedFrom === "number" &&
+        typeof segment.renderedTo === "number" &&
+        typeof segment.to === "number" &&
+        Number.isInteger(segment.from) &&
+        Number.isInteger(segment.renderedFrom) &&
+        Number.isInteger(segment.renderedTo) &&
+        Number.isInteger(segment.to) &&
+        segment.from <= segment.to &&
+        segment.renderedFrom <= segment.renderedTo
+    );
+  } catch {
+    return [];
+  }
 }
 
 function rangeOffset(block: HTMLElement, node: Node, offset: number): number | undefined {
@@ -115,7 +174,22 @@ function rangeOffset(block: HTMLElement, node: Node, offset: number): number | u
   return before.toString().length;
 }
 
-function selectedRange(root: HTMLElement, markdown: string): DocViewSelection | undefined {
+function sourceOffset(
+  segments: SourceTextSegment[],
+  renderedOffset: number,
+  boundary: "from" | "to"
+): number | undefined {
+  const matches = segments.filter(
+    (segment) =>
+      renderedOffset >= segment.renderedFrom &&
+      renderedOffset <= segment.renderedTo &&
+      segment.to - segment.from === segment.renderedTo - segment.renderedFrom
+  );
+  const segment = boundary === "from" ? matches[matches.length - 1] : matches[0];
+  return segment === undefined ? undefined : segment.from + renderedOffset - segment.renderedFrom;
+}
+
+function selectedRange(root: HTMLElement): DocViewSelection | undefined {
   const selection = window.getSelection();
   if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) {
     return undefined;
@@ -126,76 +200,75 @@ function selectedRange(root: HTMLElement, markdown: string): DocViewSelection | 
   if (startBlock === undefined || startBlock !== endBlock) {
     return undefined;
   }
-  const sourceFrom = Number(startBlock.dataset.dispatchFrom);
-  const sourceTo = Number(startBlock.dataset.dispatchTo);
-  if (
-    !Number.isInteger(sourceFrom) ||
-    !Number.isInteger(sourceTo) ||
-    markdown.slice(sourceFrom, sourceTo) !== startBlock.textContent
-  ) {
-    return undefined;
-  }
   const from = rangeOffset(startBlock, range.startContainer, range.startOffset);
   const to = rangeOffset(startBlock, range.endContainer, range.endOffset);
   if (from === undefined || to === undefined || from === to) {
     return undefined;
   }
-  const absoluteFrom = sourceFrom + Math.min(from, to);
-  const absoluteTo = sourceFrom + Math.max(from, to);
-  const quote = markdown.slice(absoluteFrom, absoluteTo);
-  if (quote !== selection.toString()) {
+  const absoluteFrom = sourceOffset(sourceSegments(startBlock), Math.min(from, to), "from");
+  const absoluteTo = sourceOffset(sourceSegments(startBlock), Math.max(from, to), "to");
+  if (absoluteFrom === undefined || absoluteTo === undefined || absoluteFrom === absoluteTo) {
     return undefined;
   }
   const rect = range.getBoundingClientRect();
   return {
     from: absoluteFrom,
-    quote,
+    quote: selection.toString(),
     rect: { bottom: rect.bottom, left: rect.left, right: rect.right, top: rect.top },
     to: absoluteTo,
   };
 }
 
-function highlightRange(root: HTMLElement, markdown: string, highlight: DocViewHighlight): void {
-  for (const block of root.querySelectorAll<HTMLElement>("[data-dispatch-from]")) {
-    const sourceFrom = Number(block.dataset.dispatchFrom);
-    const sourceTo = Number(block.dataset.dispatchTo);
-    if (
-      !Number.isInteger(sourceFrom) ||
-      !Number.isInteger(sourceTo) ||
-      highlight.from < sourceFrom ||
-      highlight.to > sourceTo ||
-      markdown.slice(sourceFrom, sourceTo) !== block.textContent
-    ) {
-      continue;
-    }
-    const textNodes: Text[] = [];
+function clearHistoricalHighlights(root: HTMLElement): void {
+  for (const mark of root.querySelectorAll("mark.dispatch-anchor-history")) {
+    mark.replaceWith(...mark.childNodes);
+  }
+  root.normalize();
+}
+
+function highlightRange(root: HTMLElement, highlight: DocViewHighlight): void {
+  for (const block of root.querySelectorAll<HTMLElement>("[data-dispatch-segments]")) {
+    const segments = sourceSegments(block);
+    const textNodes: Array<{ length: number; text: Text }> = [];
     const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
     for (let text = walker.nextNode(); text !== null; text = walker.nextNode()) {
-      textNodes.push(text as Text);
+      const textNode = text as Text;
+      textNodes.push({ length: textNode.data.length, text: textNode });
     }
-    let offset = sourceFrom;
-    for (const text of textNodes) {
-      const start = Math.max(highlight.from - offset, 0);
-      const end = Math.min(highlight.to - offset, text.data.length);
-      if (start < end) {
-        const range = document.createRange();
-        range.setStart(text, start);
-        range.setEnd(text, end);
-        const mark = document.createElement("mark");
-        mark.className = "dispatch-anchor-history";
-        mark.dataset.dispatchAnchorHistory = "true";
-        range.surroundContents(mark);
+    for (const segment of segments) {
+      if (
+        highlight.from >= segment.to ||
+        highlight.to <= segment.from ||
+        segment.to - segment.from !== segment.renderedTo - segment.renderedFrom
+      ) {
+        continue;
       }
-      offset += text.data.length;
+      const renderedFrom =
+        segment.renderedFrom + Math.max(highlight.from, segment.from) - segment.from;
+      const renderedTo = segment.renderedFrom + Math.min(highlight.to, segment.to) - segment.from;
+      let offset = 0;
+      for (const { length, text } of textNodes) {
+        const start = Math.max(renderedFrom - offset, 0);
+        const end = Math.min(renderedTo - offset, length);
+        if (start < end) {
+          const range = document.createRange();
+          range.setStart(text, start);
+          range.setEnd(text, end);
+          const mark = document.createElement("mark");
+          mark.className = "dispatch-anchor-history";
+          mark.dataset.dispatchAnchorHistory = "true";
+          range.surroundContents(mark);
+        }
+        offset += length;
+      }
     }
-    return;
   }
 }
 
 const components: Components = {
   blockquote({ children, node, ...props }) {
     return (
-      <blockquote {...sourceOffsets(node)} {...props}>
+      <blockquote {...markdownSourceSegments(node)} {...props}>
         {children}
       </blockquote>
     );
@@ -211,16 +284,58 @@ const components: Components = {
       </code>
     );
   },
+  h1({ children, node, ...props }) {
+    return (
+      <h1 {...markdownSourceSegments(node)} {...props}>
+        {children}
+      </h1>
+    );
+  },
+  h2({ children, node, ...props }) {
+    return (
+      <h2 {...markdownSourceSegments(node)} {...props}>
+        {children}
+      </h2>
+    );
+  },
+  h3({ children, node, ...props }) {
+    return (
+      <h3 {...markdownSourceSegments(node)} {...props}>
+        {children}
+      </h3>
+    );
+  },
+  h4({ children, node, ...props }) {
+    return (
+      <h4 {...markdownSourceSegments(node)} {...props}>
+        {children}
+      </h4>
+    );
+  },
+  h5({ children, node, ...props }) {
+    return (
+      <h5 {...markdownSourceSegments(node)} {...props}>
+        {children}
+      </h5>
+    );
+  },
+  h6({ children, node, ...props }) {
+    return (
+      <h6 {...markdownSourceSegments(node)} {...props}>
+        {children}
+      </h6>
+    );
+  },
   li({ children, node, ...props }) {
     return (
-      <li {...sourceOffsets(node)} {...props}>
+      <li {...markdownSourceSegments(node)} {...props}>
         {children}
       </li>
     );
   },
   p({ children, node, ...props }) {
     return (
-      <p {...sourceOffsets(node)} {...props}>
+      <p {...markdownSourceSegments(node)} {...props}>
         {children}
       </p>
     );
@@ -249,17 +364,22 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
   const root = useRef<HTMLElement>(null);
   const [selectionUnsupported, setSelectionUnsupported] = useState(false);
   useEffect(() => {
-    if (highlight === undefined || root.current === null) {
+    const article = root.current;
+    if (article === null) {
       return;
     }
-    highlightRange(root.current, markdown, highlight);
-  }, [highlight, markdown]);
+    clearHistoricalHighlights(article);
+    if (highlight !== undefined) {
+      highlightRange(article, highlight);
+    }
+    return () => clearHistoricalHighlights(article);
+  }, [highlight]);
 
   const reportSelection = () => {
     if (root.current === null || onSelectionChange === undefined) {
       return;
     }
-    const selection = selectedRange(root.current, markdown);
+    const selection = selectedRange(root.current);
     const browserSelection = window.getSelection();
     setSelectionUnsupported(
       selection === undefined &&
@@ -274,7 +394,7 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
     <>
       {selectionUnsupported ? (
         <p className="mb-2 text-sm text-amber-800" role="status">
-          This selection cannot be anchored. Select text within one unchanged markdown block.
+          This selection cannot be anchored. Select text within one Markdown block.
         </p>
       ) : null}
       <article

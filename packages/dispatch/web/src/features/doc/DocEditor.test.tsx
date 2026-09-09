@@ -182,3 +182,57 @@ test("DocEditor uses an empty synchronized document in preview and version diffs
     globalThis.WebSocket = originalWebSocket;
   }
 });
+
+test("DocEditor resets version mode and diff state for a different artifact", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+  const version = {
+    authors: [{ id: "alice", kind: "user" as const }],
+    created_at: "2026-09-09T00:00:00Z",
+    named: true,
+    number: 1,
+    summary: "Initial version",
+  };
+  const firstArtifact = { ...artifact, versions: [version] };
+  const secondArtifact = {
+    ...artifact,
+    id: "a710eb6a-06dc-4dcc-bb7e-325f13e5cddf",
+    name: "second.md",
+    slug: "second",
+    versions: [],
+  };
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["artifact", firstArtifact.id], firstArtifact);
+  queryClient.setQueryData(["artifact", firstArtifact.id, "version", 1], {
+    markdown: "First version",
+    version: 1,
+  });
+
+  try {
+    const rendered = render(
+      <QueryClientProvider client={queryClient}>
+        <DocEditor artifact={firstArtifact} isClosed={false} user={{ login: "alice" }} />
+      </QueryClientProvider>
+    );
+    const editor = within(rendered.container);
+    fireEvent.change(editor.getByLabelText("Version"), { target: { value: "1" } });
+    await editor.findByTestId("version-view");
+    fireEvent.click(editor.getByRole("button", { name: "Diff vs current" }));
+
+    rendered.rerender(
+      <QueryClientProvider client={queryClient}>
+        <DocEditor artifact={secondArtifact} isClosed={false} user={{ login: "alice" }} />
+      </QueryClientProvider>
+    );
+
+    expect((editor.getByLabelText("Version") as HTMLSelectElement).value).toBe("");
+    expect(editor.getByRole("button", { name: "Preview" })).not.toBeNull();
+    expect(editor.queryByTestId("version-view")).toBeNull();
+    expect(editor.queryByTestId("version-diff")).toBeNull();
+    rendered.unmount();
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
+});

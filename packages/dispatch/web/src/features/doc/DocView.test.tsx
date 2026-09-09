@@ -55,3 +55,93 @@ test("DocView explains when a cross-block selection cannot become an anchor", ()
 
   expect(screen.getByRole("status").textContent).toContain("cannot be anchored");
 });
+
+test("DocView maps rendered heading, bold, and link text to Markdown source offsets", () => {
+  const cases = [
+    { from: 2, markdown: "# Heading", selector: "h1", text: "Heading", to: 9 },
+    { from: 2, markdown: "**bold**", selector: "strong", text: "bold", to: 6 },
+    { from: 1, markdown: "[link](https://example.com)", selector: "a", text: "link", to: 5 },
+  ];
+
+  for (const testCase of cases) {
+    let selection: { from: number; quote: string; to: number } | undefined;
+    const { container, unmount } = render(
+      <DocView
+        markdown={testCase.markdown}
+        onSelectionChange={(next) => {
+          selection = next;
+        }}
+      />
+    );
+    const target = container.querySelector(testCase.selector);
+    const article = container.querySelector("article");
+    const text = target?.firstChild;
+    if (target === null || article === null || text === null || text === undefined) {
+      throw new Error(`Expected ${testCase.selector} text in DocView.`);
+    }
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const browserSelection = window.getSelection();
+    browserSelection?.removeAllRanges();
+    browserSelection?.addRange(range);
+
+    fireEvent.mouseUp(article);
+
+    expect(selection).toMatchObject({
+      from: testCase.from,
+      quote: target.textContent,
+      to: testCase.to,
+    });
+    unmount();
+
+    const highlighted = render(
+      <DocView highlight={{ from: testCase.from, to: testCase.to }} markdown={testCase.markdown} />
+    );
+    expect(highlighted.container.querySelector(".dispatch-anchor-history")?.textContent).toBe(
+      testCase.text
+    );
+    highlighted.unmount();
+  }
+});
+
+test("DocView maps a selection beginning after Markdown inline syntax", () => {
+  let selection: { from: number; quote: string; to: number } | undefined;
+  const { container } = render(
+    <DocView
+      markdown="**bold** [link](https://example.com)"
+      onSelectionChange={(next) => {
+        selection = next;
+      }}
+    />
+  );
+  const article = container.querySelector("article");
+  const link = container.querySelector("a");
+  const text = link?.firstChild;
+  if (article === null || link === null || text === null || text === undefined) {
+    throw new Error("Expected link text in DocView.");
+  }
+  const range = document.createRange();
+  range.selectNodeContents(text);
+  const browserSelection = window.getSelection();
+  browserSelection?.removeAllRanges();
+  browserSelection?.addRange(range);
+
+  fireEvent.mouseUp(article);
+
+  expect(selection).toMatchObject({ from: 10, quote: "link", to: 14 });
+});
+test("DocView replaces an earlier historical highlight before marking the current anchor", () => {
+  const markdown = "First **second**";
+  const { container, rerender } = render(
+    <DocView highlight={{ from: 0, to: 5 }} markdown={markdown} />
+  );
+
+  expect(
+    [...container.querySelectorAll(".dispatch-anchor-history")].map((mark) => mark.textContent)
+  ).toEqual(["First"]);
+
+  rerender(<DocView highlight={{ from: 8, to: 14 }} markdown={markdown} />);
+
+  expect(container.querySelectorAll(".dispatch-anchor-history")).toHaveLength(1);
+  expect(container.querySelector(".dispatch-anchor-history")?.textContent).toBe("second");
+});

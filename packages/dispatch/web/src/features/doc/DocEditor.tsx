@@ -45,7 +45,11 @@ function editorAccess(isClosed: boolean) {
   return [EditorState.readOnly.of(isClosed), EditorView.editable.of(!isClosed)];
 }
 
-export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNode {
+export function DocEditor(props: DocEditorProps): ReactNode {
+  return <DocEditorContent key={props.artifact.id} {...props} />;
+}
+
+function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNode {
   const host = useRef<HTMLDivElement>(null);
   const isClosedRef = useRef(isClosed);
   const providerRef = useRef<HocuspocusProvider | null>(null);
@@ -90,6 +94,7 @@ export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNo
   const [mode, setMode] = useState<EditorMode>("edit");
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [showDiff, setShowDiff] = useState(false);
+
   const artifactQuery = useQuery({
     queryKey: ["artifact", artifact.id],
     queryFn: () => api.getArtifact(artifact.id),
