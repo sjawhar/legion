@@ -18,6 +18,16 @@ a {
     border-color 150ms ease;
 }
 
+/* Mobile browsers zoom the page when a focused control renders below 16px, which shifts
+   the fixed margin sheet under the user's next tap. Phone-width controls stay at 16px. */
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: 1rem;
+  }
+}
+
 @media (max-width: 767px) {
   button,
   a,

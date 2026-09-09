@@ -1,4 +1,4 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   createAsk,
@@ -17,6 +17,20 @@ const session = {
   as: "agent" as const,
 };
 const initialMarkdown = "The quick brown fox";
+
+// On the phone layout the margin is a bottom sheet over the editor. Acting on a selection
+// opens it; the test closes it again before returning to the editor, as a phone user would.
+async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
+  if (project !== "iphone") {
+    return;
+  }
+  const toggle = page.getByRole("button", {
+    name: open ? "Open review panel" : "Close review panel",
+  });
+  if ((await toggle.count()) > 0) {
+    await toggle.click();
+  }
+}
 
 async function selectEditorRange(editor: Locator, from: number, length: number): Promise<void> {
   await editor.click();
@@ -65,9 +79,6 @@ test("margin creates, follows, and preserves anchored review items", async ({
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel" }).click();
-    }
     await page.getByRole("tab", { name: "Spec" }).click();
     const editor = page.getByRole("textbox", { name: "Document editor" });
     await expect(editor).toContainText(initialMarkdown);
@@ -97,6 +108,7 @@ test("margin creates, follows, and preserves anchored review items", async ({
       fullPage: true,
     });
     expect(comment.anchor).toMatchObject({ from: 10, quote: "brown", to: 15, version: 1 });
+    await setSheet(page, testInfo.project.name, false);
 
     await editor.click();
     await editor.press("Control+Home");
@@ -145,6 +157,11 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await expect
       .poll(() => getArtifact(artifactId).then(({ versions }) => versions.length))
       .toBeGreaterThan(versionsBeforeAccept);
+    // A long version summary must never widen the layout viewport (it breaks every tap on a phone).
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
+    await setSheet(page, testInfo.project.name, false);
 
     await selectEditorRange(editor, 20, 3);
     await editor.press("Backspace");
@@ -154,6 +171,7 @@ test("margin creates, follows, and preserves anchored review items", async ({
           (await listComments(issue.key, artifactId)).find(({ id }) => id === foxComment.id)?.anchor
       )
       .toMatchObject({ orphaned: true, version: 1 });
+    await setSheet(page, testInfo.project.name, true);
     await expect(page.getByTestId(`margin-comment-${foxComment.id}`)).toContainText("Text changed");
     await page.screenshot({
       path: testInfo.outputPath("orphaned-margin-card.png"),

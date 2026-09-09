@@ -347,6 +347,36 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			return
 		}
 	}
+	events := make([]model.Event, 0, 2)
+	if action == "accept" {
+		// Accepting a suggestion is a decision, so it names the version it produced; the
+		// transactional apply never schedules a settle (R30), so this is the only version write.
+		summary := strings.TrimSpace(comment.Body)
+		if summary == "" {
+			summary = fmt.Sprintf("Accepted suggestion: %q → %q", comment.Anchor.Quote, comment.Suggestion.ReplaceWith)
+		}
+		version, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, summary, actor)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		diff, err := s.namedVersionDiff(r.Context(), tx, comment.Anchor.ArtifactID, version)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		versionEvent, err := s.appendEvent(r.Context(), tx, model.Event{
+			IssueKey: comment.IssueKey,
+			Type:     "artifact.version",
+			Actor:    actor,
+			Payload:  versionEventPayload(comment.Anchor.ArtifactID, artifactName, version, diff),
+		})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		events = append(events, versionEvent)
+	}
 	event, err := s.appendEvent(r.Context(), tx, model.Event{
 		IssueKey: comment.IssueKey,
 		Type:     eventType,
@@ -357,12 +387,13 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
+	events = append(events, event)
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	evictOnFailure = false
-	s.publish(event)
+	s.publish(events...)
 	writeJSON(w, http.StatusOK, comment)
 }
 

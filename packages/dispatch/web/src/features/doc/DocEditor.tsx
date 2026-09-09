@@ -333,7 +333,7 @@ function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNo
             </button>
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
           <span
             className={
               connection === "connected"
@@ -346,10 +346,10 @@ function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNo
           >
             {connection}
           </span>
-          <label className="text-sm font-medium text-slate-700">
+          <label className="flex min-w-0 items-center text-sm font-medium text-slate-700">
             Version
             <select
-              className="ml-2 rounded border border-slate-300 bg-white px-2 py-1 font-normal"
+              className="ml-2 min-w-0 max-w-56 truncate rounded border border-slate-300 bg-white px-2 py-1 font-normal"
               onChange={(event) => selectVersion(event.target.value)}
               value={selectedVersion ?? ""}
             >

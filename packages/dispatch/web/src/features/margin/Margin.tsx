@@ -478,7 +478,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
     >
       <button
         aria-expanded={sheetExpanded}
-        aria-label="Open review panel"
+        aria-label={sheetExpanded ? "Close review panel" : "Open review panel"}
         className="flex h-16 w-full items-center justify-between px-4 text-left text-sm font-semibold text-slate-800 md:hidden"
         onClick={() => {
           if (sheetDragMoved.current) {
@@ -506,10 +506,17 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
           {openAskCount} open {openAskCount === 1 ? "ask" : "asks"}
         </span>
       </button>
+      {selection === undefined || visibleArtifact === undefined || isClosed ? null : (
+        <SelectionMenu
+          onAction={(kind) => {
+            // The composer lives in the sheet body, so acting on a selection opens it.
+            setExpandedIssueKey(issueKey);
+            openComposer(kind, selection);
+          }}
+          selection={selection}
+        />
+      )}
       <div className={sheetExpanded ? "px-4 pb-4 md:px-0 md:pb-0" : "hidden md:block"}>
-        {selection === undefined || visibleArtifact === undefined || isClosed ? null : (
-          <SelectionMenu onAction={(kind) => openComposer(kind, selection)} selection={selection} />
-        )}
         <div className="flex border-b border-slate-200" role="tablist">
           {(["comments", "artifacts", "pinned"] as MarginTab[]).map((name) => (
             <button
