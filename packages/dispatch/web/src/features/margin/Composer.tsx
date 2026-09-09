@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ClipboardEvent,
   type DragEvent,
@@ -11,7 +11,6 @@ import {
 } from "react";
 
 import { api } from "../../api/client";
-import type { Artifact } from "../../api/types";
 
 export interface ComposerReference {
   href: string;
@@ -62,8 +61,8 @@ function dispatchReference(value: string): ComposerReference | undefined {
     const [slug, version] = artifact.split("@v");
     const href =
       version === undefined
-        ? `/issues/${key}/artifacts/${slug}`
-        : `/issues/${key}/artifacts/${slug}?v=${version}`;
+        ? `/issues/${key}/artifact/${slug}`
+        : `/issues/${key}/artifact/${slug}?v=${version}`;
     return { href, reference: `dispatch://${key}/artifact/${artifact}` };
   }
   const [kind, id] = target.split("/");
@@ -84,7 +83,7 @@ function appReference(value: string, appOrigin: string): ComposerReference | und
     return undefined;
   }
   const match = url.pathname.match(
-    /^\/issues\/([A-Z][A-Z0-9-]*)(?:\/(spec|artifacts\/[^/]+|asks\/[^/]+|comments\/[^/]+))?$/
+    /^\/issues\/([A-Z][A-Z0-9-]*)(?:\/(spec|artifact\/[^/]+|asks\/[^/]+|comments\/[^/]+))?$/
   );
   if (match === null) {
     return undefined;
@@ -100,8 +99,8 @@ function appReference(value: string, appOrigin: string): ComposerReference | und
   if (target === "spec") {
     return { href: url.pathname, reference: `dispatch://${key}/spec` };
   }
-  if (target.startsWith("artifacts/")) {
-    const slug = target.slice("artifacts/".length);
+  if (target.startsWith("artifact/")) {
+    const slug = target.slice("artifact/".length);
     const version = url.searchParams.get("v");
     return {
       href: `${url.pathname}${url.search}`,
@@ -147,16 +146,43 @@ function filesFromDrop(event: DragEvent<HTMLTextAreaElement>): File[] {
   return [...event.dataTransfer.files].filter((file) => file.type.startsWith("image/"));
 }
 
+export function canSubmitComposer(
+  kind: ComposerKind,
+  body: string,
+  replacement: string,
+  isSaving: boolean,
+  pendingUploads: number
+): boolean {
+  return (
+    (kind === "suggestion" ? replacement.trim().length > 0 : body.trim().length > 0) &&
+    !isSaving &&
+    pendingUploads === 0
+  );
+}
+
 export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerProps): ReactNode {
   const queryClient = useQueryClient();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [body, setBody] = useState("");
   const [replacement, setReplacement] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
-  const artifacts = useQuery({
+  const [pendingUploads, setPendingUploads] = useState(0);
+  const currentIssue = useQuery({
     enabled: pickerOpen,
-    queryKey: ["artifacts", issueKey],
-    queryFn: () => api.listArtifacts(issueKey),
+    queryKey: ["issue", issueKey],
+    queryFn: () => api.getIssue(issueKey),
+  });
+  const pickerIssues = useQuery({
+    enabled: pickerOpen && currentIssue.data !== undefined,
+    queryKey: ["issues", currentIssue.data?.project],
+    queryFn: () => api.listIssues({ project: currentIssue.data?.project }),
+  });
+  const pickerArtifacts = useQueries({
+    queries: (pickerIssues.data ?? []).map((issue) => ({
+      enabled: pickerOpen,
+      queryKey: ["artifacts", issue.key],
+      queryFn: () => api.listArtifacts(issue.key),
+    })),
   });
   const references = useMemo(() => composerReferences(body), [body]);
   const save = useMutation({
@@ -182,10 +208,16 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
   const upload = useMutation({
     mutationFn: (file: File) =>
       api.uploadArtifact(issueKey, { file, name: file.name || "image.png" }),
+    onMutate: () => {
+      setPendingUploads((count) => count + 1);
+    },
     onSuccess: ({ artifact }) => {
       setBody((current) =>
         appendReference(current, `dispatch://${issueKey}/artifact/${artifact.slug}`)
       );
+    },
+    onSettled: () => {
+      setPendingUploads((count) => count - 1);
     },
   });
 
@@ -216,13 +248,13 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
       setPickerOpen(true);
     }
   };
+  const canSubmit = canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    save.mutate();
+    if (canSubmit) {
+      save.mutate();
+    }
   };
-  const canSubmit =
-    (kind === "suggestion" ? replacement.trim().length > 0 : body.trim().length > 0) &&
-    !save.isPending;
   const title = kind === "ask" ? "Ask" : kind === "suggestion" ? "Suggest" : "Comment";
 
   return (
@@ -290,24 +322,39 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
           aria-label="Reference picker"
           className="space-y-2 rounded-lg border border-slate-200 bg-white p-2"
         >
-          <button
-            className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
-            onClick={() => addReference(`dispatch://${issueKey}`)}
-            type="button"
-          >
-            {issueKey}
-          </button>
-          {(artifacts.data ?? []).map((artifact: Artifact) => (
-            <button
-              className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
-              key={artifact.id}
-              onClick={() => addReference(`dispatch://${issueKey}/artifact/${artifact.slug}`)}
-              type="button"
-            >
-              {artifact.name}
-            </button>
+          {pickerIssues.isPending ? (
+            <p className="text-sm text-slate-500">Loading issues…</p>
+          ) : null}
+          {(pickerIssues.data ?? []).map((issue, index) => (
+            <div className="space-y-1" key={issue.key}>
+              <button
+                className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
+                onClick={() => addReference(`dispatch://${issue.key}`)}
+                type="button"
+              >
+                {issue.key}: {issue.title}
+              </button>
+              {pickerArtifacts[index]?.isPending ? (
+                <p className="px-2 text-xs text-slate-500">Loading artifacts…</p>
+              ) : null}
+              {(pickerArtifacts[index]?.data ?? []).map((artifact) => (
+                <button
+                  className="ml-3 block w-[calc(100%-0.75rem)] rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
+                  key={artifact.id}
+                  onClick={() => addReference(`dispatch://${issue.key}/artifact/${artifact.slug}`)}
+                  type="button"
+                >
+                  {artifact.name}
+                </button>
+              ))}
+            </div>
           ))}
         </section>
+      ) : null}
+      {pendingUploads > 0 ? (
+        <p className="text-sm text-slate-500" role="status">
+          Uploading image…
+        </p>
       ) : null}
       {upload.isError ? <p className="text-sm text-rose-700">Could not upload the image.</p> : null}
       {save.isError ? <p className="text-sm text-rose-700">Could not save this item.</p> : null}
@@ -316,7 +363,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
         disabled={!canSubmit}
         type="submit"
       >
-        {save.isPending ? "Saving…" : title}
+        {save.isPending ? "Saving…" : pendingUploads > 0 ? "Uploading image…" : title}
       </button>
     </form>
   );

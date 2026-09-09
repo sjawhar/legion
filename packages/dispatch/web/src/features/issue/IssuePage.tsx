@@ -338,6 +338,8 @@ function ArtifactVersionView({
 export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
   const { key, "*": nestedPath } = useParams();
   const { search } = useLocation();
+  const isSpecRoute = nestedPath === "spec";
+  const artifactRouteSlug = nestedPath?.match(/^artifact\/([^/]+)$/)?.[1];
   const versionMatch = nestedPath?.match(/^artifacts\/([^/]+)\/versions\/(\d+)$/);
   const versionRoute =
     versionMatch === null || versionMatch === undefined
@@ -374,9 +376,17 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
   if (primaryArtifact === undefined) {
     return <p className="text-rose-700">Could not load this issue's primary document.</p>;
   }
+  const selectedArtifact =
+    artifactRouteSlug === undefined
+      ? primaryArtifact
+      : issue.data.artifacts?.find(({ slug }) => slug === artifactRouteSlug);
+  if (selectedArtifact === undefined) {
+    return <p className="text-rose-700">Could not load this document artifact.</p>;
+  }
 
   const issueState = stateForIssue(state.data, issue.data.key);
-  const activeTab: IssueTab = versionRoute === undefined ? tab : "spec";
+  const activeTab: IssueTab =
+    versionRoute === undefined && !isSpecRoute && artifactRouteSlug === undefined ? tab : "spec";
   const tabID = `issue-${activeTab}-tab`;
   const panelID = `issue-${activeTab}-panel`;
   return (
@@ -434,7 +444,7 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
         {activeTab === "spec" ? (
           versionRoute === undefined ? (
             <DocEditor
-              artifact={primaryArtifact}
+              artifact={selectedArtifact}
               isClosed={issue.data.closed_at !== null}
               user={user}
             />

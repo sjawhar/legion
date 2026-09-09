@@ -1,6 +1,6 @@
 import { renderMermaidSVG } from "beautiful-mermaid";
 import DOMPurify from "dompurify";
-import { type ReactNode, useEffect, useMemo, useRef } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -247,6 +247,7 @@ interface DocViewProps {
 
 export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps): ReactNode {
   const root = useRef<HTMLElement>(null);
+  const [selectionUnsupported, setSelectionUnsupported] = useState(false);
   useEffect(() => {
     if (highlight === undefined || root.current === null) {
       return;
@@ -255,25 +256,41 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
   }, [highlight, markdown]);
 
   const reportSelection = () => {
-    if (root.current !== null && onSelectionChange !== undefined) {
-      onSelectionChange(selectedRange(root.current, markdown));
+    if (root.current === null || onSelectionChange === undefined) {
+      return;
     }
+    const selection = selectedRange(root.current, markdown);
+    const browserSelection = window.getSelection();
+    setSelectionUnsupported(
+      selection === undefined &&
+        browserSelection !== null &&
+        browserSelection.rangeCount > 0 &&
+        !browserSelection.isCollapsed
+    );
+    onSelectionChange(selection);
   };
 
   return (
-    <article
-      className="prose prose-slate max-w-none break-words"
-      onKeyUp={reportSelection}
-      onMouseUp={reportSelection}
-      ref={root}
-    >
-      <Markdown
-        components={components}
-        rehypePlugins={[rehypeSanitize]}
-        remarkPlugins={[remarkGfm]}
+    <>
+      {selectionUnsupported ? (
+        <p className="mb-2 text-sm text-amber-800" role="status">
+          This selection cannot be anchored. Select text within one unchanged markdown block.
+        </p>
+      ) : null}
+      <article
+        className="prose prose-slate max-w-none break-words"
+        onKeyUp={reportSelection}
+        onMouseUp={reportSelection}
+        ref={root}
       >
-        {markdown}
-      </Markdown>
-    </article>
+        <Markdown
+          components={components}
+          rehypePlugins={[rehypeSanitize]}
+          remarkPlugins={[remarkGfm]}
+        >
+          {markdown}
+        </Markdown>
+      </article>
+    </>
   );
 }

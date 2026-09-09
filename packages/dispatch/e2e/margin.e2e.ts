@@ -42,6 +42,7 @@ test("margin creates, follows, and preserves anchored review items", async ({
     spec: initialMarkdown,
     title: "Review the spec",
   });
+  const relatedIssue = await createIssue({ project: "CORE", title: "Related work" });
   const artifactId = issue.primary_artifact_id;
   const foxComment = await createComment(
     issue.key,
@@ -72,6 +73,10 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await selectEditorRange(editor, 10, 5);
     await page.getByRole("button", { exact: true, name: "Comment" }).click();
     const commentComposer = page.getByRole("form", { name: "Comment composer" });
+    await commentComposer.getByLabel("Comment").press("Control+k");
+    await expect(
+      commentComposer.getByRole("button", { name: `${relatedIssue.key}: Related work` })
+    ).toBeVisible();
     await commentComposer.getByLabel("Comment").fill("why?");
     await commentComposer.getByRole("button", { exact: true, name: "Comment" }).click();
     await expect
@@ -169,7 +174,19 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await expect(page.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
 
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    await expect(page.getByTestId(`margin-comment-${comment.id}`)).toHaveClass(/border-sky-500/);
+    const marginItems = page.getByLabel("Margin review items");
+    await expect
+      .poll(() => marginItems.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
+      "Note: The quick red "
+    );
+    await page.goto(`/issues/${issue.key}/artifact/spec`);
+    await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
+      "Note: The quick red "
+    );
+    await expect(page.getByTestId(`margin-comment-${comment.id}`)).toContainText("why?");
   } finally {
     await alice.close();
   }

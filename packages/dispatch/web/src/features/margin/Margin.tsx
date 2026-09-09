@@ -97,8 +97,8 @@ function issueKeyFromPath(pathname: string): string | undefined {
   return pathname.match(/^\/issues\/([^/]+)/)?.[1];
 }
 
-function artifactIdFromPath(pathname: string): string | undefined {
-  return pathname.match(/^\/issues\/[^/]+\/artifacts\/([^/]+)/)?.[1];
+function artifactSlugFromPath(pathname: string): string | undefined {
+  return pathname.match(/^\/issues\/[^/]+\/artifact\/([^/]+)/)?.[1];
 }
 
 function newestFirst<T extends { created_at: string }>(items: T[]): T[] {
@@ -271,18 +271,20 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
   } = useMargin();
   const [tab, setTab] = useState<MarginTab>("comments");
   const list = useRef<HTMLDivElement>(null);
+  const scrolledRouteItem = useRef<string | undefined>(undefined);
   const [composer, setComposer] = useState<ComposerState>();
   const issueKey = issueKeyFromPath(pathname);
-  const routeArtifactId = artifactIdFromPath(pathname);
+  const routeArtifactSlug = artifactSlugFromPath(pathname);
   const routeItemId = pathname.match(/^\/issues\/[^/]+\/(?:asks|comments)\/([^/]+)$/)?.[1];
   const issue = useQuery({
     enabled: issueKey !== undefined,
     queryKey: ["issue", issueKey],
     queryFn: () => api.getIssue(issueKey ?? ""),
   });
-  const visibleArtifact = issue.data?.artifacts?.find(
-    (artifact) => artifact.id === (routeArtifactId ?? issue.data?.primary_artifact_id)
-  );
+  const visibleArtifact =
+    routeArtifactSlug === undefined
+      ? issue.data?.artifacts?.find((artifact) => artifact.id === issue.data?.primary_artifact_id)
+      : issue.data?.artifacts?.find((artifact) => artifact.slug === routeArtifactSlug);
   const asks = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
   const comments = useQuery({
     enabled: issueKey !== undefined && visibleArtifact !== undefined,
@@ -332,6 +334,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       }),
     [items]
   );
+  const itemCount = items.length;
   const action = useMutation({
     mutationFn: ({ id, kind }: { id: string; kind: "accept" | "reject" | "resolve" }) => {
       if (kind === "accept") {
@@ -356,6 +359,33 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       selectItem(routeItemId);
     }
   }, [routeItemId, selectItem]);
+
+  useEffect(() => {
+    if (routeItemId === undefined) {
+      scrolledRouteItem.current = undefined;
+      return;
+    }
+    if (scrolledRouteItem.current === routeItemId || itemCount === 0) {
+      return;
+    }
+    const container = list.current;
+    if (container === null) {
+      return;
+    }
+    const card = container.querySelector<HTMLElement>(
+      `[data-margin-item="${CSS.escape(routeItemId)}"]`
+    );
+    if (card === null) {
+      return;
+    }
+    const top =
+      card.getBoundingClientRect().top -
+      container.getBoundingClientRect().top +
+      container.scrollTop -
+      container.clientHeight / 4;
+    container.scrollTo({ top: Math.max(0, top) });
+    scrolledRouteItem.current = routeItemId;
+  }, [itemCount, routeItemId]);
 
   useEffect(() => {
     const container = list.current;
@@ -458,7 +488,11 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
               replyTo={composer.replyTo}
             />
           )}
-          <div className="max-h-[45dvh] space-y-3 overflow-y-auto" ref={list}>
+          <section
+            aria-label="Margin review items"
+            className="max-h-[45dvh] space-y-3 overflow-y-auto"
+            ref={list}
+          >
             {items.map((item) => {
               const id = itemId(item);
               const active = selectedItemId === id || hoveredItemId === id;
@@ -471,6 +505,9 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
                     >
                       <AskCard ask={item.ask} />
                       <Unfurl body={item.ask.question} />
+                      <p className="mt-2 text-xs text-slate-500">
+                        {new Date(item.ask.created_at).toLocaleString()}
+                      </p>
                     </div>
                   ) : (
                     <CommentCard
@@ -502,7 +539,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
                 No comments, asks, or suggestions on this document.
               </p>
             ) : null}
-          </div>
+          </section>
         </div>
       ) : null}
     </aside>

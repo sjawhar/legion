@@ -64,8 +64,8 @@ export function resolveMappedAnchor(
   };
 }
 
-function rangesFor(anchors: AnchorDecoration[]): Range<Decoration>[] {
-  return anchors.flatMap(({ anchor, id, selected }) => {
+function rangesFor(anchors: Iterable<AnchorDecoration>): Range<Decoration>[] {
+  return [...anchors].flatMap(({ anchor, id, selected }) => {
     if (anchor.orphaned) {
       return [];
     }
@@ -73,60 +73,65 @@ function rangesFor(anchors: AnchorDecoration[]): Range<Decoration>[] {
       Decoration.mark({
         attributes: { "data-dispatch-anchor-id": id },
         class: selected ? "dispatch-anchor dispatch-anchor-active" : "dispatch-anchor",
-        spec: { anchor: { anchor, id, selected } satisfies AnchorDecoration },
       }).range(anchor.from, anchor.to),
     ];
   });
 }
 
-function decorationsFor(anchors: AnchorDecoration[]): DecorationSet {
-  return Decoration.set(rangesFor(anchors), true);
+export interface AnchorDecorationState {
+  anchors: ReadonlyMap<string, MappedAnchor>;
+  decorations: DecorationSet;
+  activeIds: ReadonlySet<string>;
 }
 
-const anchorDecorations = StateField.define<DecorationSet>({
-  create: () => Decoration.none,
+function decorationState(
+  anchors: Iterable<AnchorDecoration>,
+  activeIds: ReadonlySet<string>
+): AnchorDecorationState {
+  const records = new Map<string, MappedAnchor>();
+  for (const source of anchors) {
+    records.set(source.id, { ...source.anchor });
+  }
+  return {
+    activeIds,
+    anchors: records,
+    decorations: Decoration.set(
+      rangesFor([...records].map(([id, anchor]) => ({ anchor, id, selected: activeIds.has(id) }))),
+      true
+    ),
+  };
+}
+
+function recordsAsDecorations(records: ReadonlyMap<string, MappedAnchor>): AnchorDecoration[] {
+  return [...records].map(([id, anchor]) => ({ anchor, id, selected: false }));
+}
+
+export const anchorDecorationState = StateField.define<AnchorDecorationState>({
+  create: () => decorationState([], new Set()),
   update(current, transaction) {
     for (const effect of transaction.effects) {
       if (effect.is(setAnchorDecorations)) {
-        return decorationsFor(effect.value);
+        return decorationState(effect.value, current.activeIds);
       }
       if (effect.is(setActiveAnchorIds)) {
-        const activeIds = new Set(effect.value);
-        const anchors: AnchorDecoration[] = [];
-        current.between(0, transaction.startState.doc.length, (from, to, decoration) => {
-          const source = decoration.spec.anchor as AnchorDecoration | undefined;
-          if (source !== undefined) {
-            anchors.push({
-              ...source,
-              anchor: { ...source.anchor, from, to },
-              selected: activeIds.has(source.id),
-            });
-          }
-        });
-        return decorationsFor(anchors);
+        return decorationState(recordsAsDecorations(current.anchors), new Set(effect.value));
       }
     }
-    const mapped = current.map(transaction.changes);
     if (!transaction.docChanged) {
-      return mapped;
+      return current;
     }
 
-    const anchors: AnchorDecoration[] = [];
-    mapped.between(0, transaction.state.doc.length, (from, to, decoration) => {
-      const source = decoration.spec.anchor as AnchorDecoration | undefined;
-      if (source === undefined) {
-        return;
-      }
-      const anchor = resolveMappedAnchor(
-        { ...source.anchor, from, to },
-        transaction.state.doc.toString(),
-        (position) => position
-      );
-      anchors.push({ ...source, anchor });
-    });
-    return decorationsFor(anchors);
+    const text = transaction.state.doc.toString();
+    const anchors = [...current.anchors].map(([id, anchor]) => ({
+      anchor: resolveMappedAnchor(anchor, text, (position, assoc) =>
+        transaction.changes.mapPos(position, assoc)
+      ),
+      id,
+      selected: false,
+    }));
+    return decorationState(anchors, current.activeIds);
   },
-  provide: (field) => EditorView.decorations.from(field),
+  provide: (field) => EditorView.decorations.from(field, (value) => value.decorations),
 });
 
 function anchorIdAt(event: MouseEvent): string | undefined {
@@ -137,7 +142,7 @@ function anchorIdAt(event: MouseEvent): string | undefined {
 /** Adds mapped live-anchor decorations and connects them to margin cards. */
 export function anchorDecorationExtension(handlers: AnchorInteractionHandlers): Extension {
   return [
-    anchorDecorations,
+    anchorDecorationState,
     EditorView.domEventHandlers({
       mousedown(event) {
         const id = anchorIdAt(event);

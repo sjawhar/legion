@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import { DocView, sanitizeMermaidSvg } from "./DocView";
 
@@ -27,4 +27,31 @@ test("sanitizeMermaidSvg removes executable SVG content", () => {
       .flatMap((element) => element.getAttributeNames())
       .some((name) => name.startsWith("on"))
   ).toBe(false);
+});
+
+test("DocView explains when a cross-block selection cannot become an anchor", () => {
+  const { container } = render(
+    <DocView markdown={"First paragraph.\n\nSecond paragraph."} onSelectionChange={() => {}} />
+  );
+  const [firstParagraph, secondParagraph] = [...container.querySelectorAll("p")];
+  const article = container.querySelector("article");
+  if (
+    firstParagraph?.firstChild === null ||
+    firstParagraph?.firstChild === undefined ||
+    secondParagraph?.firstChild === null ||
+    secondParagraph?.firstChild === undefined ||
+    article === null
+  ) {
+    throw new Error("Expected two paragraph nodes in DocView.");
+  }
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.setStart(firstParagraph.firstChild, 0);
+  range.setEnd(secondParagraph.firstChild, 6);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+
+  fireEvent.mouseUp(article);
+
+  expect(screen.getByRole("status").textContent).toContain("cannot be anchored");
 });
