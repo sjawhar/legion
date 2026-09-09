@@ -70,6 +70,12 @@ func openEmptyTestStore(t *testing.T) *store.Store {
 
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
+	handler, _ := newTestHandlerWithStore(t)
+	return handler
+}
+
+func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
+	t.Helper()
 	database := openEmptyTestStore(t)
 	deps, err := NewDeps(DepsInput{
 		Store: database,
@@ -86,7 +92,37 @@ func newTestHandler(t *testing.T) http.Handler {
 	}
 	mux := http.NewServeMux()
 	Register(mux, deps)
-	return mux
+	return mux, database
+}
+
+func waitForDatabaseLocks(t *testing.T, database *store.Store, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'
+		`).Scan(&count); err != nil {
+			t.Fatalf("inspect database locks: %v", err)
+		}
+		if count >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("waiting database locks: wanted at least %d blocked operations", want)
+}
+
+func awaitResponse(t *testing.T, responses <-chan *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+	t.Helper()
+	select {
+	case response := <-responses:
+		return response
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent request did not complete")
+		return nil
+	}
 }
 
 func dispatchRequest(t *testing.T, handler http.Handler, method, target string, body any, login string) *httptest.ResponseRecorder {
@@ -633,5 +669,306 @@ func TestResolveIssueRejectsMalformedNativeKey(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/resolve?ref=TEST-not-a-number", nil, "alice")
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_ISSUE_REF"`) {
 		t.Fatalf("resolve malformed key: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestArtifactUploadRecognizesParameterizedMarkdown(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "notes.md", "primary": "true",
+	}, "notes.md", "text/markdown; charset=utf-8", []byte("# Notes"), "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload parameterized Markdown: status=%d body=%s", response.Code, response.Body.String())
+	}
+	artifact := decodeBody[struct {
+		Artifact struct {
+			Kind string `json:"kind"`
+		} `json:"artifact"`
+	}](t, response)
+	if artifact.Artifact.Kind != "doc" {
+		t.Fatalf("parameterized Markdown kind: got %q, want doc", artifact.Artifact.Kind)
+	}
+}
+
+func TestArtifactSlugsIncludeExtensions(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	markdown := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "report.md",
+	}, "report.md", "text/markdown", []byte("# Report"), "alice")
+	if markdown.Code != http.StatusCreated {
+		t.Fatalf("upload report.md: status=%d body=%s", markdown.Code, markdown.Body.String())
+	}
+	pdf := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "report.pdf",
+	}, "report.pdf", "application/pdf", []byte("PDF"), "alice")
+	if pdf.Code != http.StatusCreated {
+		t.Fatalf("upload report.pdf: status=%d body=%s", pdf.Code, pdf.Body.String())
+	}
+	markdownArtifact := decodeBody[struct {
+		Artifact struct {
+			Slug string `json:"slug"`
+		} `json:"artifact"`
+	}](t, markdown)
+	pdfArtifact := decodeBody[struct {
+		Artifact struct {
+			Slug string `json:"slug"`
+		} `json:"artifact"`
+	}](t, pdf)
+	if markdownArtifact.Artifact.Slug != "report-md" || pdfArtifact.Artifact.Slug != "report-pdf" {
+		t.Fatalf("artifact slugs: got Markdown %q and PDF %q, want report-md and report-pdf", markdownArtifact.Artifact.Slug, pdfArtifact.Artifact.Slug)
+	}
+}
+
+func TestConcurrentPrimarySelectionsSerialize(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key               string `json:"key"`
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	firstDocument := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "first.md",
+	}, "first.md", "text/markdown", []byte("# First"), "alice")
+	secondDocument := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "second.md",
+	}, "second.md", "text/markdown", []byte("# Second"), "alice")
+	if firstDocument.Code != http.StatusCreated || secondDocument.Code != http.StatusCreated {
+		t.Fatalf("create documents: first=%d second=%d", firstDocument.Code, secondDocument.Code)
+	}
+	first := decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, firstDocument)
+	second := decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, secondDocument)
+
+	lock, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin primary lock: %v", err)
+	}
+	defer func() { _ = lock.Rollback(context.Background()) }()
+	var lockedID string
+	if err := lock.QueryRow(context.Background(), `select id::text from artifacts where id = $1 for update`, issue.PrimaryArtifactID).Scan(&lockedID); err != nil {
+		t.Fatalf("lock current primary: %v", err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+first.Artifact.ID+"/primary", map[string]any{}, "alice")
+	}()
+	waitForDatabaseLocks(t, database, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+second.Artifact.ID+"/primary", map[string]any{}, "alice")
+	}()
+	waitForDatabaseLocks(t, database, 2)
+	if err := lock.Commit(context.Background()); err != nil {
+		t.Fatalf("release primary lock: %v", err)
+	}
+	for range 2 {
+		response := awaitResponse(t, responses)
+		if response.Code != http.StatusOK {
+			t.Fatalf("concurrent primary selection: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
+	issueDetail := decodeBody[struct {
+		Artifacts []struct {
+			Primary bool `json:"primary"`
+		} `json:"artifacts"`
+	}](t, detail)
+	primaryCount := 0
+	for _, artifact := range issueDetail.Artifacts {
+		if artifact.Primary {
+			primaryCount++
+		}
+	}
+	if primaryCount != 1 {
+		t.Fatalf("primary artifacts: got %d, want exactly one", primaryCount)
+	}
+}
+
+func TestConcurrentStatusPatchesUseCommittedPreimage(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	parentResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Parent",
+	}, "alice")
+	childResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Child", "parent": "TEST-1",
+	}, "alice")
+	parent := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, parentResponse)
+	child := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, childResponse)
+	if parentResponse.Code != http.StatusCreated || childResponse.Code != http.StatusCreated {
+		t.Fatalf("create parent and child: parent=%d child=%d", parentResponse.Code, childResponse.Code)
+	}
+
+	lock, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin status lock: %v", err)
+	}
+	defer func() { _ = lock.Rollback(context.Background()) }()
+	var lockedKey string
+	if err := lock.QueryRow(context.Background(), `select key from issues where key = $1 for update`, child.Key).Scan(&lockedKey); err != nil {
+		t.Fatalf("lock child: %v", err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]string{
+			"status": "in_progress",
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, database, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]string{
+			"status": "done",
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, database, 2)
+	if err := lock.Commit(context.Background()); err != nil {
+		t.Fatalf("release child lock: %v", err)
+	}
+	for range 2 {
+		response := awaitResponse(t, responses)
+		if response.Code != http.StatusOK {
+			t.Fatalf("concurrent status update: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	eventsResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+parent.Key+"/events", nil, "alice")
+	var eventLog []struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.NewDecoder(eventsResponse.Body).Decode(&eventLog); err != nil {
+		t.Fatalf("decode parent events: %v", err)
+	}
+	var transitions []struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	for _, event := range eventLog {
+		if event.Type != "child.status" {
+			continue
+		}
+		var transition struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		if err := json.Unmarshal(event.Payload, &transition); err != nil {
+			t.Fatalf("decode child status payload: %v", err)
+		}
+		transitions = append(transitions, transition)
+	}
+	if len(transitions) != 2 || transitions[0].From != "triage" || transitions[0].To != "in_progress" || transitions[1].From != "in_progress" || transitions[1].To != "done" {
+		t.Fatalf("child status transition chain: got %#v, want triage→in_progress→done", transitions)
+	}
+}
+
+func TestConcurrentPartialUserStateUpdatesPreserveFields(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	initial := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
+		"pinned": false,
+	}, "alice")
+	if initial.Code != http.StatusOK {
+		t.Fatalf("create state: status=%d body=%s", initial.Code, initial.Body.String())
+	}
+
+	lock, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin user state lock: %v", err)
+	}
+	defer func() { _ = lock.Rollback(context.Background()) }()
+	var login string
+	if err := lock.QueryRow(context.Background(), `select login from user_issue_state where login = 'alice' and issue_key = $1 for update`, issue.Key).Scan(&login); err != nil {
+		t.Fatalf("lock user state: %v", err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
+			"pinned": true,
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, database, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
+			"last_read_seq": 7,
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, database, 2)
+	if err := lock.Commit(context.Background()); err != nil {
+		t.Fatalf("release user state lock: %v", err)
+	}
+	for range 2 {
+		response := awaitResponse(t, responses)
+		if response.Code != http.StatusOK {
+			t.Fatalf("concurrent user state update: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	stateResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "alice")
+	state := decodeBody[map[string]userIssueState](t, stateResponse)
+	if !state[issue.Key].Pinned || state[issue.Key].LastReadSeq != 7 {
+		t.Fatalf("user state: got %#v, want pinned with last_read_seq 7", state[issue.Key])
 	}
 }

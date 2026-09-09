@@ -85,7 +85,12 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	kind := artifactKind(contentType)
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
+		return
+	}
+	kind := artifactKind(mediaType)
 	if primary && kind != "doc" {
 		writeError(w, "PRIMARY_NOT_DOC", http.StatusBadRequest, "only documents can be primary")
 		return
@@ -435,6 +440,10 @@ func (s *server) setPrimaryArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "PRIMARY_NOT_DOC", http.StatusBadRequest, "only documents can be primary")
 		return
 	}
+	if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for update`, artifact.IssueKey).Scan(new(string)); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = false where issue_key = $1 and is_primary`, artifact.IssueKey); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -585,10 +594,9 @@ func artifactKind(contentType string) string {
 }
 
 func artifactSlug(name string) string {
-	base := strings.TrimSuffix(name, extension(name))
 	var slug strings.Builder
 	previousDash := false
-	for _, r := range strings.ToLower(base) {
+	for _, r := range strings.ToLower(name) {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			slug.WriteRune(r)
 			previousDash = false

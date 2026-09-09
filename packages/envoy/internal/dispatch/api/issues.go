@@ -282,6 +282,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	key := r.PathValue("key")
+	if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for update`, key).Scan(new(string)); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	before, err := s.loadIssue(r.Context(), tx, key)
 	if err != nil {
 		s.writeHandlerError(w, err)
