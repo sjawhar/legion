@@ -100,51 +100,6 @@ func EditComment(ctx context.Context, client *github.Client, owner, repo string,
 	return nil
 }
 
-// IssueEditBody replaces an issue's body, leaving its title, labels, and
-// state untouched.
-func IssueEditBody(ctx context.Context, client *github.Client, owner, repo string, number int, body string) error {
-	_, _, err := client.Issues.Edit(ctx, owner, repo, number, &github.IssueRequest{Body: github.String(body)})
-	if err != nil {
-		return fmt.Errorf("edit issue body: %w", err)
-	}
-	return nil
-}
-
-// AddLabels adds labels to an existing issue without touching any label
-// already on it.
-func AddLabels(ctx context.Context, client *github.Client, owner, repo string, number int, labels []string) error {
-	_, _, err := client.Issues.AddLabelsToIssue(ctx, owner, repo, number, labels)
-	if err != nil {
-		return fmt.Errorf("add labels: %w", err)
-	}
-	return nil
-}
-
-// BuildRequestIDQuery builds the GitHub issue-search query used to find an
-// existing dispatch thread by its request id. It searches for the raw request
-// id token that core.BuildMetaMarker embeds in the issue body (the `requestId:
-// <id>` line of the dispatch:thread marker; GitHub indexes HTML-comment text),
-// scoped to the dispatch label so unrelated issues that merely mention the id
-// are ignored. The token must stay in sync with the marker writer — see
-// TestRequestIDQueryMatchesMarker.
-func BuildRequestIDQuery(owner, repo, requestID, label string) string {
-	return fmt.Sprintf(`repo:%s/%s label:%s in:body "%s"`, owner, repo, label, requestID)
-}
-
-// SearchByRequestID returns dispatch threads whose body embeds the given
-// request id, as written by core.BuildMetaMarker into the thread marker.
-func SearchByRequestID(ctx context.Context, client *github.Client, owner, repo, requestID, label string) ([]IssueRef, error) {
-	result, _, err := client.Search.Issues(ctx, BuildRequestIDQuery(owner, repo, requestID, label), nil)
-	if err != nil {
-		return nil, fmt.Errorf("search issues: %w", err)
-	}
-	refs := make([]IssueRef, 0, len(result.Issues))
-	for _, issue := range result.Issues {
-		refs = append(refs, IssueRef{Number: issue.GetNumber(), URL: issue.GetHTMLURL()})
-	}
-	return refs, nil
-}
-
 // IssueInfo is what ContinueThread needs to know about a target issue.
 type IssueInfo struct {
 	Number      int

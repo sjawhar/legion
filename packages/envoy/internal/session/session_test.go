@@ -233,56 +233,6 @@ func TestDeliver_UsesPort_whenSelfSubscribedSessionAlsoHasOne(t *testing.T) {
 	}
 }
 
-func TestDeliver_SkipsDispatchEcho(t *testing.T) {
-	sessions, deliverer := newKVDeliverer(t)
-	if err := sessions.Put("ses_target", session.SessionEntry{Port: 1234, Dir: "/test"}); err != nil {
-		t.Fatalf("register session: %v", err)
-	}
-	deliverer.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("dispatch echo should not prompt the target session")
-		return nil, nil
-	})}
-	item := newTestEnvelope("github", "notifications.github.example-org.example-repo.issue.1", "dispatch echo")
-	item.Payload = `{"dispatch_session":"ses_target"}`
-
-	result, err := deliverer.DeliverWithResult(item, store.Interest{SessionID: "ses_target", Dir: "/test"})
-
-	if err != nil {
-		t.Fatalf("deliver dispatch echo: %v", err)
-	}
-	if !result.Skipped {
-		t.Fatal("dispatch echo was not marked skipped")
-	}
-}
-
-func TestDeliver_DeliversNonGitHubDispatchSession(t *testing.T) {
-	var requests atomic.Int32
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer target.Close()
-
-	sessions, deliverer := newKVDeliverer(t)
-	if err := sessions.Put("ses_target", session.SessionEntry{Port: mockPort(target.URL), Dir: "/test"}); err != nil {
-		t.Fatalf("register session: %v", err)
-	}
-	item := newTestEnvelope("agent", "notifications.agent.ses_target", "message")
-	item.Payload = `{"dispatch_session":"ses_target"}`
-
-	result, err := deliverer.DeliverWithResult(item, store.Interest{SessionID: "ses_target", Dir: "/test"})
-
-	if err != nil {
-		t.Fatalf("deliver non-GitHub dispatch payload: %v", err)
-	}
-	if result.Skipped {
-		t.Fatal("non-GitHub dispatch payload was skipped")
-	}
-	if got := requests.Load(); got != 1 {
-		t.Fatalf("prompt requests = %d, want 1", got)
-	}
-}
-
 func TestSessionRegistry_PortlessSelfSubscribedClaimPreservesLivePortfulRoute(t *testing.T) {
 	for _, driving := range []bool{false, true} {
 		t.Run(fmt.Sprintf("incumbent driving %t", driving), func(t *testing.T) {

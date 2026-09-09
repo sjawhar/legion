@@ -308,7 +308,7 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("decode JSON error: %v", err)
 	}
-	const want = "source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr"
+	const want = "source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr, dispatch"
 	if response.Error != want {
 		t.Fatalf("error = %q, want %q", response.Error, want)
 	}
@@ -776,7 +776,7 @@ func TestSendHandler_RejectsInvalidSource(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("decode JSON error: %v", err)
 	}
-	const want = "source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr"
+	const want = "source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr, dispatch"
 	if response.Error != want {
 		t.Fatalf("error = %q, want %q", response.Error, want)
 	}

@@ -47,9 +47,6 @@ func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Int
 	if err != nil {
 		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 	}
-	if isDispatchEcho(item, interest.SessionID) {
-		return DeliveryResult{Skipped: true}, nil
-	}
 	text := d.Text(item)
 
 	if entryVal.SelfSubscribed && entryVal.Port == 0 {
@@ -60,16 +57,6 @@ func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Int
 		return DeliveryResult{}, d.prompt(entryVal.Port, entryVal.MachineID, interest.SessionID, text)
 	}
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
-}
-
-func isDispatchEcho(item contracts.Envelope, sessionID string) bool {
-	if item.Source != "github" || item.Payload == "" || sessionID == "" {
-		return false
-	}
-	var body struct {
-		DispatchSession string `json:"dispatch_session"`
-	}
-	return json.Unmarshal([]byte(item.Payload), &body) == nil && body.DispatchSession == sessionID
 }
 
 func (d Deliverer) Text(item contracts.Envelope) string {

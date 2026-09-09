@@ -1,76 +1,83 @@
 # Dispatch HTTP Server (Go)
 
-`cmd/dispatch` runs the Go server for the Dispatch dashboard. It owns HTTP
-startup, Postgres migration, identity selection, GitHub OAuth sign-in, and the
-GitHub REST/GraphQL proxy.
+`cmd/dispatch` serves the Dispatch dashboard, native API, document rooms, GitHub
+OAuth, and the GitHub REST/GraphQL proxy.
 
-## Startup
+## Startup and persistence
 
-The server requires `DATABASE_URL` and `DISPATCH_AGENT_TOKEN`. It opens a
+`DATABASE_URL` and `DISPATCH_AGENT_TOKEN` are required. Startup opens a
 `pgxpool.Pool`, applies embedded migrations from
-`internal/dispatch/store/migrations`, and only then starts serving.
+`internal/dispatch/store/migrations`, then starts HTTP serving. The Postgres
+store contains users, native issues, artifacts, document updates, and the event
+outbox.
 
-`DISPATCH_REPO_PROJECTS` is optional configuration for agent-side issue
-resolution. The router receives it with the agent token for API handlers.
+`DISPATCH_REPO_PROJECTS` optionally maps external repositories to native issue
+projects. Unless `DISPATCH_NATS_DISABLED=1`, Dispatch connects through
+`bus.Connect`, ensures its notification stream subject, and runs the outbox.
+When disabled, database and SSE paths remain available and `/healthz` reports
+`nats: null`.
 
-Unless `DISPATCH_NATS_DISABLED=1`, startup connects through `bus.Connect` using
-`natsUrls` from envoy.json, ensures the Dispatch notification stream subject, and
-runs the Postgres-backed event outbox. With NATS disabled, Dispatch continues to
-serve the database and SSE paths without publishing events; `/healthz` reports
-`nats: null`. When enabled, `/healthz` reports the live client's NATS connection
-status and returns unavailable while that connection is down.
+Documents use a Yjs `Y.Text` named `content`. `GET /ws/doc/{artifactId}` uses
+Hocuspocus framing. Server-side edits use the document service, persist updates,
+and create settled or named versions.
 
 ## Identity
 
-`internal/dispatch/identity` is the sole human identity boundary. Handler code
-must call `Identity.Login` and pass any error to `identity.WriteError`.
+`internal/dispatch/identity` is the human identity boundary. Handlers resolve
+users through `Identity.Login` and write identity errors with
+`identity.WriteError`.
 
-- `DISPATCH_IDENTITY=cookie` is the default. `CookieIdentity` validates a
-  signed `dsession`; `DISPATCH_ALLOWED_LOGINS` is required and the OAuth
-  callback enforces it before persisting tokens or issuing a cookie.
-- `DISPATCH_IDENTITY=header:<Header-Name>` uses `HeaderIdentity`. Every
-  request's supplied login must be in `DISPATCH_ALLOWED_LOGINS`. This mode
-  deliberately logs a warning and is rejected alongside
+- `DISPATCH_IDENTITY=cookie` is the default. OAuth requires
+  `DISPATCH_ALLOWED_LOGINS`, and the callback rejects an unlisted GitHub login
+  before storing its token or issuing a cookie.
+- `DISPATCH_IDENTITY=header:<Header-Name>` trusts a proxy-provided header only
+  for an allowlisted login. It logs a warning and is rejected with
   `DISPATCH_APP_CLIENT_ID` unless `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
+- Agents authenticate with `Authorization: Bearer $DISPATCH_AGENT_TOKEN` and a
+  `session` actor. Bearer callers cannot act as users.
 
-GitHub proxy handlers need a stored user token after identity resolution. If
-one is absent, they return `503 GITHUB_TOKEN_UNAVAILABLE`.
-
-## Persistence
-
-`internal/dispatch/store.Store` holds the shared `*pgxpool.Pool`.
-`Store.Migrate` records each committed migration in `schema_migrations`.
-`PgUserStore` implements `auth.UserStore` against the `users` table. Existing
-file and NATS KV user stores are intentionally absent; users sign in again
-after this cutover.
-
-Use `scripts/dev-postgres.sh` to start the local `postgres:16` container. Its
-printed connection string is also the expected
-`DISPATCH_TEST_DATABASE_URL`.
+The GitHub proxy needs the resolved user's stored GitHub token. Without one it
+returns `503 GITHUB_TOKEN_UNAVAILABLE`.
 
 ## Routes
 
-| Path | Method | Identity | Purpose |
+Every `/api/v1` route accepts an authenticated user or an agent bearer unless
+the table says human only.
+
+| Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
-| `/auth/start` | GET | none | Begin GitHub OAuth. |
-| `/auth/callback` | GET | OAuth state | Exchange and persist an allowed login's token pair. |
-| `/auth/logout` | POST | `Identity` | Remove the resolved user's stored tokens. |
-| `/auth/whoami` | GET | `Identity` | Return the resolved login. |
-| `/api/github/rest/...` | any | `Identity` | Proxy GitHub REST with the resolved user's token. |
-| `/api/github/graphql` | POST | `Identity` | Proxy GitHub GraphQL with the resolved user's token. |
-| `/healthz` | GET | none | Report database and NATS readiness. |
-| `/api/v1/inbox?project=` | GET | `Identity` or bearer | Open asks, newest first, with issue key and title. |
-| `/api/v1/issues/{key}/asks` | POST | `Identity` or bearer | Create an ask, optionally anchored to a document range. |
-| `/api/v1/asks/{id}` | GET | `Identity` or bearer | Read an ask. |
-| `/api/v1/asks/{id}/answer` | POST | `Identity` | Answer an open ask; bearer callers are forbidden. |
-| `/api/v1/issues/{key}/comments?artifact=` | GET | `Identity` or bearer | List comments; an artifact ID limits results to anchored comments. |
-| `/api/v1/issues/{key}/comments` | POST | `Identity` or bearer | Create a comment, reply, or anchored suggestion. |
-| `/api/v1/comments/{id}/resolve` | POST | `Identity` or bearer | Mark a comment resolved. |
-| `/api/v1/comments/{id}/accept` | POST | `Identity` | Apply and accept an anchored suggestion. |
-| `/api/v1/comments/{id}/reject` | POST | `Identity` | Reject a suggestion. |
-| `/api/v1/issues/{key}/events` | GET | `Identity` or bearer | List events: `after` (ascending), `order=desc` with optional exclusive `before` (descending), or up to 50 exact `ids` (ascending); paged requests are capped at 200. |
-| `/api/v1/issues/{key}/messages` | POST | `Identity` or bearer | Post a short issue message. |
-| `/api/v1/artifacts/{id}` | GET | `Identity` or bearer | Read an artifact, including posts that reference it. |
+| `/auth/start` | GET | public | Start GitHub OAuth. |
+| `/auth/callback` | GET | OAuth state | Exchange an allowlisted GitHub login's token pair. |
+| `/auth/logout` | POST | identity | Remove the resolved user's tokens. |
+| `/auth/whoami` | GET | identity | Return the resolved login. |
+| `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
+| `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
+| `/healthz` | GET | public | Report database and NATS readiness. |
+| `/api/v1/projects` | GET, POST | POST human only | List or create projects. |
+| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. |
+| `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. |
+| `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
+| `/api/v1/issues/{key}/events` | GET | user or bearer | Read events by forward cursor, descending page, or exact IDs. |
+| `/api/v1/inbox` | GET | user or bearer | List open asks, newest first. |
+| `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. |
+| `/api/v1/asks/{id}` | GET | user or bearer | Read an ask. |
+| `/api/v1/asks/{id}/answer` | POST | human only | Answer an open ask. |
+| `/api/v1/issues/{key}/comments` | GET, POST | user or bearer | List or create comments and suggestions. |
+| `/api/v1/comments/{id}/resolve` | POST | user or bearer | Resolve a comment. |
+| `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. |
+| `/api/v1/comments/{id}/reject` | POST | human only | Reject a suggestion. |
+| `/api/v1/issues/{key}/messages` | POST | user or bearer | Post a short issue message. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List or upload artifact versions. |
+| `/api/v1/artifacts/{id}/primary` | POST | human only | Make a document the issue primary artifact. |
+| `/api/v1/artifacts/{id}` | GET | user or bearer | Read an artifact, versions, and references. |
+| `/api/v1/artifacts/{id}/text` | GET | user or bearer | Read a live document's markdown. |
+| `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. |
+| `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. |
+| `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. |
+| `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
+| `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
+| `/api/v1/events` | GET | identity | Stream durable events with SSE. |
+| `/ws/doc/{artifactId}` | GET | user or bearer | Join the Hocuspocus document room. |
 
 ## Checks
 
