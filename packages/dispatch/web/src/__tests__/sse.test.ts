@@ -19,7 +19,7 @@ function event(
     seq: 4,
     type,
     ...overrides,
-  };
+  } as Event;
 }
 
 test("ask events refresh the issue, its asks, selected ask, and the inbox", () => {

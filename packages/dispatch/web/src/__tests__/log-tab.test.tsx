@@ -13,7 +13,13 @@ function event(): Event {
     id: 1,
     issue_key: "CORE-1",
     notify: false,
-    payload: { body: "A message" },
+    payload: {
+      author: { id: "alice", kind: "user" },
+      body: "A message",
+      created_at: "2026-09-09T00:00:00Z",
+      id: "message-1",
+      issue_key: "CORE-1",
+    },
     seq: 1,
     type: "message.created",
   };

@@ -1,4 +1,16 @@
-import { agentSubject, EnvelopeSchema } from "@legion/contracts";
+import {
+  ArtifactCreatedEventPayloadSchema as ArtifactCreatedPayloadSchema,
+  ArtifactVersionEventPayloadSchema as ArtifactVersionPayloadSchema,
+  AskEventPayloadSchema as AskPayloadSchema,
+  agentSubject,
+  ChildStatusEventPayloadSchema as ChildStatusPayloadSchema,
+  CommentEventPayloadSchema as CommentPayloadSchema,
+  type InboundDispatchEvent as DispatchEvent,
+  DispatchEventSchema,
+  EnvelopeSchema,
+  IssueEventPayloadSchema as IssuePayloadSchema,
+  MessageEventPayloadSchema as MessagePayloadSchema,
+} from "@legion/contracts";
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
 
@@ -77,55 +89,6 @@ export function replyWith(envelope: DeliveryEnvelope): string | undefined {
 // {artifact_id, name, version, diff?}, and child.status {child_key, from, to}.
 // Bus frames are untrusted, so each schema below declares exactly the fields
 // this renderer surfaces and a frame that disagrees renders without them.
-const DispatchEventSchema = z.object({
-  issue_key: z.string(),
-  type: z.string(),
-  actor: z.object({ kind: z.string(), id: z.string().optional() }).passthrough(),
-  payload: z.object({}).passthrough(),
-});
-
-type DispatchEvent = z.infer<typeof DispatchEventSchema>;
-
-const IssuePayloadSchema = z.object({
-  title: z.string().optional(),
-  status: z.string().optional(),
-  route: z.string().nullish(),
-});
-
-const ArtifactCreatedPayloadSchema = z.object({
-  artifact: z.object({ name: z.string().optional() }).optional(),
-});
-
-const ArtifactVersionPayloadSchema = z.object({
-  name: z.string().optional(),
-  version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
-  diff: z.string().optional(),
-});
-
-const AskPayloadSchema = z.object({
-  // A nil Go slice marshals to null, so every list here is nullable.
-  question: z.string().optional(),
-  options: z.array(z.object({ label: z.string().optional() })).nullish(),
-  answer: z
-    .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
-    .nullish(),
-});
-
-const CommentPayloadSchema = z.object({
-  artifact_name: z.string().optional(),
-  body: z.string().optional(),
-  reply_to: z.string().nullish(),
-  anchor: z.object({ quote: z.string().optional() }).nullish(),
-  suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
-});
-
-const MessagePayloadSchema = z.object({ body: z.string().optional() });
-
-const ChildStatusPayloadSchema = z.object({
-  child_key: z.string().optional(),
-  from: z.string().optional(),
-  to: z.string().optional(),
-});
 
 // Each Dispatch event type validates its payload with the schema that matches the
 // wire contract documented above. A frame whose payload disagrees with its type's

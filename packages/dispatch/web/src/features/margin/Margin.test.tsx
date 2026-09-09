@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, Comment, Issue } from "../../api/types";
+import type { Artifact, Comment, IssueDetails } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
 import { Margin, MarginProvider, useMargin } from "./Margin";
 
@@ -21,8 +21,9 @@ const specArtifact: Artifact = {
   versions: [],
 };
 
-const issue: Issue = {
+const issue: IssueDetails = {
   artifacts: [specArtifact],
+  children: [],
   closed_at: null,
   created_at: "2026-09-09T00:00:00Z",
   created_by: { id: "alice", kind: "user" },
@@ -37,10 +38,11 @@ const issue: Issue = {
   route: null,
   status: "open",
   title: "Review the spec",
+  open_asks: [],
   updated_at: "2026-09-09T00:00:00Z",
 };
 
-const secondIssue: Issue = {
+const secondIssue: IssueDetails = {
   ...issue,
   artifacts: [
     {

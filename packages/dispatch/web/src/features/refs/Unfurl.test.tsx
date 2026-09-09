@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 
 import { api } from "../../api/client";
-import type { Artifact, Issue } from "../../api/types";
+import type { Artifact, IssueDetails } from "../../api/types";
 import { Unfurl } from "./Unfurl";
 
 test("Unfurl trims terminal punctuation before resolving a GitHub reference", async () => {
@@ -43,8 +43,9 @@ test("Unfurl reads the immutable document version named by a reference", async (
     slug: "design",
     versions: [],
   };
-  const issue: Issue = {
+  const issue: IssueDetails = {
     artifacts: [artifact],
+    children: [],
     closed_at: null,
     created_at: "2026-09-09T00:00:00Z",
     created_by: { id: "alice", kind: "user" },
@@ -59,6 +60,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
     route: null,
     status: "testing",
     title: "Design decision",
+    open_asks: [],
     updated_at: "2026-09-09T00:00:00Z",
   };
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
@@ -67,8 +69,12 @@ test("Unfurl reads the immutable document version named by a reference", async (
     version: null,
   });
   const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
+    authors: [],
+    created_at: "2026-09-09T00:00:00Z",
     markdown: "Version three",
-    version: 3,
+    named: true,
+    number: 3,
+    summary: "Version three",
   });
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },

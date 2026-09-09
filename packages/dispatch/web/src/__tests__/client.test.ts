@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { createApiClient, type FetchImplementation } from "../api/client";
+import type { Version } from "../api/types";
 
 interface RecordedRequest {
   body?: BodyInit | null;
@@ -66,6 +67,14 @@ test("API client normalizes server asks with null options", async () => {
   );
 
   expect((await createApiClient(stub.fetch).getInbox())[0]?.options).toEqual([]);
+});
+test("API client preserves the null version returned by a no-op edit", async () => {
+  const stub = stubFetch(() => Response.json({ applied: 0, version: null }));
+  const result: { applied: number; version: Version | null } = await createApiClient(
+    stub.fetch
+  ).editArtifact("artifact-1", { ops: [] });
+
+  expect(result).toEqual({ applied: 0, version: null });
 });
 
 test("API client sends the documented method and JSON body for mutations", async () => {

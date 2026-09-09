@@ -9,11 +9,17 @@ function event(overrides: Partial<Event> = {}): Event {
     id: 1,
     issue_key: "CORE-1",
     notify: false,
-    payload: {},
+    payload: {
+      author: { id: "session-1", kind: "session" },
+      body: "Update",
+      created_at: "2026-09-09T00:00:00Z",
+      id: "message-1",
+      issue_key: "CORE-1",
+    },
     seq: 1,
     type: "message.created",
     ...overrides,
-  };
+  } as Event;
 }
 
 test("log model reverses server events and folds events that resolve their item", () => {

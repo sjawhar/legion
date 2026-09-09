@@ -1,3 +1,5 @@
+export * from "./dispatch-api";
+
 export * from "./dispatch-tools";
 export * from "./envelope";
 export * from "./handoff-schema";
