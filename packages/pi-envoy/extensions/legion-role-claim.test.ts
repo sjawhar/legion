@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { agentSubject, roleToken } from "@legion/contracts";
 import type { ZodNumberProperty } from "../src/pi-types";
 
@@ -47,7 +47,20 @@ const originalEnvironment = {
   LEGION_ROLE: process.env.LEGION_ROLE,
   LEGION_TREE: process.env.LEGION_TREE,
   LEGION_STATE_DIR: process.env.LEGION_STATE_DIR,
+  HOME: process.env.HOME,
+  DISPATCH_URL: process.env.DISPATCH_URL,
+  DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
+  DISPATCH_MCP_URL: process.env.DISPATCH_MCP_URL,
 } as const;
+// The envoy extension registers the dispatch tools whenever the developer's own
+// ~/.config/opencode/envoy.json enables dispatch; this file's zod stub is not a real schema
+// builder, so the resolution must see no user config and no DISPATCH_* override.
+beforeEach(() => {
+  process.env.HOME = "/nonexistent-home-for-legion-tests";
+  delete process.env.DISPATCH_URL;
+  delete process.env.DISPATCH_TOKEN;
+  delete process.env.DISPATCH_MCP_URL;
+});
 afterEach(() => {
   globalThis.fetch = originalFetch;
   for (const [key, value] of Object.entries(originalEnvironment)) {
