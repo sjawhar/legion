@@ -303,10 +303,6 @@ func (r *router) healthz(w http.ResponseWriter, req *http.Request) {
 // ───── static ───────────────────────────────────────────────────────────────
 
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
-	if req.URL.Path == "/mcp" || strings.HasPrefix(req.URL.Path, "/mcp/") {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
 	if r.ctx.WebDistDir == "" {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
@@ -333,6 +329,10 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
 	if _, err := os.Stat(indexPath); err != nil {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
+		return
+	}
+	if normalized != "/issues" && !strings.HasPrefix(normalized, "/issues/") {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	serveFile(w, req, indexPath)

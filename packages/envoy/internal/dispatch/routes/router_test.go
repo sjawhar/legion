@@ -186,7 +186,7 @@ func TestBuildAppContextRejectsMalformedRepoProjectMapping(t *testing.T) {
 	}
 }
 
-func TestStaticHandlerRejectsRetiredMCPRoute(t *testing.T) {
+func TestStaticHandlerRejectsUnknownRoute(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
@@ -195,9 +195,9 @@ func TestStaticHandlerRejectsRetiredMCPRoute(t *testing.T) {
 	context.WebDistDir = webDist
 
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/unroutable", nil))
 
 	if response.Code != http.StatusNotFound {
-		t.Fatalf("MCP route status: got %d, want %d; body=%s", response.Code, http.StatusNotFound, response.Body.String())
+		t.Fatalf("unknown route status: got %d, want %d; body=%s", response.Code, http.StatusNotFound, response.Body.String())
 	}
 }
