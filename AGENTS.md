@@ -33,12 +33,17 @@ bun test                      # Test
 ```
 
 ```bash
-legion start <team> [-w path] # Start swarm
-legion status <team>          # Check status
-legion stop <team>            # Stop swarm
-legion restart <team>         # Restart daemon, preserve worker sessions
-legion teams                  # List cached teams
-legion attach <team> <issue>  # Attach to worker
+legion start <team> [-w path]        # Start swarm
+legion status <team>                 # Check status
+legion stop <team>                   # Stop swarm
+legion restart <team>                # Restart daemon, preserve worker sessions
+legion legions                       # List registered Legion daemons
+legion gh -- <args>                  # Run gh with a session-bound GitHub token
+legion credential                    # Git credential helper for Legion grants
+legion state                         # Read daemon state
+legion approve <issue>               # Apply a human approval
+legion admit <issue>                 # Admit a root issue
+legion backlog <issue> <marker>      # Mark an issue as deliberately backlogged
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
 ```
 

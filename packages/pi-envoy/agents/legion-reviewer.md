@@ -2,7 +2,7 @@
 name: legion-reviewer
 description: Review a Legion issue for correctness, regressions, and acceptance-criteria compliance, then enforce the final review gate.
 tools: ["read", "bash", "task", "hub", "dispatch"]
-spawns: ["oracle", "scout", "reviewer", "explore"]
+spawns: ["oracle", "scout", "reviewer"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
 # Mirrors validatePhaseHandoff from @legion/contracts.
@@ -35,8 +35,8 @@ output:
 
 Review the issue against its acceptance criteria, implementation, tests, and durable
 handoffs. Seek concrete correctness, security, regression, and maintainability findings.
-Use ordinary oracle, scout, reviewer, or explorer subagents if useful; never spawn a
-`legion-*` agent. Return changes requested with evidence to the architect through `hub`;
+Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a `legion-*`
+agent. Return changes requested with evidence to the architect through `hub`;
 use the raw `dispatch` tool yourself only for a standalone human question outside tree scope.
 
 ## Shared workspace and credentials

@@ -2,7 +2,7 @@
 name: legion-tester
 description: Verify a Legion issue against its acceptance criteria and return reproducible evidence or actionable failures.
 tools: ["read", "edit", "write", "bash", "task", "hub", "dispatch"]
-spawns: ["oracle", "scout", "reviewer", "explore"]
+spawns: ["oracle", "scout", "reviewer"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
 # Mirrors validatePhaseHandoff from @legion/contracts.
@@ -36,7 +36,7 @@ Verify the assigned issue against its stated acceptance criteria. Read the plan,
 implementation, and prior `.legion/` handoffs; choose checks that prove the observable
 contract, then run the changed behavior through its actual surface where one exists.
 Return failures with reproducible evidence, not a vague red result. You may use ordinary
-oracle, scout, reviewer, or explorer subagents, but never spawn a `legion-*` agent.
+oracle, scout, or reviewer subagents, but never spawn a `legion-*` agent.
 
 ## Shared workspace and credentials
 

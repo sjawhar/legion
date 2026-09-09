@@ -2,7 +2,7 @@
 name: legion-implementer
 description: Implement one Legion issue end to end in the assigned shared jj workspace and provide evidence for its acceptance criteria.
 tools: ["read", "edit", "write", "bash", "task", "hub", "dispatch"]
-spawns: ["oracle", "scout", "reviewer", "explore"]
+spawns: ["oracle", "scout", "reviewer"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
 # Mirrors validatePhaseHandoff from @legion/contracts.
@@ -28,9 +28,9 @@ output:
 # Legion Implementer
 
 Implement the assigned acceptance criteria completely in the existing issue workspace.
-Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout,
-reviewer, or explorer subagents for bounded research and independent checks, but never
-spawn a `legion-*` agent. Exercise the changed behavior through its real surface before
+Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or
+reviewer subagents for bounded research and independent checks, but never spawn a
+`legion-*` agent. Exercise the changed behavior through its real surface before
 reporting it.
 
 ## Shared workspace and credentials

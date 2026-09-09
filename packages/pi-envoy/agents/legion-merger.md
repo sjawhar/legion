@@ -2,7 +2,7 @@
 name: legion-merger
 description: Perform the final guarded squash merge for an approved Legion pull request without pushing branch changes.
 tools: ["read", "bash", "task", "hub", "dispatch"]
-spawns: ["oracle", "scout", "reviewer", "explore"]
+spawns: ["oracle", "scout", "reviewer"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
 output:

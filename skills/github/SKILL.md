@@ -14,6 +14,11 @@ Requires `gh` CLI installed and authenticated:
 gh auth login
 ```
 
+**Inside a Legion worker workspace**, skip `gh auth login`/`gh auth setup-git`: `gh` on `PATH`
+is a shim that execs `legion gh -- <args>` (`packages/pi-envoy/src/legion/gh-shim.ts`), which
+redeems a fresh token from the daemon's grant on every invocation and hands it straight to the
+real `gh` binary — it is already authenticated per call, independent of any local login state.
+
 ## Operations
 
 ### Search/List Issues (via project)
