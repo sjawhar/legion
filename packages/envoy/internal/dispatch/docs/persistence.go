@@ -498,4 +498,25 @@ func (p *PgVersioned) pool() *pgxpool.Pool {
 	return p.store.Pool
 }
 
+func (s *Service) CompactAll(ctx context.Context, keep int) error {
+	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc'`)
+	if err != nil {
+		return fmt.Errorf("list document rooms: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var artifactID string
+		if err := rows.Scan(&artifactID); err != nil {
+			return fmt.Errorf("scan document room: %w", err)
+		}
+		if _, err := s.persistence.Compact(ctx, artifactID, keep); err != nil {
+			return fmt.Errorf("compact document %s: %w", artifactID, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list document rooms: %w", err)
+	}
+	return nil
+}
+
 var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
