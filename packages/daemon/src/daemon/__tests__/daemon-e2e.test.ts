@@ -118,11 +118,13 @@ function fakeWorkerRpcClient(): WorkerRpcClient {
   const closed = Promise.withResolvers<void>();
   return {
     closed: closed.promise,
+    runState: "idle",
     negotiate: async () => {},
     prompt: async () => {},
     getState: async () => ({}),
     shutdown: () => {},
     close: () => closed.resolve(),
+    onIdle: () => {},
   };
 }
 
@@ -220,7 +222,7 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     repos: ["acme/widgets"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 1,
-    workerBudget: 2,
+    workerCap: 2,
     maxRecursionDepth: 8,
     lingerHours: 72,
     maxFixAttempts: 3,

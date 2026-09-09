@@ -164,6 +164,17 @@ export async function panePid(run: TmuxRun, target: string): Promise<number | un
   return panes.exitCode === 0 && Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
 }
 
+/** Reads a window's own pane id (its first/sole pane), or `undefined` if it cannot be read.
+ * Used to backfill a locator's `tmuxPaneId` once a window recorded before that field existed —
+ * or written by some other pane-id-less path — is confirmed alive, so the reconciliation
+ * sweep's pane-level check (see `listUnknownPanes`) eventually has a real id to compare against
+ * instead of permanently exempting that window. */
+export async function firstPaneId(run: TmuxRun, windowId: string): Promise<string | undefined> {
+  const panes = await run(["tmux", "list-panes", "-t", windowId, "-F", "#{pane_id}"]);
+  const paneId = panes.stdout.trim().split(/\s+/)[0];
+  return panes.exitCode === 0 && paneId && /^%\d+$/.test(paneId) ? paneId : undefined;
+}
+
 export async function killWindow(run: TmuxRun, windowId: string): Promise<void> {
   await run(["tmux", "kill-window", "-t", windowId]);
 }
@@ -209,6 +220,60 @@ export async function listUnknownOwnedWindows(
     const activityAt = Number(activitySeconds) * 1000;
     if (!Number.isFinite(activityAt)) continue;
     unknown.push({ windowId, activityAt });
+  }
+  return unknown;
+}
+
+/** An unrecorded pane inside a Legion-owned window, running the worker-shim wrapper. */
+export interface UnknownPane {
+  paneId: string;
+  windowId: string;
+  activityAt: number;
+}
+
+/**
+ * Lists every pane, anywhere on the tmux server, whose owning window is marked with
+ * `@legion_owner === owner` (window options resolve through the pane's own window, exactly as
+ * `listUnknownOwnedWindows` reads the same option via `list-windows`) whose pane id isn't in
+ * `known`, and whose start command names the `legion worker-shim` wrapper every Legion process —
+ * root, phase worker, or controller — runs inside its pane. A pane split into a *known* window
+ * (so the window itself is never reaped by `listUnknownOwnedWindows`) but never recorded by any
+ * tree/controller/role locator is a real, running process the daemon has otherwise completely
+ * forgotten about — most likely a crash between opening the pane and persisting its locator.
+ * `known` is checked unconditionally: a recorded pane id is never a candidate here regardless of
+ * whether its window happens to look unowned. Returns an empty array (rather than throwing) if
+ * the command itself fails.
+ */
+export async function listUnknownPanes(
+  run: TmuxRun,
+  owner: string,
+  known: ReadonlySet<string>
+): Promise<UnknownPane[]> {
+  const panes = await run([
+    "tmux",
+    "list-panes",
+    "-a",
+    "-F",
+    "#{pane_id}\t#{window_id}\t#{@legion_owner}\t#{pane_start_command}\t#{pane_activity}",
+  ]);
+  if (panes.exitCode !== 0) return [];
+
+  const unknown: UnknownPane[] = [];
+  for (const line of panes.stdout.split(/\r?\n/)) {
+    const [paneId, windowId, windowOwner, startCommand, activitySeconds] = line.split("\t");
+    if (
+      !paneId ||
+      !/^%\d+$/.test(paneId) ||
+      !windowId ||
+      known.has(paneId) ||
+      windowOwner !== owner ||
+      !startCommand?.includes("worker-shim")
+    ) {
+      continue;
+    }
+    const activityAt = Number(activitySeconds) * 1000;
+    if (!Number.isFinite(activityAt)) continue;
+    unknown.push({ paneId, windowId, activityAt });
   }
   return unknown;
 }

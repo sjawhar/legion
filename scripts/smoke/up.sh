@@ -279,7 +279,7 @@ board_project_ids:${board_config}
 app_logins:
 $(printf '%s\n' "$LEGION_APP_LOGINS" | tr ',' '\n' | sed 's/^/  - /')
 admission_cap: 4
-worker_budget: 6
+worker_cap: 6
 max_recursion_depth: 8
 linger_hours: 72
 max_fix_attempts: 3

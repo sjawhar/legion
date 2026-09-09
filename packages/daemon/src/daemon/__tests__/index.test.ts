@@ -154,11 +154,13 @@ function daemonTestDependencies(
         const closed = Promise.withResolvers<void>();
         return {
           closed: closed.promise,
+          runState: "idle",
           negotiate: async () => {},
           prompt: async () => {},
           getState: async () => ({}),
           shutdown: () => {},
           close: () => closed.resolve(),
+          onIdle: () => {},
         };
       },
       statPrompt: async () => {},
@@ -203,7 +205,7 @@ function config(stateDir: string): DaemonConfig {
     repos: ["acme/widgets"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 4,
-    workerBudget: 6,
+    workerCap: 6,
     maxRecursionDepth: 8,
     lingerHours: 72,
     maxFixAttempts: 3,

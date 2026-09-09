@@ -51,6 +51,7 @@ describe("Legion HTTP API", () => {
     issue: IssueKey;
     role: string;
     agentId: string;
+    sessionId: string;
   }>;
   let spawnedWorkers: Array<{ tree: IssueKey; issue: IssueKey; role: string; task: string }>;
   let workerReadyCalls: Array<{
@@ -205,8 +206,17 @@ describe("Legion HTTP API", () => {
         releaseSlot: (issue) => {
           releaseSlots.push(issue);
         },
-        registerRoleBacking: (tree, issue, role, agentId) => {
-          backingRegistrations.push({ tree, issue, role, agentId });
+        registerRoleBacking: (tree, issue, role, agentId, sessionId) => {
+          backingRegistrations.push({ tree, issue, role, agentId, sessionId });
+          const backingToken = roleToken(state.project, issue, role);
+          const existingBacking = state.roles[backingToken];
+          state.roles[backingToken] = {
+            ...(existingBacking && "issue" in existingBacking ? existingBacking : {}),
+            issue,
+            role,
+            agentId,
+            sessionId,
+          };
         },
         markTreeReady: () => {},
         markControllerReady: () => {},
@@ -1024,7 +1034,13 @@ describe("Legion HTTP API", () => {
       ).response.status
     ).toBe(200);
     expect(backingRegistrations).toEqual([
-      { tree: root, issue: child, role: "implementer", agentId: "agent-17" },
+      {
+        tree: root,
+        issue: child,
+        role: "implementer",
+        agentId: "agent-17",
+        sessionId: "ses_implementer",
+      },
     ]);
 
     const provisioningCredential = await json<{ token: string }>(
@@ -1405,6 +1421,74 @@ describe("Legion HTTP API", () => {
 
     expect(phase.response.status).toBe(200);
     expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+  });
+
+  it("merges /phase onto an existing claim, preserving locator/generation/pendingAssignment", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+    expect(spawn.response.status).toBe(200);
+
+    const testerToken = roleToken(state.project, root, "tester");
+    // Pre-seed the claim with fields /phase must not drop by rebuilding it wholesale.
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      sessionId: "ses_tester",
+      agentId: "agent-tester",
+      generation: 5,
+      pendingAssignment: "verify #41",
+      launchFailures: 1,
+      bootTokenHash: "deadbeef",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@9",
+        tmuxPaneId: "%9",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+
+    const phase = await json("/legion/v1/phase", {
+      tree: root,
+      issue: root,
+      phase: "tester",
+      sessionId: "ses_tester",
+      spawnToken: spawn.body.spawnToken,
+    });
+
+    expect(phase.response.status).toBe(200);
+    expect(state.roles[testerToken]).toEqual({
+      issue: root,
+      role: "tester",
+      agentId: "agent-tester",
+      sessionId: "ses_tester",
+      generation: 5,
+      pendingAssignment: "verify #41",
+      launchFailures: 1,
+      bootTokenHash: "deadbeef",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@9",
+        tmuxPaneId: "%9",
+        socketPath: "/state/workers/tester.sock",
+      },
+    });
   });
   it("surfaces a deferred admission retry as queued through the controller API", async () => {
     await start({ admissionResult: "queued" });

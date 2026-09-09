@@ -20,7 +20,7 @@ describe("daemon config", () => {
         LEGION_ADMISSION_CAP: "7",
         LEGION_MAX_RECURSION_DEPTH: "11",
         LEGION_LINGER_HOURS: "48",
-        LEGION_WORKER_BUDGET: "9",
+        LEGION_WORKER_CAP: "9",
         LEGION_OMP_INVOCATION: "custom-omp-from-env",
       },
       cliOverrides: {
@@ -41,7 +41,7 @@ describe("daemon config", () => {
       admissionCap: 7,
       maxRecursionDepth: 11,
       lingerHours: 48,
-      workerBudget: 9,
+      workerCap: 9,
       resyncIntervalMs: 600_000,
       gates: { design: "root-issues", merge: "human" },
       ompInvocation: "custom-omp-from-env",
@@ -49,33 +49,149 @@ describe("daemon config", () => {
     expect(config.stateDir).toEndWith(path.join(".legion", "acme42"));
   });
 
-  it("resolves the optional dispatch MCP passthrough from the environment", () => {
+  it("rejects the retired dispatch_mcp_url passthrough from the environment", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          LEGION_BOARD_PROJECT_IDS: "PVT_x",
+          DISPATCH_MCP_URL: "http://127.0.0.1:18766/mcp",
+        },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow("dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)");
+  });
+
+  it("accepts DISPATCH_MCP_URL from the environment when it is the daemon's own consistent alias", () => {
+    // The daemon exports DISPATCH_MCP_URL into every pane it spawns, derived from its own
+    // dispatchUrl; `legion start`/`restart`/`check-config` run from inside a spawned pane
+    // always inherits it, and must not fail just because it is present.
     const { config } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
         LEGION_BOARD_PROJECT_IDS: "PVT_x",
+        DISPATCH_URL: "http://127.0.0.1:18766",
         DISPATCH_MCP_URL: "http://127.0.0.1:18766/mcp",
       },
       cliOverrides: {
         githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
       },
     });
-    expect(config.dispatchMcpUrl).toBe("http://127.0.0.1:18766/mcp");
+    expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
   });
 
-  it("rejects an invalid dispatch MCP passthrough URL", () => {
+  it("rejects DISPATCH_MCP_URL from the environment when it disagrees with DISPATCH_URL", () => {
     expect(() =>
       resolveDaemonConfig({
         env: {
           ...requiredEnv,
           LEGION_BOARD_PROJECT_IDS: "PVT_x",
-          DISPATCH_MCP_URL: "not a url",
+          DISPATCH_URL: "http://127.0.0.1:18766",
+          DISPATCH_MCP_URL: "http://127.0.0.1:9999/mcp",
         },
         cliOverrides: {
           githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
         },
       })
-    ).toThrow(/DISPATCH_MCP_URL/);
+    ).toThrow("dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)");
+  });
+
+  it("rejects the retired worker_budget key from the environment", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_BOARD_PROJECT_IDS: "PVT_x", LEGION_WORKER_BUDGET: "6" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow("worker_budget was replaced by worker_cap");
+  });
+
+  it("rejects the retired worker_budget key from the YAML loader shape with a helpful message", () => {
+    expect(() =>
+      loadConfigFromFile(
+        ["project: acme/7", "worker_budget: 6", "gates:", "  design: off", "  merge: off"].join(
+          "\n"
+        ),
+        "/tmp/legion-config"
+      )
+    ).toThrow("worker_budget was replaced by worker_cap");
+  });
+
+  it("resolves the optional dispatch service base URL from the environment", () => {
+    const { config } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_BOARD_PROJECT_IDS: "PVT_x",
+        DISPATCH_URL: "http://127.0.0.1:18766",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
+  });
+
+  it("normalizes a trailing slash off the dispatch service base URL", () => {
+    const { config } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_BOARD_PROJECT_IDS: "PVT_x",
+        DISPATCH_URL: "http://127.0.0.1:18766/",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
+  });
+
+  it("rejects an invalid dispatch service URL", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          LEGION_BOARD_PROJECT_IDS: "PVT_x",
+          DISPATCH_URL: "not a url",
+        },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(/DISPATCH_URL/);
+  });
+
+  it("rejects a dispatch service URL still carrying the /mcp alias", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          LEGION_BOARD_PROJECT_IDS: "PVT_x",
+          DISPATCH_URL: "http://127.0.0.1:18766/mcp",
+        },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(/DISPATCH_URL must be the dispatch service base URL, not the \/mcp endpoint/);
+  });
+
+  it("accepts dispatch_url from the YAML loader shape without an unknown-key warning", () => {
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "dispatch_url: http://127.0.0.1:18766",
+        "gates:",
+        "  design: off",
+        "  merge: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+    const { config } = resolveDaemonConfig({ env: requiredEnv, configFile: file });
+
+    expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
   });
 
   it("loads lifecycle settings from the existing YAML loader shape", () => {
@@ -96,7 +212,7 @@ describe("daemon config", () => {
         "admission_cap: 3",
         "max_recursion_depth: 6",
         "linger_hours: 24",
-        "worker_budget: 2",
+        "worker_cap: 2",
         "resync_interval_seconds: 120",
         "omp_invocation: mise x github:acme/oh-my-pi@18.0.3 -- omp",
         "state_dir: ./state",
@@ -121,7 +237,7 @@ describe("daemon config", () => {
       admissionCap: 3,
       maxRecursionDepth: 6,
       lingerHours: 24,
-      workerBudget: 2,
+      workerCap: 2,
       resyncIntervalMs: 120_000,
       stateDir: "/tmp/legion-config/state",
       gates: { design: "off", merge: "off" },
@@ -129,19 +245,19 @@ describe("daemon config", () => {
     });
   });
 
-  it("loads dispatch_mcp_url from the YAML config without rejecting it as unknown", () => {
-    const file = loadConfigFromFile(
-      [
-        "project: acme/7",
-        "dispatch_mcp_url: http://127.0.0.1:18766/mcp",
-        "gates:",
-        "  design: off",
-        "  merge: off",
-      ].join("\n"),
-      "/tmp/legion-config"
-    );
-    const { config } = resolveDaemonConfig({ env: requiredEnv, configFile: file });
-    expect(config.dispatchMcpUrl).toBe("http://127.0.0.1:18766/mcp");
+  it("rejects the retired dispatch_mcp_url key from the YAML loader shape with a helpful message", () => {
+    expect(() =>
+      loadConfigFromFile(
+        [
+          "project: acme/7",
+          "dispatch_mcp_url: http://127.0.0.1:18766/mcp",
+          "gates:",
+          "  design: off",
+          "  merge: off",
+        ].join("\n"),
+        "/tmp/legion-config"
+      )
+    ).toThrow("dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)");
   });
 
   it("rejects missing NATS configuration instead of inventing a transport", () => {
@@ -165,8 +281,8 @@ describe("daemon config", () => {
       "LEGION_ADMISSION_CAP"
     );
     expect(() =>
-      loadConfigFromFile("project: acme/7\nworker_budget: 1.5\n", "/tmp/legion-config")
-    ).toThrow("worker_budget");
+      loadConfigFromFile("project: acme/7\nworker_cap: 1.5\n", "/tmp/legion-config")
+    ).toThrow("worker_cap");
   });
 
   it("rejects a design gate left on without board_project_ids configured", () => {

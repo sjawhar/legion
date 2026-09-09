@@ -84,10 +84,10 @@ export async function handlePhase(
   const token = roleToken(ctx.deps.state.project, issue, role);
   const existing = ctx.deps.state.roles[token];
   ctx.deps.state.roles[token] = {
+    ...(existing && "issue" in existing ? existing : {}),
     issue,
     role,
     sessionId,
-    ...(existing && "issue" in existing && existing.agentId ? { agentId: existing.agentId } : {}),
   };
   const lease = await ctx.github.tokenForIssue(issue, appRoleForLegionRole(role));
   await ctx.save();
@@ -181,13 +181,7 @@ export async function handleRoleBacking(
     { tree, issue, role },
     "Unknown or mismatched Legion spawn token"
   );
-  ctx.deps.state.roles[roleToken(ctx.deps.state.project, issue, role)] = {
-    issue,
-    role,
-    sessionId,
-    agentId,
-  };
-  await ctx.deps.processManager.registerRoleBacking(tree, issue, role, agentId);
+  await ctx.deps.processManager.registerRoleBacking(tree, issue, role, agentId, sessionId);
   await ctx.save();
   return Response.json(validateContractResponse(LegionDaemonApi.RoleBacking.response, {}));
 }

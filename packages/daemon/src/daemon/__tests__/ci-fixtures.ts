@@ -131,7 +131,7 @@ export function config(): DaemonConfig {
     repos: ["acme/widgets"],
     appLogins: ["legion[bot]"],
     admissionCap: 4,
-    workerBudget: 6,
+    workerCap: 6,
     maxRecursionDepth: 8,
     lingerHours: 72,
     maxFixAttempts: 3,

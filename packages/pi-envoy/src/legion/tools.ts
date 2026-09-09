@@ -5,9 +5,9 @@ import {
   LEGION_ROLES,
   type LegionRole,
 } from "@legion/contracts";
-import type { LegionDaemonClient } from "./daemon-client";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
+import type { LegionDaemonClient } from "./daemon-client";
 
 interface ArchitectSession {
   readonly tree: string;
@@ -76,7 +76,14 @@ export function createLegionTool(deps: {
   return {
     name: "legion",
     label: "legion",
-    description: "Perform a Legion lifecycle write through the Legion daemon.",
+    description:
+      "Perform a Legion lifecycle write through the Legion daemon. " +
+      'spawn_worker\'s response "status" means: "spawned" — a fresh pane just opened and is ' +
+      'running now; "resumed" — an existing worker was prompted directly over its live socket, ' +
+      "or (if its boot has not confirmed yet) its task was recorded to deliver once that boot " +
+      'completes; "queued" — the running-worker cap is full, the task was recorded and this ' +
+      'role will start on its own once a slot frees. Never re-spawn a role after "resumed" or ' +
+      '"queued" — wait for the worker-started notification instead.',
     defaultInactive: true,
     parameters: legionToolSchema(pi),
     execute: async (_id, parameters, _signal, _onUpdate, context) => {
@@ -108,12 +115,14 @@ export function createLegionTool(deps: {
         }
         switch (parameters.op) {
           case "merge_gate":
-            return jsonSuccess(await daemon.mergeGate({
-              tree: architect.tree,
-              pr: numberInput("pr"),
-              sessionId,
-              secret: architect.secret,
-            }));
+            return jsonSuccess(
+              await daemon.mergeGate({
+                tree: architect.tree,
+                pr: numberInput("pr"),
+                sessionId,
+                secret: architect.secret,
+              })
+            );
           case "issue_create": {
             const labels = parameters.labels;
             if (
@@ -126,14 +135,16 @@ export function createLegionTool(deps: {
             ) {
               throw new Error("issue_create labels must use architect-mutable Legion labels");
             }
-            return jsonSuccess(await daemon.issueCreate({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              title: stringInput("title"),
-              body: stringInput("body"),
-              labels: labels ?? [],
-            }));
+            return jsonSuccess(
+              await daemon.issueCreate({
+                tree: architect.tree,
+                sessionId,
+                secret: architect.secret,
+                title: stringInput("title"),
+                body: stringInput("body"),
+                labels: labels ?? [],
+              })
+            );
           }
           case "wave_release": {
             const children = parameters.children;
@@ -143,21 +154,25 @@ export function createLegionTool(deps: {
             ) {
               throw new Error("wave_release requires children");
             }
-            return jsonSuccess(await daemon.waveRelease({
-              tree: architect.tree,
-              children,
-              sessionId,
-              secret: architect.secret,
-            }));
+            return jsonSuccess(
+              await daemon.waveRelease({
+                tree: architect.tree,
+                children,
+                sessionId,
+                secret: architect.secret,
+              })
+            );
           }
           case "comment":
-            return jsonSuccess(await daemon.comment({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              issue: stringInput("issue"),
-              body: stringInput("body"),
-            }));
+            return jsonSuccess(
+              await daemon.comment({
+                tree: architect.tree,
+                sessionId,
+                secret: architect.secret,
+                issue: stringInput("issue"),
+                body: stringInput("body"),
+              })
+            );
           case "post_spec":
             await daemon.postBody({
               tree: architect.tree,
@@ -172,13 +187,15 @@ export function createLegionTool(deps: {
             if (!isArchitectMutableLabel(label)) {
               throw new Error("label changes must use architect-mutable Legion labels");
             }
-            return jsonSuccess(await daemon.labels({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              issue: stringInput("issue"),
-              add: [label],
-            }));
+            return jsonSuccess(
+              await daemon.labels({
+                tree: architect.tree,
+                sessionId,
+                secret: architect.secret,
+                issue: stringInput("issue"),
+                add: [label],
+              })
+            );
           }
           case "escalate": {
             const kind = stringInput("kind");
@@ -223,14 +240,16 @@ export function createLegionTool(deps: {
             if (typeof role !== "string" || !LEGION_ROLES.includes(role as LegionRole)) {
               throw new Error("spawn_worker requires a valid Legion role");
             }
-            return jsonSuccess(await daemon.spawnWorker({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              issue: stringInput("issue"),
-              role: role as LegionRole,
-              task: stringInput("task"),
-            }));
+            return jsonSuccess(
+              await daemon.spawnWorker({
+                tree: architect.tree,
+                sessionId,
+                secret: architect.secret,
+                issue: stringInput("issue"),
+                role: role as LegionRole,
+                task: stringInput("task"),
+              })
+            );
           }
           default:
             throw new Error(`Unsupported legion operation: ${String(parameters.op)}`);
@@ -241,4 +260,3 @@ export function createLegionTool(deps: {
     },
   };
 }
-

@@ -108,9 +108,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v15 state with a valid project and admission capacity", () => {
+  it("initializes empty v16 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 15,
+      version: 16,
       project: "omp",
       issues: {},
       trees: {},
@@ -120,6 +120,7 @@ describe("legion state", () => {
       prByBranch: {},
       prTombstones: {},
       admission: { cap: 4, active: [], queue: [] },
+      workerAdmission: { queue: [] },
       phases: {},
       controllerHeldEvents: [],
     });
@@ -503,6 +504,16 @@ describe("legion state", () => {
       },
     };
     await writeFile(file, JSON.stringify({ ...current, version: 12 }), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v15 state by adding an empty running-worker queue", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v15-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const { workerAdmission: _workerAdmission, ...withoutWorkerAdmission } = current;
+    await writeFile(file, JSON.stringify({ ...withoutWorkerAdmission, version: 15 }), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
   });

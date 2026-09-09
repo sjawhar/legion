@@ -355,12 +355,19 @@ async function startDaemonLocked(
     now: deps.now,
   });
 
-  // reconcileAdmission is now awaited further down (see the comment near its call), once
-  // `api` is assigned: its promotion cascade calls back into `mintBootToken`/
-  // `mintControllerCapability` closures that read `api` by reference.
-  void processManager.reconnectWorkers().catch((error) => {
+  // Awaited (not fire-and-forget): reconnectWorkers is the source of truth
+  // runningWorkerCount() relies on, so an admission decision racing ahead of it would risk
+  // over-admitting past the configured cap. This runs before `api` is assigned purely because
+  // it needs no `api` reference (it only probes existing connections; it never mints a boot
+  // token) — but a reconnect's own `get_state` response can still synchronously fire
+  // `onIdle` -> `promoteWorkerQueue`, which is why that trigger (and `reconcileWorkerAdmission`)
+  // stay gated behind `processManager.enableWorkerPromotion()` below until `api` exists: nothing
+  // here is protected by call *ordering*, only by the gate.
+  try {
+    await processManager.reconnectWorkers();
+  } catch (error) {
     console.error(`[legion] worker reconnection failed:`, error);
-  });
+  }
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
     const payload = await overseerCatchup(state, tree);
     await deps.envoyPublish(
@@ -416,8 +423,18 @@ async function startDaemonLocked(
 
   // Awaited only now that `api` is assigned: the promotion cascade this can
   // trigger calls back into `processManager`'s `mintBootToken`/
-  // `mintControllerCapability` closures, which read `api` by reference.
+  // `mintControllerCapability` closures, which read `api` by reference. `Bun.serve` above
+  // already has the port open and accepting connections by this point — the running-worker
+  // and tree-admission counts these two calls converge are correct *before* that happens
+  // (computed fresh from `state.roles`/`state.admission`, not accumulated), so an early real
+  // request arriving during this window is never over-admitted; it only serializes behind
+  // these calls on the same `admissionLock`, which can at most let it jump ahead of a queued
+  // tree/worker in FIFO order. `enableWorkerPromotion()` opens the gate `reconcileWorkerAdmission`
+  // (and every `onIdle`/`markWorkerDead`/`closeTree` trigger from this point on) requires —
+  // see `WorkerAdmission.workerPromotionEnabled`'s doc comment.
+  processManager.enableWorkerPromotion();
   await processManager.reconcileAdmission();
+  await processManager.reconcileWorkerAdmission();
   const ready = nats.ready();
   const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 
@@ -478,6 +495,13 @@ async function startDaemonLocked(
     }
     void processManager.reconcileTmuxWindows().catch((error) => {
       console.error(`[legion] tmux reconciliation failed:`, error);
+    });
+    // A below-threshold launch failure rotates its head to the tail (see
+    // `promoteQueuedWorker`) instead of blocking the queue, but nothing else retries a queue
+    // with zero live workers on its own — this periodic tick is that retry, mirroring how a
+    // worker-cap raise between restarts gets promoted via the same call at boot.
+    void processManager.reconcileWorkerAdmission().catch((error) => {
+      console.error(`[legion] worker admission reconciliation failed:`, error);
     });
   }, LINGER_SWEEP_INTERVAL_MS);
 

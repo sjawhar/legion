@@ -102,7 +102,17 @@ export interface WorkerRoleClaim {
   generation?: number;
   pendingAssignment?: string;
   launchFailures?: number;
+  /** Consecutive `prompt()` rejections against this claim's already-live socket (reset to 0 on
+   * a successful prompt) — the queued idle-resume path's own failure counter, mirroring
+   * `launchFailures` for the cold-launch path. At `MAX_LAUNCH_FAILURES` the worker is
+   * considered persistently broken: its locator is retired and cleared so the still-queued
+   * assignment falls through to the launch path's own threshold on the next drain. */
+  promptFailures?: number;
   bootTokenHash?: string;
+  /** The dead worker's last OMP session file, preserved when its locator is cleared (retired or
+   * found dead on reconnect) so a later promoted/resumed launch still resumes the same agent via
+   * `--resume` instead of starting fresh. Cleared once a launch records a fresh locator. */
+  resumeSessionFile?: string;
 }
 
 export interface ControllerRoleClaim {
@@ -118,7 +128,7 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 15;
+  version: 16;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -133,6 +143,9 @@ export interface LegionState {
   /** A closed-unmerged PR's `headUpdatedAt` at close, keyed by `repo#number`: keeps an older `opened`/`synchronize` redelivery from recreating a PR this state has already deleted (see `pullRequest` in reducers.ts). Pruned past 30 days by `pruneStalePrTombstones`. */
   prTombstones: Record<string, number>;
   admission: { cap: number; active: IssueKey[]; queue: IssueKey[] };
+  /** FIFO role tokens waiting for a running-worker slot (config.workerCap); the currently-running
+   * set is derived from live RPC frames and kept in-memory by ProcessManager, never persisted. */
+  workerAdmission: { queue: string[] };
   phases: Record<
     IssueKey,
     { phase: string; sessionId: string; completed?: { summary: string; at: string } } | undefined
@@ -274,7 +287,9 @@ const WorkerRoleClaimSchema = z
     generation: z.number().int().nonnegative().optional(),
     pendingAssignment: z.string().optional(),
     launchFailures: z.number().int().nonnegative().optional(),
+    promptFailures: z.number().int().nonnegative().optional(),
     bootTokenHash: z.string().optional(),
+    resumeSessionFile: z.string().optional(),
   })
   .strict();
 const ControllerRoleClaimSchema = z
@@ -300,7 +315,7 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(15),
+    version: z.literal(16),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -327,6 +342,11 @@ const LegionStateSchema = z
         queue: z.array(IssueKeySchema),
       })
       .strict(),
+    workerAdmission: z
+      .object({
+        queue: z.array(z.string().regex(ENVOY_ROLE_TOKEN_PATTERN)),
+      })
+      .strict(),
     phases: z.record(IssueKeySchema, PhaseSchema),
     controllerHeldEvents: z.array(HeldEventSchema).default([]),
     controllerCapabilityHash: z
@@ -344,7 +364,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 15,
+    version: 16,
     project,
     issues: {},
     trees: {},
@@ -354,6 +374,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     prByBranch: {},
     prTombstones: {},
     admission: { cap, active: [], queue: [] },
+    workerAdmission: { queue: [] },
     phases: {},
     controllerHeldEvents: [],
   };
@@ -589,6 +610,16 @@ function migrateV14State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 14) return state;
   return { ...state, version: 15 };
 }
+
+/** v15 -> v16: adds the FIFO running-worker admission queue (bounded by config.workerCap)
+ * beside the existing tree admission queue; the currently-*running* set is derived live from
+ * each worker's RPC socket by ProcessManager and is never persisted, so the migration only needs
+ * to seed an empty queue. */
+function migrateV15State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 15) return state;
+  return { ...state, version: 16, workerAdmission: { queue: [] } };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -602,16 +633,18 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV14State(
-    migrateV13State(
-      migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
+  const state = migrateV15State(
+    migrateV14State(
+      migrateV13State(
+        migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
+      )
     )
   );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 15) {
+  if (version !== 16) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

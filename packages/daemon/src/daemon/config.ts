@@ -20,13 +20,13 @@ export interface DaemonConfig {
   port: number;
   envoyUrl: string;
   /**
-   * Optional dispatch service endpoint (its /mcp URL), passed through to
-   * spawned session environments as DISPATCH_MCP_URL so the native dispatch
-   * tool targets a specific service (the smoke rig points it at its own
+   * Optional dispatch service base URL (no `/mcp` suffix), passed through to
+   * spawned session environments as DISPATCH_URL so the native dispatch tool
+   * targets a specific service (the smoke rig points it at its own
    * instance). When unset, sessions fall back to their envoy.json dispatch
    * config.
    */
-  dispatchMcpUrl?: string;
+  dispatchUrl?: string;
   natsUrls: string[];
   ompInvocation: string;
   boardProjectIds: string[];
@@ -34,7 +34,7 @@ export interface DaemonConfig {
   repos: string[];
   appLogins: string[];
   admissionCap: number;
-  workerBudget: number;
+  workerCap: number;
   maxRecursionDepth: number;
   lingerHours: number;
   maxFixAttempts: number;
@@ -80,7 +80,7 @@ type ValueSource = "cli" | "config" | "env" | "default";
 const DEFAULT_PORT = 13370;
 const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 const DEFAULT_ADMISSION_CAP = 4;
-const DEFAULT_WORKER_BUDGET = 6;
+const DEFAULT_WORKER_CAP = 10;
 const DEFAULT_MAX_RECURSION_DEPTH = 8;
 const DEFAULT_LINGER_HOURS = 72;
 const DEFAULT_MAX_FIX_ATTEMPTS = 3;
@@ -91,13 +91,19 @@ const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
   port: null,
   envoy_url: null,
+  // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_url
+  // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   dispatch_mcp_url: null,
+  dispatch_url: null,
   nats_urls: null,
   omp_invocation: null,
   board_project_ids: null,
   repos: null,
   app_logins: null,
   admission_cap: null,
+  worker_cap: null,
+  // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-worker_cap
+  // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   worker_budget: null,
   max_recursion_depth: null,
   linger_hours: null,
@@ -209,6 +215,32 @@ function validateRepoSlug(value: string, field: string): string {
     throw new Error(`${field} entries must be "owner/name" (got "${value}")`);
   }
   return value;
+}
+
+/** The dispatch service base URL never carries its clients' `/mcp` alias; the clients strip it
+ * themselves. Rejecting it here surfaces a stale config value instead of silently misrouting.
+ * Checked against the parsed URL's pathname (trailing slash stripped) rather than the raw
+ * string, so `.../mcp/` and `.../mcp?query=1` are caught too, not just an exact `/mcp` suffix. */
+function requireNoMcpSuffix(value: string, field: string): string {
+  const pathname = new URL(value).pathname.replace(/\/+$/, "");
+  if (pathname.endsWith("/mcp")) {
+    throw new Error(`${field} must be the dispatch service base URL, not the /mcp endpoint`);
+  }
+  return value;
+}
+
+/** Canonicalizes a validated base URL to have no trailing slash, so appending a path segment
+ * (e.g. `` `${dispatchUrl}/mcp` ``) never doubles the slash regardless of how the operator wrote
+ * the configured value (`http://x` and `http://x/` both resolve to `http://x`). Rejects a query
+ * string or fragment outright — string-concatenating a path segment onto either would build a
+ * broken URL (the query/fragment landing before the appended path), so there is no correct way
+ * to canonicalize one. */
+function normalizeBaseUrl(value: string, field: string): string {
+  const url = new URL(value);
+  if (url.search || url.hash) {
+    throw new Error(`${field} must not include a query string or fragment`);
+  }
+  return url.toString().replace(/\/+$/, "");
 }
 
 function collectUnknownKeys(
@@ -371,9 +403,17 @@ export function loadConfigFromFile(
   }
   const envoyUrl = readString(config.envoy_url, "envoy_url");
   if (envoyUrl !== undefined) fields.envoyUrl = validateUrl(envoyUrl, "envoy_url");
-  const dispatchMcpUrlField = readString(config.dispatch_mcp_url, "dispatch_mcp_url");
-  if (dispatchMcpUrlField !== undefined) {
-    fields.dispatchMcpUrl = validateUrl(dispatchMcpUrlField, "dispatch_mcp_url");
+  if (config.dispatch_mcp_url !== undefined) {
+    throw new Error(
+      "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
+    );
+  }
+  if (config.worker_budget !== undefined) {
+    throw new Error("worker_budget was replaced by worker_cap");
+  }
+  const dispatchUrlField = readString(config.dispatch_url, "dispatch_url");
+  if (dispatchUrlField !== undefined) {
+    fields.dispatchUrl = validateUrl(dispatchUrlField, "dispatch_url");
   }
   const natsUrls = readStringArray(config.nats_urls, "nats_urls");
   if (natsUrls !== undefined) fields.natsUrls = natsUrls;
@@ -390,7 +430,7 @@ export function loadConfigFromFile(
 
   for (const [fileKey, configKey] of [
     ["admission_cap", "admissionCap"],
-    ["worker_budget", "workerBudget"],
+    ["worker_cap", "workerCap"],
     ["max_recursion_depth", "maxRecursionDepth"],
     ["linger_hours", "lingerHours"],
     ["max_fix_attempts", "maxFixAttempts"],
@@ -449,12 +489,37 @@ export function resolveDaemonConfig(
     env.ENVOY_URL,
     DEFAULT_ENVOY_URL
   );
-  const dispatchMcpUrl = resolveValue(
+  const dispatchUrl = resolveValue(
     undefined,
-    fileString(fields, "dispatchMcpUrl"),
-    env.DISPATCH_MCP_URL,
+    fileString(fields, "dispatchUrl"),
+    env.DISPATCH_URL,
     undefined
   );
+  const resolvedDispatchUrl =
+    dispatchUrl.value === undefined
+      ? undefined
+      : requireNoMcpSuffix(
+          normalizeBaseUrl(validateUrl(dispatchUrl.value, "DISPATCH_URL"), "DISPATCH_URL"),
+          "DISPATCH_URL"
+        );
+  if (env.DISPATCH_MCP_URL !== undefined) {
+    // The daemon exports DISPATCH_MCP_URL into every pane it spawns (a `/mcp`-suffixed alias
+    // derived from its own dispatchUrl, for clients that still read that alias directly) — so
+    // `legion start`/`restart`/`check-config` run from inside one of those panes (the
+    // controller pane has a shell) always inherits it. Only reject a genuinely stale/wrong
+    // value: unset DISPATCH_URL (nothing to derive the alias from) or one that disagrees with
+    // what DISPATCH_URL implies; the daemon's own consistent echo is accepted.
+    const expectedMcpUrl =
+      resolvedDispatchUrl === undefined ? undefined : `${resolvedDispatchUrl}/mcp`;
+    if (expectedMcpUrl === undefined || env.DISPATCH_MCP_URL !== expectedMcpUrl) {
+      throw new Error(
+        "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
+      );
+    }
+  }
+  if (env.LEGION_WORKER_BUDGET !== undefined) {
+    throw new Error("worker_budget was replaced by worker_cap");
+  }
   const natsUrls = resolveValue(
     opts.cliOverrides?.natsUrls,
     fileStringArray(fields, "natsUrls"),
@@ -499,11 +564,11 @@ export function resolveDaemonConfig(
     parseEnvPositiveInteger(env.LEGION_ADMISSION_CAP, "LEGION_ADMISSION_CAP"),
     DEFAULT_ADMISSION_CAP
   );
-  const workerBudget = resolveValue(
-    opts.cliOverrides?.workerBudget,
-    fileNumber(fields, "workerBudget"),
-    parseEnvPositiveInteger(env.LEGION_WORKER_BUDGET, "LEGION_WORKER_BUDGET"),
-    DEFAULT_WORKER_BUDGET
+  const workerCap = resolveValue(
+    opts.cliOverrides?.workerCap,
+    fileNumber(fields, "workerCap"),
+    parseEnvPositiveInteger(env.LEGION_WORKER_CAP, "LEGION_WORKER_CAP"),
+    DEFAULT_WORKER_CAP
   );
   const maxRecursionDepth = resolveValue(
     opts.cliOverrides?.maxRecursionDepth,
@@ -532,7 +597,7 @@ export function resolveDaemonConfig(
 
   const lifecycleNumbers: Record<string, number> = {
     admissionCap: admissionCap.value,
-    workerBudget: workerBudget.value,
+    workerCap: workerCap.value,
     maxRecursionDepth: maxRecursionDepth.value,
     lingerHours: lingerHours.value,
     maxFixAttempts: maxFixAttempts.value,
@@ -575,17 +640,14 @@ export function resolveDaemonConfig(
       legionId: legionId.value,
       port: port.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
-      dispatchMcpUrl:
-        dispatchMcpUrl.value === undefined
-          ? undefined
-          : validateUrl(dispatchMcpUrl.value, "DISPATCH_MCP_URL"),
+      dispatchUrl: resolvedDispatchUrl,
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       boardProjectIds: boardProjectIds.value,
       repos: repos.value,
       appLogins: appLogins.value,
       admissionCap: admissionCap.value,
-      workerBudget: workerBudget.value,
+      workerCap: workerCap.value,
       maxRecursionDepth: maxRecursionDepth.value,
       lingerHours: lingerHours.value,
       maxFixAttempts: maxFixAttempts.value,
