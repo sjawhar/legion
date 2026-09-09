@@ -413,7 +413,7 @@ func TestArtifactVersionsAndPrimaryDocument(t *testing.T) {
 	}](t, first)
 	blob := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+image.Artifact.ID+"/versions/1", nil, "alice")
 	checksum := sha256.Sum256([]byte("first image"))
-	if blob.Code != http.StatusOK || blob.Body.String() != "first image" || blob.Header().Get("Content-Type") != "image/png" || blob.Header().Get("ETag") != hex.EncodeToString(checksum[:]) {
+	if blob.Code != http.StatusOK || blob.Body.String() != "first image" || blob.Header().Get("Content-Type") != "image/png" || blob.Header().Get("ETag") != hex.EncodeToString(checksum[:]) || blob.Header().Get("Content-Disposition") != "attachment" || blob.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("stream first blob: status=%d headers=%v body=%s", blob.Code, blob.Header(), blob.Body.String())
 	}
 
@@ -1291,5 +1291,37 @@ func TestConcurrentPartialUserStateUpdatesPreserveFields(t *testing.T) {
 	state := decodeBody[map[string]userIssueState](t, stateResponse)
 	if !state[issue.Key].Pinned || state[issue.Key].LastReadSeq != 7 {
 		t.Fatalf("user state: got %#v, want pinned with last_read_seq 7", state[issue.Key])
+	}
+}
+
+func TestIssueExternalLinksRequireAbsoluteHTTPURLs(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "External links",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	for _, address := range []string{"javascript:alert(1)", "file:///etc/passwd", "/relative"} {
+		response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+			"external_links": []map[string]string{{"url": address}},
+		}, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_URL"`) {
+			t.Fatalf("reject unsafe link %q: status=%d body=%s", address, response.Code, response.Body.String())
+		}
+	}
+	valid := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"external_links": []map[string]string{{"url": "http://100.64.0.1:8766/issues/TEST-1"}},
+	}, "alice")
+	if valid.Code != http.StatusOK || !strings.Contains(valid.Body.String(), `"external_links":[{"url":"http://100.64.0.1:8766/issues/TEST-1","kind":"url"}]`) {
+		t.Fatalf("accept HTTP external link: status=%d body=%s", valid.Code, valid.Body.String())
 	}
 }

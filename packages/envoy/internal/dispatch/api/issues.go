@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"net/url"
 
 	"github.com/jackc/pgx/v5"
 
@@ -343,8 +344,8 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, link := range *input.ExternalLinks {
-			if strings.TrimSpace(link.URL) == "" {
-				writeError(w, "INVALID_EXTERNAL_LINK", http.StatusBadRequest, "external link URL is required")
+			if err := validateExternalURL(link.URL); err != nil {
+				s.writeHandlerError(w, err)
 				return
 			}
 			kind := link.Kind
@@ -499,4 +500,12 @@ func (s *server) loadChildren(ctx context.Context, q issueQueryer, key string) (
 		children = append(children, child)
 	}
 	return children, rows.Err()
+}
+
+func validateExternalURL(raw string) error {
+	value, err := url.ParseRequestURI(strings.TrimSpace(raw))
+	if err != nil || !value.IsAbs() || value.Host == "" || (value.Scheme != "http" && value.Scheme != "https") {
+		return errorf(http.StatusBadRequest, "INVALID_URL", "external link URL must be an absolute HTTP(S) URL")
+	}
+	return nil
 }
