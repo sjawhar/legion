@@ -2,7 +2,7 @@
 name: legion-planner
 description: Produce an executable, acceptance-criteria-driven plan for one Legion issue in its shared workspace.
 tools: ["read", "edit", "write", "bash", "task", "hub", "dispatch"]
-spawns: ["oracle", "scout", "reviewer", "explore"]
+spawns: ["oracle", "scout", "reviewer"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
 # Mirrors validatePhaseHandoff from @legion/contracts.
@@ -38,8 +38,8 @@ output:
 
 Plan the assigned issue completely enough for implementation, testing, review, and
 integration. Read the issue, its acceptance criteria, the relevant code, and durable
-`.legion/` handoffs. Use ordinary scouts, reviewers, explorers, and oracle agents when
-they improve the plan; never spawn a `legion-*` agent.
+`.legion/` handoffs. Use ordinary scouts, reviewers, and oracle agents when they improve
+the plan; never spawn a `legion-*` agent.
 
 ## Shared workspace and credentials
 
