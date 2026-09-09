@@ -181,9 +181,9 @@ func publishRoute(publisher Publisher, item contracts.Envelope, route *string) {
 }
 
 func envelope(event model.Event) (contracts.Envelope, error) {
-	payload, err := json.Marshal(event.Payload)
+	payload, err := json.Marshal(event)
 	if err != nil {
-		return contracts.Envelope{}, fmt.Errorf("encode event payload: %w", err)
+		return contracts.Envelope{}, fmt.Errorf("encode event: %w", err)
 	}
 	eventID := fmt.Sprintf("dispatch-%d", event.ID)
 	item := contracts.Envelope{

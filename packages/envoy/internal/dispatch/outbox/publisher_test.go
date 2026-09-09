@@ -86,12 +86,12 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	if item.InReplyTo != askID || item.Urgency != "blocking" {
 		t.Fatalf("answer metadata = (%q, %q)", item.InReplyTo, item.Urgency)
 	}
-	var payload model.Ask
+	var payload model.Event
 	if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
 		t.Fatalf("decode event payload: %v", err)
 	}
-	if payload.ID != askID {
-		t.Fatalf("payload ask ID = %q, want %q", payload.ID, askID)
+	if payload.ID != event.ID || payload.Seq != event.Seq || payload.Type != event.Type || payload.Actor != event.Actor {
+		t.Fatalf("payload event = %#v, want id=%d seq=%d type=%q actor=%#v", payload, event.ID, event.Seq, event.Type, event.Actor)
 	}
 	if item.PayloadSummary != "T-1 ask answered: Should the dispatcher publish this answer?" {
 		t.Fatalf("payload summary = %q", item.PayloadSummary)
