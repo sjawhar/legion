@@ -337,7 +337,7 @@ describe("Legion HTTP API", () => {
     );
     expect(approvalDelivery).toContainEqual({
       kind: "publish",
-      role: roleToken(state.project, child, "architect"),
+      role: roleToken(state.project, root, "architect"),
       payload: { type: "pr-ready", pr: 17 },
     });
     expect(state.prs["acme/widgets#17"]?.reviewDecision).toBe("approved");
@@ -1246,6 +1246,54 @@ describe("Legion HTTP API", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+  it("stores the resolved claim role in state.phases, not an arbitrary declared phase string", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+    expect(spawn.response.status).toBe(200);
+    expect(
+      (
+        await json("/legion/v1/role-backing", {
+          tree: root,
+          issue: root,
+          role: "tester",
+          agentId: "agent-tester",
+          sessionId: "ses_tester",
+          spawnToken: spawn.body.spawnToken,
+        })
+      ).response.status
+    ).toBe(200);
+
+    // roleForSession only rejects a declared phase that names a *different*
+    // recognized role; an unrecognized string passes through unchecked, so
+    // handlePhase must persist the resolved claim role, not this value.
+    const phase = await json("/legion/v1/phase", {
+      tree: root,
+      issue: root,
+      phase: "not-a-real-role",
+      sessionId: "ses_tester",
+      spawnToken: spawn.body.spawnToken,
+    });
+
+    expect(phase.response.status).toBe(200);
+    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
   });
   it("surfaces a deferred admission retry as queued through the controller API", async () => {
     await start({ admissionResult: "queued" });

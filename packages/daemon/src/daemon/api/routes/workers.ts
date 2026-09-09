@@ -66,7 +66,7 @@ export async function handlePhase(
     role,
     secretHash: secretHash(secret),
   });
-  ctx.deps.state.phases[issue] = { phase, sessionId };
+  ctx.deps.state.phases[issue] = { phase: role, sessionId };
   const token = roleToken(ctx.deps.state.project, issue, role);
   const existing = ctx.deps.state.roles[token];
   ctx.deps.state.roles[token] = {

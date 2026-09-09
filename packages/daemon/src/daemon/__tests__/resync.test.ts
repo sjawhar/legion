@@ -53,6 +53,30 @@ function recordOpenReleasedIssue(
   };
 }
 
+/**
+ * Registers `issue` as its own tree root with an active implementer phase, so
+ * a settled CI verdict for its PR routes to a worker instead of vanishing for
+ * want of a tracked tree.
+ */
+function trackIssue(state: LegionState): void {
+  state.issues[issue] = {
+    key: issue,
+    title: "Resync this Legion tree",
+    state: "open",
+    children: [],
+    released: true,
+    labels: [],
+  };
+  state.trees[issue] = {
+    root: issue,
+    generation: 1,
+    status: "active",
+    launchFailures: 0,
+    heldEvents: [],
+  };
+  state.phases[issue] = { phase: "implementer", sessionId: "resync-test-worker" };
+}
+
 describe("runResync", () => {
   it("reports one zero-owner-tree anomaly for an unmarked released open issue with no active tree", async () => {
     const state = newLegionState("omp", 1);
@@ -462,7 +486,7 @@ describe("runResync", () => {
         effects: [
           {
             kind: "publish",
-            role: roleToken("omp", issue, "implementer"),
+            role: roleToken("omp", issue, "architect"),
             payload: { type: "ci-green", sha: "head-1" },
           },
           {
@@ -486,6 +510,7 @@ describe("runResync", () => {
 
   it("reconciles an unsettled red PR with failing check names", async () => {
     const state = newLegionState("omp", 1);
+    trackIssue(state);
     state.prs["sjawhar/legion#7"] = checkPr(issue, { repo: "sjawhar/legion" });
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
 
@@ -537,6 +562,7 @@ describe("runResync", () => {
 
   it("moves a stale local head before applying GitHub's green rollup", async () => {
     const state = newLegionState("omp", 1);
+    trackIssue(state);
     state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
       verdict: "red",
@@ -607,6 +633,14 @@ describe("runResync", () => {
       released: true,
       labels: [],
     };
+    state.trees[issue] = {
+      root: issue,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.phases[issue] = { phase: "implementer", sessionId: "resync-test-worker" };
     const pr: PrState = {
       key: issue,
       repo: "sjawhar/legion",
@@ -889,6 +923,7 @@ describe("runResync", () => {
 
   it("reconciles a stored red verdict to green", async () => {
     const state = newLegionState("omp", 1);
+    trackIssue(state);
     state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
       verdict: "red",
@@ -935,6 +970,7 @@ describe("runResync", () => {
 
   it("reconciles a stored green verdict to red with GitHub's failing checks", async () => {
     const state = newLegionState("omp", 1);
+    trackIssue(state);
     state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
       verdict: "green",

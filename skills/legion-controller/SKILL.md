@@ -50,6 +50,7 @@ into a state holder: daemon state and GitHub artifacts remain authoritative.
 | Resync report | artifact-driven anomaly list (zero-owner trees, erroring issues) | Verify against fresh state, then dispatch/heal |
 | Mention | Slack/GitHub @mention text | Answer, or route to the owning issue's architect role |
 | Approval interpretation | ambiguous human comment on a gated issue | Decide whether it's an approval; if so, apply `human-approved` via the daemon |
+| Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion admit <root>`; otherwise no action — the event is not held or redelivered |
 | Direct user message | — | Always first |
 
 ## New issue triage

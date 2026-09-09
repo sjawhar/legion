@@ -441,7 +441,13 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     });
     pr.ciReconciled = false;
     await applyEffects(
-      settleCiVerdict(deps.state, pr, { ...outcome, settledAt: input.settledAt }, deps.config),
+      settleCiVerdict(
+        deps.state,
+        pr,
+        { ...outcome, settledAt: input.settledAt },
+        deps.config,
+        envelope
+      ),
       envelope
     );
     return true;

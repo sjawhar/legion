@@ -93,8 +93,8 @@ let resyncClock = 1;
 const publishedEmissions = (applied: Effect[][]) =>
   applied.flat().flatMap((effect) => (effect.kind === "publish" ? [effect.payload] : []));
 
-it("routes an approved PR immediately when its head's checks settle green", async () => {
-  const { state, architect, implementer } = stateForCi();
+it("routes an approved PR's settled checks and ready signal to the tree's architect", async () => {
+  const { state, architect } = stateForCi();
   reduceGithubEvent(
     state,
     "notifications.github.acme.widgets.pr.7.review",
@@ -137,7 +137,7 @@ it("routes an approved PR immediately when its head's checks settle green", asyn
 
   expect(published).toEqual([
     {
-      topic: roleTopic(implementer),
+      topic: roleTopic(architect),
       payloadJson: JSON.stringify({ type: "ci-green", sha: "head-1" }),
     },
     {

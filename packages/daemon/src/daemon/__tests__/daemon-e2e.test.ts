@@ -222,7 +222,6 @@ describe("daemon end-to-end", () => {
       const root = formatIssueKey("acme", "widgets", 1);
       const child = formatIssueKey("acme", "widgets", 2);
       const controller = controllerToken(project);
-      const childArchitect = roleToken(project, child, "architect");
       const worker = roleToken(project, child, "implementer");
       const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-e2e-"));
       const natsPort = await scratchPort();
@@ -239,8 +238,8 @@ describe("daemon end-to-end", () => {
       const rootRespawn = Promise.withResolvers<string[]>();
       let rootSpawnCount = 0;
       const controllerTriage = Promise.withResolvers<NatsEvent>();
-      const childArchitectPublication = Promise.withResolvers<NatsEvent>();
-      const workerPublication = Promise.withResolvers<NatsEvent>();
+      const firstWorkerPublication = Promise.withResolvers<NatsEvent>();
+      const secondWorkerPublication = Promise.withResolvers<NatsEvent>();
       const workerPublications: NatsEvent[] = [];
       const workerDirective = Promise.withResolvers<NatsEvent>();
       let roleSubscription: Subscription | undefined;
@@ -349,11 +348,10 @@ describe("daemon end-to-end", () => {
               payload: JSON.parse(codec.decode(message.data)),
             };
             if (event.subject === roleTopic(controller)) controllerTriage.resolve(event);
-            if (event.subject === roleTopic(childArchitect))
-              childArchitectPublication.resolve(event);
             if (event.subject === roleTopic(worker)) {
               workerPublications.push(event);
-              workerPublication.resolve(event);
+              if (workerPublications.length === 1) firstWorkerPublication.resolve(event);
+              if (workerPublications.length === 2) secondWorkerPublication.resolve(event);
             }
           }
         })();
@@ -680,8 +678,11 @@ describe("daemon end-to-end", () => {
         );
         await broker.flush();
 
-        const architectPublication = await childArchitectPublication.promise;
-        expect(architectPublication.payload).toMatchObject({
+        // The child issue has an active implementer phase (set via the
+        // /legion/v1/phase call above), so routeActive delivers this comment
+        // to the implementer, not a fixed architect role.
+        const routedComment = await firstWorkerPublication.promise;
+        expect(routedComment.payload).toMatchObject({
           type: "issue-comment",
           author: "human",
           body: "Please investigate this child",
@@ -690,7 +691,7 @@ describe("daemon end-to-end", () => {
         const workerPayload = JSON.stringify({ type: "work", issue: child });
         broker.publish(roleTopic(worker), codec.encode(workerPayload));
         await broker.flush();
-        const observedWorkerPublication = await workerPublication.promise;
+        const observedWorkerPublication = await secondWorkerPublication.promise;
         expect(observedWorkerPublication.payload).toMatchObject({
           type: "work",
           issue: child,
