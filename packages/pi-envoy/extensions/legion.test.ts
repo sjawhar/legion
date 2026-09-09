@@ -65,6 +65,7 @@ type TestPi = {
   ) => void;
   readonly registerTool: (tool: RegisteredTool) => void;
   readonly registerCommand: (name: string, command: Omit<RegisteredCommand, "name">) => void;
+  readonly registerMessageRenderer: PiApi["registerMessageRenderer"];
 };
 
 type Handler = (event: unknown, context: SessionContext) => Promise<unknown> | unknown;
@@ -180,6 +181,7 @@ function createPi(
       activeTools.splice(0, activeTools.length, ...tools);
     },
     registerCommand: (name, command) => commands.push({ name, ...command }),
+    registerMessageRenderer: () => undefined,
   };
   if (options.omitAgents) Reflect.deleteProperty(pi, "agents");
   envoyExtension(pi as never);

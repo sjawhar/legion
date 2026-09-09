@@ -3,6 +3,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
+import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
 
@@ -51,6 +52,7 @@ type TestPi = {
   readonly zod: typeof z;
   readonly registerTool: (tool: RegisteredTool) => void;
   readonly registerCommand: (name: string, command: Omit<RegisteredCommand, "name">) => void;
+  readonly registerMessageRenderer: PiApi["registerMessageRenderer"];
   readonly on: (
     event:
       | "resources_discover"
@@ -218,19 +220,30 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
   const commands: RegisteredCommand[] = [];
   const tools: RegisteredTool[] = [];
   const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<unknown>>();
+  const renderers = new Map<string, MessageRenderer>();
   const messages: string[] = [];
   const deliveries: { readonly content: string; readonly options: unknown }[] = [];
   const pi: TestPi = {
     zod: options.zod ?? z,
     registerTool: (tool) => tools.push(tool),
     registerCommand: (name, command) => commands.push({ name, ...command }),
+    registerMessageRenderer: (customType, renderer) => renderers.set(customType, renderer),
     on: (event, handler) => handlers.set(event, handler),
     sendMessage: (message, options) => {
       messages.push(message.content);
       deliveries.push({ content: message.content, options });
     },
   };
-  return { commands, copiedSessionIDs: clipboardState.copiedSessionIDs, deliveries, handlers, messages, pi, tools };
+  return {
+    commands,
+    copiedSessionIDs: clipboardState.copiedSessionIDs,
+    deliveries,
+    handlers,
+    messages,
+    pi,
+    renderers,
+    tools,
+  };
 }
 
 function sessionContext(sessionID = "ses_omp"): SessionContext {
@@ -2409,5 +2422,55 @@ describe("envoy OMP extension", () => {
       summary: "summary-51",
     });
     expect(entries.at(-1)?.event_id).toBe("event-2");
+  });
+
+  test("registers a plain-text renderer for envoy-message so inbound content never renders as a markdown code block", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?message-renderer");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+
+    const renderer = fixture.renderers.get("envoy-message");
+    if (renderer === undefined) throw new Error("envoy-message renderer was not registered");
+
+    // TOON nests a structured `message` value under a `message:` key at
+    // 4-space indent — the exact shape CommonMark reads as an indented code
+    // block. The renderer must show the human body verbatim regardless,
+    // since it displays raw text and never runs content through Markdown.
+    const content = [
+      "envoy:",
+      "  from: human",
+      "  summary: dispatch answer",
+      "  message:",
+      "    **bold** answer",
+      "",
+      "    - one",
+      "    - two",
+    ].join("\n");
+    const theme: MessageRendererTheme = {
+      fg: (_color, text) => text,
+      bold: (text) => text,
+      boxRound: {
+        topLeft: "+",
+        topRight: "+",
+        bottomLeft: "+",
+        bottomRight: "+",
+        horizontal: "-",
+        vertical: "|",
+      },
+    };
+
+    const component = renderer({ customType: "envoy-message", content }, { expanded: true }, theme);
+    if (component === undefined) throw new Error("renderer returned no component");
+
+    const lines = component.render(80).map((line) => Bun.stripANSI(line));
+    const rendered = lines.join("\n");
+    expect(rendered).toContain("**bold** answer");
+    const oneIndex = lines.findIndex((line) => line.includes("- one"));
+    const twoIndex = lines.findIndex((line) => line.includes("- two"));
+    expect(oneIndex).toBeGreaterThan(-1);
+    expect(twoIndex).toBeGreaterThan(oneIndex);
+    // A markdown paragraph merge (the bug's actual symptom) would join
+    // adjacent lines onto one row; plain-text rendering keeps them apart.
+    expect(rendered).not.toContain("- one - two");
   });
 });
