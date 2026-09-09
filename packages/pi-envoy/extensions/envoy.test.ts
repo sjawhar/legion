@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { dispatchToolSpecs } from "@legion/contracts";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
 import { decode } from "@toon-format/toon";
@@ -188,9 +189,15 @@ const originalFetch = globalThis.fetch;
 const originalNatsUrl = process.env.ENVOY_NATS_URL;
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
+const originalDispatchUrl = process.env.DISPATCH_URL;
+const originalDispatchToken = process.env.DISPATCH_TOKEN;
 
 beforeEach(() => {
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
+  delete process.env.DISPATCH_MCP_URL;
+  delete process.env.DISPATCH_URL;
+  delete process.env.DISPATCH_TOKEN;
+  process.env.HOME = "/nonexistent-home-for-envoy-tests";
 });
 
 afterEach(() => {
@@ -198,6 +205,10 @@ afterEach(() => {
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   globalThis.fetch = originalFetch;
   delete process.env.DISPATCH_MCP_URL;
+  if (originalDispatchUrl === undefined) delete process.env.DISPATCH_URL;
+  else process.env.DISPATCH_URL = originalDispatchUrl;
+  if (originalDispatchToken === undefined) delete process.env.DISPATCH_TOKEN;
+  else process.env.DISPATCH_TOKEN = originalDispatchToken;
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
   if (originalPath === undefined) delete process.env.PATH;
@@ -295,23 +306,8 @@ function responseWithRegistration(
   return response({ session_id: body.session_id, machine_id: "test", dir: body.dir, topics: body.topics });
 }
 
-/** Put a `gh` on PATH that mints a known token, so the Bearer header is deterministic. */
-function withFakeGh(): void {
-  const dir = mkdtempSync(join(tmpdir(), "fake-gh-"));
-  writeFileSync(join(dir, "gh"), "#!/bin/sh\necho test-token\n", { mode: 0o755 });
-  process.env.PATH = `${dir}:${process.env.PATH ?? ""}`;
-}
 
-/** The JSON Schema fields the tool contract fixes for the model-facing `dispatch` schema. */
-const ToolJsonSchema = z.object({
-  required: z.array(z.string()),
-  properties: z.record(z.string(), z.unknown()),
-});
-
-/** One captured JSON-RPC `tools/call` body, down to `params.arguments`. */
-const DispatchPost = z.object({
-  params: z.object({ arguments: z.record(z.string(), z.unknown()) }),
-});
+const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
 describe("envoy OMP extension", () => {
   test("discovers the bundled envoy skill from the repository root", async () => {
@@ -452,7 +448,6 @@ describe("envoy OMP extension", () => {
     // package's zod import registers here but fails to load in a real session. The fixture
     // normally hands the extension the same zod the contract imports, which cannot tell the
     // two apart, so this pi.zod tracks every schema it (or a chained call on one) creates.
-    const { default: envoyExtension } = await import("./envoy.ts?injected-zod-identity");
     const built = new WeakSet<object>();
     const track = <Schema extends object>(schema: Schema): Schema => {
       const proxy = new Proxy(schema, {
@@ -471,9 +466,15 @@ describe("envoy OMP extension", () => {
     const foreign: string[] = [];
     const injected = {
       ...z,
-      object: (shape: z.ZodRawShape) => track(z.object(shape)),
+      object: (shape: z.ZodRawShape) => {
+        for (const field of Object.values(shape)) {
+          if (!built.has(field)) foreign.push("object field");
+        }
+        return track(z.object(shape));
+      },
       string: () => track(z.string()),
       number: () => track(z.number()),
+      boolean: () => track(z.boolean()),
       array: (item: z.ZodType) => {
         if (!built.has(item)) foreign.push("array element");
         return track(z.array(item));
@@ -482,9 +483,12 @@ describe("envoy OMP extension", () => {
       unknown: () => track(z.unknown()),
     } as unknown as typeof z;
     const fixture = createPi({ zod: injected });
+    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const { default: envoyExtension } = await import("./envoy.ts?injected-zod-identity");
     envoyExtension(fixture.pi);
 
-    for (const tool of fixture.tools.filter((candidate) => candidate.name.startsWith("envoy_"))) {
+    for (const tool of fixture.tools) {
       const parameters = tool.parameters as z.ZodObject<z.ZodRawShape>;
       if (!built.has(parameters)) foreign.push(tool.name);
       for (const [key, field] of Object.entries(parameters.shape)) {
@@ -535,7 +539,7 @@ describe("envoy OMP extension", () => {
     expect(result.content[0]?.text).toContain("no live session ses_missing");
   });
 
-  test("auto-subscribes the session to the dispatch thread topic on a successful dispatch tool result", async () => {
+  test("subscribes to the structured Dispatch topic from a successful tool result", async () => {
     const interestRegistrations: unknown[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
@@ -551,17 +555,17 @@ describe("envoy OMP extension", () => {
     await fixture.handlers.get("session_start")?.({}, sessionContext());
     await fixture.handlers.get("tool_result")?.(
       {
-        toolName: "dispatch",
+        toolName: "dispatch_ask",
         toolCallId: "call_1",
         input: {},
-        details: { thread: 91, url: "https://github.com/sjawhar/legion/issues/91" },
+        details: { topic: "notifications.dispatch.issue.LEGION-1.>" },
         isError: false,
       },
       sessionContext(),
     );
 
-    const topic = "notifications.github.sjawhar.legion.issue.91.>";
-    const base = "notifications.github.sjawhar.legion.issue.91";
+    const topic = "notifications.dispatch.issue.LEGION-1.>";
+    const base = "notifications.dispatch.issue.LEGION-1";
     expect(natsState.controls.has(base)).toBe(true);
     expect(natsState.controls.has(topic)).toBe(true);
     const lastRegistration = interestRegistrations.at(-1) as { topics?: string[] } | undefined;
@@ -585,7 +589,6 @@ describe("envoy OMP extension", () => {
       expect(natsState.controls.has(topic)).toBe(false);
     }
   });
-
 
   test("re-subscribes persisted registry interests on resumed session start, skipping role lanes", async () => {
     globalThis.fetch = async (input, init) => {
@@ -619,165 +622,114 @@ describe("envoy OMP extension", () => {
     expect(natsState.controls.has("notifications.role.legion-controller")).toBe(false);
   });
 
-  test("ignores failed and non-dispatch tool results", async () => {
+  test("does not subscribe when a tool result is an error or has no Dispatch topic", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-auto-subscribe-negative");
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext());
-    const url = '{"thread":92,"url":"https://github.com/sjawhar/legion/issues/92"}';
     await fixture.handlers.get("tool_result")?.(
-      { toolName: "dispatch", toolCallId: "c", input: {}, details: url, isError: true },
+      {
+        toolName: "dispatch_ask",
+        toolCallId: "failed",
+        input: {},
+        details: { topic: "notifications.dispatch.issue.LEGION-1.>" },
+        isError: true,
+      },
       sessionContext(),
     );
     await fixture.handlers.get("tool_result")?.(
-      { toolName: "read", toolCallId: "c2", input: {}, details: url, isError: false },
+      { toolName: "dispatch_read", toolCallId: "read", input: {}, details: { issue: "LEGION-1" }, isError: false },
       sessionContext(),
     );
 
-    expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.92.>")).toBe(false);
+    expect(natsState.controls.has("notifications.dispatch.issue.LEGION-1.>")).toBe(false);
   });
 
-  test("registers a native dispatch tool when dispatch is enabled and reads session identity on every call", async () => {
-    withFakeGh();
-    process.env.DISPATCH_MCP_URL = "http://127.0.0.1:1/mcp";
-    const posts: Array<{ headers: Headers; body: unknown }> = [];
+  test("registers every shared Dispatch tool when URL and token are available", async () => {
+    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-registration");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+
+    expect(fixture.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([...envoyToolSpecs.map((spec) => spec.name), ...dispatchToolNames]),
+    );
+    expect(fixture.tools).toHaveLength(envoyToolSpecs.length + dispatchToolSpecs.length);
+  });
+
+  test("executes dispatch_ask with the calling session identity and returns its structured result", async () => {
+    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const requests: Array<{ readonly url: URL; readonly init: RequestInit | undefined }> = [];
     globalThis.fetch = async (input, init) => {
-      const url = input.toString();
-      if (url === "http://127.0.0.1:1/mcp") {
-        posts.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
-        return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            result: {
-              content: [{ type: "text", text: '{"thread":91,"url":"https://github.com/sjawhar/legion/issues/91"}' }],
-            },
-          }),
-          { headers: { "content-type": "application/json" } },
-        );
-      }
-      return response({});
+      const url = new URL(input.toString());
+      requests.push({ url, init });
+      return new Response(
+        JSON.stringify({ id: "ask_1", issue_key: "LEGION-1", question: "Should we ship B3?" }),
+        { headers: { "content-type": "application/json" } },
+      );
     };
-    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch");
+    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-ask");
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    const tool = fixture.tools.find((candidate) => candidate.name === "dispatch");
-    if (tool === undefined) throw new Error("dispatch tool was not registered");
-    expect(tool.description).toContain("Open a thread with `subject`; continue one with `thread`.");
-    // The LLM-facing schema is one flat object shared by every host: the same
-    // eight arguments, only context and question required.
-    const schema = ToolJsonSchema.parse(tool.parameters);
-    expect(schema.required).toEqual(["context", "question"]);
-    expect(Object.keys(schema.properties)).toEqual([
-      "subject",
-      "thread",
-      "context",
-      "question",
-      "ask",
-      "urgency",
-      "repo",
-      "parent",
-    ]);
-
-    let title = "before rename";
+    const ask = fixture.tools.find((candidate) => candidate.name === "dispatch_ask");
+    if (ask === undefined) throw new Error("dispatch_ask was not registered");
     const context = {
       ...sessionContext("ses_live"),
-      sessionManager: { getSessionId: () => "ses_live", getSessionName: () => title },
+      sessionManager: { getSessionId: () => "ses_live", getSessionName: () => "current title" },
     };
-    // The token is minted in the session cwd, so the cwd has to exist.
-    mkdirSync(context.cwd, { recursive: true });
-    const first = await tool.execute(
-      "call_1",
-      { subject: "s", context: "c", question: "q", repo: "sjawhar/legion" },
+
+    const result = await ask.execute(
+      "call_ask",
+      { issue: "LEGION-1", question: "Should we ship B3?" },
       undefined,
       undefined,
       context,
     );
-    expect(first.isError).toBeUndefined();
-    expect(first.details).toEqual({ thread: 91, url: "https://github.com/sjawhar/legion/issues/91" });
-    const firstArgs = DispatchPost.parse(posts[0]?.body).params.arguments;
-    expect(firstArgs.repo).toBe("sjawhar/legion");
-    expect(firstArgs.origin).toMatchObject({
-      host: "omp",
-      cwd: "/tmp/envoy-omp-test",
-      sessionId: "ses_live",
-      sessionTitle: "before rename",
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "Opened ask ask_1: Should we ship B3?" }],
+      details: {
+        issue: "LEGION-1",
+        topic: "notifications.dispatch.issue.LEGION-1.>",
+        ask: "ask_1",
+      },
     });
-    expect(posts[0]?.headers.get("authorization")).toBe("Bearer test-token");
-    expect(posts[0]?.headers.get("mcp-session-id")).toBeNull();
-
-    title = "after rename";
-    await tool.execute(
-      "call_2",
-      { thread: "sjawhar/legion#91", context: "c2", question: "q2" },
-      undefined,
-      undefined,
-      context,
-    );
-    const secondArgs = DispatchPost.parse(posts[1]?.body).params.arguments;
-    expect(secondArgs.thread).toBe("sjawhar/legion#91");
-    expect(secondArgs.origin).toMatchObject({ sessionId: "ses_live", sessionTitle: "after rename" });
-    expect(posts).toHaveLength(2);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url.pathname).toBe("/api/v1/issues/LEGION-1/asks");
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe("Bearer dispatch-token");
+    expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
+      question: "Should we ship B3?",
+      actor: {
+        kind: "session",
+        id: "ses_live",
+        origin: { host: "omp", cwd: "/tmp/envoy-omp-test", session_title: "current title" },
+      },
+    });
   });
 
-  test("dispatch tool rejects a mixed-mode call before touching the network", async () => {
-    withFakeGh();
-    process.env.DISPATCH_MCP_URL = "http://127.0.0.1:1/mcp";
-    let fetched = 0;
-    globalThis.fetch = async () => {
-      fetched++;
-      return response({});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-invalid");
-    const fixture = createPi();
-    envoyExtension(fixture.pi);
-    const tool = fixture.tools.find((candidate) => candidate.name === "dispatch");
-    if (tool === undefined) throw new Error("dispatch tool was not registered");
-    const result = await tool.execute(
-      "c",
-      { subject: "s", thread: "7", context: "c", question: "q" },
-      undefined,
-      undefined,
-      sessionContext(),
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toBe(
-      "dispatch: pass either subject (open a thread) or thread (continue one), not both",
-    );
-    expect(fetched).toBe(0);
-  });
-
-  test("does not register dispatch when it is not enabled", async () => {
-    delete process.env.DISPATCH_MCP_URL;
+  test("does not register Dispatch tools and reports the missing token once at session start", async () => {
+    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
+    delete process.env.DISPATCH_TOKEN;
     process.env.HOME = "/nonexistent-home-for-dispatch-gating";
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-disabled");
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    expect(fixture.tools.map((tool) => tool.name)).not.toContain("dispatch");
-    expect(fixture.tools).toHaveLength(envoyToolSpecs.length);
-  });
 
-  test("reports an invalid envoy.json on session start instead of silently disabling dispatch", async () => {
-    delete process.env.DISPATCH_MCP_URL;
-    const home = mkdtempSync(join(tmpdir(), "dispatch-invalid-home-"));
-    const configDir = join(home, ".config", "opencode");
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(join(configDir, "envoy.json"), JSON.stringify({ dispatch: { enabled: true, bogus: 1 } }));
-    process.env.HOME = home;
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-invalid-config");
-    const fixture = createPi();
-    envoyExtension(fixture.pi);
-    expect(fixture.tools.map((tool) => tool.name)).not.toContain("dispatch");
+    expect(fixture.tools.map((tool) => tool.name)).toEqual(envoyToolSpecs.map((spec) => spec.name));
     const notifications: string[] = [];
     await fixture.handlers.get("session_start")?.(
       {},
       { ...sessionContext(), ui: { notify: (message) => notifications.push(message) } },
     );
-    expect(notifications.some((message) => message.startsWith("envoy: dispatch tool disabled — "))).toBe(true);
-    expect(notifications.some((message) => message.includes("bogus"))).toBe(true);
+    expect(notifications.filter((message) => message.startsWith("envoy: dispatch tool disabled — "))).toEqual([
+      "envoy: dispatch tool disabled — dispatch.token must be a non-empty bearer token",
+    ]);
   });
 
   test("envoy_sessions rejects a non-string machine filter before calling Envoy", async () => {

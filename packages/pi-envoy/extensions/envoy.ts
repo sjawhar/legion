@@ -1,17 +1,11 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts";
+import { agentSubject, dispatchToolSpecs, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
-import { executeDispatch } from "@legion/envoy-client/dispatch-call";
+import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
-import {
-  DISPATCH_TOOL_DESCRIPTION,
-  DISPATCH_TOOL_JSON_SCHEMA,
-  DISPATCH_TOOL_NAME,
-  parseDispatchCall,
-} from "@legion/envoy-client/dispatch-contract";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
@@ -505,48 +499,39 @@ export default function envoyExtension(pi: PiApi): void {
     });
   }
 
-  // The dispatch tool runs in this process, so it reads the session's identity
-  // from the host on every call: a follow-up after a rename or a handoff
-  // carries the current title and id. OMP accepts plain JSON Schema for tool
-  // parameters (the same path its MCP tools take), so the model-facing schema
-  // is the contract's own, nothing rebuilt here.
-  if (dispatchConfig.url !== null) {
-    const serviceUrl = dispatchConfig.url;
-    pi.registerTool({
-      name: DISPATCH_TOOL_NAME,
-      label: "Dispatch",
-      description: DISPATCH_TOOL_DESCRIPTION,
-      parameters: DISPATCH_TOOL_JSON_SCHEMA,
-      execute: async (_id, parameters, _signal, _onUpdate, context) => {
-        try {
-          const call = parseDispatchCall(parameters);
-          const result = await executeDispatch({
-            call,
-            cwd: context.cwd,
-            host: "omp",
-            sessionId: context.sessionManager.getSessionId() || undefined,
-            sessionTitle: context.sessionManager.getSessionName?.() || undefined,
-            serviceUrl,
-          });
-          // details carries the issue URL: the tool_result hook below reads it
-          // to subscribe this session to the thread's replies.
-          return toolSuccess(JSON.stringify(result), { ...result });
-        } catch (error) {
-          return toolFailure(error);
-        }
-      },
-    });
+  if (dispatchConfig.enabled) {
+    for (const spec of dispatchToolSpecs) {
+      pi.registerTool({
+        name: spec.name,
+        label: spec.name,
+        description: spec.description,
+        parameters: pi.zod.object(spec.arguments(zodSchemaApi(pi.zod))),
+        execute: async (_id, params, _signal, _onUpdate, context) => {
+          try {
+            const result = await executeDispatchTool({
+              tool: spec.name,
+              args: params,
+              cwd: context.cwd,
+              host: "omp",
+              sessionId: context.sessionManager.getSessionId(),
+              sessionTitle: context.sessionManager.getSessionName?.(),
+              config: dispatchConfig,
+              env: process.env,
+            });
+            return toolSuccess(result.text, result.details);
+          } catch (error) {
+            return toolFailure(error);
+          }
+        },
+      });
+    }
   }
 
   registerEnvoyWhoamiCommand(pi, () => sessionID);
 
-  // The dispatch tool opens or continues a GitHub thread; the human answers by
-  // commenting on it. Close the reply loop here: subscribe the calling session
-  // to the thread's topic and persist the interest — for a follow-up from a
-  // handed-off session, that is the new session id.
   pi.on("tool_result", async (event) => {
     if (event.isError) return;
-    const topic = dispatchSubscriptionTopic(event.toolName, JSON.stringify(event.details) ?? "");
+    const topic = dispatchSubscriptionTopic(event.details);
     if (topic === null) return;
     try {
       if (await subscribe(topic)) await registerSession();
