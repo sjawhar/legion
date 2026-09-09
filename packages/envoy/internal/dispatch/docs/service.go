@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,17 +46,20 @@ type Service struct {
 	identity    identity.Identity
 	agentToken  string
 	settle      time.Duration
-	rooms       sync.Map
+	rooms          sync.Map
+	nextConnection atomic.Uint64
 }
 
 type roomState struct {
-	actors map[string]model.Actor
-	settle *time.Timer
-	mu     sync.Mutex
+	connected map[uint64]model.Actor
+	pending   map[string]model.Actor
+	settle    *time.Timer
+	mu        sync.Mutex
 }
 
 type connectionState struct {
 	room  string
+	id    uint64
 	actor model.Actor
 	added bool
 }
@@ -100,7 +104,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
 	s.srv.ServeHTTP(w, r.WithContext(ctx))
 	if connection.added {
-		s.removeConnection(connection.room, connection.actor)
+		s.removeConnection(connection.room, connection.id)
 	}
 }
 
@@ -177,7 +181,6 @@ func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID str
 	state := s.room(artifactID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.actors[actorKey(actor)] = actor
 	markdown, err := s.Text(ctx, artifactID)
 	if err != nil {
 		return model.Version{}, false, err
@@ -187,11 +190,12 @@ func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID str
 		return model.Version{}, false, err
 	}
 	if latest.markdown != markdown {
-		version, err := writeVersion(ctx, tx, artifactID, markdown, false, nil, actorSlice(state.actors))
+		state.pending[actorKey(actor)] = actor
+		version, err := writeVersion(ctx, tx, artifactID, markdown, false, nil, actorSlice(state.pending))
 		if err != nil {
 			return model.Version{}, false, err
 		}
-		state.actors = make(map[string]model.Actor)
+		state.pending = make(map[string]model.Actor)
 		return version, true, nil
 	}
 	return latest.Version, false, nil
@@ -241,7 +245,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	state := s.room(artifactID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.actors[actorKey(actor)] = actor
+	state.pending[actorKey(actor)] = actor
 
 	var version model.Version
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
@@ -260,11 +264,11 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 		if err != nil {
 			return err
 		}
-		version, err = writeVersion(ctx, tx, artifactID, markdown, true, new(summary), actorSlice(state.actors))
+		version, err = writeVersion(ctx, tx, artifactID, markdown, true, new(summary), actorSlice(state.pending))
 		return err
 	})
 	if err == nil {
-		state.actors = make(map[string]model.Actor)
+		state.pending = make(map[string]model.Actor)
 	}
 	return version, err
 }
@@ -326,9 +330,10 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 		return websocket.ConnectionConfig{}, false
 	}
 	connection.room = room
+	connection.id = s.nextConnection.Add(1)
 	connection.actor = actor
 	connection.added = true
-	s.addConnection(room, actor)
+	s.addConnection(room, connection.id, actor)
 	return websocket.ConnectionConfig{ReadOnly: !open}, true
 }
 
@@ -369,6 +374,7 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 
 func (s *Service) onLoadDocument(_ context.Context, room string, doc *crdt.Doc) error {
 	doc.OnUpdate(func(_ []byte, _ any) {
+		s.recordConnectedActors(room)
 		s.scheduleSettle(room)
 	})
 	return nil
@@ -411,10 +417,7 @@ func (s *Service) settleRoom(room string) {
 	if err != nil || latest.markdown == markdown {
 		return
 	}
-	authors := actorSlice(state.actors)
-	if len(authors) == 0 {
-		return
-	}
+	authors := actorSlice(state.pending)
 	version, err := writeVersion(context.Background(), tx, room, markdown, false, nil, authors)
 	if err != nil {
 		return
@@ -422,10 +425,14 @@ func (s *Service) settleRoom(room string) {
 	if err := s.reresolveAnchors(context.Background(), tx, room, markdown); err != nil {
 		return
 	}
+	eventActor := model.Actor{}
+	if len(authors) > 0 {
+		eventActor = authors[0]
+	}
 	event, err := s.events.Append(context.Background(), tx, model.Event{
 		IssueKey: issueKey,
 		Type:     "artifact.version",
-		Actor:    authors[0],
+		Actor:    eventActor,
 		Payload:  map[string]any{"artifact_id": room, "name": artifactName, "version": version},
 	})
 	if err != nil {
@@ -434,7 +441,7 @@ func (s *Service) settleRoom(room string) {
 	if err := tx.Commit(context.Background()); err != nil {
 		return
 	}
-	state.actors = make(map[string]model.Actor)
+	state.pending = make(map[string]model.Actor)
 	s.events.Publish(event)
 }
 
@@ -498,7 +505,8 @@ func (s *Service) issueOpen(ctx context.Context, artifactID string) (bool, error
 
 func (s *Service) room(name string) *roomState {
 	value, _ := s.rooms.LoadOrStore(name, &roomState{
-		actors: make(map[string]model.Actor),
+		connected: make(map[uint64]model.Actor),
+		pending:   make(map[string]model.Actor),
 	})
 	return value.(*roomState)
 }
@@ -506,22 +514,32 @@ func (s *Service) room(name string) *roomState {
 func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
-	state.actors[actorKey(actor)] = actor
+	state.pending[actorKey(actor)] = actor
 	state.mu.Unlock()
 }
 
-func (s *Service) addConnection(room string, actor model.Actor) {
+func (s *Service) recordConnectedActors(room string) {
 	state := s.room(room)
 	state.mu.Lock()
-	state.actors[actorKey(actor)] = actor
+	for _, actor := range state.connected {
+		state.pending[actorKey(actor)] = actor
+	}
 	state.mu.Unlock()
 }
 
-func (s *Service) removeConnection(room string, actor model.Actor) {
+func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	delete(state.actors, actorKey(actor))
+	state.connected[id] = actor
+	state.pending[actorKey(actor)] = actor
+	state.mu.Unlock()
+}
+
+func (s *Service) removeConnection(room string, id uint64) {
+	state := s.room(room)
+	state.mu.Lock()
+	delete(state.connected, id)
+	state.mu.Unlock()
 }
 
 func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {

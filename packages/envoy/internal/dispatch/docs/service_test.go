@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -200,8 +201,107 @@ func TestNamedVersionIncludesTrackedActorsAndResetsRoom(t *testing.T) {
 	state := service.room(artifactID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.actors) != 0 {
-		t.Fatalf("tracked actors after named version = %#v, want empty", state.actors)
+	if len(state.pending) != 0 {
+		t.Fatalf("pending authors after named version = %#v, want empty", state.pending)
+	}
+}
+
+func TestSettlePersistsPendingAuthorAfterDisconnect(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	connectionID := service.nextConnection.Add(1)
+	service.addConnection(artifactID, connectionID, actor)
+
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		content := doc.GetText("content")
+		transact(func(tx *crdt.Transaction) {
+			content.Delete(tx, 0, content.Len())
+			content.Insert(tx, 0, "after", nil)
+		})
+	}); err != nil {
+		t.Fatalf("apply connected client update: %v", err)
+	}
+	service.removeConnection(artifactID, connectionID)
+
+	version := waitForDocumentVersion(t, service.store, artifactID, 2)
+	if len(version.Authors) != 1 || version.Authors[0] != actor {
+		t.Fatalf("settled version authors = %#v, want %v", version.Authors, actor)
+	}
+}
+
+func TestSettleWritesDirtyVersionWithoutPendingAuthors(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		content := doc.GetText("content")
+		transact(func(tx *crdt.Transaction) {
+			content.Delete(tx, 0, content.Len())
+			content.Insert(tx, 0, "after", nil)
+		})
+	}); err != nil {
+		t.Fatalf("apply unattributed update: %v", err)
+	}
+
+	version := waitForDocumentVersion(t, service.store, artifactID, 2)
+	if len(version.Authors) != 0 {
+		t.Fatalf("settled version authors = %#v, want none", version.Authors)
+	}
+}
+
+func TestConnectedActorIsPendingAfterEachDocumentUpdate(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	connectionID := service.nextConnection.Add(1)
+	service.addConnection(artifactID, connectionID, actor)
+
+	for number, markdown := range []string{"after first update", "after second update"} {
+		if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			content := doc.GetText("content")
+			transact(func(tx *crdt.Transaction) {
+				content.Delete(tx, 0, content.Len())
+				content.Insert(tx, 0, markdown, nil)
+			})
+		}); err != nil {
+			t.Fatalf("apply connected update %d: %v", number+1, err)
+		}
+		version := waitForDocumentVersion(t, service.store, artifactID, number+2)
+		if len(version.Authors) != 1 || version.Authors[0] != actor {
+			t.Fatalf("version %d authors = %#v, want %v", number+2, version.Authors, actor)
+		}
+	}
+}
+
+func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "# First")
+	snapshotter := model.Actor{Kind: "user", ID: "alice"}
+	editor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin snapshot transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	version, wrote, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	if err != nil {
+		t.Fatalf("snapshot unchanged document: %v", err)
+	}
+	if wrote || version.Number != 1 {
+		t.Fatalf("unchanged snapshot = %#v wrote=%t, want version 1 without a write", version, wrote)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit snapshot transaction: %v", err)
+	}
+
+	if err := service.ReplaceText(context.Background(), artifactID, "after", editor); err != nil {
+		t.Fatalf("replace document: %v", err)
+	}
+	version = waitForDocumentVersion(t, service.store, artifactID, 2)
+	if len(version.Authors) != 1 || version.Authors[0] != editor {
+		t.Fatalf("settled version authors = %#v, want only %v", version.Authors, editor)
 	}
 }
 
