@@ -666,6 +666,8 @@ func TestListIssueEventsSupportsNewestCursorAndIDLookup(t *testing.T) {
 		"/api/v1/issues/" + issue.Key + "/events?after=0&order=desc",
 		"/api/v1/issues/" + issue.Key + "/events?after=not-a-number",
 		"/api/v1/issues/" + issue.Key + "/events?before=not-a-number",
+		"/api/v1/issues/" + issue.Key + "/events?before=",
+		"/api/v1/issues/" + issue.Key + "/events?before=%20",
 	} {
 		response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice")
 		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_QUERY"`) {

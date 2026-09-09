@@ -17,6 +17,11 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
+	hasBefore := query.Has("before")
+	if hasBefore && strings.TrimSpace(query.Get("before")) == "" {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "before must be a non-negative integer"))
+		return
+	}
 	after, err := parseNonNegativeInt(query.Get("after"), "after")
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -42,15 +47,15 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if query.Has("after") && (query.Has("before") || descending) {
+	if query.Has("after") && (hasBefore || descending) {
 		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "after cannot be combined with before or order=desc"))
 		return
 	}
 	events, err := s.readEvents(r.Context(), r.PathValue("key"), eventListOptions{
 		after:      after,
 		before:     before,
-		hasBefore:  query.Has("before"),
-		descending: descending || query.Has("before"),
+		hasBefore:  hasBefore,
+		descending: descending || hasBefore,
 		ids:        ids,
 		limit:      limit,
 	})
