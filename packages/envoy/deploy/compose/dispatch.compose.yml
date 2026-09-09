@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}
+      POSTGRES_DB: dispatch
     volumes:
       - dispatch-pg:/var/lib/postgresql/data
     healthcheck:
@@ -35,7 +36,7 @@ services:
       start_period: 5s
     environment:
       HOME: /home/envoy
-      DATABASE_URL: postgres://postgres:${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}@127.0.0.1:${DISPATCH_PG_PORT:-55432}/postgres?sslmode=disable
+      DATABASE_URL: postgres://postgres:${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}@127.0.0.1:${DISPATCH_PG_PORT:-55432}/dispatch?sslmode=disable
       DISPATCH_LISTEN_HOST: ${DISPATCH_LISTEN_HOST:-127.0.0.1}
       DISPATCH_PORT: ${DISPATCH_PORT:-8766}
       DISPATCH_APP_CLIENT_ID: ${DISPATCH_APP_CLIENT_ID:-}
@@ -56,22 +57,25 @@ services:
       - dispatch-data:/home/envoy/.local/share/dispatch
 
   pg-backup:
-    build:
-      context: ../../../..
-      dockerfile: packages/envoy/docker/pg-backup.Dockerfile
+    image: eeshugerman/postgres-backup-s3@sha256:cfcaa57732c13d0724312a2eea1ad3e385f5ed049de3c626d1ef28ecc13cdddb
     network_mode: host
-    entrypoint: ["/bin/sh", "/backup.sh"]
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://postgres:${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}@127.0.0.1:${DISPATCH_PG_PORT:-55432}/postgres?sslmode=disable
-      DISPATCH_BACKUP_BUCKET: ${DISPATCH_BACKUP_BUCKET:?set DISPATCH_BACKUP_BUCKET}
-      AWS_PROFILE: ${AWS_PROFILE:-default}
-    volumes:
-      - "${HOME}/.aws:/root/.aws:ro"
-      - "../scripts/pg-backup.sh:/backup.sh:ro"
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: "30"
+      S3_REGION: ${S3_REGION:?set S3_REGION}
+      S3_BUCKET: ${DISPATCH_BACKUP_BUCKET:?set DISPATCH_BACKUP_BUCKET}
+      S3_PREFIX: dispatch
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "${DISPATCH_PG_PORT:-55432}"
+      POSTGRES_DATABASE: dispatch
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
 
 volumes:
   dispatch-data:

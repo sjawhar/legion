@@ -1,7 +1,7 @@
 # Deploy
 
 Compose definitions run the on-prem Envoy listener, Dispatch server, its
-Postgres database, and the nightly Postgres backup worker. All services use host
+Postgres database, and the daily Postgres backup worker. All services use host
 networking. The listener serves `127.0.0.1:9020` for local OpenCode session
 registration and webhook ingress; Dispatch serves `127.0.0.1:8766` by default
 for the SPA, GitHub OAuth, and the native Dispatch API.
@@ -13,7 +13,6 @@ for the SPA, GitHub OAuth, and the native Dispatch API.
 - `scripts/up-listener.sh` — starts the listener with `docker compose`.
 - `scripts/up-dispatch.sh` — starts Dispatch and its dependencies with
   `docker compose`.
-- `scripts/pg-backup.sh` — uploads an immediate backup, then repeats daily.
 - `scripts/sync-host.sh` — rsyncs `deploy/` to a remote host.
 - `scripts/install-docker-debian.sh` — Docker install helper for fresh hosts.
 - `scripts/read-secret.sh` — reads a secret from local SOPS-encrypted state.
@@ -23,8 +22,8 @@ for the SPA, GitHub OAuth, and the native Dispatch API.
 The listener and Dispatch share the image built by `../docker/Dockerfile`. Its
 build context is the repository root: a Bun stage builds the SPA and generates
 the Go contracts, then a Go stage builds `envoy-listener` and `envoy-dispatch`.
-The backup worker builds `docker/pg-backup.Dockerfile`, which supplies both
-`pg_dump` and the AWS CLI.
+The backup worker uses the digest-pinned `eeshugerman/postgres-backup-s3`
+image, so it is available to a host that receives only `deploy/`.
 
 `ENVOY_IMAGE_TAG` has no Compose default. `scripts/up-listener.sh` and
 `scripts/up-dispatch.sh` set it to `local` for a checkout build. A host synced
@@ -60,6 +59,7 @@ export DISPATCH_PG_PASSWORD="$(openssl rand -hex 32)"
 export DISPATCH_AGENT_TOKEN="$(openssl rand -hex 32)"
 export DISPATCH_ALLOWED_LOGINS="<github-login>"
 export DISPATCH_BACKUP_BUCKET="<private-s3-bucket>"
+export S3_REGION="<bucket-region>"
 deploy/scripts/up-dispatch.sh
 curl http://127.0.0.1:8766/healthz
 ```
@@ -71,7 +71,8 @@ curl http://127.0.0.1:8766/healthz
 | `DISPATCH_AGENT_TOKEN` | yes | Agent bearer token; generate with `openssl rand -hex 32`. |
 | `DISPATCH_ALLOWED_LOGINS` | yes | Comma-separated GitHub login allowlist. |
 | `DISPATCH_BACKUP_BUCKET` | yes | Private S3 bucket receiving daily PostgreSQL dumps. |
-| `AWS_PROFILE` | no | AWS profile for backups; defaults to `default`. |
+| `S3_REGION` | yes | AWS Region that contains the backup bucket. |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | conditional | Set both for static S3 credentials; leave both unset to use the instance role. |
 | `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`. |
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |
 | `DISPATCH_IDENTITY` | no | Defaults to `cookie`; `header:<name>` is for a trusted proxy or tests. |
@@ -85,10 +86,11 @@ port. The database data and Dispatch signing material are named volumes.
 
 ## Backups and restore
 
-`pg-backup` waits for Postgres, runs `pg_dump -Fc` against Dispatch, uploads to
-`s3://$DISPATCH_BACKUP_BUCKET/dispatch-<utc-timestamp>.dump`, and retries in
-one hour if an upload fails. It mounts `${HOME}/.aws` read-only and uses
-`AWS_PROFILE`.
+The digest-pinned `eeshugerman/postgres-backup-s3` worker runs daily, retains
+30 days of dumps under the `dispatch` prefix, and connects directly to the
+Compose-managed Postgres database. It uses both `S3_ACCESS_KEY_ID` and
+`S3_SECRET_ACCESS_KEY` when supplied; when both are unset, AWS resolves the
+instance role.
 
 Download the desired dump, then restore it into the target database:
 
