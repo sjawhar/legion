@@ -1,8 +1,11 @@
 import type {
   Actor,
+  Artifact,
+  ArtifactVersionText,
   Ask,
   CreateAskInput,
   CreateMessageInput,
+  EditArtifactInput,
   Event,
   Issue,
   Project,
@@ -107,6 +110,41 @@ export function createAsk(
 
 export function getAsk(id: string, options: ApiOptions = {}): Promise<Ask> {
   return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
+}
+
+export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artifact> {
+  return request<Artifact>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+export function getArtifactVersion(
+  id: string,
+  version: number,
+  options: ApiOptions = {}
+): Promise<ArtifactVersionText> {
+  return request<ArtifactVersionText>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${version}`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+export function editArtifact(
+  id: string,
+  input: EditArtifactInput,
+  options: ApiOptions = {}
+): Promise<{ applied: number }> {
+  return request<{ applied: number }>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/edits`,
+    "POST",
+    input,
+    options
+  );
 }
 
 export function createMessage(

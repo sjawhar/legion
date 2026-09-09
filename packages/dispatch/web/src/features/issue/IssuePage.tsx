@@ -3,7 +3,15 @@ import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useState
 import { Link, useParams } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { Event, ExternalLink, Issue, UserIssueState, UserState } from "../../api/types";
+import type {
+  AuthenticatedUser,
+  Event,
+  ExternalLink,
+  Issue,
+  UserIssueState,
+  UserState,
+} from "../../api/types";
+import { DocEditor } from "../doc/DocEditor";
 import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
 import { LogTab } from "./LogTab";
@@ -21,7 +29,7 @@ const issueStatuses = [
 ];
 const routePattern = /^(role:[a-z0-9-]+|session:[0-9a-f-]{16,})$/;
 
-type IssueTab = "log" | "children";
+type IssueTab = "spec" | "log" | "children";
 
 function activeSessions(events: Event[]): Extract<Event["actor"], { kind: "session" }>[] {
   const sessions = new Map<string, Extract<Event["actor"], { kind: "session" }>>();
@@ -260,7 +268,7 @@ function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }):
   );
 }
 
-export function IssuePage(): ReactNode {
+export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
   const { key } = useParams();
   const [tab, setTab] = useState<IssueTab>("log");
   const issue = useQuery({
@@ -277,12 +285,36 @@ export function IssuePage(): ReactNode {
     return <p className="text-rose-700">Could not load this issue.</p>;
   }
 
+  const primaryArtifact = issue.data.artifacts?.find(
+    ({ id }) => id === issue.data.primary_artifact_id
+  );
+  if (primaryArtifact === undefined) {
+    return <p className="text-rose-700">Could not load this issue's primary document.</p>;
+  }
+
   const issueState = stateForIssue(state.data, issue.data.key);
+  const tabID = `issue-${tab}-tab`;
+  const panelID = `issue-${tab}-panel`;
   return (
     <section>
       <IssueHeader issue={issue.data} state={issueState} />
       <BoardStrip issue={issue.data} state={issueState} />
       <div className="mb-4 flex gap-2 border-b border-slate-200" role="tablist">
+        <button
+          aria-controls="issue-spec-panel"
+          aria-selected={tab === "spec"}
+          className={
+            tab === "spec"
+              ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
+              : "px-3 py-2 text-sm text-slate-600"
+          }
+          id="issue-spec-tab"
+          onClick={() => setTab("spec")}
+          role="tab"
+          type="button"
+        >
+          Spec
+        </button>
         <button
           aria-controls="issue-log-panel"
           aria-selected={tab === "log"}
@@ -314,12 +346,14 @@ export function IssuePage(): ReactNode {
           Children
         </button>
       </div>
-      <div
-        aria-labelledby={tab === "log" ? "issue-log-tab" : "issue-children-tab"}
-        id={tab === "log" ? "issue-log-panel" : "issue-children-panel"}
-        role="tabpanel"
-      >
-        {tab === "log" ? (
+      <div aria-labelledby={tabID} id={panelID} role="tabpanel">
+        {tab === "spec" ? (
+          <DocEditor
+            artifact={primaryArtifact}
+            isClosed={issue.data.closed_at !== null}
+            user={user}
+          />
+        ) : tab === "log" ? (
           <LogTab issueKey={issue.data.key} state={state.data} />
         ) : (
           <ChildrenTab issue={issue.data} />

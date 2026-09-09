@@ -1,0 +1,251 @@
+import { markdown } from "@codemirror/lang-markdown";
+import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { HocuspocusProvider } from "@hocuspocus/provider";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { yCollab } from "y-codemirror.next";
+import * as Y from "yjs";
+
+import { api } from "../../api/client";
+import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
+import { DocView } from "./DocView";
+import { VersionDiff } from "./VersionDiff";
+
+interface DocEditorProps {
+  artifact: Artifact;
+  isClosed: boolean;
+  user: AuthenticatedUser;
+}
+
+type EditorMode = "edit" | "preview";
+type ConnectionState = "connecting" | "connected" | "offline";
+
+const presenceColors = ["#0284c7", "#7c3aed", "#c2410c", "#047857", "#be123c", "#4338ca"];
+
+/** Gives each collaborator a stable, distinct cursor color in the current browser session. */
+function colorForLogin(login: string): string {
+  let hash = 0;
+  for (const character of login) {
+    hash = (hash * 31 + character.charCodeAt(0)) | 0;
+  }
+  return presenceColors[Math.abs(hash) % presenceColors.length] ?? presenceColors[0];
+}
+
+/** Builds the same-origin Hocuspocus endpoint without hard-coding deployment hosts. */
+export function wsUrl(artifactId: string): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/ws/doc/${encodeURIComponent(artifactId)}`;
+}
+
+export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNode {
+  const host = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
+  const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [content, setContent] = useState("");
+  const [mode, setMode] = useState<EditorMode>("edit");
+  const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
+  const [showDiff, setShowDiff] = useState(false);
+  const artifactQuery = useQuery({
+    queryKey: ["artifact", artifact.id],
+    queryFn: () => api.getArtifact(artifact.id),
+  });
+  const liveTextQuery = useQuery({
+    queryKey: ["artifact", artifact.id, "text"],
+    queryFn: () => api.getArtifactText(artifact.id),
+  });
+  const versionTextQuery = useQuery({
+    enabled: selectedVersion !== null,
+    queryKey: ["artifact", artifact.id, "version", selectedVersion],
+    queryFn: () => api.getArtifactVersion(artifact.id, selectedVersion ?? 0),
+  });
+  const nameVersion = useMutation({
+    mutationFn: (summary: string) => api.createArtifactVersion(artifact.id, { summary }),
+    onSuccess: (version) => {
+      queryClient.setQueryData<Artifact>(["artifact", artifact.id], (current) => {
+        const source = current ?? artifact;
+        return {
+          ...source,
+          versions: [...source.versions.filter(({ number }) => number !== version.number), version],
+        };
+      });
+      setMode("preview");
+      setSelectedVersion(version.number);
+      setShowDiff(false);
+    },
+  });
+  const liveMarkdown = content || liveTextQuery.data?.markdown || "";
+  const selectedMarkdown =
+    versionTextQuery.data !== undefined && "markdown" in versionTextQuery.data
+      ? versionTextQuery.data.markdown
+      : undefined;
+  const versions = [...(artifactQuery.data?.versions ?? artifact.versions)].sort(
+    (left, right) => right.number - left.number
+  );
+
+  useEffect(() => {
+    const parent = host.current;
+    if (parent === null) {
+      return;
+    }
+
+    let mounted = true;
+    const document = new Y.Doc();
+    const provider = new HocuspocusProvider({
+      document,
+      name: artifact.id,
+      onStatus: ({ status }) => {
+        if (mounted) {
+          setConnection(status === "disconnected" ? "offline" : status);
+        }
+      },
+      url: wsUrl(artifact.id),
+    });
+    const awareness = provider.awareness;
+    if (awareness === null) {
+      provider.destroy();
+      document.destroy();
+      throw new Error("Dispatch document provider did not create awareness.");
+    }
+    awareness.setLocalStateField("user", {
+      color: colorForLogin(user.login),
+      name: user.login,
+    });
+    const ytext = document.getText("content");
+    const syncContent = () => setContent(ytext.toString());
+    ytext.observe(syncContent);
+    syncContent();
+    const extensions = [
+      markdown(),
+      EditorView.lineWrapping,
+      EditorView.theme({ "&": { minHeight: "24rem" } }),
+      yCollab(ytext, awareness),
+    ];
+    if (isClosed) {
+      extensions.push(EditorState.readOnly.of(true), EditorView.editable.of(false));
+    }
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        extensions: [
+          EditorView.contentAttributes.of({ "aria-label": "Document editor" }),
+          ...extensions,
+        ],
+      }),
+    });
+
+    return () => {
+      mounted = false;
+      view.destroy();
+      ytext.unobserve(syncContent);
+      provider.destroy();
+      document.destroy();
+    };
+  }, [artifact.id, isClosed, user.login]);
+
+  const selectVersion = (value: string) => {
+    setSelectedVersion(value === "" ? null : Number(value));
+    setMode(value === "" ? "edit" : "preview");
+    setShowDiff(false);
+  };
+  const requestNamedVersion = () => {
+    const summary = window.prompt("What changed in this version?");
+    if (summary?.trim()) {
+      nameVersion.mutate(summary.trim());
+    }
+  };
+
+  return (
+    <section aria-label="Document editor" className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="rounded border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:border-sky-500"
+            onClick={() => {
+              setMode((current) => (current === "edit" ? "preview" : "edit"));
+              setSelectedVersion(null);
+              setShowDiff(false);
+            }}
+            type="button"
+          >
+            {mode === "edit" ? "Preview" : "Edit"}
+          </button>
+          <button
+            className="rounded border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:border-sky-500 disabled:cursor-not-allowed disabled:text-slate-400"
+            disabled={isClosed || nameVersion.isPending}
+            onClick={requestNamedVersion}
+            type="button"
+          >
+            Name version
+          </button>
+          {selectedVersion === null ? null : (
+            <button
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:border-sky-500"
+              onClick={() => setShowDiff((visible) => !visible)}
+              type="button"
+            >
+              {showDiff ? "Show version" : "Diff vs current"}
+            </button>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <span
+            className={
+              connection === "connected"
+                ? "rounded-full bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-800"
+                : connection === "connecting"
+                  ? "rounded-full bg-amber-100 px-2 py-1 text-xs font-medium text-amber-800"
+                  : "rounded-full bg-slate-200 px-2 py-1 text-xs font-medium text-slate-700"
+            }
+            role="status"
+          >
+            {connection}
+          </span>
+          <label className="text-sm font-medium text-slate-700">
+            Version
+            <select
+              className="ml-2 rounded border border-slate-300 bg-white px-2 py-1 font-normal"
+              onChange={(event) => selectVersion(event.target.value)}
+              value={selectedVersion ?? ""}
+            >
+              <option value="">Current</option>
+              {versions.map((version: Version) => (
+                <option key={version.number} value={version.number}>
+                  Version {version.number}
+                  {version.named && version.summary !== null ? ` — ${version.summary}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
+      {isClosed ? (
+        <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+          This issue is closed. Its document is read-only.
+        </p>
+      ) : null}
+      {nameVersion.isError ? (
+        <p className="text-sm text-rose-700" role="alert">
+          Could not name this version.
+        </p>
+      ) : null}
+      <div
+        className={mode === "edit" && selectedVersion === null ? "min-h-96" : "hidden"}
+        ref={host}
+      />
+      {selectedVersion !== null && selectedMarkdown === undefined ? (
+        <p className="text-sm text-slate-500">Loading version…</p>
+      ) : selectedVersion !== null && selectedMarkdown !== undefined ? (
+        showDiff ? (
+          <VersionDiff after={liveMarkdown} before={selectedMarkdown} />
+        ) : (
+          <div data-testid="version-view">
+            <DocView markdown={selectedMarkdown} />
+          </div>
+        )
+      ) : mode === "preview" ? (
+        <DocView markdown={liveMarkdown} />
+      ) : null}
+    </section>
+  );
+}

@@ -77,7 +77,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               </section>
             }
           />
-          <Route path="/issues/:key/*" element={<IssuePage />} />
+          <Route path="/issues/:key/*" element={<IssuePage user={user} />} />
           <Route path="*" element={<Navigate replace to="/" />} />
         </Routes>
       </main>
