@@ -20,14 +20,6 @@ export interface DaemonConfig {
   port: number;
   envoyUrl: string;
   /**
-   * Optional dispatch service endpoint (its /mcp URL), passed through to
-   * spawned session environments as DISPATCH_MCP_URL so the native dispatch
-   * tool targets a specific service (the smoke rig points it at its own
-   * instance). When unset, sessions fall back to their envoy.json dispatch
-   * config.
-   */
-  dispatchMcpUrl?: string;
-  /**
    * Optional dispatch service base URL (no `/mcp` suffix), passed through to
    * spawned session environments as DISPATCH_URL so the native dispatch tool
    * targets a specific service (the smoke rig points it at its own
@@ -99,6 +91,8 @@ const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
   port: null,
   envoy_url: null,
+  // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_url
+  // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   dispatch_mcp_url: null,
   dispatch_url: null,
   nats_urls: null,
@@ -108,6 +102,9 @@ const CONFIG_SCHEMA: ConfigSchema = {
   app_logins: null,
   admission_cap: null,
   worker_cap: null,
+  // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-worker_cap
+  // error below instead of the generic "Unknown config key" message. Never mapped to a field.
+  worker_budget: null,
   max_recursion_depth: null,
   linger_hours: null,
   max_fix_attempts: null,
@@ -234,9 +231,16 @@ function requireNoMcpSuffix(value: string, field: string): string {
 
 /** Canonicalizes a validated base URL to have no trailing slash, so appending a path segment
  * (e.g. `` `${dispatchUrl}/mcp` ``) never doubles the slash regardless of how the operator wrote
- * the configured value (`http://x` and `http://x/` both resolve to `http://x`). */
-function normalizeBaseUrl(value: string): string {
-  return new URL(value).toString().replace(/\/+$/, "");
+ * the configured value (`http://x` and `http://x/` both resolve to `http://x`). Rejects a query
+ * string or fragment outright — string-concatenating a path segment onto either would build a
+ * broken URL (the query/fragment landing before the appended path), so there is no correct way
+ * to canonicalize one. */
+function normalizeBaseUrl(value: string, field: string): string {
+  const url = new URL(value);
+  if (url.search || url.hash) {
+    throw new Error(`${field} must not include a query string or fragment`);
+  }
+  return url.toString().replace(/\/+$/, "");
 }
 
 function collectUnknownKeys(
@@ -399,9 +403,13 @@ export function loadConfigFromFile(
   }
   const envoyUrl = readString(config.envoy_url, "envoy_url");
   if (envoyUrl !== undefined) fields.envoyUrl = validateUrl(envoyUrl, "envoy_url");
-  const dispatchMcpUrlField = readString(config.dispatch_mcp_url, "dispatch_mcp_url");
-  if (dispatchMcpUrlField !== undefined) {
-    fields.dispatchMcpUrl = validateUrl(dispatchMcpUrlField, "dispatch_mcp_url");
+  if (config.dispatch_mcp_url !== undefined) {
+    throw new Error(
+      "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
+    );
+  }
+  if (config.worker_budget !== undefined) {
+    throw new Error("worker_budget was replaced by worker_cap");
   }
   const dispatchUrlField = readString(config.dispatch_url, "dispatch_url");
   if (dispatchUrlField !== undefined) {
@@ -481,18 +489,37 @@ export function resolveDaemonConfig(
     env.ENVOY_URL,
     DEFAULT_ENVOY_URL
   );
-  const dispatchMcpUrl = resolveValue(
-    undefined,
-    fileString(fields, "dispatchMcpUrl"),
-    env.DISPATCH_MCP_URL,
-    undefined
-  );
   const dispatchUrl = resolveValue(
     undefined,
     fileString(fields, "dispatchUrl"),
     env.DISPATCH_URL,
     undefined
   );
+  const resolvedDispatchUrl =
+    dispatchUrl.value === undefined
+      ? undefined
+      : requireNoMcpSuffix(
+          normalizeBaseUrl(validateUrl(dispatchUrl.value, "DISPATCH_URL"), "DISPATCH_URL"),
+          "DISPATCH_URL"
+        );
+  if (env.DISPATCH_MCP_URL !== undefined) {
+    // The daemon exports DISPATCH_MCP_URL into every pane it spawns (a `/mcp`-suffixed alias
+    // derived from its own dispatchUrl, for clients that still read that alias directly) — so
+    // `legion start`/`restart`/`check-config` run from inside one of those panes (the
+    // controller pane has a shell) always inherits it. Only reject a genuinely stale/wrong
+    // value: unset DISPATCH_URL (nothing to derive the alias from) or one that disagrees with
+    // what DISPATCH_URL implies; the daemon's own consistent echo is accepted.
+    const expectedMcpUrl =
+      resolvedDispatchUrl === undefined ? undefined : `${resolvedDispatchUrl}/mcp`;
+    if (expectedMcpUrl === undefined || env.DISPATCH_MCP_URL !== expectedMcpUrl) {
+      throw new Error(
+        "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
+      );
+    }
+  }
+  if (env.LEGION_WORKER_BUDGET !== undefined) {
+    throw new Error("worker_budget was replaced by worker_cap");
+  }
   const natsUrls = resolveValue(
     opts.cliOverrides?.natsUrls,
     fileStringArray(fields, "natsUrls"),
@@ -613,17 +640,7 @@ export function resolveDaemonConfig(
       legionId: legionId.value,
       port: port.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
-      dispatchMcpUrl:
-        dispatchMcpUrl.value === undefined
-          ? undefined
-          : validateUrl(dispatchMcpUrl.value, "DISPATCH_MCP_URL"),
-      dispatchUrl:
-        dispatchUrl.value === undefined
-          ? undefined
-          : requireNoMcpSuffix(
-              normalizeBaseUrl(validateUrl(dispatchUrl.value, "DISPATCH_URL")),
-              "DISPATCH_URL"
-            ),
+      dispatchUrl: resolvedDispatchUrl,
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       boardProjectIds: boardProjectIds.value,

@@ -72,7 +72,8 @@ export interface LegionApiProcessManager {
     tree: IssueKey,
     issue: IssueKey,
     role: LegionRole,
-    agentId: string
+    agentId: string,
+    sessionId: string
   ): void | Promise<void>;
   spawnWorker(
     tree: IssueKey,

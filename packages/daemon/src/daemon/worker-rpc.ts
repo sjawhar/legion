@@ -23,22 +23,31 @@ export interface WorkerRpcClient {
   /** Resolves once the underlying socket connection closes. */
   readonly closed: Promise<void>;
   /** The worker's run state, updated from every `agent_start`/`agent_end` frame seen on the
-   * socket since it connected — including a reconnect's replayed backlog. */
+   * socket since it connected (including a reconnect's replayed backlog), and seeded from
+   * `getState()`'s `isStreaming` field on a fresh connection that hasn't observed a frame yet. */
   readonly runState: WorkerRunState;
   negotiate(): Promise<void>;
   /** Marks `runState` as `"running"` before the request is even sent, so a concurrent caller
    * checking occupancy never sees free capacity in the gap between sending a prompt to an
    * already-idle worker and its `agent_start` frame arriving. */
   prompt(message: string): Promise<void>;
+  /** Also seeds `runState` from the response's `isStreaming` field (`true` -> `"running"`,
+   * `false` -> `"idle"`, firing `onIdle` on a transition into idle) when present, so a worker
+   * that was already idle before this connection existed — e.g. reconnected after a daemon
+   * restart — is not stuck at the conservative `"unknown"` default forever. */
   getState(timeoutMs?: number): Promise<Record<string, unknown>>;
   /** Asks the shim to close the wrapped OMP process's stdin; never SIGTERMs it. */
   shutdown(): void;
   close(): void;
   /**
    * Registers a callback fired once when `runState` transitions to `"idle"` from a non-idle
-   * state, and again when the socket closes. Pure trigger — "something may have freed capacity,
-   * re-check occupancy" — never a source of occupancy itself (that's always `runState`/a fresh
-   * `runningWorkerCount()` computation). Replaces any previously registered callback.
+   * state. Pure trigger — "something may have freed capacity, re-check occupancy" — never a
+   * source of occupancy itself (that's always `runState`/a fresh `runningWorkerCount()`
+   * computation). Never fired on socket close: a closed socket's run state goes to `"unknown"`
+   * (still occupying, conservatively), not `"idle"` — a worker whose socket just died might
+   * still be mid-turn and about to reconnect, and firing this callback would wrongly signal
+   * freed capacity for one the daemon hasn't yet confirmed is actually gone. Replaces any
+   * previously registered callback.
    */
   onIdle(callback: () => void): void;
 }
@@ -59,6 +68,12 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
   const closedResolvers = Promise.withResolvers<void>();
   let runState: WorkerRunState = "unknown";
   let idleCallback: (() => void) | undefined;
+  let loggedMissingIsStreaming = false;
+  const markIdle = (): void => {
+    const wasIdle = runState === "idle";
+    runState = "idle";
+    if (!wasIdle) idleCallback?.();
+  };
 
   const failAllPending = (error: Error): void => {
     for (const request of pending.values()) request.reject(error);
@@ -77,9 +92,7 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
     if (frame.type === "agent_start") {
       runState = "running";
     } else if (frame.type === "agent_end") {
-      const wasIdle = runState === "idle";
-      runState = "idle";
-      if (!wasIdle) idleCallback?.();
+      markIdle();
     }
     const id = frame.id;
     if (typeof id === "string" && pending.has(id)) {
@@ -108,13 +121,12 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
       },
       close() {
         failAllPending(new Error("Worker RPC socket closed"));
-        // A dead client is no longer running anything — treat it the same as an observed idle
-        // transition, and treat this the same as one for the onIdle trigger, so a worker that
-        // dies while busy still frees its running-worker slot for the next promotion.
-        const wasIdle = runState === "idle";
-        runState = "idle";
+        // Conservative, not idle: the daemon has not yet confirmed this worker is actually
+        // gone (it may reconnect), so its slot must keep counting as occupied until
+        // `markWorkerDead` decides otherwise — firing the idle trigger here would wrongly
+        // signal freed capacity.
+        runState = "unknown";
         closedResolvers.resolve();
-        if (!wasIdle) idleCallback?.();
       },
       error(_socket, error) {
         failAllPending(error);
@@ -156,7 +168,22 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
       await request("prompt", { message });
     },
     getState(timeoutMs = DEFAULT_RPC_TIMEOUT_MS) {
-      return request("get_state", {}, timeoutMs);
+      return request("get_state", {}, timeoutMs).then((response) => {
+        const data = isRecord(response.data) ? response.data : undefined;
+        if (typeof data?.isStreaming === "boolean") {
+          if (data.isStreaming) runState = "running";
+          else markIdle();
+        } else if (!loggedMissingIsStreaming) {
+          // Logged once per client, not once per call: a shim that never reports
+          // `isStreaming` would otherwise repeat this on every `get_state` a reconnect or
+          // periodic probe issues against it.
+          loggedMissingIsStreaming = true;
+          console.error(
+            "[legion] worker RPC get_state response missing data.isStreaming; leaving runState unchanged"
+          );
+        }
+        return response;
+      });
     },
     shutdown() {
       socket.write(`${JSON.stringify({ type: "shutdown" })}\n`);
