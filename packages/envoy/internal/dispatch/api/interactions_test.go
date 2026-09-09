@@ -1260,25 +1260,40 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 	t.Cleanup(func() { _ = connection.Close() })
 	drainDocumentUpdates(persistenceStore)
 	responses := make(chan *httptest.ResponseRecorder, 1)
+	handlerDone := make(chan struct{})
 	go func() {
+		defer close(handlerDone)
 		responses <- sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 			"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
 		})
 	}()
+	// Release every test gate before connection, server, and service cleanup. Otherwise a
+	// failed assertion can leave this request holding its transaction open indefinitely.
+	t.Cleanup(func() {
+		closeTestGate(failure.releaseBeforeApply)
+		closeTestGate(failure.release)
+		closeTestGate(failure.releaseEvict)
+		select {
+		case <-handlerDone:
+		case <-time.After(5 * time.Second):
+			t.Error("transactional edit did not exit after releasing test gates")
+		}
+	})
 	waitForBeforeApply(t, failure)
 	if _, err := documentService.ApplyOps(context.Background(), issue.PrimaryArtifactID, []model.EditOp{{Op: "replace", Find: "before", With: "before"}}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("apply live update before transactional edit: %v", err)
 	}
 	waitForDocumentUpdate(t, persistenceStore)
 	waitForSecondReplacementOrCommentLock(t, database, make(chan struct{}))
-	close(failure.releaseBeforeApply)
+	assertArtifactKeyShareLockAvailable(t, database, issue.PrimaryArtifactID)
+	closeTestGate(failure.releaseBeforeApply)
 	waitForPostApply(t, failure)
 	waitForDocumentUpdate(t, persistenceStore)
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
-	close(failure.release)
+	closeTestGate(failure.release)
 	waitForBeforeEvict(t, failure)
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
-	close(failure.releaseEvict)
+	closeTestGate(failure.releaseEvict)
 	handlerResponse := awaitResponse(t, responses)
 	if handlerResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
@@ -1473,6 +1488,33 @@ func drainDocumentUpdates(store *recordingVersionedStore) {
 		default:
 			return
 		}
+	}
+}
+
+func closeTestGate(gate chan struct{}) {
+	if gate == nil {
+		return
+	}
+	select {
+	case <-gate:
+		return
+	default:
+		close(gate)
+	}
+}
+
+func assertArtifactKeyShareLockAvailable(t *testing.T, database *store.Store, artifactID string) {
+	t.Helper()
+	tx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin artifact lock probe: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	var lockedID string
+	if err := tx.QueryRow(context.Background(), `
+		select id::text from artifacts where id = $1 for key share nowait
+	`, artifactID).Scan(&lockedID); err != nil {
+		t.Fatalf("settlement holds artifact lock while waiting for issue lock: %v", err)
 	}
 }
 

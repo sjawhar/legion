@@ -813,9 +813,9 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if err := tx.QueryRow(ctx, `
 		select a.issue_key, a.name, i.closed_at is null
 		from artifacts a join issues i on i.key = a.issue_key
-		where a.id = $1 for update
+		where a.id = $1 for update of i
 	`, room).Scan(&issueKey, &artifactName, &open); err != nil {
-		s.retrySettle(room, generation, fmt.Errorf("lock document artifact: %w", err))
+		s.retrySettle(room, generation, fmt.Errorf("lock document issue: %w", err))
 		return
 	}
 	if !open {
