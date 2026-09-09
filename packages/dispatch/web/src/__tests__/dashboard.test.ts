@@ -435,6 +435,93 @@ describe("dashboard read-side rendering", () => {
     expect(html).toContain(">x<");
   });
 
+  it("renders a free-text answer containing markdown as prose, not a monospace pill", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Other (specify)",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: Which approach?\n      header: Approach\n      options:\n        - label: Yes\n        - label: No\n-->\n\nOpening body",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const freeText = "**bold** and a [link](https://example.com)\n\n- item";
+    const comments: Comment[] = [
+      {
+        id: 1,
+        body: `<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - ${JSON.stringify(freeText)}\n-->\n\n**Approach** — Which approach?\n${freeText}`,
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "sami",
+      },
+    ];
+    const html = renderThreadDetail(detail(issue, comments));
+    // Custom "Other (specify)" text is a value that isn't one of the ask's
+    // option labels, so it renders as sanitized prose rather than a pill.
+    expect(html).not.toContain("answer-pill");
+    expect(html).toContain('class="answer-text"');
+    expect(html).toContain("<strong>bold</strong>");
+    expect(html).toContain('<a href="https://example.com">link</a>');
+    expect(html).toContain("<li>item</li>");
+  });
+
+  it("still renders an answer that matches an option label as a pill", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Option pick",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: Which approach?\n      header: Approach\n      options:\n        - label: Yes\n        - label: No\n-->\n\nOpening body",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const comments: Comment[] = [
+      {
+        id: 1,
+        body: '<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - "Yes"\n-->\n\n**Approach** — Which approach?\nYes',
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "sami",
+      },
+    ];
+    const html = renderThreadDetail(detail(issue, comments));
+    expect(html).toContain('<span class="answer-pill">Yes</span>');
+    expect(html).not.toContain("answer-text");
+  });
+
+  it("renders a mixed answer as a pill for the chosen option and prose for the free text beside it", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Mixed answer",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: Which approach?\n      header: Approach\n      multiple: true\n      options:\n        - label: Yes\n        - label: No\n-->\n\nOpening body",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const freeText = "also notify **the org channel**";
+    const comments: Comment[] = [
+      {
+        id: 1,
+        body: `<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - "Yes"\n    - ${JSON.stringify(freeText)}\n-->\n\n**Approach** — Which approach?\nYes, ${freeText}`,
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "sami",
+      },
+    ];
+    const html = renderThreadDetail(detail(issue, comments));
+    expect(html).toContain('<span class="answer-pill">Yes</span>');
+    expect(html).toContain('class="answer-text"');
+    expect(html).toContain("<strong>the org channel</strong>");
+    expect(html.match(/class="answer-pill"/g)?.length).toBe(1);
+  });
+
   it("shows a second answer to the same ask in the conversation instead of hiding it", () => {
     const issue: Issue = {
       repo: "sjawhar/legion",
