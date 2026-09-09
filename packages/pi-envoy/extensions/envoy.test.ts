@@ -889,22 +889,25 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("resuming a transcript whose role another live session now holds does not steal it", async () => {
+  test("automatic reclaim is a soft claim: a live holder's 409 is honoured, an explicit claim stays hard", async () => {
     // The parent of a /fork: its transcript still records `pr-queue`, but the
-    // fork moved the live claim to the child. An explicit envoy_role_set is
-    // last-claim-wins; an automatic reclaim on resume must not be.
-    const roleClaims: string[] = [];
+    // fork moved the live claim to the child. The listener arbitrates: the
+    // extension sends soft:true and the listener answers 409 with the holder.
+    const roleClaims: { readonly session_id: string; readonly soft: boolean | undefined }[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
-      if (url.pathname === "/v1/roles/pr-queue") {
-        return response({ role: "pr-queue", holder: "ses_fork_child", last_seen: 42 });
-      }
       if (url.pathname === "/v1/interests/ses_fork_parent") {
         return response({ error: "nats: key not found" });
       }
       if (url.pathname === "/v1/roles/set") {
         const body = JSON.parse(init?.body?.toString() ?? "{}");
-        roleClaims.push(body.role);
+        roleClaims.push({ session_id: body.session_id, soft: body.soft });
+        if (body.soft === true) {
+          return Response.json(
+            { error: "role pr-queue is held by ses_fork_child", role: "pr-queue", holder: "ses_fork_child" },
+            { status: 409 }
+          );
+        }
         return response({
           session_id: body.session_id,
           machine_id: "test",
@@ -928,11 +931,20 @@ describe("envoy OMP extension", () => {
     };
     await fixture.handlers.get("session_start")?.({}, resumedParent);
 
-    expect(roleClaims).toEqual([]);
-    // The parent does not believe it holds the role either.
+    // One attempt, soft, refused — and the parent does not believe it holds
+    // the role afterwards.
+    expect(roleClaims).toEqual([{ session_id: "ses_fork_parent", soft: true }]);
     const unsubscribe = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    const result = await unsubscribe?.execute("", { topics: ["notifications.role.pr-queue"] });
-    expect(result?.content[0]?.text).toBe("Unsubscribed: (none)");
+    const refused = await unsubscribe?.execute("", { topics: ["notifications.role.pr-queue"] });
+    expect(refused?.content[0]?.text).toBe("Unsubscribed: (none)");
+
+    // The user's explicit envoy_role_set is a hard claim and takes it.
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    await roleTool?.execute("", { role: "pr-queue" });
+    expect(roleClaims).toEqual([
+      { session_id: "ses_fork_parent", soft: true },
+      { session_id: "ses_fork_parent", soft: undefined },
+    ]);
   });
 
   test("a role released before the process died is not re-claimed on resume", async () => {

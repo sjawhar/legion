@@ -371,9 +371,13 @@ export default async (input: { serverUrl: URL }) => {
         args: roleSetSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(args, ctx) {
           ctx.metadata({ title: "Set Envoy role" });
-          return JSON.stringify(
-            await envoy.setRole({ sessionID: ctx.sessionID, role: args.role as string })
-          );
+          const result = await envoy.setRole({
+            sessionID: ctx.sessionID,
+            role: args.role as string,
+          });
+          // A hard claim always lands; the discriminant exists for soft claims.
+          if (!result.claimed) throw new Error(`role ${args.role} is held by ${result.holder}`);
+          return JSON.stringify(result.interest);
         },
       }),
       envoy_whoami: tool({

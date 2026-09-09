@@ -355,10 +355,36 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  const setEnvoyRole = async (role: string): Promise<void> => {
+  /**
+   * Claim `role` for this session. A hard claim (the default; what
+   * envoy_role_set does) is last-claim-wins. A soft claim is what automatic
+   * recovery uses: the listener grants it only when the role is unheld, its
+   * holder is no longer live, or its holder is the id this session continues
+   * (`previousSessionID` — a fork's parent is still heartbeating), and answers
+   * with the live holder otherwise — atomically, so two resumers cannot both
+   * believe they won. Returns whether the claim landed.
+   */
+  const setEnvoyRole = async (
+    role: string,
+    options: { soft?: boolean; previousSessionID?: string } = {}
+  ): Promise<boolean> => {
     const topic = ROLE_TOPIC_PREFIX + role;
     const previousTopic = claimedRoleTopic;
-    await client.setRole({ sessionID, role });
+    const result = await client.setRole({
+      sessionID,
+      role,
+      soft: options.soft,
+      previousSessionID: options.previousSessionID,
+    });
+    if (!result.claimed) {
+      logger.warn("envoy: role held by another live session; not reclaimed", {
+        role,
+        sessionID,
+        holder: result.holder,
+      });
+      claimedRoleTopic = undefined;
+      return false;
+    }
     claimedRoleTopic = topic;
     // The transcript is the one thing `omp --resume` guarantees, so it is
     // the durable record of the claim: the listener reaps a dead session's
@@ -369,6 +395,7 @@ export default function envoyExtension(pi: PiApi): void {
     if (previousTopic !== undefined && previousTopic !== topic) {
       await client.unsubscribe({ sessionID, topics: [previousTopic] });
     }
+    return true;
   };
 
   const releaseClaimedRole = (): void => {
@@ -438,24 +465,14 @@ export default function envoyExtension(pi: PiApi): void {
     // An explicit envoy_role_set is last-claim-wins by contract. An automatic
     // reclaim is not: this session's transcript may be stale evidence (the
     // parent of a /fork whose role moved to the child; a second process on
-    // the same transcript), and it must not take a role a different session
-    // legitimately holds. Claim only when the role is unheld, or held by an
-    // id this session is continuing. A lookup failure counts as unheld: the
-    // listener rejects the claim itself if that turns out to be wrong.
-    const holder = await client.getRole(role).then(
-      (live) => live.holder,
-      () => undefined
-    );
-    if (holder !== undefined && holder !== sessionID && holder !== previousSessionID) {
-      logger.warn("envoy: role held by another live session; not reclaimed", {
-        role,
-        sessionID,
-        holder,
-      });
-      claimedRoleTopic = undefined;
-      return;
-    }
-    await setEnvoyRole(role).catch((error) => {
+    // the same transcript), and it must not take a role a different live
+    // session holds. The listener decides that atomically for a soft claim;
+    // the id this session continues is the one live holder it may supersede.
+    const continued =
+      carryPreviousSessionRole && previousSessionID !== "" && previousSessionID !== sessionID
+        ? previousSessionID
+        : undefined;
+    await setEnvoyRole(role, { soft: true, previousSessionID: continued }).catch((error) => {
       logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });
     });
   };

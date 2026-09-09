@@ -646,10 +646,17 @@ describe("Legion OMP extension", () => {
       },
       // The controller role was held by ses_controller in this same process;
       // the rebind to ses_interactive re-claims it under the live id from
-      // memory — checking first that no other live session holds it — before
-      // the explicit claim command runs.
-      { path: `/v1/roles/${token}`, body: undefined },
-      { path: "/v1/roles/set", body: { session_id: "ses_interactive", role: token } },
+      // memory as a soft claim naming its predecessor, before the explicit
+      // claim command runs.
+      {
+        path: "/v1/roles/set",
+        body: {
+          session_id: "ses_interactive",
+          role: token,
+          soft: true,
+          previous_session_id: "ses_controller",
+        },
+      },
       { path: "/legion/v1/state", body: undefined },
       {
         path: "/v1/interests/subscribe",

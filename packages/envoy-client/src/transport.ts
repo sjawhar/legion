@@ -32,6 +32,12 @@ const RoleWireSchema = z.object({
   last_seen: z.number().int(),
 });
 
+const RoleHeldWireSchema = z.object({
+  error: z.string(),
+  role: z.string(),
+  holder: z.string(),
+});
+
 const ErrorWireSchema = z.object({
   error: z.string(),
   expected: z.array(z.string()).optional(),
@@ -129,7 +135,24 @@ export type PublishInput = (AgentSourceInput | HumanSourceInput) &
 export type SetRoleInput = {
   readonly sessionID: string;
   readonly role: string;
+  /**
+   * Claim only if the role is unheld, its holder is no longer live, or its
+   * holder is `previousSessionID`. Any other live holder is left in place and
+   * reported in the result instead of being displaced. Default (false) is
+   * last-claim-wins.
+   */
+  readonly soft?: boolean;
+  /**
+   * The session id this claimant continues (a fork or branch mints a new id
+   * in the same process). Lets a soft claim take the role from that still-live
+   * predecessor. Sent only with `soft`.
+   */
+  readonly previousSessionID?: string;
 };
+
+export type SetRoleResult =
+  | { readonly claimed: true; readonly interest: Interest }
+  | { readonly claimed: false; readonly holder: string };
 
 export type ListSessionsInput = {
   readonly directory?: string;
@@ -182,7 +205,7 @@ export type EnvoyClient = {
   readonly send: (input: SendInput) => Promise<SendResult>;
   readonly publish: (input: PublishInput) => Promise<PublishResult>;
   readonly unregisterSession: (sessionID: string) => Promise<void>;
-  readonly setRole: (input: SetRoleInput) => Promise<Interest>;
+  readonly setRole: (input: SetRoleInput) => Promise<SetRoleResult>;
   readonly getRole: (role: string) => Promise<RoleInfo>;
   readonly listSessions: (input?: ListSessionsInput) => Promise<readonly SessionInfo[]>;
 };
@@ -301,10 +324,32 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     unregisterSession: async (sessionID) => {
       await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
     },
-    setRole: async (input) =>
-      InterestWireSchema.parse(
-        JSON.parse(await post("/v1/roles/set", { session_id: input.sessionID, role: input.role }))
-      ),
+    setRole: async (input) => {
+      // `soft` and `previous_session_id` are omitted from the wire unless set,
+      // so an older listener sees an unchanged hard-claim request.
+      const soft = input.soft === true;
+      const previous = soft ? (input.previousSessionID ?? "") : "";
+      const body: { session_id: string; role: string; soft?: true; previous_session_id?: string } =
+        {
+          session_id: input.sessionID,
+          role: input.role,
+          ...(soft ? { soft: true } : {}),
+          ...(previous === "" ? {} : { previous_session_id: previous }),
+        };
+      let raw: string;
+      try {
+        raw = await post("/v1/roles/set", body);
+      } catch (error) {
+        // A soft claim refused by a live holder is an outcome, not a failure:
+        // the listener answers 409 with the holder's id.
+        if (error instanceof EnvoyApiError && error.details.status === 409) {
+          const held = RoleHeldWireSchema.safeParse(JSON.parse(error.details.responseBody));
+          if (held.success) return { claimed: false, holder: held.data.holder };
+        }
+        throw error;
+      }
+      return { claimed: true, interest: InterestWireSchema.parse(JSON.parse(raw)) };
+    },
     getRole: async (role) =>
       RoleWireSchema.parse(
         JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))

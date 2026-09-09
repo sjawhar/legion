@@ -131,11 +131,12 @@ or `/resume` switch installs an unrelated transcript and carries nothing. A proc
 is never resumed does not stay a live holder; once liveness expires, role publishes return
 `no holder` until that transcript resumes or another session claims the role.
 
-Automatic reclaim never steals: if a different live session holds the role when a transcript is
-resumed (the parent of a `/fork` whose role moved to the child, or a second process on the same
-transcript), the resumed session logs a warning and holds nothing. Only an explicit
-`envoy_role_set` is last-claim-wins. Re-running `envoy_role_set` for a role this session already
-holds is harmless.
+Automatic reclaim never steals. It is a *soft* claim, which the listener grants only when the role
+is unheld, held by a session that is no longer live, or held by the id this session continues (a
+fork's parent). If a different live session holds it — the parent of a `/fork` whose role moved to
+the child, or a second process on the same transcript — the listener refuses atomically and the
+resumed session logs a warning and holds nothing. Only an explicit `envoy_role_set` is
+last-claim-wins. Re-running `envoy_role_set` for a role this session already holds is harmless.
 
 ## Legion role claims
 

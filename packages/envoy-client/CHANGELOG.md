@@ -5,6 +5,7 @@
 ### Added
 
 - Added the shared nine-tool native Dispatch client, typed results, and per-issue event subscription details.
+- `setRole` takes `soft` and `previousSessionID` and returns `{ claimed: true, interest }` or `{ claimed: false, holder }`, so a caller can recover a role without displacing a live holder.
 
 ### Fixed
 
