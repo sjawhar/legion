@@ -138,6 +138,7 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
     });
   await expect(alicePage.getByText("This issue is closed.")).toBeVisible();
   await expect(inboxPage.locator("[data-testid^=ask-]")).toHaveCount(1);
+  await expect(inboxPage.getByText("First ask", { exact: true })).toHaveCount(0);
   await inboxContext.close();
   await alicePage.getByRole("button", { name: "Pin issue" }).click();
   await alicePage.goto("/");
@@ -153,7 +154,8 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   const bob = await asUser(browser, "bob");
   const bobPage = await bob.newPage();
   await bobPage.goto("/");
-  await expect(bobPage.locator("[data-testid^=ask-]")).toHaveCount(2);
+  await expect(bobPage.locator("[data-testid^=ask-]")).toHaveCount(1);
+  await expect(bobPage.getByText("First ask", { exact: true })).toHaveCount(0);
   await expect(bobPage.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
 
   await bob.close();

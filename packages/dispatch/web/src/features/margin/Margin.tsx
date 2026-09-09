@@ -94,10 +94,6 @@ interface MarginProps {
   ArtifactsTabSlot?: () => ReactNode;
 }
 
-function issueKeyFromPath(pathname: string): string | undefined {
-  return pathname.match(/^\/issues\/([^/]+)/)?.[1];
-}
-
 function newestFirst<T extends { created_at: string }>(items: T[]): T[] {
   return [...items].sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
@@ -280,10 +276,10 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
   const [expandedIssueKey, setExpandedIssueKey] = useState<string>();
   const sheetDragOrigin = useRef<number | undefined>(undefined);
   const sheetDragMoved = useRef(false);
-  const issueKey = issueKeyFromPath(pathname);
   const route = parseIssuePath(pathname);
+  const issueKey = route?.key;
   const routeArtifactSlug = route?.kind === "artifact" ? route.slug : undefined;
-  const routeItemId = pathname.match(/^\/issues\/[^/]+\/(?:asks|comments)\/([^/]+)$/)?.[1];
+  const routeItemId = route?.kind === "ask" || route?.kind === "comment" ? route.id : undefined;
   const issue = useQuery({
     enabled: issueKey !== undefined,
     queryKey: ["issue", issueKey],

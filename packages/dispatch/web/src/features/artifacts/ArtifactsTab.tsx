@@ -10,7 +10,7 @@ import type {
   Version,
 } from "../../api/types";
 import { VersionDiff } from "../doc/VersionDiff";
-import { parseIssuePath } from "../refs/routes";
+import { buildIssuePath, parseIssuePath } from "../refs/routes";
 import { Unfurl } from "../refs/Unfurl";
 import { Upload } from "./Upload";
 
@@ -318,7 +318,10 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
               <p className="text-xs font-medium text-slate-500">
                 {reference.kind[0]?.toUpperCase()}
                 {reference.kind.slice(1)} ·{" "}
-                <Link className="text-sky-700 underline" to={`/issues/${reference.issue_key}`}>
+                <Link
+                  className="text-sky-700 underline"
+                  to={buildIssuePath({ key: reference.issue_key, kind: "issue" })}
+                >
                   {reference.issue_key}
                 </Link>
               </p>
@@ -336,7 +339,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
 
 export function ArtifactsTab(): ReactNode {
   const { pathname } = useLocation();
-  const issueKey = pathname.match(/^\/issues\/([^/]+)/)?.[1];
+  const issueKey = parseIssuePath(pathname)?.key;
   const artifacts = useQuery({
     enabled: issueKey !== undefined,
     queryKey: ["artifacts", issueKey],

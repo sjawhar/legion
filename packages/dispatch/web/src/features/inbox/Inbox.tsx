@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { buildIssuePath } from "../refs/routes";
 import { AskCard } from "./AskCard";
 
 export function Inbox(): ReactNode {
@@ -31,7 +32,7 @@ export function Inbox(): ReactNode {
         <li key={ask.id}>
           <Link
             className="mb-2 flex flex-col items-start gap-1 text-sm text-sky-700 hover:text-sky-900 md:inline-flex md:flex-row md:items-baseline md:gap-2"
-            to={`/issues/${ask.issue_key}/asks/${ask.id}`}
+            to={buildIssuePath({ id: ask.id, key: ask.issue_key, kind: "ask" })}
           >
             <span className="font-semibold">{ask.issue_key}</span>
             <span>{ask.issue?.title ?? ask.issue_key}</span>

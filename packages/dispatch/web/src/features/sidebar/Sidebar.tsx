@@ -4,6 +4,7 @@ import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { IssueSummary, UserState } from "../../api/types";
+import { buildIssuePath, parseIssuePath } from "../refs/routes";
 
 export type SidebarEntry = string | { key: string; children: SidebarEntry[] };
 
@@ -125,7 +126,7 @@ export function selectSidebarView(
 }
 
 function activeIssueKey(pathname: string): string | undefined {
-  return pathname.match(/^\/issues\/([^/]+)/)?.[1];
+  return parseIssuePath(pathname)?.key;
 }
 
 function IssueLink({
@@ -148,7 +149,7 @@ function IssueLink({
       <Link
         className="block rounded px-2 py-1.5 text-sm hover:bg-slate-800"
         onClick={onNavigate}
-        to={`/issues/${issue.key}`}
+        to={buildIssuePath({ key: issue.key, kind: "issue" })}
       >
         <span className="font-medium">{issue.key}</span>
         <span className="ml-2 text-slate-300">{issue.title}</span>

@@ -14,7 +14,7 @@ import type {
 } from "../../api/types";
 import { DocEditor } from "../doc/DocEditor";
 import { DocView } from "../doc/DocView";
-import { parseIssuePath } from "../refs/routes";
+import { buildIssuePath, parseIssuePath } from "../refs/routes";
 import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
 import { LogTab } from "./LogTab";
@@ -229,7 +229,7 @@ function IssueHeader({
         {issue.parent === null ? null : (
           <Link
             className="text-sm text-sky-700 underline hover:text-sky-900"
-            to={`/issues/${issue.parent}`}
+            to={buildIssuePath({ key: issue.parent, kind: "issue" })}
           >
             Parent: {issue.parent}
           </Link>

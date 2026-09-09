@@ -43,18 +43,20 @@ test("ask events refresh the issue, its asks, selected ask, and the inbox", () =
   ]);
 });
 
-test("closed issues refresh the inbox so their open asks disappear", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
+test("issue changes refresh the inbox", () => {
+  for (const type of ["issue.closed", "issue.updated"] as const) {
+    const invalidated: unknown[][] = [];
+    const queryClient = {
+      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+        invalidated.push([...queryKey]);
+        return Promise.resolve();
+      },
+    };
 
-  applyEventInvalidations(queryClient, event("issue.closed"));
+    applyEventInvalidations(queryClient, event(type));
 
-  expect(invalidated).toEqual([["issue", "CORE-1"], ["events", "CORE-1"], ["issues"], ["inbox"]]);
+    expect(invalidated).toEqual([["issue", "CORE-1"], ["events", "CORE-1"], ["issues"], ["inbox"]]);
+  }
 });
 
 test("artifact versions refresh the document and its anchored margin items", () => {

@@ -54,11 +54,8 @@ export function applyEventInvalidations(queryClient: QueryInvalidator, event: Ev
   queryClient.invalidateQueries({ queryKey: ["events", event.issue_key] });
   queryClient.invalidateQueries({ queryKey: ["issues"] });
 
-  if (event.type === "issue.closed") {
-    queryClient.invalidateQueries({ queryKey: ["inbox"] });
-    return;
-  }
   if (event.type.startsWith("issue.")) {
+    queryClient.invalidateQueries({ queryKey: ["inbox"] });
     return;
   }
 

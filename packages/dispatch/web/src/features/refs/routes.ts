@@ -54,7 +54,7 @@ export function parseDispatchReference(value: string): DispatchRoute | undefined
   if (target === "spec") {
     return { key, kind: "spec" };
   }
-  const artifact = target.match(/^artifacts?\/([^@/?#\s]+)(?:@v([1-9]\d*))?$/);
+  const artifact = target.match(/^artifact\/([^@/?#\s]+)(?:@v([1-9]\d*))?$/);
   if (artifact !== null) {
     return artifactRoute(key, artifact[1] ?? "", artifact[2]);
   }

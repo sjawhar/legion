@@ -6,6 +6,7 @@ import { MemoryRouter, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Comment, Issue } from "../../api/types";
+import { buildIssuePath } from "../refs/routes";
 import { Margin, MarginProvider, useMargin } from "./Margin";
 
 const issue: Issue = {
@@ -62,7 +63,10 @@ function CommentLink(): ReactNode {
   const navigate = useNavigate();
 
   return (
-    <button onClick={() => navigate("/issues/CORE-1/comments/comment-1")} type="button">
+    <button
+      onClick={() => navigate(buildIssuePath({ id: "comment-1", key: "CORE-1", kind: "comment" }))}
+      type="button"
+    >
       Open comment
     </button>
   );
@@ -101,7 +105,7 @@ test("Margin hides an open composer when its issue closes", async () => {
   const listComments = spyOn(api, "listComments").mockResolvedValue([]);
 
   const view = render(
-    <MemoryRouter initialEntries={["/issues/CORE-1"]}>
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
         <MarginProvider>
           <SelectionButton />
@@ -143,7 +147,7 @@ test("a comment deep link activates Comments and scrolls its card from Pinned", 
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
 
   const view = render(
-    <MemoryRouter initialEntries={["/issues/CORE-1"]}>
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
         <MarginProvider>
           <CommentLink />

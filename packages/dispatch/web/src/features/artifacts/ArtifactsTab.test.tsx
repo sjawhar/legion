@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
+import { buildIssuePath } from "../refs/routes";
 import { ArtifactsTab } from "./ArtifactsTab";
 
 const artifact: Artifact = {
@@ -52,7 +53,7 @@ test("ArtifactsTab compares selected blob versions side by side", async () => {
 
   try {
     render(
-      <MemoryRouter initialEntries={["/issues/CORE-1"]}>
+      <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
         <QueryClientProvider client={queryClient}>
           <ArtifactsTab />
         </QueryClientProvider>
