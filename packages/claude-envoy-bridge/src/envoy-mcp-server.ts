@@ -1,3 +1,4 @@
+import { zodSchemaApi } from "@legion/contracts"
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
 import { executeDispatch } from "@legion/envoy-client/dispatch-call"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
@@ -34,7 +35,7 @@ import { createThreadForwarder, type ThreadForwarder } from "./thread-forwarder"
 // The shared tool contract builds argument shapes on the caller's Zod so each host registers
 // schemas its runtime recognises; this bridge validates and emits JSON Schema with its own.
 function argumentsSchema(spec: ToolSpec): z.ZodObject<z.ZodRawShape> {
-  return z.object(spec.arguments(z) as z.ZodRawShape)
+  return z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape)
 }
 
 function parseArguments<Operation extends EnvoyToolOperation>(

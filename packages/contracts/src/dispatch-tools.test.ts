@@ -1,32 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import { dispatchToolSpecs } from "./dispatch-tools";
-import type { SchemaApi } from "./tool-schema";
+import { zodSchemaApi } from "./tool-schema";
 
-const schemaApi = {
-  string: (opts = {}) => {
-    let schema = z.string();
-    if (opts.min !== undefined) schema = schema.min(opts.min);
-    if (opts.max !== undefined) schema = schema.max(opts.max);
-    return schema;
-  },
-  number: (opts = {}) => {
-    let schema = z.number();
-    if (opts.int) schema = schema.int();
-    if (opts.min !== undefined) schema = schema.min(opts.min);
-    if (opts.max !== undefined) schema = schema.max(opts.max);
-    return schema;
-  },
-  boolean: () => z.boolean(),
-  enum: (values: readonly [string, ...string[]]) => z.enum(values),
-  array: (item: z.ZodType, opts = {}) => {
-    let schema = z.array(item);
-    if (opts.min !== undefined) schema = schema.min(opts.min);
-    if (opts.max !== undefined) schema = schema.max(opts.max);
-    return schema;
-  },
-  object: (shape: Record<string, z.ZodType>) => z.object(shape),
-} satisfies SchemaApi<z.ZodType>;
+const schemaApi = zodSchemaApi(z);
 
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
@@ -54,6 +31,24 @@ function schemaFor(name: keyof typeof validCalls) {
   if (!spec) throw new Error(`missing ${name}`);
   return z.object(spec.arguments(schemaApi) as z.ZodRawShape);
 }
+
+describe("zodSchemaApi", () => {
+  test("rejects fractional values when integers are required", () => {
+    expect(schemaApi.number({ int: true }).safeParse(1.5).success).toBe(false);
+  });
+
+  test("rejects strings beyond their maximum length", () => {
+    expect(schemaApi.string({ max: 3 }).safeParse("abcd").success).toBe(false);
+  });
+
+  test("rejects arrays beyond their maximum length", () => {
+    expect(
+      schemaApi
+        .array(schemaApi.string(), { max: 8 })
+        .safeParse(Array.from({ length: 9 }, () => "item")).success
+    ).toBe(false);
+  });
+});
 
 describe("dispatchToolSpecs", () => {
   test("builds every dispatch tool on real Zod and accepts its valid invocation", () => {

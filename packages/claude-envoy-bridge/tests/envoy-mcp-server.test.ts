@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test"
 import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { zodSchemaApi } from "@legion/contracts"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import type { Server } from "bun"
 import { z } from "zod"
@@ -191,7 +192,7 @@ test("rejects an invalid urgency with the shared field validation error", async 
     const module = await loadServer("shared-metadata-validation")
     const spec = envoyToolSpecs.find((candidate) => candidate.name === "envoy_send")
     if (spec === undefined) throw new Error("envoy_send specification is missing")
-    const parsed = z.object(spec.arguments(z) as unknown as z.ZodRawShape).safeParse({
+    const parsed = z.object(spec.arguments(zodSchemaApi(z)) as unknown as z.ZodRawShape).safeParse({
       session_id: "ses_target",
       message: "hello",
       urgency: "urgent",

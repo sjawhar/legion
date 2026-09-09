@@ -1,5 +1,6 @@
 import {
   EnvelopeSchema,
+  zodSchemaApi,
   type SchemaApi,
   type SchemaNode,
   type ToolArgumentsShape,
@@ -51,33 +52,9 @@ export function messageMetadataShape<Element extends SchemaNode<Element>>(
     expires_at: schema.number({ int: true }).optional(),
   };
 }
-const zodSchemaApi = {
-  string: (opts = {}) => {
-    let schema = z.string();
-    if (opts.min !== undefined) schema = schema.min(opts.min);
-    if (opts.max !== undefined) schema = schema.max(opts.max);
-    return schema;
-  },
-  number: (opts = {}) => {
-    let schema = z.number();
-    if (opts.int) schema = schema.int();
-    if (opts.min !== undefined) schema = schema.min(opts.min);
-    if (opts.max !== undefined) schema = schema.max(opts.max);
-    return schema;
-  },
-  boolean: () => z.boolean(),
-  enum: (values: readonly [string, ...string[]]) => z.enum(values),
-  array: (item: z.ZodType, opts = {}) => {
-    let schema = z.array(item);
-    if (opts.min !== undefined) schema = schema.min(opts.min);
-    if (opts.max !== undefined) schema = schema.max(opts.max);
-    return schema;
-  },
-  object: (shape: Record<string, z.ZodType>) => z.object(shape),
-} satisfies SchemaApi<z.ZodType>;
 
 export const MessageMetadataSchema = z.object(
-  messageMetadataShape(zodSchemaApi) as z.ZodRawShape
+  messageMetadataShape(zodSchemaApi(z)) as z.ZodRawShape
 );
 
 export type MessageMetadataArguments = {

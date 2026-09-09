@@ -7,7 +7,7 @@ This package is the language-neutral contract layer for cross-runtime event payl
 Current scope:
 
 - envelope schema and subject helpers
-- model-facing Dispatch tool specifications built over an injected Zod surface
+- model-facing Dispatch tool specifications built over `zodSchemaApi(hostZod)`
 - Go generation: `scripts/gen-go.ts`
 - generated Go output: `packages/envoy/internal/contracts/generated.go`
 

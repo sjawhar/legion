@@ -1,20 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
+import { zodSchemaApi } from "@legion/contracts";
 import {
   envoyToolSpecs,
+  messageMetadataShape,
   MessageMetadataSchema,
   toMessageMetadata,
-  type SchemaApi,
 } from "../tool-contract";
 
-const schemaApi = {
-  string: () => z.string(),
-  number: () => z.number(),
-  boolean: () => z.boolean(),
-  enum: (values: readonly [string, ...string[]]) => z.enum(values),
-  array: (item: z.ZodType) => z.array(item),
-  object: (shape: Record<string, z.ZodType>) => z.object(shape),
-} satisfies SchemaApi<z.ZodType>;
+const schemaApi = zodSchemaApi(z);
 
 describe("envoyToolSpecs", () => {
   test("defines the ten canonical Envoy tool names", () => {
@@ -133,6 +127,12 @@ describe("message metadata", () => {
       expectsReply: "required",
       expiresAt: 1_788_956_000_000,
     });
+  });
+
+  test("rejects fractional metadata expiration", () => {
+    const schema = z.object(messageMetadataShape(zodSchemaApi(z)) as z.ZodRawShape);
+
+    expect(schema.safeParse({ expires_at: 1.5 }).success).toBe(false);
   });
 
   test("identifies an invalid metadata enum by field", () => {

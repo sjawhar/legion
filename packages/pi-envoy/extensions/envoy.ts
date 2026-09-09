@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject, ROLE_TOPIC_PREFIX } from "@legion/contracts";
+import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
 import { executeDispatch } from "@legion/envoy-client/dispatch-call";
@@ -722,7 +722,7 @@ export default function envoyExtension(pi: PiApi): void {
 function schemaFor(pi: PiApi, operation: EnvoyToolOperation): unknown {
   const spec = envoyToolSpecs.find((candidate) => candidate.operation === operation);
   if (spec === undefined) throw new Error(`missing Envoy tool specification for ${operation}`);
-  return pi.zod.object(spec.arguments(pi.zod));
+  return pi.zod.object(spec.arguments(zodSchemaApi(pi.zod)));
 }
 
 function stringFor(parameters: Record<string, unknown>, key: string): string {
