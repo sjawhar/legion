@@ -982,3 +982,44 @@ func TestDoneIssueAllowsOnlyAStatusReopen(t *testing.T) {
 		t.Fatalf("combined reopen and mutation: status=%d body=%s, want ISSUE_CLOSED", combined.Code, combined.Body.String())
 	}
 }
+
+func TestNamedArtifactVersionEventCarriesUnifiedDiff(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Version diff", "before")
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"summary": "Change opening",
+		"actor":   sessionActor(),
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("write named version: status=%d body=%s", response.Code, response.Body.String())
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK {
+		t.Fatalf("list version events: status=%d body=%s", events.Code, events.Body.String())
+	}
+	var log []struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.NewDecoder(events.Body).Decode(&log); err != nil {
+		t.Fatalf("decode version events: %v", err)
+	}
+	for _, event := range log {
+		if event.Type != "artifact.version" {
+			continue
+		}
+		var payload struct {
+			Diff *string `json:"diff"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode version event payload: %v", err)
+		}
+		want := "--- previous\n+++ current\n@@ -1 +1 @@\n-before\n+after\n"
+		if payload.Diff == nil || *payload.Diff != want {
+			t.Fatalf("version diff = %#v, want %q", payload.Diff, want)
+		}
+		return
+	}
+	t.Fatalf("artifact.version event not found in %#v", log)
+}

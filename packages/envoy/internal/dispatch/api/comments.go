@@ -153,7 +153,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 			IssueKey: issueKey,
 			Type:     "artifact.version",
 			Actor:    actor,
-			Payload:  versionEventPayload(anchor.ArtifactID, artifactName, *snapshot),
+			Payload:  versionEventPayload(anchor.ArtifactID, artifactName, *snapshot, nil),
 		})
 		if err != nil {
 			s.writeHandlerError(w, err)

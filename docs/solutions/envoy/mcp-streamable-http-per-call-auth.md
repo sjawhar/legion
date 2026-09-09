@@ -1,3 +1,5 @@
+> **Superseded.** Describes the GitHub-thread Dispatch replaced by the native workspace (docs/superpowers/specs/2026-09-09-dispatch-native-workspace-design.md).
+
 ---
 title: "Go MCP SDK handler context is the initialize request's — per-call auth must read req.Extra.Header, and a client that never re-initializes needs a stateless server"
 category: envoy

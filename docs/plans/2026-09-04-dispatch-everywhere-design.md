@@ -1,3 +1,5 @@
+> **Superseded.** Describes the GitHub-thread Dispatch replaced by the native workspace (docs/superpowers/specs/2026-09-09-dispatch-native-workspace-design.md).
+
 # Dispatch for every session
 
 **Date:** 2026-09-04

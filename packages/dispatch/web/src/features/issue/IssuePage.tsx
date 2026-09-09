@@ -57,18 +57,53 @@ function safeExternalHref(value: string): string | undefined {
   }
 }
 
+interface GitHubReference {
+  head?: { sha?: string };
+  merged?: boolean;
+  state: string;
+  title: string;
+}
+
 function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   const href = safeExternalHref(link.url);
   const match =
-    href?.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:issues|pull)\/(\d+)\/?$/) ?? null;
-  const githubIssue = useQuery({
+    href?.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(issues|pull)\/(\d+)\/?$/) ?? null;
+  const isPullRequest = match?.[3] === "pull";
+  const githubReference = useQuery({
     enabled: match !== null,
     queryKey: ["github-link", link.url],
     queryFn: async () => {
       const response = await api.githubRest(
-        `repos/${match?.[1]}/${match?.[2]}/issues/${match?.[3]}`
+        `repos/${match?.[1]}/${match?.[2]}/${isPullRequest ? "pulls" : "issues"}/${match?.[4]}`
       );
-      return (await response.json()) as { state: string; title: string };
+      return (await response.json()) as GitHubReference;
+    },
+    retry: false,
+  });
+  const headSHA = isPullRequest ? githubReference.data?.head?.sha : undefined;
+  const checks = useQuery({
+    enabled: headSHA !== undefined,
+    queryKey: ["github-link-checks", link.url, headSHA],
+    queryFn: async () => {
+      const response = await api.githubRest(
+        `repos/${match?.[1]}/${match?.[2]}/commits/${headSHA}/check-runs`
+      );
+      const { check_runs: checkRuns } = (await response.json()) as {
+        check_runs: { conclusion: string | null; status: string }[];
+      };
+      if (
+        checkRuns.some(({ conclusion }) =>
+          ["action_required", "cancelled", "failure", "timed_out"].includes(conclusion ?? "")
+        )
+      ) {
+        return "failure";
+      }
+      if (
+        checkRuns.some(({ conclusion, status }) => conclusion === null || status !== "completed")
+      ) {
+        return "pending";
+      }
+      return "success";
     },
     retry: false,
   });
@@ -80,10 +115,11 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       </span>
     );
   }
-  if (match === null || githubIssue.isError) {
+  if (match === null || githubReference.isError || checks.isError) {
     const unavailable =
-      githubIssue.error instanceof ApiError &&
-      githubIssue.error.code === "GITHUB_TOKEN_UNAVAILABLE";
+      (githubReference.error instanceof ApiError &&
+        githubReference.error.code === "GITHUB_TOKEN_UNAVAILABLE") ||
+      (checks.error instanceof ApiError && checks.error.code === "GITHUB_TOKEN_UNAVAILABLE");
     return (
       <a
         className="text-sm text-sky-700 underline hover:text-sky-900"
@@ -94,22 +130,27 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       </a>
     );
   }
-  if (githubIssue.data === undefined) {
+  if (githubReference.data === undefined) {
     return (
       <a className="text-sm text-sky-700 underline" href={href}>
         {link.url}
       </a>
     );
   }
+  const state =
+    isPullRequest && githubReference.data.merged ? "merged" : githubReference.data.state;
   return (
     <a
       className="inline-flex items-center gap-2 text-sm text-sky-700 underline hover:text-sky-900"
       href={href}
     >
-      <span>{githubIssue.data.title}</span>
-      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
-        {githubIssue.data.state}
-      </span>
+      <span>{githubReference.data.title}</span>
+      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">{state}</span>
+      {isPullRequest && checks.data !== undefined ? (
+        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+          checks: {checks.data}
+        </span>
+      ) : null}
     </a>
   );
 }

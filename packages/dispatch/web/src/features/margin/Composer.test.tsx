@@ -5,27 +5,26 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { api } from "../../api/client";
 import { Composer } from "./Composer";
 
-test("Composer refreshes issue artifacts after a pasted image uploads", async () => {
+test("Composer uploads dropped files and inserts their references", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
-  const invalidateQueries = spyOn(queryClient, "invalidateQueries");
   const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue({
     artifact: {
       created_at: "2026-09-09T00:00:00Z",
       created_by: { id: "alice", kind: "user" },
       id: "artifact-1",
       issue_key: "CORE-1",
-      kind: "image",
-      name: "diagram.png",
+      kind: "file",
+      name: "notes.md",
       primary: false,
-      slug: "diagram-png",
+      slug: "notes-md",
       versions: [],
     },
     version: {
       authors: [{ id: "alice", kind: "user" }],
       created_at: "2026-09-09T00:00:00Z",
-      mime: "image/png",
+      mime: "text/markdown",
       named: false,
       number: 1,
       sha256: "sha",
@@ -46,17 +45,15 @@ test("Composer refreshes issue artifacts after a pasted image uploads", async ()
       </QueryClientProvider>
     );
 
-    fireEvent.paste(screen.getByLabelText("Comment"), {
-      clipboardData: {
-        files: [new File(["image"], "diagram.png", { type: "image/png" })],
+    const textarea = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.drop(textarea, {
+      dataTransfer: {
+        files: [new File(["# Notes"], "notes.md", { type: "text/markdown" })],
       },
     });
 
-    await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
-    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["artifacts", "CORE-1"] });
-    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["issue", "CORE-1"] });
+    await waitFor(() => expect(textarea.value).toBe("dispatch://CORE-1/artifact/notes-md"));
   } finally {
-    invalidateQueries.mockRestore();
     uploadArtifact.mockRestore();
   }
 });

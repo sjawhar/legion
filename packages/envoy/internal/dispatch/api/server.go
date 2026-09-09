@@ -339,8 +339,34 @@ func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) er
 	return nil
 }
 
-func versionEventPayload(artifactID, name string, version model.Version) map[string]any {
-	return map[string]any{"artifact_id": artifactID, "name": name, "version": version}
+func versionEventPayload(artifactID, name string, version model.Version, diff *string) map[string]any {
+	payload := map[string]any{"artifact_id": artifactID, "name": name, "version": version}
+	if diff != nil {
+		payload["diff"] = *diff
+	}
+	return payload
+}
+
+func (s *server) namedVersionDiff(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version) (*string, error) {
+	if !version.Named || version.Number < 2 {
+		return nil, nil
+	}
+	var previous, current string
+	if err := tx.QueryRow(ctx, `
+		select markdown from artifact_versions where artifact_id = $1 and number = $2
+	`, artifactID, version.Number-1).Scan(&previous); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load previous artifact version: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+		select markdown from artifact_versions where artifact_id = $1 and number = $2
+	`, artifactID, version.Number).Scan(&current); err != nil {
+		return nil, fmt.Errorf("load current artifact version: %w", err)
+	}
+	diff := text.UnifiedDiff(previous, current)
+	return &diff, nil
 }
 
 func externalRef(ref string) (repo string, number string, err error) {

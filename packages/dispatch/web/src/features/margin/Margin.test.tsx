@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 
@@ -144,12 +144,15 @@ function SelectedItemLabel(): ReactNode {
 
 test("Margin hides an open composer when its issue closes", async () => {
   const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
   });
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key, specArtifact.id], []);
 
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
@@ -168,18 +171,16 @@ test("Margin hides an open composer when its issue closes", async () => {
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     await screen.findByLabelText("Ask composer");
 
-    queryClient.setQueryData(["issue", issue.key], {
-      ...issue,
-      closed_at: "2026-09-09T01:00:00Z",
+    act(() => {
+      queryClient.setQueryData(["issue", issue.key], {
+        ...issue,
+        closed_at: "2026-09-09T01:00:00Z",
+      });
     });
 
     await waitFor(() => expect(screen.queryByLabelText("Ask composer")).toBeNull());
   } finally {
     view.unmount();
-    getIssue.mockRestore();
-    getInbox.mockRestore();
-    getMyState.mockRestore();
-    listComments.mockRestore();
   }
 });
 

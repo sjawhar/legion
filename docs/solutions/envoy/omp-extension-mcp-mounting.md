@@ -1,3 +1,5 @@
+> **Superseded.** Describes the GitHub-thread Dispatch replaced by the native workspace (docs/superpowers/specs/2026-09-09-dispatch-native-workspace-design.md).
+
 ---
 title: "OMP extensions mount MCP servers via package-root .mcp.json, not a runtime API"
 category: envoy

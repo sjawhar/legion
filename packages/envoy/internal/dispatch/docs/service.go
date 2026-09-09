@@ -734,6 +734,18 @@ func (s *Service) scheduleSettle(room string) {
 	})
 }
 
+func artifactVersionEventPayload(
+	artifactID, name string,
+	version model.Version,
+	diff *string,
+) map[string]any {
+	payload := map[string]any{"artifact_id": artifactID, "name": name, "version": version}
+	if diff != nil {
+		payload["diff"] = *diff
+	}
+	return payload
+}
+
 func (s *Service) settleRoom(room string, generation uint64) {
 	state := s.room(room)
 	state.mu.Lock()
@@ -803,7 +815,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		IssueKey: issueKey,
 		Type:     "artifact.version",
 		Actor:    eventActor,
-		Payload:  map[string]any{"artifact_id": room, "name": artifactName, "version": version},
+		Payload:  artifactVersionEventPayload(room, artifactName, version, nil),
 	})
 	if err != nil {
 		return

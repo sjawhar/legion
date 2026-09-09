@@ -230,8 +230,16 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	var diff *string
+	if !created && kind == "doc" {
+		diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	eventType := "artifact.version"
-	payload := versionEventPayload(artifact.ID, artifact.Name, version)
+	payload := versionEventPayload(artifact.ID, artifact.Name, version, diff)
 	if created {
 		eventType = "artifact.created"
 		artifact.Versions = []model.Version{version}
@@ -377,11 +385,16 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	diff, err := s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	event, err := s.appendEvent(r.Context(), tx, model.Event{
 		IssueKey: artifact.IssueKey,
 		Type:     "artifact.version",
 		Actor:    actor,
-		Payload:  versionEventPayload(artifact.ID, artifact.Name, version),
+		Payload:  versionEventPayload(artifact.ID, artifact.Name, version, diff),
 	})
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -443,11 +456,16 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		version = &namedVersion
+		diff, err := s.namedVersionDiff(r.Context(), tx, artifact.ID, namedVersion)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		event, err := s.appendEvent(r.Context(), tx, model.Event{
 			IssueKey: artifact.IssueKey,
 			Type:     "artifact.version",
 			Actor:    actor,
-			Payload:  versionEventPayload(artifact.ID, artifact.Name, namedVersion),
+			Payload:  versionEventPayload(artifact.ID, artifact.Name, namedVersion, diff),
 		})
 		if err != nil {
 			s.writeHandlerError(w, err)

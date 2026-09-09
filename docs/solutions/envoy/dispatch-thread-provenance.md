@@ -1,3 +1,5 @@
+> **Superseded.** Describes the GitHub-thread Dispatch replaced by the native workspace (docs/superpowers/specs/2026-09-09-dispatch-native-workspace-design.md).
+
 ---
 title: "Dispatch threads carry session provenance from the calling plugin, not the server"
 category: envoy

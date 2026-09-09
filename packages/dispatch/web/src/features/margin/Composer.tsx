@@ -92,14 +92,6 @@ function appendReference(body: string, reference: string): string {
   return `${body}${body.length === 0 || /\s$/.test(body) ? "" : " "}${reference}`;
 }
 
-function filesFromPaste(event: ClipboardEvent<HTMLTextAreaElement>): File[] {
-  return [...event.clipboardData.files].filter((file) => file.type.startsWith("image/"));
-}
-
-function filesFromDrop(event: DragEvent<HTMLTextAreaElement>): File[] {
-  return [...event.dataTransfer.files].filter((file) => file.type.startsWith("image/"));
-}
-
 export function canSubmitComposer(
   kind: ComposerKind,
   body: string,
@@ -190,7 +182,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
     }
   };
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = filesFromPaste(event);
+    const files = [...event.clipboardData.files];
     if (files.length > 0) {
       event.preventDefault();
       uploadFiles(files);
@@ -198,7 +190,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
   };
   const handleDrop = (event: DragEvent<HTMLTextAreaElement>) => {
     event.preventDefault();
-    uploadFiles(filesFromDrop(event));
+    uploadFiles([...event.dataTransfer.files]);
   };
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
@@ -260,7 +252,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
         />
       </label>
       <p className="text-xs text-slate-500">
-        Paste or drop an image to add it as an artifact. Ctrl+K inserts a reference.
+        Paste or drop a file to add it as an artifact. Ctrl+K inserts a reference.
       </p>
       {references.length === 0 ? null : (
         <section aria-label="References" className="flex flex-wrap gap-2">
@@ -321,7 +313,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
       ) : null}
       {pendingUploads > 0 ? (
         <p className="text-sm text-slate-500" role="status">
-          Uploading image…
+          Uploading file…
         </p>
       ) : null}
       {upload.isError ? (
@@ -333,7 +325,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
         disabled={!canSubmit}
         type="submit"
       >
-        {save.isPending ? "Saving…" : pendingUploads > 0 ? "Uploading image…" : title}
+        {save.isPending ? "Saving…" : pendingUploads > 0 ? "Uploading file…" : title}
       </button>
     </form>
   );
