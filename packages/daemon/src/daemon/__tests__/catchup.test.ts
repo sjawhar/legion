@@ -127,6 +127,28 @@ describe("derived catch-up", () => {
           fixAttempts: 1,
         },
       },
+      phaseCompletions: [],
+    });
+  });
+
+  it("includes a phase that finished with no live architect holder, but not one still awaiting completion", async () => {
+    const { state, root, child } = stateForTree();
+    state.phases[root] = {
+      phase: "tester",
+      sessionId: "ses_tester",
+      completed: { summary: "Verified the acceptance criteria", at: "2026-09-09T00:00:00.000Z" },
+    };
+    state.phases[child] = { phase: "implementer", sessionId: "ses_implementer" };
+
+    expect(await overseerCatchup(state, root)).toMatchObject({
+      phaseCompletions: [
+        {
+          issue: root,
+          role: "tester",
+          summary: "Verified the acceptance criteria",
+          at: "2026-09-09T00:00:00.000Z",
+        },
+      ],
     });
   });
 

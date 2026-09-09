@@ -2651,7 +2651,7 @@ describe("ProcessManager", () => {
     expect(split).toContain("@99");
   });
 
-  it("resumes an already-alive worker by sending the task over its live socket, spawning nothing new", async () => {
+  it("resumes an already-alive worker by sending the task over its live socket, spawning nothing new, and records the reassignment as the issue's active phase", async () => {
     const state = newLegionState("omp", 1);
     state.issues[root] = {
       key: root,
@@ -2677,7 +2677,11 @@ describe("ProcessManager", () => {
       },
     };
     const client = fakeWorkerRpcClient();
-    const { manager: processes, commands } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      commands,
+    } = manager(state, {
       connectWorkerRpc: async () => client,
     });
 
@@ -2686,7 +2690,12 @@ describe("ProcessManager", () => {
     expect(result).toEqual({ status: "resumed", roleToken: token });
     expect(client.prompts).toEqual(["verify #55"]);
     expect(commands.some((command) => command[0] === "tmux")).toBeFalse();
+    // A phase worker resumed for a repeat assignment (the architect requested changes, or
+    // reassigned it a second time) must re-register as the issue's active phase, or its
+    // eventual `legion handoff complete` 409s forever against a phase no route ever restored.
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
   });
+
   it("treats a same-role spawn during an in-flight boot as resumed-pending, never launching a second pane", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
@@ -3067,6 +3076,10 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.pendingAssignment).toBeUndefined();
+    // Same fix as the resumed-live-socket branch of spawnWorker: a delivered pending assignment
+    // must re-register as the issue's active phase, or the worker's eventual `handoff complete`
+    // 409s against a phase this delivery path never restored.
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
   });
 
   it("ignores worker/ready from a stale generation even when the session id matches, leaving pendingAssignment intact", async () => {

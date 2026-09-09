@@ -53,6 +53,12 @@ interface CredentialCommandDeps {
   daemonUrl?: string;
 }
 
+interface HandoffCompleteCommandDeps {
+  env: NodeJS.ProcessEnv;
+  fetch: Fetch;
+  daemonUrl?: string;
+}
+
 function daemonUrl(env: NodeJS.ProcessEnv, explicit?: string): string {
   return (
     explicit ?? env.LEGION_DAEMON_URL ?? `http://127.0.0.1:${env.LEGION_DAEMON_PORT ?? "13370"}`
@@ -77,7 +83,22 @@ async function spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number> 
   return completion.promise;
 }
 
+/** True when the forwarded `gh` argv would merge a PR: a `pr … merge` subcommand invocation (the
+ * non-flag tokens contain `pr` followed later by `merge` — `gh pr merge`'s own flags like
+ * `--repo <value>` insert extra non-flag tokens between them without changing the subcommand), or
+ * a raw REST `gh api` call whose path token ends in `/merge`. No Legion worker role ever merges a
+ * PR directly; the merge queue does that under its own PAT. */
+function isPrMergeInvocation(args: string[]): boolean {
+  const positional = args.filter((arg) => !arg.startsWith("-"));
+  const prIndex = positional.indexOf("pr");
+  if (prIndex !== -1 && positional.slice(prIndex + 1).includes("merge")) return true;
+  return positional.includes("api") && positional.some((token) => token.endsWith("/merge"));
+}
+
 export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
+  if (isPrMergeInvocation(args)) {
+    throw new CliError("Legion workers never merge; publish READY to the merge queue");
+  }
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -112,6 +133,29 @@ export async function cmdCredential(deps: CredentialCommandDeps): Promise<void> 
     throw new CliError("Daemon returned an invalid git credential response");
   }
   deps.write(credential.endsWith("\n") ? credential : `${credential}\n`);
+}
+
+export async function cmdHandoffComplete(
+  summary: string,
+  deps: HandoffCompleteCommandDeps
+): Promise<void> {
+  const response = await deps.fetch(
+    `${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/phase/complete`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grantId: grantFrom(deps.env), summary }),
+    }
+  );
+  if (!response.ok) {
+    const payload = await response.text();
+    throw new CliError(`Unable to report phase completion (${response.status}): ${payload}`);
+  }
+  if (response.status === 202) {
+    console.log("[handoff] Warning: phase recorded; no architect was live to receive the summary");
+    return;
+  }
+  console.log("[handoff] Reported phase completion");
 }
 
 async function readStdin(): Promise<string> {
@@ -332,6 +376,28 @@ export const handoffCommand = defineCommand({
           writeMessage(workspace, { from, to, body: String(args.body) });
           console.log(`[handoff] Wrote message from ${from} to ${to}`);
         }, "write message"),
+    }),
+    complete: defineCommand({
+      meta: {
+        name: "complete",
+        description:
+          "Report phase completion to this issue's architect. Authenticates exactly like " +
+          "`legion gh`/`legion credential`: reads LEGION_GRANT from the environment (the " +
+          "pi-envoy worker extension injects it into every worker bash call) and redeems it " +
+          "for this worker's issue/role/session — never a live session secret in the request.",
+      },
+      args: {
+        summary: {
+          type: "string",
+          required: true,
+          description: "Two-sentence summary of this phase for the architect",
+        },
+      },
+      run: ({ args }) =>
+        runHandoff(
+          () => cmdHandoffComplete(String(args.summary), { env: process.env, fetch }),
+          "report phase completion"
+        ),
     }),
   },
 });

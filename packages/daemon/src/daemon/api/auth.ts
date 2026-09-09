@@ -13,6 +13,7 @@ export interface SessionCapability {
 export interface Grant {
   issue: IssueKey;
   role: LegionRole;
+  sessionId: string;
   expiresAt: number;
 }
 

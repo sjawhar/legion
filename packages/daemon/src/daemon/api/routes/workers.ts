@@ -1,10 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { LegionDaemonApi, roleToken } from "@legion/contracts";
+import {
+  type IssueKey,
+  LegionDaemonApi,
+  type LegionRole,
+  roleToken,
+  roleTopic,
+} from "@legion/contracts";
 import type { WorkerRoleClaim } from "../../legion-state";
 import { equalSecretHash, secretHash, spawnCapabilityKey } from "../auth";
 import { type RouteContext, roleForSession, rootForIssue, treeContains } from "../context";
 import { appRoleForLegionRole } from "../github";
 import {
+  EnvoyPublishError,
   HttpError,
   legionRole,
   requiredNumber,
@@ -256,20 +263,130 @@ export async function handleWorkerStarted(
   );
 }
 
-export async function handleWorkerReady(
+interface WorkerSession {
+  tree: IssueKey;
+  issue: IssueKey;
+  role: LegionRole;
+  sessionId: string;
+}
+
+/** Verifies the worker's own session capability and that its claimed role matches the request —
+ * used by `worker/ready`, the one remaining route a phase worker still calls with its session
+ * secret directly (`phase/complete` authenticates via a short-lived grant instead — see below).
+ * `requestName` names the request in the 403 message. */
+function requireWorkerSession(
   ctx: RouteContext,
-  body: Record<string, unknown>
-): Promise<Response> {
+  body: Record<string, unknown>,
+  requestName: string
+): WorkerSession {
   const { tree, issue } = ctx.requireTreeIssue(body);
   const role = legionRole(requiredString(body, "role"));
   const capability = ctx.auth.requireSessionCapability(body, tree, issue);
   if (capability.role !== role) {
-    throw new HttpError(403, "Session role does not match worker/ready request");
+    throw new HttpError(403, `Session role does not match ${requestName} request`);
   }
   const sessionId = requiredString(body, "sessionId");
+  return { tree, issue, role, sessionId };
+}
+
+export async function handleWorkerReady(
+  ctx: RouteContext,
+  body: Record<string, unknown>
+): Promise<Response> {
+  const { issue, role, sessionId } = requireWorkerSession(ctx, body, "worker/ready");
   const generation = requiredNumber(body, "generation");
   await ctx.deps.processManager.workerReady(issue, role, sessionId, generation);
   return Response.json(validateContractResponse(LegionDaemonApi.WorkerReady.response, {}));
+}
+
+/**
+ * A worker reports its phase done. Authenticates like `legion gh`/`legion credential`: a
+ * short-lived grant (`LEGION_GRANT`) resolved via `ctx.auth.resolveGrant` — never a live session
+ * secret in the request body. Verifies the claim for (issue, grant.role) still belongs to the
+ * grant's session, and that the issue's active phase still belongs to this exact worker (a
+ * retained worker resumed for a later reassignment keeps the same sessionId, so a duplicate/late
+ * completion from a superseded phase is rejected on the phase check alone). The phase is captured
+ * and cleared synchronously, before the publish `await`, so a second concurrent completion for
+ * the same phase always finds it already gone and 409s instead of both publishing. Publishes to
+ * the tree's architect next: a genuine delivery failure (anything but "no live holder") restores
+ * the captured phase and returns 502, so the worker retries and — since neither the phase nor the
+ * claim moved — the retry is exactly idempotent. A missing architect holder never drops the
+ * completion either: state (the source of truth) records it as `phases[issue].completed` instead
+ * of clearing the phase, so `overseerCatchup` replays it on the architect's next catch-up and
+ * `routeActive` treats the issue as having no active phase until the next assignment (a fresh
+ * `spawn_worker` write) replaces this record. Either way, if the save itself fails, the
+ * in-memory phase is restored before rethrowing (500) so a retry redoes the whole attempt. The
+ * worker's role claim is never touched: the same agent stays claimed and resumes for its next
+ * assignment. A missing holder is not a worker-facing failure: the response is 202 instead of the
+ * normal 200, so a caller can tell delivery was uncertain without treating it as an error.
+ */
+export async function handlePhaseComplete(
+  ctx: RouteContext,
+  body: Record<string, unknown>
+): Promise<Response> {
+  const grant = ctx.auth.resolveGrant(body);
+  const summary = requiredString(body, "summary");
+  const tree = rootForIssue(ctx.deps.state, grant.issue);
+  if (!tree) throw new HttpError(404, `No Legion tree contains issue ${grant.issue}`);
+  const token = roleToken(ctx.deps.state.project, grant.issue, grant.role);
+  const claim = ctx.deps.state.roles[token];
+  if (!claim || !("issue" in claim) || claim.sessionId !== grant.sessionId) {
+    throw new HttpError(409, "Grant does not match the worker currently holding this role");
+  }
+  const phase = ctx.deps.state.phases[grant.issue];
+  if (!phase || phase.phase !== grant.role || phase.sessionId !== grant.sessionId) {
+    // The issue's active phase has already moved on to a later worker (a retained but superseded
+    // worker reporting a duplicate/late completion must never clear a newer phase it no longer
+    // owns). This is distinct from a stale grant: the worker's own claim is fine.
+    throw new HttpError(409, `Phase for ${grant.issue} is no longer owned by this worker`);
+  }
+
+  // Capture and clear the phase synchronously, before the publish await below.
+  delete ctx.deps.state.phases[grant.issue];
+
+  const architectToken = roleToken(ctx.deps.state.project, tree, "architect");
+  let noHolder = false;
+  try {
+    await ctx.deps.envoyPublish(
+      roleTopic(architectToken),
+      JSON.stringify({
+        type: "phase-complete",
+        issue: grant.issue,
+        role: grant.role,
+        summary,
+      })
+    );
+  } catch (error) {
+    if (!(error instanceof EnvoyPublishError) || error.status !== 404) {
+      ctx.deps.state.phases[grant.issue] = phase;
+      throw new HttpError(
+        502,
+        `Envoy publish to the tree's architect failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    noHolder = true;
+    console.error(
+      `[legion] phase-complete for ${grant.issue} (${grant.role}) has no live architect holder at ${architectToken}; recording it for catch-up: ${summary}`
+    );
+  }
+
+  if (noHolder) {
+    ctx.deps.state.phases[grant.issue] = {
+      phase: phase.phase,
+      sessionId: phase.sessionId,
+      completed: { summary, at: new Date(ctx.now()).toISOString() },
+    };
+  }
+  try {
+    await ctx.save();
+  } catch (error) {
+    ctx.deps.state.phases[grant.issue] = phase;
+    throw error;
+  }
+  return Response.json(
+    validateContractResponse(LegionDaemonApi.PhaseComplete.response, {}),
+    noHolder ? { status: 202 } : undefined
+  );
 }
 
 export async function handleSpawnWorker(

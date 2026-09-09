@@ -1708,6 +1708,40 @@ describe("routeActive", () => {
       })
     ).toThrow(child);
   });
+
+  it("routes PR conversation to the tree's architect once the phase worker has already reported completion", () => {
+    const state = rootState();
+    attachChild(state);
+    claim(state, child, "implementer");
+    addPr(state);
+    const phase = state.phases[child];
+    if (!phase) throw new Error("phase fixture missing");
+    phase.completed = { summary: "Implemented the change", at: "2026-09-09T00:00:00.000Z" };
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(
+      effects(state, {
+        action: "created",
+        issue: issue(prNumber, { pull_request: { url: "pr-api-url" } }),
+        comment: {
+          user: { login: "reviewer" },
+          body: "Please rename this",
+          html_url: "comment-url",
+        },
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: {
+          type: "pr-comment",
+          author: "reviewer",
+          body: "Please rename this",
+          url: "comment-url",
+        },
+      },
+    ]);
+  });
 });
 
 describe("uncertifyCiVerdict", () => {
