@@ -455,24 +455,18 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       setSelection(undefined);
     }
   }, [selection, setSelection, visibleArtifact?.id]);
+  const isClosed = issue.data !== undefined && issue.data.closed_at !== null;
   useEffect(() => {
-    if (composer !== undefined && composer.anchor.artifact !== visibleArtifact?.id) {
+    if (composer !== undefined && (isClosed || composer.anchor.artifact !== visibleArtifact?.id)) {
       setComposer(undefined);
     }
-  }, [composer, visibleArtifact?.id]);
+  }, [composer, isClosed, visibleArtifact?.id]);
 
   const openComposer = (kind: ComposerKind, anchor: ComposerAnchor, replyTo?: string) => {
     setComposer({ anchor, kind, replyTo });
     setSelection(undefined);
   };
   const closeComposer = () => setComposer(undefined);
-  const isClosed = issue.data?.closed_at !== null && issue.data !== undefined;
-
-  useEffect(() => {
-    if (isClosed) {
-      setComposer(undefined);
-    }
-  }, [isClosed]);
 
   return (
     <aside
