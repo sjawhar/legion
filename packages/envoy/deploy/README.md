@@ -6,9 +6,19 @@ networking. The listener serves `127.0.0.1:9020` for local OpenCode session
 registration and webhook ingress; Dispatch serves `127.0.0.1:8766` by default
 for the SPA, GitHub OAuth, and the native Dispatch API.
 
-For a phone check over the tailnet, set `DISPATCH_LISTEN_HOST=0.0.0.0` and use
-the host's tailnet address with `DISPATCH_PORT`. Use `DISPATCH_INSECURE_COOKIE=1`
-only when that address is served over HTTP rather than HTTPS.
+For a phone check over the tailnet, use Tailscale Serve to terminate HTTPS
+without exposing Dispatch beyond Tailscale:
+
+```bash
+tailscale serve --https=443 http://127.0.0.1:8766
+```
+
+If Tailscale Serve is unavailable, bind directly to the host's Tailscale IPv4
+address instead of every interface:
+
+```bash
+export DISPATCH_LISTEN_HOST="$(tailscale ip -4)"
+```
 
 ## Layout
 
@@ -82,7 +92,7 @@ available. Host adapters use the same file or the `DISPATCH_URL` and
 | `DISPATCH_BACKUP_BUCKET` | yes | Private S3 bucket receiving daily PostgreSQL dumps. |
 | `S3_REGION` | yes | AWS Region that contains the backup bucket. |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | conditional | Set both for static S3 credentials; leave both unset to use the instance role. |
-| `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; set `0.0.0.0` for a tailnet-reachable server. |
+| `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; for direct tailnet access, set it to `$(tailscale ip -4)`, never `0.0.0.0`. |
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |
 | `DISPATCH_IDENTITY` | no | `cookie` (default) or `header:<name>` for a trusted proxy or tests. |
 | `DISPATCH_IDENTITY_HEADER_TRUSTED` | conditional | Set to `1` when header identity and GitHub OAuth credentials share a deployment. |
@@ -91,7 +101,7 @@ available. Host adapters use the same file or the `DISPATCH_URL` and
 | `DISPATCH_URL` | no | Host-adapter override for the Dispatch base URL; use with `DISPATCH_TOKEN`. |
 | `DISPATCH_TOKEN` | host adapters | Bearer token paired with `DISPATCH_URL`. |
 | `DISPATCH_APP_CLIENT_ID` / `DISPATCH_APP_CLIENT_SECRET` | OAuth | GitHub OAuth credentials. The GitHub proxy needs a stored user token. |
-| `DISPATCH_INSECURE_COOKIE` | HTTP only | Set only for local or tailnet HTTP OAuth. |
+| `DISPATCH_INSECURE_COOKIE` | HTTP only | Set only for local HTTP development; use Tailscale Serve for tailnet browser access. |
 
 The service derives `DATABASE_URL` from the configured password and Postgres
 port. The database data and Dispatch signing material are named volumes.
