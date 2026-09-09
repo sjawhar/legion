@@ -1,7 +1,7 @@
 import { formatIssueKey, type IssueKey, LegionDaemonApi, parseIssueKey } from "@legion/contracts";
 import { getApprovalState } from "../../approval-check";
 import type { LegionState } from "../../legion-state";
-import { resetPrHead } from "../../reducers";
+import { resetPrHead, supersededBy } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import { asRecord, HttpError, requiredNumber, validateContractResponse } from "../http";
 
@@ -131,17 +131,24 @@ export async function handleMergeGate(
   // the read was in flight); the same head still advances the clock, so a
   // delayed synchronize for an intervening head is rejected as older.
   if (pr.headSha !== snapshot.head.sha) {
-    if (pr.headUpdatedAt !== undefined && snapshot.updatedAt < pr.headUpdatedAt) {
+    if (
+      supersededBy(
+        { updatedAt: snapshot.updatedAt, source: "resync" },
+        { updatedAt: pr.headUpdatedAt, source: pr.headUpdatedAtSource ?? "webhook" }
+      )
+    ) {
       console.debug(
-        `[legion] ignored stale merge-gate head for ${pr.repo}#${pr.number} fetched=${snapshot.head.sha}@${new Date(snapshot.updatedAt).toISOString()} known=${pr.headSha}@${new Date(pr.headUpdatedAt).toISOString()}`
+        `[legion] ignored stale merge-gate head for ${pr.repo}#${pr.number} fetched=${snapshot.head.sha}@${new Date(snapshot.updatedAt).toISOString()} known=${pr.headSha}@${new Date(pr.headUpdatedAt ?? 0).toISOString()}`
       );
     } else {
       resetPrHead(pr, snapshot.head.sha);
       pr.headUpdatedAt = snapshot.updatedAt;
+      pr.headUpdatedAtSource = "resync";
       await ctx.save();
     }
   } else if (pr.headUpdatedAt === undefined || snapshot.updatedAt > pr.headUpdatedAt) {
     pr.headUpdatedAt = snapshot.updatedAt;
+    pr.headUpdatedAtSource = "resync";
     await ctx.save();
   }
   const approval = await getApprovalState(

@@ -25,12 +25,13 @@ const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, "../cli/index.ts");
 
 /**
  * Wraps a `saveState` rejection that occurs after `spawnTree` has already
- * succeeded (generation/locator/launchFailures already reset to reflect a
- * real, running tmux window). Distinguishes this from a genuine launch
- * failure so `startRoot` never rolls back or requeues on it — that spawn
- * is not the problem, and doing so would orphan the window it just
- * created. Left to propagate instead, so a caller running this inside a
- * durable transaction (the linger effect's promotion, via
+ * succeeded (a real tmux window was running when the save was attempted).
+ * Distinguishes this from a genuine launch failure so `startRoot` never
+ * rolls back generation/status/launchFailures or requeues on it — that
+ * spawn is not the problem. The window itself is killed before this is
+ * thrown (see `spawnRoot`), so nothing is left running unrecorded; the
+ * failure is left to propagate so a caller running this inside a durable
+ * transaction (the linger effect's promotion, via
  * `advancePromotionSweep`/`startRoot`) fails and goes fatal, consistent
  * with every other durable effect whose post-mutation save fails.
  */
@@ -136,6 +137,8 @@ export class ProcessManager {
   private readonly resurrecting = new Map<IssueKey, Promise<void>>();
   private controllerSpawn?: Promise<void>;
   private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
+  /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
+  private readonly spawns = new Set<Promise<void>>();
 
   constructor(private readonly deps: ProcessManagerDeps) {}
 
@@ -175,9 +178,18 @@ export class ProcessManager {
    * because a cap raised between restarts opens slots no release event fills.
    */
   async reconcileAdmission(): Promise<void> {
+    // Boot never trusts a window it did not record: reap every
+    // `@legion_owner`-marked window no tree or the controller currently
+    // names, with no grace period, before the demote/promote below decide
+    // what to run. An orphan-active-no-locator tree demoted below (its
+    // prior window, if one exists, was never recorded in its locator) is
+    // caught by this same criterion, so it is reaped here rather than left
+    // running alongside the fresh spawn the promotion loop later gives the
+    // requeued tree.
+    await this.reconcileTmuxWindows(0);
+
     const admission = this.deps.state.admission;
     admission.cap = this.deps.config.admissionCap;
-
     // An "active" tree with no recorded locator never finished spawning
     // before the daemon last stopped: advancePromotionSweep persists the
     // promotion before startRoot/spawnRoot ever records a locator, so a
@@ -260,7 +272,15 @@ export class ProcessManager {
     await this.deps.saveState();
   }
 
-  async reconcileTmuxWindows(): Promise<void> {
+  /**
+   * Kills every `@legion_owner`-marked tmux window this state does not
+   * name (via a tree's or the controller's locator) and that has been idle
+   * at least `graceMs` — long enough that a window mid-creation (activity
+   * not yet recorded) is never mistaken for an orphan. Boot calls this with
+   * `graceMs: 0`: it never trusts a window it did not itself record, so
+   * there is no such race to protect against there (see `reconcileAdmission`).
+   */
+  async reconcileTmuxWindows(graceMs = TMUX_RECONCILIATION_GRACE_MS): Promise<void> {
     const session = `legion-${this.deps.state.project}`;
     const owner = `legion-${this.deps.state.project}`;
     const windows = await this.deps.run([
@@ -285,10 +305,7 @@ export class ProcessManager {
         continue;
       }
       const activityAt = Number(activitySeconds) * 1000;
-      if (
-        !Number.isFinite(activityAt) ||
-        this.deps.now() - activityAt < TMUX_RECONCILIATION_GRACE_MS
-      ) {
+      if (!Number.isFinite(activityAt) || this.deps.now() - activityAt < graceMs) {
         continue;
       }
       await this.deps.run(["tmux", "kill-window", "-t", windowId]);
@@ -333,15 +350,21 @@ export class ProcessManager {
 
     // The spawn itself succeeded — a real tmux window is running. A save
     // failure past this point is not a launch failure: rolling back
-    // generation/locator/launchFailures here would orphan that window
-    // (untracked, indistinguishable from a leaked stale process). Propagate
-    // it distinctly instead (see `SpawnPersistenceFailure`).
+    // generation/status/launchFailures here would make the daemon retry a
+    // tree that already has a live window. Kill that window first instead
+    // — every spawn is either persisted or reaped, never left running
+    // unrecorded — then propagate the failure distinctly (see
+    // `SpawnPersistenceFailure`) so this goes fatal like every other
+    // durable effect whose post-mutation save fails.
     tree.launchFailures = 0;
     this.settlePromotionSpawn(issue);
     if (this.promotionSweep?.inFlight === 0) this.promotionSweep = undefined;
     try {
       await this.deps.saveState();
     } catch (error) {
+      if (tree.locator) {
+        await this.deps.run(["tmux", "kill-window", "-t", tree.locator.tmuxWindowId]);
+      }
       throw new SpawnPersistenceFailure(error);
     }
   }
@@ -573,10 +596,23 @@ export class ProcessManager {
   }
 
   private startRoot(issue: IssueKey): Promise<void> {
-    return this.spawnRoot(issue).catch((error) => {
-      if (error instanceof SpawnPersistenceFailure) throw error;
-      console.error(`[legion] failed to spawn ${issue}:`, error);
-    });
+    const spawn = this.spawnRoot(issue)
+      .catch((error) => {
+        if (error instanceof SpawnPersistenceFailure) throw error;
+        console.error(`[legion] failed to spawn ${issue}:`, error);
+      })
+      .finally(() => {
+        this.spawns.delete(spawn);
+      });
+    this.spawns.add(spawn);
+    return spawn;
+  }
+
+  /** Awaits every currently in-flight `startRoot` call, including ones added while draining, so a shutdown's final save never races a spawn's own `saveState`. */
+  async drainSpawns(): Promise<void> {
+    while (this.spawns.size > 0) {
+      await Promise.allSettled([...this.spawns]);
+    }
   }
 
   /** Marks a sweep-launched spawn as settled once its success or failure is known. */
@@ -856,6 +892,11 @@ export class ProcessManager {
       `legion-${this.deps.state.project}`,
     ]);
     if (marker.exitCode !== 0) {
+      // Every window is either recorded (marked, then locator-assigned by
+      // the caller) or reaped: this one never got its marker, so nothing
+      // will ever recognize or clean it up later. Kill it now instead of
+      // leaving an orphan for `reconcileTmuxWindows` to find.
+      await this.deps.run(["tmux", "kill-window", "-t", tmuxWindowId]);
       throw new Error(
         `tmux window ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`
       );

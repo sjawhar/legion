@@ -477,6 +477,11 @@ async function startDaemonLocked(
 
   const drain = async () => {
     await eventPump.drain();
+    // A spawn fired by `admit`'s promotion (never awaited at its call site)
+    // or an in-flight `advancePromotionSweep` may still be running its own
+    // `saveState`; without this, the final `save()` below can capture state
+    // older than what that spawn is about to persist.
+    await processManager.drainSpawns();
     await saving;
   };
 

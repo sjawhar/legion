@@ -222,6 +222,40 @@ describe("ProcessManager", () => {
     expect(state.admission).toEqual({ cap: 1, active: [child], queue: [] });
   });
 
+  it("drainSpawns awaits an admit-triggered spawn that admit itself never awaits, including that spawn's own saveState", async () => {
+    const stateDir = await temporaryDir();
+    const saveGate = Promise.withResolvers<void>();
+    const { manager: processes } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@42\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+      saveState: async () => {
+        await saveGate.promise;
+      },
+    });
+
+    // admit()'s "spawned" path fires startRoot without awaiting it — the
+    // spawn, and its own post-success saveState, are still running when
+    // admit() returns.
+    expect(processes.admit(root)).toBe("spawned");
+
+    let drained = false;
+    const draining = processes.drainSpawns().then(() => {
+      drained = true;
+    });
+
+    // saveGate is still pending, so the tracked spawn cannot have settled
+    // yet — no real wait needed to know `drained` is still false here.
+    expect(drained).toBe(false);
+
+    saveGate.resolve();
+    await draining;
+    expect(drained).toBe(true);
+  });
+
   it("provisions the root issue workspace before launching OMP in that workspace", async () => {
     const stateDir = await temporaryDir();
     const repo = path.join(stateDir, "repos", "github.com", "sjawhar", "legion");
@@ -767,6 +801,90 @@ describe("ProcessManager", () => {
     }
   });
 
+  it("reaps an unrecorded owner-marked window at boot, with no grace period, before re-spawning a demoted tree", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    // Same crash as above, plus a leaked tmux window from that same prior
+    // spawn attempt: nothing in state names it, so boot must not wait out
+    // the periodic sweep's grace period to reap it.
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.admission.active.push(root);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const killedWindows: string[] = [];
+    let newWindowCalls = 0;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        if (command[1] === "list-windows") {
+          return {
+            stdout: `@99\tlegion-omp\t${Date.parse("2026-08-24T00:00:00.000Z") / 1000}\n`,
+            exitCode: 0,
+          };
+        }
+        if (command[1] === "kill-window") {
+          killedWindows.push(command[3] ?? "");
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") {
+          newWindowCalls += 1;
+          return { stdout: "@77\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      await processes.reconcileAdmission();
+
+      expect(killedWindows).toEqual(["@99"]);
+      expect(newWindowCalls).toBe(1);
+      expect(state.trees[root]).toMatchObject({
+        status: "active",
+        locator: { tmuxSession: "legion-omp", tmuxWindowId: "@77" },
+      });
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("kills a just-created window and rolls back the launch when its ownership marker fails", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.admission.active.push(root);
+    const killedWindows: string[] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@88\n", exitCode: 0 };
+        if (command[1] === "set-option" && command[2] === "-w") {
+          return { stdout: "marker rejected", exitCode: 1 };
+        }
+        if (command[1] === "kill-window") {
+          killedWindows.push(command[3] ?? "");
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Every window is either recorded (locator assigned) or reaped: the
+    // marker never landed, so nothing would ever find this window again —
+    // it must be killed synchronously instead of leaked.
+    await expect(processes.spawnRoot(root)).rejects.toThrow("tmux window ownership marker failed");
+
+    expect(killedWindows).toEqual(["@88"]);
+    expect(state.trees[root]?.status).toBe("queued");
+    expect(state.trees[root]?.locator).toBeUndefined();
+  });
+
   it("leaves launch-failed trees queued when reconciling admission capacity", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
@@ -873,7 +991,16 @@ describe("ProcessManager", () => {
       active: [root],
       queue: [root, child, grandchild, closed],
     });
-    expect(commands).toEqual([]);
+    expect(commands).toEqual([
+      [
+        "tmux",
+        "list-windows",
+        "-t",
+        "legion-omp",
+        "-F",
+        "#{window_id}\t#{@legion_owner}\t#{window_activity}",
+      ],
+    ]);
   });
 
   it("marks a tree launch-failed after its third launch failure and publishes a controller anomaly", async () => {
@@ -909,15 +1036,20 @@ describe("ProcessManager", () => {
     ]);
   });
 
-  it("propagates a saveState failure after a successful spawn without rolling back the launch or requeuing it as a failure", async () => {
+  it("kills the just-spawned window before propagating a saveState failure after a successful spawn, without rolling back the launch or requeuing it as a failure", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     state.admission.active.push(root);
+    const killedWindows: string[] = [];
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
         if (command[1] === "new-window") return { stdout: "@42\n", exitCode: 0 };
+        if (command[1] === "kill-window") {
+          killedWindows.push(command[3] ?? "");
+          return { stdout: "", exitCode: 0 };
+        }
         return { stdout: "", exitCode: 0 };
       },
       saveState: async () => {
@@ -928,10 +1060,12 @@ describe("ProcessManager", () => {
     // The spawn itself (tmux window, locator, generation) already
     // succeeded before this save runs — only persisting that fact failed.
     // Treating this like a launch failure would roll back the tracked
-    // locator and requeue the tree while a real, now-untracked tmux window
-    // keeps running: an orphan. It must propagate distinctly instead.
+    // locator and requeue the tree while a real window keeps running, so
+    // instead the window is killed directly and the failure propagates
+    // distinctly (see `SpawnPersistenceFailure`).
     await expect(processes.spawnRoot(root)).rejects.toThrow("disk full");
 
+    expect(killedWindows).toEqual(["@42"]);
     expect(state.trees[root]).toMatchObject({
       generation: 1,
       status: "active",

@@ -1523,9 +1523,8 @@ describe("core-NATS event pump", () => {
       await expect(pump.drain()).rejects.toThrow();
       expect(acks).toEqual([]);
       expect(state.controllerHeldEvents).toEqual([]);
-      // publishRoleDirect no longer logs its own copy of the failure —
-      // only processDurableMessage's catch does, so this fires once, not
-      // twice, for the exact same underlying rejection.
+      // Only `processDurableMessage`'s catch logs a durable-lane rejection;
+      // it fires once for this one underlying failure.
       expect(errorLog).toHaveBeenCalledTimes(1);
     } finally {
       errorLog.mockRestore();

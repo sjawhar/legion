@@ -452,6 +452,48 @@ describe("reduceGithubEvent", () => {
     expect(state.issues[root].labels).toEqual(["human-approved"]);
   });
 
+  it("lets a resync-sourced label change win an identical-clock tie against a webhook's disagreeing one", () => {
+    const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
+    const T = "2026-01-01T00:00:02.000Z";
+
+    // A real webhook labels the issue "human-approved" at T.
+    expect(
+      effects(state, {
+        action: "labeled",
+        issue: issue(1, { updated_at: T }),
+        label: { name: "human-approved" },
+      })
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
+    expect(state.issues[root]).toMatchObject({
+      updatedAt: Date.parse(T),
+      updatedAtSource: "webhook",
+      labels: ["human-approved"],
+    });
+
+    // resync's own board read disagrees at the exact same clock. Unlike a
+    // webhook redelivery at an identical clock (ignored — see the test
+    // above), GitHub's authoritative resync read wins this tie regardless
+    // of arrival order, so the label is removed rather than the event
+    // being treated as a stale redelivery.
+    expect(
+      effects(
+        state,
+        {
+          action: "unlabeled",
+          issue: issue(1, { updated_at: T }),
+          label: { name: "human-approved" },
+        },
+        "resync"
+      )
+    ).toEqual([]);
+    expect(state.issues[root]).toMatchObject({
+      updatedAt: Date.parse(T),
+      updatedAtSource: "resync",
+      labels: [],
+    });
+  });
+
   it("does not let an issue action it ignores make itself the freshness authority", () => {
     const state = rootState();
     const architect = roleToken(state.project, root, "architect");
@@ -1145,6 +1187,36 @@ describe("reduceGithubEvent", () => {
     });
   });
 
+  it("ignores a same-clock webhook synchronize that disagrees with a resync-sourced head (GitHub's authoritative read wins the tie)", () => {
+    const state = rootState();
+    attachChild(state);
+    const T = "2026-09-07T03:00:00Z";
+    // Simulates resync having already recorded head C at T (resync.ts sets
+    // headUpdatedAtSource itself; here that precondition is given directly).
+    addPr(state, {
+      headSha: "head-c",
+      headUpdatedAt: Date.parse(T),
+      headUpdatedAtSource: "resync",
+    });
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "synchronize",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "head-b",
+        updated_at: T,
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      headSha: "head-c",
+      headUpdatedAt: Date.parse(T),
+      headUpdatedAtSource: "resync",
+    });
+  });
+
   it("notifies the active implementer of a review and the subsequent CI-ready signal", () => {
     const state = rootState();
     attachChild(state);
@@ -1317,6 +1389,40 @@ describe("reduceGithubEvent", () => {
         head_ref: "legion/issue-2",
         head_sha: "stale-resurrection-head",
         updated_at: "2026-09-07T03:30:00Z",
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+  });
+
+  it("keeps a tombstone after an unmerged close so a synchronize at the exact same clock cannot recreate the PR", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    const closedAt = "2026-09-07T04:00:00Z";
+
+    effects(state, {
+      kind: "pr",
+      action: "closed",
+      repo,
+      number: String(prNumber),
+      merged: "false",
+      updated_at: closedAt,
+    });
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+
+    // Unlike the fence between two live observations (equal clock still
+    // applies — a legitimate same-second sequence), the close tombstone is
+    // itself a point-in-time event: a synchronize at its exact clock is
+    // the close racing its own last delivered head, not a later one.
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "synchronize",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "stale-resurrection-head",
+        updated_at: closedAt,
       })
     ).toEqual([]);
     expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();

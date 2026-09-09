@@ -361,6 +361,7 @@ describe("thermonuclear API regressions", () => {
     expect(state.prs["acme/widgets#17"]).toEqual({
       ...before,
       headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+      headUpdatedAtSource: "webhook",
     });
   });
 

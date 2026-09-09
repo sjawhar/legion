@@ -10,6 +10,9 @@ import {
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
 
+/** Which read last set a fence's timestamp: a real GitHub webhook, or the daemon's own resync (board GraphQL/CI-status/merge-gate) read. At an identical clock a resync read is GitHub's authoritative source of truth and wins a tie against a disagreeing webhook observation. */
+export type UpdateSource = "webhook" | "resync";
+
 export interface IssueNode {
   key: IssueKey;
   title: string;
@@ -22,6 +25,8 @@ export interface IssueNode {
   finalCommentRef?: string;
   /** The GitHub payload's `updated_at` (or, for a sub_issue event, `parent_issue.updated_at`) from the last event applied to this issue — a freshness fence, mirroring `PrState.headUpdatedAt`, against an out-of-order redelivery. */
   updatedAt?: number;
+  /** The source of `updatedAt`'s last write; see `UpdateSource`. */
+  updatedAtSource?: UpdateSource;
 }
 
 export interface HeldEvent {
@@ -59,6 +64,8 @@ export interface PrState {
   number: number;
   headSha: string;
   headUpdatedAt?: number;
+  /** The source of `headUpdatedAt`'s last write; see `UpdateSource`. */
+  headUpdatedAtSource?: UpdateSource;
   /** The last SETTLED verdict for this head; a rerun in flight makes it unknown at the next resync. */
   verdict: "green" | "red" | null;
   /** Failing check runs: reported by the listener or by GitHub's rollup. */
@@ -148,6 +155,7 @@ const IssueNodeSchema = z
     backlogMarker: z.string().optional(),
     finalCommentRef: z.string().optional(),
     updatedAt: z.number().optional(),
+    updatedAtSource: z.enum(["webhook", "resync"]).optional(),
   })
   .strict();
 const HeldEventSchema = z
@@ -211,6 +219,7 @@ const PrStateSchema = z
     number: z.number().int().nonnegative(),
     headSha: z.string(),
     headUpdatedAt: z.number().optional(),
+    headUpdatedAtSource: z.enum(["webhook", "resync"]).optional(),
     verdict: z.enum(["green", "red"]).nullable(),
     failing: z.array(z.string()),
     failingStatuses: z.array(z.string()),
