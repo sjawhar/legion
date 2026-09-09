@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -181,5 +183,21 @@ func TestBuildAppContextRejectsMalformedRepoProjectMapping(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
 		t.Fatalf("error: got %v, want malformed DISPATCH_REPO_PROJECTS rejection", err)
+	}
+}
+
+func TestStaticHandlerRejectsRetiredMCPRoute(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("MCP route status: got %d, want %d; body=%s", response.Code, http.StatusNotFound, response.Body.String())
 	}
 }

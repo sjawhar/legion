@@ -225,12 +225,12 @@ test("forwards a GitHub envelope after native dispatch removes the echo filter",
     source: "github",
     dedupe_key: "github.dispatch.1",
     payload_summary: "Keep the conversation open?",
-    payload: JSON.stringify({ dispatch_session: "ses_claude" }),
+    payload: JSON.stringify({}),
   })
   const laterCopy = JSON.stringify({
     dedupe_key: "github.dispatch.1",
     payload_summary: "Keep the conversation open?",
-    payload: JSON.stringify({ dispatch_session: "ses_other" }),
+    payload: JSON.stringify({}),
   })
 
   nats.emit(COMMENT, echo)
@@ -248,7 +248,7 @@ test("forwards a non-GitHub message that names this dispatch session", async () 
     dedupe_key: "agent.dispatch.1",
     source: "agent",
     payload_summary: "An agent replied.",
-    payload: JSON.stringify({ dispatch_session: "ses_claude" }),
+    payload: JSON.stringify({}),
   })
 
   nats.emit(COMMENT, message)

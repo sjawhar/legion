@@ -983,7 +983,7 @@ describe("envoy OMP extension", () => {
       summary: "note to self",
     });
   });
-  test("skips a dispatch echo without suppressing a later non-echo envelope", async () => {
+  test("deduplicates a dispatch event without suppressing a later envelope", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-echo");
     const fixture = createPi();
     const afterEcho = Promise.withResolvers<void>();
@@ -1007,7 +1007,7 @@ describe("envoy OMP extension", () => {
         dedupe_key: "github.dispatch.echo",
         issued_at: 1,
         payload_summary: "Keep the thread open?",
-        payload: JSON.stringify({ dispatch_session: "ses_omp" }),
+        payload: JSON.stringify({}),
         trace_id: "trace-dispatch-echo",
       })
     );
@@ -1020,7 +1020,7 @@ describe("envoy OMP extension", () => {
         dedupe_key: "github.dispatch.echo",
         issued_at: 1,
         payload_summary: "Keep the thread open?",
-        payload: JSON.stringify({ dispatch_session: "ses_other" }),
+        payload: JSON.stringify({}),
         trace_id: "trace-dispatch-later-copy",
       })
     );
