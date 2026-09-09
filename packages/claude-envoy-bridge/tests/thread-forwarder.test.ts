@@ -217,7 +217,7 @@ test("forwards and renders a future-source envelope", async () => {
   )
 })
 
-test("records and skips a dispatch echo for the originating session", async () => {
+test("forwards a GitHub envelope after native dispatch removes the echo filter", async () => {
   const nats = new FakeNats()
   const forwarder = createThreadForwarder(nats, "ses_claude")
   forwarder.follow(THREAD)
@@ -237,7 +237,7 @@ test("records and skips a dispatch echo for the originating session", async () =
   nats.emit(COMMENT, laterCopy)
   await settled()
 
-  expect(nats.published).toEqual([])
+  expect(nats.published.map((entry) => decode(entry.data))).toEqual([echo])
 })
 
 test("forwards a non-GitHub message that names this dispatch session", async () => {

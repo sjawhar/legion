@@ -17,7 +17,7 @@ function repoExec(repo: string): ExecFn {
   };
 }
 
-const config = { enabled: true, url: "http://dispatch.test", token: "secret" };
+const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
 
 describe("executeDispatchTool", () => {
   test("prefills an omitted issue from LEGION_ISSUE using the cwd repository", async () => {

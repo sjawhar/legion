@@ -72,14 +72,67 @@ export function replyWith(envelope: DeliveryEnvelope): string | undefined {
   return `envoy_send(session_id="${envelope.source_session}", message="...")`;
 }
 
+interface DispatchEventFields {
+  readonly issue_key?: unknown;
+  readonly type?: unknown;
+  readonly actor?: unknown;
+  readonly payload?: unknown;
+}
+
+interface DispatchPayload {
+  readonly title?: unknown;
+  readonly status?: unknown;
+  readonly route?: unknown;
+  readonly name?: unknown;
+  readonly version?: unknown;
+  readonly diff?: unknown;
+  readonly question?: unknown;
+  readonly options?: unknown;
+  readonly answer?: unknown;
+  readonly artifact_name?: unknown;
+  readonly anchor?: unknown;
+  readonly reply_to?: unknown;
+  readonly body?: unknown;
+  readonly suggestion?: unknown;
+  readonly child_key?: unknown;
+  readonly from?: unknown;
+  readonly to?: unknown;
+}
+
+interface DispatchVersionPayload {
+  readonly number?: unknown;
+  readonly summary?: unknown;
+}
+
+interface DispatchOptionPayload {
+  readonly label?: unknown;
+}
+
+interface DispatchAnswerPayload {
+  readonly selected?: unknown;
+  readonly text?: unknown;
+}
+
+interface DispatchAnchorPayload {
+  readonly quote?: unknown;
+}
+
+interface DispatchSuggestionPayload {
+  readonly replace_with?: unknown;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 }
 
+function asObject<T>(value: unknown): T | null {
+  return asRecord(value) as T | null;
+}
+
 function asDispatchEvent(value: unknown): Event | null {
-  const event = asRecord(value);
+  const event = asObject<DispatchEventFields>(value);
   if (
     event === null ||
     typeof event.issue_key !== "string" ||
@@ -99,10 +152,10 @@ function dispatchActorLabel(actor: Event["actor"]): string {
 }
 
 function dispatchBody(event: Event): string[] {
-  const payload = asRecord(event.payload);
+  const payload = asObject<DispatchPayload>(event.payload);
   if (payload === null) return [];
   const lines: string[] = [];
-  const text = (name: string): string | undefined =>
+  const text = (name: keyof DispatchPayload): string | undefined =>
     typeof payload[name] === "string" ? (payload[name] as string) : undefined;
 
   switch (event.type) {
@@ -124,7 +177,7 @@ function dispatchBody(event: Event): string[] {
     }
     case "artifact.version": {
       const name = text("name");
-      const version = asRecord(payload.version);
+      const version = asObject<DispatchVersionPayload>(payload.version);
       if (name) lines.push(`Artifact: ${name}`);
       if (typeof version?.number === "number") lines.push(`Version: ${version.number}`);
       if (typeof version?.summary === "string") lines.push(`Summary: ${version.summary}`);
@@ -139,12 +192,12 @@ function dispatchBody(event: Event): string[] {
       if (event.type === "ask.opened") {
         const options = Array.isArray(payload.options)
           ? payload.options
-              .map((option) => asRecord(option)?.label)
+              .map((option) => asObject<DispatchOptionPayload>(option)?.label)
               .filter((label): label is string => typeof label === "string")
           : [];
         if (options.length > 0) lines.push(`Options: ${options.join(", ")}`);
       } else {
-        const answer = asRecord(payload.answer);
+        const answer = asObject<DispatchAnswerPayload>(payload.answer);
         const selected = Array.isArray(answer?.selected)
           ? answer.selected.filter((choice): choice is string => typeof choice === "string")
           : [];
@@ -156,7 +209,7 @@ function dispatchBody(event: Event): string[] {
     case "comment.created":
     case "comment.resolved": {
       const artifactName = text("artifact_name");
-      const anchor = asRecord(payload.anchor);
+      const anchor = asObject<DispatchAnchorPayload>(payload.anchor);
       const replyTo = text("reply_to");
       const body = text("body");
       if (artifactName) lines.push(`Artifact: ${artifactName}`);
@@ -168,8 +221,8 @@ function dispatchBody(event: Event): string[] {
     case "suggestion.accepted":
     case "suggestion.rejected": {
       const artifactName = text("artifact_name");
-      const quote = asRecord(payload.anchor)?.quote;
-      const replacement = asRecord(payload.suggestion)?.replace_with;
+      const quote = asObject<DispatchAnchorPayload>(payload.anchor)?.quote;
+      const replacement = asObject<DispatchSuggestionPayload>(payload.suggestion)?.replace_with;
       if (artifactName) lines.push(`Artifact: ${artifactName}`);
       if (typeof quote === "string") lines.push(`> ${quote}`);
       if (typeof quote === "string" && typeof replacement === "string") {

@@ -35,7 +35,8 @@ reference, and returns the typed tool-result details that host adapters use for 
 
 `resolveDispatchConfig` enables Dispatch only when both its URL and bearer token resolve. Configure
 `dispatch.token` with `dispatch.serverUrl` in `envoy.json`, or override them with `DISPATCH_TOKEN` and
-`DISPATCH_URL`.
+`DISPATCH_URL`. Invalid configuration, malformed URLs, and empty tokens leave Dispatch disabled and
+name the failing source in the returned `error`.
 
 ## Tool contract
 

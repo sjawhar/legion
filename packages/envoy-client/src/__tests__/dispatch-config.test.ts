@@ -33,6 +33,7 @@ describe("resolveDispatchConfig", () => {
         enabled: true,
         url: "http://dispatch.test",
         token: "token",
+        error: null,
       });
       expect(second.url).toBe("http://other.test");
       expect(warnings).toEqual([expect.stringContaining("DISPATCH_URL")]);
@@ -51,6 +52,7 @@ describe("resolveDispatchConfig", () => {
       enabled: true,
       url: "http://dispatch.test",
       token: "file-token",
+      error: null,
     });
   });
 
@@ -73,6 +75,7 @@ describe("resolveDispatchConfig", () => {
       enabled: true,
       url: "http://override.test",
       token: "environment-token",
+      error: null,
     });
   });
 
@@ -84,6 +87,39 @@ describe("resolveDispatchConfig", () => {
       enabled: false,
       url: "http://dispatch.test",
       token: null,
+      error: "dispatch.token must be a non-empty bearer token",
     });
+  });
+
+  test("reports malformed and invalid envoy.json rather than silently opting out", () => {
+    const invalidHome = tempDir();
+    writeUserConfig(invalidHome, { dispatch: { enabled: true, unexpected: true } });
+    const invalid = resolveDispatchConfig({}, { home: invalidHome, cwd: tempDir() });
+    expect(invalid.enabled).toBe(false);
+    expect(invalid.error).toContain("dispatch.unexpected");
+
+    const malformedHome = tempDir();
+    const configDir = path.join(malformedHome, ".config", "opencode");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(path.join(configDir, "envoy.json"), "{");
+    const malformed = resolveDispatchConfig({}, { home: malformedHome, cwd: tempDir() });
+    expect(malformed.enabled).toBe(false);
+    expect(malformed.error).toContain("invalid JSON");
+  });
+
+  test("rejects malformed URLs and empty environment tokens with the setting named", () => {
+    const invalidUrl = resolveDispatchConfig(
+      { DISPATCH_URL: "not-a-url", DISPATCH_TOKEN: "token" },
+      { home: tempDir(), cwd: tempDir() }
+    );
+    expect(invalidUrl.enabled).toBe(false);
+    expect(invalidUrl.error).toContain("DISPATCH_URL");
+
+    const emptyToken = resolveDispatchConfig(
+      { DISPATCH_URL: "http://dispatch.test", DISPATCH_TOKEN: "" },
+      { home: tempDir(), cwd: tempDir() }
+    );
+    expect(emptyToken.enabled).toBe(false);
+    expect(emptyToken.error).toContain("DISPATCH_TOKEN");
   });
 });

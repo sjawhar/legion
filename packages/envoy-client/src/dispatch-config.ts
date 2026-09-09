@@ -16,6 +16,19 @@ function deprecatedMcpUrl(url: string): string {
   return normalizeDispatchUrl(url).replace(/\/mcp$/, "");
 }
 
+function parsedDispatchUrl(
+  value: string,
+  source: string
+): { url: string | null; error: string | null } {
+  const url = normalizeDispatchUrl(value);
+  try {
+    new URL(url);
+    return { url, error: null };
+  } catch {
+    return { url: null, error: `${source} must be a valid URL` };
+  }
+}
+
 function warnDeprecatedMcpUrl(): void {
   if (emittedDeprecatedUrlWarning) return;
   emittedDeprecatedUrlWarning = true;
@@ -87,6 +100,8 @@ export interface DispatchConfigResolution {
   readonly enabled: boolean;
   readonly url: string | null;
   readonly token: string | null;
+  /** Set when a file, URL, or token prevents Dispatch from being enabled. */
+  readonly error: string | null;
 }
 
 /**
@@ -114,21 +129,35 @@ export function resolveDispatchConfig(
   const repoFile = readEnvoyFile(path.join(cwd, ".opencode", "envoy.json"));
 
   for (const file of [userFile, repoFile]) {
-    if (file.kind === "invalid") return { enabled: false, url: null, token: null };
+    if (file.kind === "invalid") {
+      return { enabled: false, url: null, token: null, error: file.reason };
+    }
   }
 
   const merged: DispatchSettings = {
     ...(userFile.kind === "valid" ? userFile.settings : null),
     ...(repoFile.kind === "valid" ? repoFile.settings : null),
   };
-  const url =
+  const rawUrl =
     explicitUrl !== undefined
-      ? normalizeDispatchUrl(explicitUrl)
+      ? { value: explicitUrl, source: "DISPATCH_URL" }
       : deprecatedUrl !== undefined
-        ? deprecatedMcpUrl(deprecatedUrl)
+        ? { value: deprecatedMcpUrl(deprecatedUrl), source: "DISPATCH_MCP_URL" }
         : merged.enabled === true
-          ? normalizeDispatchUrl(merged.serverUrl ?? DEFAULT_SERVER_URL)
+          ? { value: merged.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" }
           : null;
+  const url = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
   const token = env.DISPATCH_TOKEN ?? merged.token ?? null;
-  return { enabled: url !== null && token !== null, url, token };
+  const tokenSource = env.DISPATCH_TOKEN === undefined ? "dispatch.token" : "DISPATCH_TOKEN";
+  if (url.error !== null) return { enabled: false, url: null, token, error: url.error };
+  if (url.url === null) return { enabled: false, url: null, token, error: null };
+  if (!token) {
+    return {
+      enabled: false,
+      url: url.url,
+      token,
+      error: `${tokenSource} must be a non-empty bearer token`,
+    };
+  }
+  return { enabled: true, url: url.url, token, error: null };
 }
