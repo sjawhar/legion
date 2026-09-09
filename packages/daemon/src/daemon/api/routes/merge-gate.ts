@@ -80,6 +80,7 @@ async function recoverPrForMergeGate(
     number,
     headSha: head.sha,
     headUpdatedAt: snapshot.updatedAt,
+    headUpdatedAtSource: "resync" as const,
     verdict: null,
     failing: [],
     failingStatuses: [],

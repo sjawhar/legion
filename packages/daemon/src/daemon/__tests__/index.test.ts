@@ -489,6 +489,110 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("does not resolve until boot-time admission reconciliation, including its tmux orphan reap, has settled", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const issue = formatIssueKey("acme", "widgets", 42);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[issue] = {
+      key: issue,
+      title: "Queued at boot",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[issue] = {
+      root: issue,
+      generation: 0,
+      status: "queued",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.admission.queue.push(issue);
+    await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
+      recursive: true,
+    });
+    const listWindowsGate = Promise.withResolvers<void>();
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      const starting = startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return { stdout: "LEGION_OMP_AGENTS=available\n", stderr: "", exitCode: 0 };
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
+              const workspaceDir = command[3];
+              if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            if (command[0]?.endsWith("/tmux") && command[1] === "list-windows") {
+              // reconcileAdmission's boot-time orphan reap: slow to prove
+              // startDaemon does not resolve until it — and every promotion
+              // it gates — has fully settled.
+              await listWindowsGate.promise;
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
+            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
+            if (
+              command[0]?.endsWith("/tmux") &&
+              (command[1] === "new-session" || command[1] === "new-window")
+            ) {
+              return { stdout: "@42", stderr: "", exitCode: 0 };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      let started = false;
+      void starting.then((handle) => {
+        started = true;
+        daemon = handle;
+      });
+
+      // The reap's list-windows call is gated shut, so reconcileAdmission
+      // cannot have settled yet — no real wait needed to know this.
+      expect(started).toBe(false);
+
+      listWindowsGate.resolve();
+      daemon = await starting;
+      expect(started).toBe(true);
+      expect(state.admission.active).toEqual([issue]);
+      expect(state.trees[issue]?.status).toBe("active");
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("logs an owner CI fetch failure instead of treating its PR as closed", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);

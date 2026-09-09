@@ -535,6 +535,87 @@ describe("Legion HTTP API", () => {
     ]);
   });
 
+  it("does not let a webhook synchronize at the same clock as a merge-gate-recovered head reopen the tie", async () => {
+    await start({
+      runner: async (command) => {
+        commands.push(command);
+        if (command[2] === "repos/acme/widgets/pulls/19") {
+          return {
+            stdout: JSON.stringify({
+              number: 19,
+              body: "Closes #1",
+              head: { ref: "feature/recovered", sha: "head-c" },
+              updated_at: "2026-09-07T03:00:00Z",
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (command[2] === "repos/acme/widgets/pulls/19/reviews") {
+          return {
+            stdout: JSON.stringify([
+              { user: { login: "sami" }, state: "APPROVED", commit_id: "head-c" },
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        throw new Error(`Unexpected GitHub command: ${command.join(" ")}`);
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const gate = await curlJson<{ approved: boolean; pr: number; headSha: string }>(
+      "/legion/v1/merge-gate",
+      { tree: root, pr: 19, sessionId: "ses_root", secret: started.body.secret }
+    );
+    expect(gate).toEqual({
+      status: 200,
+      body: { approved: true, pr: 19, headSha: "head-c" },
+    });
+    expect(state.prs["acme/widgets#19"]).toMatchObject({
+      headSha: "head-c",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+      headUpdatedAtSource: "resync",
+    });
+
+    // A webhook synchronize for a different head arrives at the exact same
+    // clock as the merge gate's own recovered read: it must not win the tie.
+    reduceGithubEvent(
+      state,
+      "notifications.github.acme.widgets.pull_request.synchronize",
+      {
+        event_id: "webhook-head-b",
+        issued_at: Date.parse("2026-09-07T03:00:00Z"),
+        payload: {
+          kind: "pr",
+          action: "synchronize",
+          repo: "acme/widgets",
+          number: "19",
+          head_sha: "head-b",
+          updated_at: "2026-09-07T03:00:00Z",
+        },
+      },
+      { boardProjectIds: [], appLogins: [], maxFixAttempts: 3 }
+    );
+
+    expect(state.prs["acme/widgets#19"]).toMatchObject({
+      headSha: "head-c",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+      headUpdatedAtSource: "resync",
+    });
+  });
+
   it("rejects an unrelated pull request after checking durable merge-gate linkage", async () => {
     await start({
       runner: async (command) => {
