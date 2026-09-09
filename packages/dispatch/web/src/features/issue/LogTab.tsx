@@ -3,8 +3,12 @@ import { type ReactNode, useEffect, useMemo, useRef } from "react";
 
 import { api } from "../../api/client";
 import type { Event, UserIssueState, UserState } from "../../api/types";
-import { buildLogItems, dismissEvent, isPinnedEvent, setEventPinned } from "./log-model";
-import { IssueStateWriteQueue } from "./state-write-queue";
+import { buildLogItems, eventItemId, isPinnedEvent } from "./log-model";
+import {
+  applyDismissedStateOperation,
+  type DismissedStateOperation,
+  IssueStateWriteQueue,
+} from "./state-write-queue";
 
 const stateWrites = new IssueStateWriteQueue();
 
@@ -169,29 +173,36 @@ export function LogTab({
     };
   }, [issueKey, queryClient, visibleEventCount]);
 
-  const updateDismissed = (update: (dismissed: string[]) => string[]) => {
-    let dismissed: string[] = [];
+  const updateDismissed = (
+    operation: DismissedStateOperation | ((dismissed: string[]) => DismissedStateOperation)
+  ) => {
+    let nextOperation: DismissedStateOperation | undefined;
     queryClient.setQueryData<UserState>(["user-state"], (current) => {
-      const issueState = eventState(current, issueKey);
-      dismissed = update(issueState.dismissed);
+      nextOperation = typeof operation === "function" ? operation(issueState.dismissed) : operation;
       return {
         ...current,
-        [issueKey]: { ...issueState, dismissed },
+        [issueKey]: {
+          ...issueState,
+          dismissed: applyDismissedStateOperation(issueState.dismissed, nextOperation),
+        },
       };
     });
-    void stateWrites
-      .enqueue(issueKey, () => api.putIssueState(issueKey, { dismissed }))
-      .then(
-        (next) => {
-          queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-            ...current,
-            [issueKey]: next,
-          }));
-        },
-        () => {
-          void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-        }
-      );
+    if (nextOperation === undefined) {
+      return;
+    }
+    void stateWrites.enqueue(issueKey, nextOperation, {
+      fetchState: async (key) => eventState(await api.getMyState(), key),
+      onDrained: (key, next) => {
+        queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+          ...current,
+          [key]: next,
+        }));
+      },
+      onError: () => {
+        void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+      },
+      putState: (key, dismissed) => api.putIssueState(key, { dismissed }),
+    });
   };
 
   if (log.isPending) {
@@ -221,11 +232,12 @@ export function LogTab({
             event={item.event}
             folded={item.folded}
             key={item.event.id}
-            onDismiss={() => updateDismissed((dismissed) => dismissEvent(dismissed, item.event))}
+            onDismiss={() => updateDismissed({ id: eventItemId(item.event), op: "dismiss" })}
             onPin={() =>
-              updateDismissed((dismissed) =>
-                setEventPinned(dismissed, item.event, !isPinnedEvent(dismissed, item.event))
-              )
+              updateDismissed((dismissed) => ({
+                id: eventItemId(item.event),
+                op: isPinnedEvent(dismissed, item.event) ? "unpin" : "pin",
+              }))
             }
             pinned={isPinnedEvent(issueState.dismissed, item.event)}
             register={(element) => {

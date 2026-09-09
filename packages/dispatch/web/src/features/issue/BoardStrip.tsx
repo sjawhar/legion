@@ -2,9 +2,28 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
-import type { Issue, UserIssueState } from "../../api/types";
+import type { Event, Issue, UserIssueState } from "../../api/types";
 import { AskCard } from "../inbox/AskCard";
 import { pinnedEventIds } from "./log-model";
+
+const pinnedEventBatchSize = 50;
+
+type IssueEventsFetcher = (issueKey: string, options: { ids: string[] }) => Promise<Event[]>;
+
+export async function fetchPinnedEvents(
+  listIssueEvents: IssueEventsFetcher,
+  issueKey: string,
+  ids: string[]
+): Promise<Event[]> {
+  const batches: string[][] = [];
+  for (let index = 0; index < ids.length; index += pinnedEventBatchSize) {
+    batches.push(ids.slice(index, index + pinnedEventBatchSize));
+  }
+  const events = await Promise.all(
+    batches.map((batch) => listIssueEvents(issueKey, { ids: batch }))
+  );
+  return events.flat().sort((left, right) => left.seq - right.seq);
+}
 
 export function BoardStrip({ issue, state }: { issue: Issue; state: UserIssueState }): ReactNode {
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
@@ -12,7 +31,7 @@ export function BoardStrip({ issue, state }: { issue: Issue; state: UserIssueSta
   const events = useQuery({
     enabled: ids.length > 0,
     queryKey: ["events", issue.key, "board", ids],
-    queryFn: () => api.getIssueEvents(issue.key, { ids }),
+    queryFn: () => fetchPinnedEvents(api.getIssueEvents.bind(api), issue.key, ids),
   });
   const openAsks = (inbox.data ?? []).filter((ask) => ask.issue_key === issue.key);
   const pinned = events.data ?? [];
