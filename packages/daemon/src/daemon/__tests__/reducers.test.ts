@@ -36,6 +36,7 @@ function issue(number: number, overrides: Record<string, unknown> = {}): Record<
     state: "open",
     html_url: `https://github.com/${repo}/issues/${number}`,
     labels: [],
+    updated_at: "2026-01-01T00:00:00.000Z",
     ...overrides,
   };
 }
@@ -253,6 +254,102 @@ describe("reduceGithubEvent", () => {
     }
   });
 
+  it("ignores a stale ingress redelivery whose issue.updated_at is older than a newer applied event", () => {
+    const state = newLegionState("omp", 4);
+    // A newer sub_issue_added event already advanced the root's fence past
+    // the ingress payload's timestamp.
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+      updatedAt: Date.parse("2026-01-01T00:00:02.000Z"),
+    };
+
+    const result = effects(state, {
+      action: "opened",
+      project: { id: "PVT_board" },
+      issue: issue(1, {
+        sub_issues: [issue(2)],
+        updated_at: "2026-01-01T00:00:01.000Z",
+      }),
+    });
+
+    expect(result).toEqual([]);
+    // Nothing from the stale payload was applied: no children overwritten,
+    // no tree created, fence untouched.
+    expect(state.issues[root]).toMatchObject({
+      children: [],
+      updatedAt: Date.parse("2026-01-01T00:00:02.000Z"),
+    });
+    expect(state.trees[root]).toBeUndefined();
+  });
+
+  it("does not re-triage or overwrite state once a tree already exists for the ingress issue", () => {
+    const state = newLegionState("omp", 4);
+    const first = effects(state, {
+      action: "opened",
+      project: { id: "PVT_board" },
+      issue: issue(1, { sub_issues: [issue(2)] }),
+    });
+    expect(first).toEqual([
+      {
+        kind: "controller",
+        payload: { type: "triage", issue: root, preexistingChildren: [child] },
+      },
+    ]);
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      heldEvents: [],
+      launchFailures: 0,
+    };
+    // A newer event drops one of the children the first ingress recorded.
+    state.issues[root].children = [];
+
+    // A duplicate/redelivered ingress event, newer timestamp included, must
+    // not re-triage or clobber the children a later event already changed:
+    // the tree's existence means this issue was already triaged once.
+    const second = effects(state, {
+      action: "opened",
+      project: { id: "PVT_board" },
+      issue: issue(1, {
+        sub_issues: [issue(2), issue(3)],
+        updated_at: "2026-01-01T00:00:05.000Z",
+      }),
+    });
+
+    expect(second).toEqual([]);
+    expect(state.issues[root].children).toEqual([]);
+  });
+
+  it("preserves an issue's updatedAt fence across addNode when a later ingress event omits updated_at", () => {
+    const state = newLegionState("omp", 4);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+      updatedAt: Date.parse("2026-01-01T00:00:05.000Z"),
+    };
+
+    // No tree yet, so this ingress isn't blocked by the tree-exists guard;
+    // it omits updated_at entirely (unlike a real webhook, addNode must not
+    // silently wipe the fence a prior event already established).
+    effects(state, {
+      action: "opened",
+      project: { id: "PVT_board" },
+      issue: issue(1, { updated_at: undefined }),
+    });
+
+    expect(state.issues[root].updatedAt).toBe(Date.parse("2026-01-01T00:00:05.000Z"));
+  });
+
   it("adopts a human-added child on an active tree but ignores an already-recorded legion child", () => {
     const state = rootState();
     const architect = roleToken(state.project, root, "architect");
@@ -297,6 +394,130 @@ describe("reduceGithubEvent", () => {
     ).toEqual([]);
     expect(state.issues[root].children).toEqual([]);
     expect(state.issues[child]).toBeUndefined();
+  });
+
+  it("crashes loud on an issue event missing a parseable updated_at (a contract violation, not a real GitHub payload)", () => {
+    const state = rootState();
+    for (const updated_at of [undefined, "not-a-date"]) {
+      expect(() =>
+        effects(state, {
+          action: "reopened",
+          issue: issue(1, { updated_at }),
+        })
+      ).toThrow(/missing a parseable updated_at/);
+    }
+  });
+
+  it("crashes loud on a sub_issue event missing a parseable parent_issue.updated_at", () => {
+    const state = rootState();
+    for (const updated_at of [undefined, "not-a-date"]) {
+      expect(() =>
+        effects(state, {
+          action: "sub_issue_added",
+          parent_issue: issue(1, { updated_at }),
+          sub_issue: issue(2),
+        })
+      ).toThrow(/missing a parseable parent_issue.updated_at/);
+    }
+  });
+
+  it("fences a real webhook against a newer resync-sourced snapshot (resync carries GitHub's updated_at too)", () => {
+    const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
+
+    // A resync-sourced label reconciliation carries GitHub's real
+    // updated_at now, so it advances the fence exactly like a webhook would.
+    expect(
+      effects(
+        state,
+        {
+          action: "labeled",
+          issue: issue(1, { updated_at: "2026-01-01T00:00:02.000Z" }),
+          label: { name: "human-approved" },
+        },
+        "resync"
+      )
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
+    expect(state.issues[root].updatedAt).toBe(Date.parse("2026-01-01T00:00:02.000Z"));
+
+    // A delayed, older real webhook redelivering after that resync snapshot
+    // must not reverse it.
+    expect(
+      effects(state, {
+        action: "unlabeled",
+        issue: issue(1, { updated_at: "2026-01-01T00:00:01.000Z" }),
+        label: { name: "human-approved" },
+      })
+    ).toEqual([]);
+    expect(state.issues[root].labels).toEqual(["human-approved"]);
+  });
+
+  it("lets a resync-sourced label change win an identical-clock tie against a webhook's disagreeing one", () => {
+    const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
+    const T = "2026-01-01T00:00:02.000Z";
+
+    // A real webhook labels the issue "human-approved" at T.
+    expect(
+      effects(state, {
+        action: "labeled",
+        issue: issue(1, { updated_at: T }),
+        label: { name: "human-approved" },
+      })
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
+    expect(state.issues[root]).toMatchObject({
+      updatedAt: Date.parse(T),
+      updatedAtSource: "webhook",
+      labels: ["human-approved"],
+    });
+
+    // resync's own board read disagrees at the exact same clock. Unlike a
+    // webhook redelivery at an identical clock (ignored — see the test
+    // above), GitHub's authoritative resync read wins this tie regardless
+    // of arrival order, so the label is removed rather than the event
+    // being treated as a stale redelivery.
+    expect(
+      effects(
+        state,
+        {
+          action: "unlabeled",
+          issue: issue(1, { updated_at: T }),
+          label: { name: "human-approved" },
+        },
+        "resync"
+      )
+    ).toEqual([]);
+    expect(state.issues[root]).toMatchObject({
+      updatedAt: Date.parse(T),
+      updatedAtSource: "resync",
+      labels: [],
+    });
+  });
+
+  it("does not let an issue action it ignores make itself the freshness authority", () => {
+    const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
+
+    // issueEvent recognizes labeled/unlabeled/closed/reopened only; "assigned"
+    // falls through unhandled at a later timestamp than the approval below.
+    expect(
+      effects(state, {
+        action: "assigned",
+        issue: issue(1, { updated_at: "2026-01-01T00:00:02.000Z" }),
+      })
+    ).toEqual([]);
+    expect(state.issues[root].updatedAt).toBeUndefined();
+
+    // An earlier human-approved label must still apply: the ignored event
+    // above never mutated anything, so it must not have become the fence.
+    expect(
+      effects(state, {
+        action: "labeled",
+        issue: issue(1, { updated_at: "2026-01-01T00:00:01.000Z" }),
+        label: { name: "human-approved" },
+      })
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
+    expect(state.issues[root].labels).toEqual(["human-approved"]);
   });
 
   it("reports child closure and the zero-crossing completion edge", () => {
@@ -428,6 +649,52 @@ describe("reduceGithubEvent", () => {
         payload: { type: "children-complete" },
       },
     ]);
+    expect(state.issues[root].children).toEqual([]);
+    expect(state.issues[child].parent).toBeUndefined();
+  });
+
+  it("does not re-adopt a redelivered sub_issue_added that arrives after a newer sub_issue_removed", () => {
+    const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
+    const addedPayload = {
+      action: "sub_issue_added",
+      parent_issue: issue(1, { updated_at: "2026-01-01T00:00:01.000Z" }),
+      sub_issue: issue(2),
+    };
+
+    expect(effects(state, addedPayload)).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-adopted", child, remaining: 1 },
+      },
+    ]);
+    expect(state.issues[root].children).toEqual([child]);
+
+    expect(
+      effects(state, {
+        action: "sub_issue_removed",
+        parent_issue: issue(1, { updated_at: "2026-01-01T00:00:02.000Z" }),
+        sub_issue: issue(2),
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-removed", child, remaining: 0 },
+      },
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "children-complete" },
+      },
+    ]);
+    expect(state.issues[root].children).toEqual([]);
+
+    // Redelivery of the original sub_issue_added: its parent_issue.updated_at
+    // (t=1) is now older than the parent's last-applied event (t=2, from the
+    // removal above), so it is ignored instead of re-adopting the child.
+    expect(effects(state, addedPayload)).toEqual([]);
     expect(state.issues[root].children).toEqual([]);
     expect(state.issues[child].parent).toBeUndefined();
   });
@@ -920,6 +1187,36 @@ describe("reduceGithubEvent", () => {
     });
   });
 
+  it("ignores a same-clock webhook synchronize that disagrees with a resync-sourced head (GitHub's authoritative read wins the tie)", () => {
+    const state = rootState();
+    attachChild(state);
+    const T = "2026-09-07T03:00:00Z";
+    // Simulates resync having already recorded head C at T (resync.ts sets
+    // headUpdatedAtSource itself; here that precondition is given directly).
+    addPr(state, {
+      headSha: "head-c",
+      headUpdatedAt: Date.parse(T),
+      headUpdatedAtSource: "resync",
+    });
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "synchronize",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "head-b",
+        updated_at: T,
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      headSha: "head-c",
+      headUpdatedAt: Date.parse(T),
+      headUpdatedAtSource: "resync",
+    });
+  });
+
   it("notifies the active implementer of a review and the subsequent CI-ready signal", () => {
     const state = rootState();
     attachChild(state);
@@ -1024,6 +1321,205 @@ describe("reduceGithubEvent", () => {
     ]);
     expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
     expect(state.prByBranch[`${repo}@legion/issue-2`]).toBeUndefined();
+  });
+
+  it("keeps a tombstone after an unmerged close so an older opened redelivery cannot recreate the PR", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "closed",
+        repo,
+        number: String(prNumber),
+        merged: "false",
+        updated_at: "2026-09-07T04:00:00Z",
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "pr-closed-unmerged", pr: prNumber },
+      },
+    ]);
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+
+    // An older "opened" redelivery (a stale duplicate webhook, or a
+    // crash-before-ack redelivery of the original opened event) must not
+    // resurrect a PR this state already recorded as closed.
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "opened",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "old-sha",
+        updated_at: "2026-09-07T03:00:00Z",
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+    expect(state.prByBranch[`${repo}@legion/issue-2`]).toBeUndefined();
+  });
+
+  it("keeps a tombstone after an unmerged close so an older synchronize cannot recreate the PR", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+
+    effects(state, {
+      kind: "pr",
+      action: "closed",
+      repo,
+      number: String(prNumber),
+      merged: "false",
+      updated_at: "2026-09-07T04:00:00Z",
+    });
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "synchronize",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "stale-resurrection-head",
+        updated_at: "2026-09-07T03:30:00Z",
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+  });
+
+  it("keeps a tombstone after an unmerged close so a synchronize at the exact same clock cannot recreate the PR", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    const closedAt = "2026-09-07T04:00:00Z";
+
+    effects(state, {
+      kind: "pr",
+      action: "closed",
+      repo,
+      number: String(prNumber),
+      merged: "false",
+      updated_at: closedAt,
+    });
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+
+    // Unlike the fence between two live observations (equal clock still
+    // applies — a legitimate same-second sequence), the close tombstone is
+    // itself a point-in-time event: a synchronize at its exact clock is
+    // the close racing its own last delivered head, not a later one.
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "synchronize",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "stale-resurrection-head",
+        updated_at: closedAt,
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+  });
+
+  it("allows a genuinely newer opened event to recreate a PR after an older tombstoned close", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    const implementer = claim(state, child, "implementer");
+
+    effects(state, {
+      kind: "pr",
+      action: "closed",
+      repo,
+      number: String(prNumber),
+      merged: "false",
+      updated_at: "2026-09-07T04:00:00Z",
+    });
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "opened",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "reopened-head",
+        url: "pr-url",
+        updated_at: "2026-09-07T05:00:00Z",
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: implementer,
+        payload: { type: "pr-opened", pr: prNumber, url: "pr-url" },
+      },
+    ]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({ headSha: "reopened-head" });
+  });
+
+  it("ignores a stale opened event when a newer PR record already exists", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, { headUpdatedAt: Date.parse("2026-09-07T03:00:00Z") });
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "opened",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "stale-reopen-head",
+        url: "pr-url",
+        updated_at: "2026-09-07T02:00:00Z",
+      })
+    ).toEqual([]);
+    // The existing PR record must survive untouched — a stale "opened"
+    // redelivery must not reset it via registerPr.
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({ headSha: "old-sha" });
+  });
+
+  it("ignores an opened redelivery at the exact same clock as the existing PR record, without wiping its CI/review state", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, {
+      headSha: "settled-head",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+      verdict: "green",
+      ciSettledAt: 5,
+      reviewDecision: "approved",
+    });
+
+    // "opened" fires exactly once per PR; a second delivery at the same
+    // clock is a redelivery (the crash-after-save-before-ack window), not
+    // a distinct later observation, and must not re-register the PR —
+    // registerPr would wipe the verdict/review a settlement already
+    // established.
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "opened",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "settled-head",
+        url: "pr-url",
+        updated_at: "2026-09-07T03:00:00Z",
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      headSha: "settled-head",
+      verdict: "green",
+      ciSettledAt: 5,
+      reviewDecision: "approved",
+    });
   });
 
   it("does not retain a review decision when the delivered review is pinned to a stale head", () => {

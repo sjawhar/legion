@@ -1,9 +1,22 @@
 import { describe, expect, it, vi } from "bun:test";
-import { controllerToken, type IssueKey, roleTopic } from "@legion/contracts";
+import { controllerToken, formatIssueKey, type IssueKey, roleTopic } from "@legion/contracts";
 import { overseerCatchup } from "../catchup";
-import { type EventPumpDeps, startEventPump } from "../events";
+import {
+  type EventPumpDeps,
+  startEventPump,
+  truncateTermReason,
+  type UndeliverableInfo,
+} from "../events";
 import type { LegionState } from "../legion-state";
-import { checkPr, config, FakeNats, prPayload, settledChecks, stateForIssue } from "./ci-fixtures";
+import {
+  checkPr,
+  config,
+  type FakeDurableControlCalls,
+  FakeNats,
+  prPayload,
+  settledChecks,
+  stateForIssue,
+} from "./ci-fixtures";
 
 function envelope(
   payload: Record<string, unknown> | string,
@@ -40,6 +53,10 @@ function deps(
     state,
     saveState: async () => {},
     onException,
+    // Tests that exercise a fatal path override this with their own spy;
+    // the default is a safe no-op so an unexpected fatal call never kills
+    // the test runner via a real process.exit().
+    fatal: async () => {},
     config: config(),
     ...handlers,
   };
@@ -89,6 +106,385 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("consumes GitHub events through a durable per-repo JetStream consumer, acking only after effects apply", async () => {
+    const { state, architect } = stateForIssue();
+    const nats = new FakeNats();
+    const consumeDurableSpy = vi.spyOn(nats, "consumeDurable");
+    const subscribeSpy = vi.spyOn(nats, "subscribe");
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        published.push({ topic, payloadJson });
+      })
+    );
+
+    expect(consumeDurableSpy).toHaveBeenCalledTimes(1);
+    expect(consumeDurableSpy).toHaveBeenCalledWith(
+      "ENVOY_NOTIFICATIONS",
+      "legion-omp-github",
+      ["notifications.github.acme.widgets.>"],
+      expect.any(Function)
+    );
+    expect(subscribeSpy).not.toHaveBeenCalledWith("notifications.github.>", expect.any(Function));
+
+    const acks: string[] = [];
+    nats.emit("notifications.github.acme.widgets.issue.1.comment", envelope(issueComment()), () =>
+      acks.push("ack-1")
+    );
+    await flush();
+
+    expect(published).toEqual([
+      {
+        topic: roleTopic(architect),
+        payloadJson: JSON.stringify({
+          type: "issue-comment",
+          author: "human",
+          body: "Please investigate",
+          url: "https://github.com/acme/widgets/issues/1#comment",
+        }),
+      },
+    ]);
+    expect(acks).toEqual(["ack-1"]);
+    pump.stop();
+  });
+
+  it("dispatches every effect and saves before acking — order is enforced, not incidental", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const acks: string[] = [];
+    const order: string[] = [];
+    const saveState = vi.fn(async () => {
+      // If ack already happened, save ran too late: this assertion is the
+      // regression detector, not the final state comparison alone.
+      expect(acks).toEqual([]);
+      order.push("save");
+    });
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        expect(acks).toEqual([]);
+        order.push("publish");
+      }),
+      saveState,
+    });
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.comment",
+        envelope(issueComment(), "comment-1"),
+        {
+          ack: () => {
+            acks.push("ack-1");
+            order.push("ack");
+          },
+        }
+      );
+      await flush();
+
+      expect(order).toEqual(["publish", "save", "ack"]);
+      expect(acks).toEqual(["ack-1"]);
+    } finally {
+      pump.stop();
+    }
+  });
+
+  it("dispatches every effect of a multi-effect reducer input before saving; the publish hook never sees an ack", async () => {
+    const { state, issue, implementer } = stateForIssue();
+    state.phases[issue] = { phase: "implementer", sessionId: "worker-session" };
+    state.prs["acme/widgets#7"] = checkPr(issue, { verdict: "green" });
+    const nats = new FakeNats();
+    const acks: string[] = [];
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const approvalStatusCalls: unknown[] = [];
+    const saveState = vi.fn(async () => {
+      // A review approving the PR's current, green head derives three
+      // effects (pr-review publish, approval-status, pr-ready publish);
+      // save must not run until every one of them has dispatched.
+      expect(published).toHaveLength(2);
+      expect(approvalStatusCalls).toHaveLength(1);
+      expect(acks).toEqual([]);
+    });
+    const pump = startEventPump({
+      ...deps(
+        state,
+        nats,
+        async (topic, payloadJson) => {
+          expect(acks).toEqual([]);
+          published.push({ topic, payloadJson });
+        },
+        undefined,
+        {
+          onLinger: async () => {},
+          onProbe: async () => {},
+          onApprovalStatus: async (effect) => {
+            expect(acks).toEqual([]);
+            approvalStatusCalls.push(effect);
+          },
+        }
+      ),
+      saveState,
+    });
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pull_request_review.submitted",
+        envelope(
+          {
+            action: "submitted",
+            repository: { full_name: "acme/widgets" },
+            pull_request: { number: 7, head: { sha: "head-1" } },
+            review: {
+              user: { login: "sami" },
+              state: "approved",
+              commit_id: "head-1",
+              body: "Looks good",
+            },
+          },
+          "review-1"
+        ),
+        { ack: () => acks.push("ack-1") }
+      );
+      await pump.drain();
+
+      expect(published).toEqual([
+        {
+          topic: roleTopic(implementer),
+          payloadJson: JSON.stringify({
+            type: "pr-review",
+            state: "approved",
+            author: "sami",
+            body: "Looks good",
+          }),
+        },
+        {
+          topic: roleTopic(implementer),
+          payloadJson: JSON.stringify({ type: "pr-ready", pr: 7 }),
+        },
+      ]);
+      expect(approvalStatusCalls).toEqual([
+        { kind: "approval-status", repo: "acme/widgets", pr: 7, sha: "head-1" },
+      ]);
+      expect(saveState).toHaveBeenCalledTimes(1);
+      expect(acks).toEqual(["ack-1"]);
+    } finally {
+      pump.stop();
+    }
+  });
+
+  it("acks after saving; a 404 no-holder publish calls onUndeliverable with subject, event id, and effect kind instead of failing", async () => {
+    const { state, architect } = stateForIssue();
+    const nats = new FakeNats();
+    const undeliverable: UndeliverableInfo[] = [];
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        const error = new Error("Envoy publish failed with status 404") as Error & {
+          status?: number;
+        };
+        error.status = 404;
+        throw error;
+      }),
+      onUndeliverable: async (info) => {
+        undeliverable.push(info);
+      },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.comment",
+        envelope(issueComment(), "comment-1"),
+        {},
+        calls
+      );
+      await flush();
+
+      expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
+      expect(undeliverable).toHaveLength(1);
+      expect(undeliverable[0]).toMatchObject({
+        role: architect,
+        eventId: "comment-1",
+        subject: "notifications.github.acme.widgets.issue.1.comment",
+        summary: "test",
+        kind: "publish",
+      });
+    } finally {
+      pump.stop();
+    }
+  });
+
+  it("logs the subject and payload_summary in the default onUndeliverable message when no hook is provided", async () => {
+    const { state, architect } = stateForIssue();
+    const nats = new FakeNats();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump(
+      deps(state, nats, async () => {
+        const error = new Error("Envoy publish failed with status 404") as Error & {
+          status?: number;
+        };
+        error.status = 404;
+        throw error;
+      })
+    );
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.comment",
+        envelope(issueComment(), "comment-1"),
+        {},
+        calls
+      );
+      await flush();
+
+      expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("notifications.github.acme.widgets.issue.1.comment")
+      );
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("summary=test"));
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(`no holder for ${architect}`));
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("calls fatal (never ack or nak) when a non-404 publish fails during effect dispatch", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const fatalCalls: unknown[] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        throw new Error("listener down");
+      }),
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.comment",
+        envelope(issueComment(), "comment-1"),
+        {},
+        calls
+      );
+      await flush();
+
+      // The reducer's mutation is already in memory when the publish
+      // fails; going fatal (not ack, not nak) means a supervisor restart
+      // reloads clean state from disk instead of continuing to serve
+      // other messages against it.
+      expect(fatalCalls).toHaveLength(1);
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [] });
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "durable message fatally failed on notifications.github.acme.widgets.issue.1.comment"
+        )
+      );
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("terms then calls fatal when a reducer mutates state and then throws", async () => {
+    const { state, issue } = stateForIssue();
+    state.phases[issue] = { phase: "not-a-real-role", sessionId: "corrupt-session" };
+    const nats = new FakeNats();
+    const fatalCalls: unknown[] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {}),
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
+
+    try {
+      const childKey = formatIssueKey("acme", "widgets", 2);
+      const subIssuePayload = {
+        action: "sub_issue_added",
+        repository: { full_name: "acme/widgets" },
+        parent_issue: { number: 1, updated_at: "2026-01-01T00:00:00.000Z" },
+        sub_issue: { number: 2, title: "Child", state: "open", labels: [] },
+      };
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.sub_issue",
+        envelope(subIssuePayload, "corrupt-phase-1"),
+        { streamSequence: 3, deliverySequence: 1 },
+        calls
+      );
+      await flush();
+
+      // subIssue() pushes the child into parent.children before routeActive
+      // throws on the corrupted phase; there is no dispatch, no save, and
+      // no restore — the mutation stays exactly where the reducer left it.
+      // Reducers are synchronous and pure, so this throw is deterministic:
+      // the message is termed with a loud poison log (never redelivered),
+      // and the process then goes fatal since memory may be dirty.
+      expect(state.issues[issue].children).toEqual([childKey]);
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [expect.any(String)] });
+      expect(fatalCalls).toHaveLength(1);
+      // The term frame is only in the client's outgoing buffer until
+      // flushed; a flush before the fatal exit is what keeps JetStream
+      // from redelivering a message the daemon already decided to term.
+      expect(nats.flushCalls).toBe(1);
+      const [message] = errorLog.mock.calls[0] ?? [];
+      expect(message).toContain("notifications.github.acme.widgets.issue.1.sub_issue");
+      expect(message).toContain("stream_seq=3");
+      expect(message).toContain("event_id=corrupt-phase-1");
+      expect(message).toContain("unrecognized phase");
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("calls fatal even when terming or flushing a poison message itself throws", async () => {
+    const { state, issue } = stateForIssue();
+    state.phases[issue] = { phase: "not-a-real-role", sessionId: "corrupt-session" };
+    const nats = new FakeNats();
+    nats.flush = () => {
+      throw new Error("connection draining");
+    };
+    const fatalCalls: unknown[] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {}),
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
+
+    try {
+      const subIssuePayload = {
+        action: "sub_issue_added",
+        repository: { full_name: "acme/widgets" },
+        parent_issue: { number: 1, updated_at: "2026-01-01T00:00:00.000Z" },
+        sub_issue: { number: 2, title: "Child", state: "open", labels: [] },
+      };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.sub_issue",
+        envelope(subIssuePayload, "corrupt-phase-2")
+      );
+      await flush();
+
+      // A rejected flush (or a term call that throws outright) must never
+      // suppress the fatal exit: the reducer has already mutated live
+      // state, so the process must not keep serving other messages against
+      // it regardless of whether the term frame made it out.
+      expect(fatalCalls).toHaveLength(1);
+      expect(
+        errorLog.mock.calls.some(([message]) => String(message).includes("connection draining"))
+      ).toBe(true);
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
   it("warns and ignores a raw-shaped GitHub pull request payload", async () => {
     const { state, issue } = stateForIssue();
     state.prs["acme/widgets#7"] = checkPr(issue);
@@ -134,32 +530,38 @@ describe("core-NATS event pump", () => {
     try {
       nats.emit(
         "notifications.github.acme.widgets.pull_request_review.submitted",
-        envelope({
-          action: "submitted",
-          repository: { full_name: "acme/widgets" },
-          pull_request: { number: 7, head: { sha: "head-1" } },
-          review: {
-            user: { login: "reviewer" },
-            state: "approved",
-            commit_id: "head-1",
-            body: "Looks good",
+        envelope(
+          {
+            action: "submitted",
+            repository: { full_name: "acme/widgets" },
+            pull_request: { number: 7, head: { sha: "head-1" } },
+            review: {
+              user: { login: "reviewer" },
+              state: "approved",
+              commit_id: "head-1",
+              body: "Looks good",
+            },
           },
-        })
+          "review-submitted"
+        )
       );
       await pump.drain();
       nats.emit(
         "notifications.github.acme.widgets.pull_request_review_comment.created",
-        envelope({
-          action: "created",
-          repository: { full_name: "acme/widgets" },
-          pull_request: { number: 7, head: { sha: "head-1" } },
-          comment: {
-            user: { login: "reviewer" },
-            body: "Please rename this",
-            path: "src/index.ts",
-            html_url: "https://github.com/acme/widgets/pull/7#discussion_r1",
+        envelope(
+          {
+            action: "created",
+            repository: { full_name: "acme/widgets" },
+            pull_request: { number: 7, head: { sha: "head-1" } },
+            comment: {
+              user: { login: "reviewer" },
+              body: "Please rename this",
+              path: "src/index.ts",
+              html_url: "https://github.com/acme/widgets/pull/7#discussion_r1",
+            },
           },
-        })
+          "review-comment-created"
+        )
       );
       await pump.drain();
 
@@ -235,8 +637,8 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
-  it("holds role events for unreleased issues instead of publishing them", async () => {
-    const { state, issue } = stateForIssue(false);
+  it("publishes role events immediately for unreleased issues (release no longer gates delivery)", async () => {
+    const { state, architect } = stateForIssue(false);
     const nats = new FakeNats();
     const published: string[] = [];
     const pump = startEventPump(
@@ -248,18 +650,16 @@ describe("core-NATS event pump", () => {
     nats.emit("notifications.github.acme.widgets.issue.1.comment", envelope(issueComment()));
     await flush();
 
-    expect(published).toEqual([]);
-    expect(state.trees[issue].heldEvents).toEqual([
-      expect.objectContaining({ eventId: "event-1", role: expect.any(String) }),
-    ]);
+    expect(published).toEqual([roleTopic(architect)]);
     pump.stop();
   });
-  it("holds role events while a tree is queued or lingering", async () => {
+  it("publishes role events immediately even while a tree is queued or lingering", async () => {
     for (const status of ["queued", "lingering"] as const) {
-      const { state, issue } = stateForIssue();
+      const { state, issue, architect } = stateForIssue();
       state.trees[issue].status = status;
       const nats = new FakeNats();
       const published: string[] = [];
+      const acks: string[] = [];
       const pump = startEventPump(
         deps(state, nats, async (topic) => {
           published.push(topic);
@@ -268,12 +668,14 @@ describe("core-NATS event pump", () => {
 
       nats.emit(
         "notifications.github.acme.widgets.issue.1.comment",
-        envelope(issueComment(), `inactive-${status}`)
+        envelope(issueComment(), `${status}-comment`),
+        () => acks.push(status)
       );
       await flush();
 
-      expect(published).toEqual([]);
-      expect(state.trees[issue].heldEvents).toHaveLength(1);
+      expect(published).toEqual([roleTopic(architect)]);
+      expect(acks).toEqual([status]);
+      expect(state.trees[issue].heldEvents).toEqual([]);
       pump.stop();
     }
   });
@@ -339,6 +741,10 @@ describe("core-NATS event pump", () => {
       )
     );
     await pump.drain();
+    // One save per event, regardless of how many effects it derives: the
+    // reducer runs, its effects dispatch, then state saves once (see
+    // applyDurableEvent) — a zero-effect settlement is no different from
+    // a one-effect settlement here.
     expect(saveState).toHaveBeenCalledTimes(savesAfterEmission + 1);
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       ciSettledAt: 2_000,
@@ -346,6 +752,55 @@ describe("core-NATS event pump", () => {
     });
     expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
     pump.stop();
+  });
+
+  it("calls fatal (never ack or nak) when saveState rejects after the reducer's effects already dispatched", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const fatalCalls: unknown[] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const saveState = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const pump = startEventPump({
+      ...deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      }),
+      saveState,
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(settledChecks(), "settle-attempt-1"),
+        {},
+        calls
+      );
+      await flush();
+
+      // The publish already ran (it dispatches before save); only the
+      // save afterward failed. Still fatal, not nak: the mutation and the
+      // fact its effect already published are only in memory until the
+      // save durably records them, so the process must not keep serving
+      // other messages against this now-unconfirmed state.
+      expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [] });
+      expect(fatalCalls).toHaveLength(1);
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "durable message fatally failed on notifications.github.acme.widgets.pr.7.checks"
+        )
+      );
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
   });
   it("ignores checks for a SHA that is not the current head", async () => {
     const { state, issue } = stateForIssue();
@@ -508,7 +963,8 @@ describe("core-NATS event pump", () => {
           failed: { count: 1, checks: ["unit"] },
           passed: { count: 1, checks: ["build"] },
           failing_checks: [{ name: "unit", url: "https://example.test/checks/unit" }],
-        })
+        }),
+        "checks-red"
       )
     );
     await flush();
@@ -526,7 +982,8 @@ describe("core-NATS event pump", () => {
           snapshot: "state-hash-2",
           settled_at: 2_000,
           superseded_settlement: "true",
-        })
+        }),
+        "checks-green"
       )
     );
     await flush();
@@ -551,7 +1008,8 @@ describe("core-NATS event pump", () => {
         prPayload({
           head_sha: "head-2",
           updated_at: "2026-09-07T03:02:00Z",
-        })
+        }),
+        "pr-synchronize"
       )
     );
     await flush();
@@ -765,80 +1223,77 @@ describe("core-NATS event pump", () => {
     });
     pump.stop();
   });
-  it("persists a failed role publication and retries it with backoff", async () => {
-    vi.useFakeTimers();
+  it("calls fatal and adds nothing to heldEvents when a durable GitHub event's publish effect rejects (non-404)", async () => {
     const { state, issue } = stateForIssue();
     const nats = new FakeNats();
-    let attempts = 0;
-    const pump = startEventPump(
-      deps(state, nats, async () => {
-        attempts += 1;
-        if (attempts === 1) throw new Error("listener down");
-      })
-    );
+    const fatalCalls: unknown[] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        throw new Error("listener down");
+      }),
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
 
     try {
-      nats.emit("notifications.github.acme.widgets.issue.1.comment", envelope(issueComment()));
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.comment",
+        envelope(issueComment()),
+        {},
+        calls
+      );
       await flush();
-      expect(state.trees[issue].heldEvents).toHaveLength(1);
 
-      vi.advanceTimersByTime(1_000);
-      await flush();
-      expect(attempts).toBe(2);
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [] });
+      expect(fatalCalls).toHaveLength(1);
+      // The durable lane never holds effects out-of-band (that mechanism
+      // is for the mention/exception/resync held lane only): a lost
+      // publish here goes fatal, never into heldEvents.
       expect(state.trees[issue].heldEvents).toEqual([]);
     } finally {
+      errorLog.mockRestore();
       pump.stop();
-      vi.useRealTimers();
     }
   });
-  it("persists failed controller events and redelivers them after the controller registers", async () => {
+  it("calls fatal and adds nothing to controllerHeldEvents when a durable GitHub event's controller effect rejects (non-404)", async () => {
     const { state, issue } = stateForIssue();
     state.trees[issue].status = "closed";
     const nats = new FakeNats();
-    const publications: Array<{ topic: string; payloadJson: string }> = [];
-    let controllerAvailable = false;
-    const pump = startEventPump(
-      deps(state, nats, async (topic, payloadJson) => {
-        if (!controllerAvailable) throw new Error("controller listener is unavailable");
-        publications.push({ topic, payloadJson });
-      })
-    );
-
-    nats.emit(
-      "notifications.github.acme.widgets.issue.1",
-      envelope({
-        action: "reopened",
-        repository: { full_name: "acme/widgets" },
-        issue: { number: 1, state: "open" },
-      })
-    );
-    await flush();
-
-    const persisted = state;
-    expect(persisted.controllerHeldEvents).toEqual([
-      {
-        role: controllerToken(state.project),
-        payloadJson: JSON.stringify({ type: "reactivation", issue }),
-        heldAt: new Date(1_000).toISOString(),
-        eventId: "event-1",
+    const fatalCalls: unknown[] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        throw new Error("controller listener is unavailable");
+      }),
+      fatal: async (error) => {
+        fatalCalls.push(error);
       },
-    ]);
+    });
 
-    state.roles[controllerToken(state.project)] = {
-      role: "controller",
-      sessionId: "ses-controller",
-    };
-    controllerAvailable = true;
-    await pump.redeliverControllerEvents();
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1",
+        envelope({
+          action: "reopened",
+          repository: { full_name: "acme/widgets" },
+          issue: { number: 1, state: "open", updated_at: "2026-01-01T00:00:00.000Z" },
+        }),
+        {},
+        calls
+      );
+      await flush();
 
-    expect(publications).toEqual([
-      {
-        topic: roleTopic(controllerToken(state.project)),
-        payloadJson: JSON.stringify({ type: "reactivation", issue }),
-      },
-    ]);
-    expect(persisted.controllerHeldEvents).toEqual([]);
-    pump.stop();
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [] });
+      expect(fatalCalls).toHaveLength(1);
+      expect(state.controllerHeldEvents).toEqual([]);
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
   });
 
   it("passes a project issue-role delivery exception to the process manager", async () => {
@@ -957,25 +1412,32 @@ describe("core-NATS event pump", () => {
 
     nats.emit(
       "notifications.github.acme.widgets.issue.1.closed",
-      envelope({
-        action: "closed",
-        issue: { number: 1 },
-        repository: { full_name: "acme/widgets" },
-      })
+      envelope(
+        {
+          action: "closed",
+          issue: { number: 1, updated_at: "2026-01-01T00:00:00.000Z" },
+          repository: { full_name: "acme/widgets" },
+        },
+        "issue-closed"
+      )
     );
     await flush();
     state.trees[issue].status = "closed";
     nats.emit(
       "notifications.github.acme.widgets.issue.1.reopened",
-      envelope({
-        action: "reopened",
-        issue: { number: 1 },
-        repository: { full_name: "acme/widgets" },
-      })
+      envelope(
+        {
+          action: "reopened",
+          issue: { number: 1, updated_at: "2026-01-01T00:00:01.000Z" },
+          repository: { full_name: "acme/widgets" },
+        },
+        "issue-reopened"
+      )
     );
+    await flush();
     nats.emit(
       "notifications.github.acme.widgets.pull_request.synchronize",
-      envelope(prPayload({ head_sha: "head-2" }))
+      envelope(prPayload({ head_sha: "head-2" }), "pr-synchronize")
     );
     await flush();
 
@@ -1010,5 +1472,187 @@ describe("core-NATS event pump", () => {
 
     expect(published).toEqual([{ topic: roleTopic(controllerToken("omp")), payloadJson }]);
     pump.stop();
+  });
+
+  it("forwards a GitHub mention directly to the controller role, without the held-event path", async () => {
+    const { state } = stateForIssue();
+    state.roles[controllerToken(state.project)] = {
+      role: "controller",
+      sessionId: "ses-controller",
+    };
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        published.push({ topic, payloadJson });
+      })
+    );
+    const payloadJson = JSON.stringify({ text: "@legion please investigate" });
+
+    const acks: string[] = [];
+    nats.emit(
+      "notifications.github.acme.widgets.mention",
+      envelope({ text: "@legion please investigate" }, "github-mention-1"),
+      () => acks.push("ack-1")
+    );
+    await flush();
+
+    expect(published).toEqual([{ topic: roleTopic(controllerToken("omp")), payloadJson }]);
+    expect(acks).toEqual(["ack-1"]);
+    pump.stop();
+  });
+
+  it("does not ack, and adds nothing to controllerHeldEvents, when a GitHub mention's publish rejects", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump(
+      deps(state, nats, async () => {
+        throw new Error("listener down");
+      })
+    );
+
+    try {
+      const acks: string[] = [];
+      nats.emit(
+        "notifications.github.acme.widgets.mention",
+        envelope({ text: "@legion please investigate" }, "github-mention-2"),
+        () => acks.push("ack-1")
+      );
+
+      await expect(pump.drain()).rejects.toThrow();
+      expect(acks).toEqual([]);
+      expect(state.controllerHeldEvents).toEqual([]);
+      // Only `processDurableMessage`'s catch logs a durable-lane rejection;
+      // it fires once for this one underlying failure.
+      expect(errorLog).toHaveBeenCalledTimes(1);
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("terms (never retries) a poison durable message that isn't valid JSON, logging the subject and stream/consumer sequence", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.comment",
+        "not JSON",
+        { streamSequence: 5, deliverySequence: 2 },
+        calls
+      );
+      await flush();
+
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [expect.any(String)] });
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      const [message] = errorLog.mock.calls[0] ?? [];
+      expect(message).toContain("notifications.github.acme.widgets.issue.1.comment");
+      expect(message).toContain("stream_seq=5");
+      expect(message).toContain("delivery_seq=2");
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("terms a durable message that fails envelope schema validation, including its event_id when recoverable", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      // Valid JSON, but missing the envelope's required fields.
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.comment",
+        JSON.stringify({ event_id: "schema-bad-1" }),
+        { streamSequence: 9, deliverySequence: 1 },
+        calls
+      );
+      await flush();
+
+      expect(calls.terms).toHaveLength(1);
+      expect(calls.acks).toBe(0);
+      expect(calls.naks).toEqual([]);
+      const [message] = errorLog.mock.calls[0] ?? [];
+      expect(message).toContain("event_id=schema-bad-1");
+      expect(message).toContain("stream_seq=9");
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("runs a runExclusive operation (resync's contract) and a durable message on the same PR strictly sequentially", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const order: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      if (typeof args[0] === "string" && args[0].includes("consumed event")) {
+        order.push("durable-message");
+      }
+    });
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    try {
+      const gate = Promise.withResolvers<void>();
+      const resyncPromise = pump.runExclusive(async () => {
+        order.push("resync-start");
+        await gate.promise;
+        order.push("resync-end");
+      });
+
+      // Emitted immediately, before the resync gate is released: if the
+      // durable lane weren't serialized against runExclusive, this
+      // message would be processed (its "consumed event" log firing)
+      // *during* the still-running resync operation instead of after it.
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(settledChecks(), "checks-during-resync")
+      );
+      await flush();
+      expect(order).toEqual(["resync-start"]);
+
+      gate.resolve();
+      await resyncPromise;
+      await flush();
+
+      expect(order).toEqual(["resync-start", "resync-end", "durable-message"]);
+    } finally {
+      log.mockRestore();
+      pump.stop();
+    }
+  });
+});
+
+describe("truncateTermReason", () => {
+  it("leaves a reason under the byte cap untouched", () => {
+    const reason = "tmux new-window failed";
+    expect(truncateTermReason(reason)).toBe(reason);
+  });
+
+  it("caps the total UTF-8 byte length at 1024, including the appended ellipsis", () => {
+    const reason = "x".repeat(2_000);
+    const truncated = truncateTermReason(reason);
+    expect(new TextEncoder().encode(truncated).length).toBe(1_024);
+    expect(truncated.endsWith("…")).toBe(true);
+    expect(truncated).toBe(`${"x".repeat(1_021)}…`);
+  });
+
+  it("caps the byte length even when trimming crosses a multi-byte character boundary", () => {
+    // "é" is 2 UTF-8 bytes; a naive character-count truncation (1024 chars
+    // + a 3-byte ellipsis) would overshoot 1024 bytes here.
+    const reason = "é".repeat(2_000);
+    const truncated = truncateTermReason(reason);
+    const bytes = new TextEncoder().encode(truncated).length;
+    expect(bytes).toBeLessThanOrEqual(1_024);
+    expect(truncated.endsWith("…")).toBe(true);
   });
 });

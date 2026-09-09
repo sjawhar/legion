@@ -10,6 +10,9 @@ import {
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
 
+/** Which read last set a fence's timestamp: a real GitHub webhook, or the daemon's own resync (board GraphQL/CI-status/merge-gate) read. At an identical clock a resync read is GitHub's authoritative source of truth and wins a tie against a disagreeing webhook observation. */
+export type UpdateSource = "webhook" | "resync";
+
 export interface IssueNode {
   key: IssueKey;
   title: string;
@@ -20,6 +23,10 @@ export interface IssueNode {
   labels: string[];
   backlogMarker?: string;
   finalCommentRef?: string;
+  /** The GitHub payload's `updated_at` (or, for a sub_issue event, `parent_issue.updated_at`) from the last event applied to this issue — a freshness fence, mirroring `PrState.headUpdatedAt`, against an out-of-order redelivery. */
+  updatedAt?: number;
+  /** The source of `updatedAt`'s last write; see `UpdateSource`. */
+  updatedAtSource?: UpdateSource;
 }
 
 export interface HeldEvent {
@@ -57,6 +64,8 @@ export interface PrState {
   number: number;
   headSha: string;
   headUpdatedAt?: number;
+  /** The source of `headUpdatedAt`'s last write; see `UpdateSource`. */
+  headUpdatedAtSource?: UpdateSource;
   /** The last SETTLED verdict for this head; a rerun in flight makes it unknown at the next resync. */
   verdict: "green" | "red" | null;
   /** Failing check runs: reported by the listener or by GitHub's rollup. */
@@ -94,7 +103,7 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 12;
+  version: 13;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -103,6 +112,8 @@ export interface LegionState {
   spawnCapabilities: Record<string, SpawnCapability>;
   prs: Record<string, PrState>;
   prByBranch: Record<string, string>;
+  /** A closed-unmerged PR's `headUpdatedAt` at close, keyed by `repo#number`: keeps an older `opened`/`synchronize` redelivery from recreating a PR this state has already deleted (see `pullRequest` in reducers.ts). Pruned past 30 days by `pruneStalePrTombstones`. */
+  prTombstones: Record<string, number>;
   admission: { cap: number; active: IssueKey[]; queue: IssueKey[] };
   phases: Record<IssueKey, { phase: string; sessionId: string } | undefined>;
   controllerHeldEvents: HeldEvent[];
@@ -143,6 +154,8 @@ const IssueNodeSchema = z
     labels: z.array(GateLabelSchema),
     backlogMarker: z.string().optional(),
     finalCommentRef: z.string().optional(),
+    updatedAt: z.number().optional(),
+    updatedAtSource: z.enum(["webhook", "resync"]).optional(),
   })
   .strict();
 const HeldEventSchema = z
@@ -206,6 +219,7 @@ const PrStateSchema = z
     number: z.number().int().nonnegative(),
     headSha: z.string(),
     headUpdatedAt: z.number().optional(),
+    headUpdatedAtSource: z.enum(["webhook", "resync"]).optional(),
     verdict: z.enum(["green", "red"]).nullable(),
     failing: z.array(z.string()),
     failingStatuses: z.array(z.string()),
@@ -248,7 +262,7 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(12),
+    version: z.literal(13),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -265,6 +279,7 @@ const LegionStateSchema = z
     spawnCapabilities: z.record(z.string().regex(/^[a-f0-9]{64}$/), SpawnCapabilitySchema),
     prs: z.record(z.string(), PrStateSchema),
     prByBranch: z.record(z.string(), z.string()),
+    prTombstones: z.record(z.string(), z.number()).default({}),
     admission: z
       .object({
         cap: z.number().int().nonnegative(),
@@ -289,7 +304,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 12,
+    version: 13,
     project,
     issues: {},
     trees: {},
@@ -297,6 +312,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     spawnCapabilities: {},
     prs: {},
     prByBranch: {},
+    prTombstones: {},
     admission: { cap, active: [], queue: [] },
     phases: {},
     controllerHeldEvents: [],
@@ -481,6 +497,20 @@ function migrateV8State(state: unknown): unknown {
   return { ...rest, version: 12, ...(migratedPrs ? { prs: migratedPrs } : {}) };
 }
 
+function migrateV12State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 12) return state;
+  return { ...state, version: 13 };
+}
+
+const PR_TOMBSTONE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Drops PR closed-tombstones older than 30 days: past that window an out-of-order `opened`/`synchronize` redelivery for the closed PR is no longer plausible, and leaving them forever would leak memory across a project's whole history. */
+export function pruneStalePrTombstones(state: LegionState, now: number): void {
+  for (const [key, closedAt] of Object.entries(state.prTombstones)) {
+    if (now - closedAt > PR_TOMBSTONE_MAX_AGE_MS) delete state.prTombstones[key];
+  }
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -494,12 +524,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))));
+  const state = migrateV12State(
+    migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))))
+  );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 12) {
+  if (version !== 13) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 
@@ -522,6 +554,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
       if (!hasErrnoCode(error, "EEXIST")) throw error;
     }
   }
+  pruneStalePrTombstones(validatedState, Date.now());
   return validatedState;
 }
 

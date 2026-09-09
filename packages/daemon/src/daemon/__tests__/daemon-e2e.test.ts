@@ -10,7 +10,15 @@ import {
   roleTopic,
   sanitizeToken,
 } from "@legion/contracts";
-import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import {
+  connect,
+  type NatsConnection,
+  nanos,
+  RetentionPolicy,
+  StorageType,
+  StringCodec,
+  type Subscription,
+} from "nats";
 import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
 import { type DaemonHandle, startDaemon } from "../index";
@@ -111,6 +119,7 @@ async function startNats(port: number): Promise<NatsContainer> {
     "-p",
     `127.0.0.1:${port}:4222`,
     NATS_IMAGE,
+    "-js",
   ]);
   if (result.exitCode !== 0) {
     throw new Error(`Unable to start NATS container ${name}: ${result.stderr || result.stdout}`);
@@ -190,6 +199,7 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     natsUrls: [natsUrl],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
+    repos: ["acme/widgets"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 1,
     workerBudget: 2,
@@ -336,6 +346,14 @@ describe("daemon end-to-end", () => {
       try {
         nats = await startNats(natsPort);
         broker = await connectNatsWhenReady(nats.url, `legion-daemon-e2e-observer-${project}`);
+        const jsm = await broker.jetstreamManager();
+        await jsm.streams.add({
+          name: "ENVOY_NOTIFICATIONS",
+          subjects: ["notifications.github.>"],
+          retention: RetentionPolicy.Limits,
+          max_age: nanos(72 * 60 * 60 * 1000),
+          storage: StorageType.File,
+        });
         const codec = StringCodec();
         const role = broker.subscribe("notifications.role.>");
         const control = broker.subscribe("legion.ctl.>");
@@ -406,7 +424,7 @@ describe("daemon end-to-end", () => {
         daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), daemonOptions);
         await daemon.ready();
         const rootTopic = "notifications.github.acme.widgets.issue.1";
-        broker.publish(
+        await broker.jetstream().publish(
           rootTopic,
           codec.encode(
             JSON.stringify(
@@ -659,7 +677,7 @@ describe("daemon end-to-end", () => {
         });
 
         const childCommentTopic = "notifications.github.acme.widgets.issue.2.comment";
-        broker.publish(
+        await broker.jetstream().publish(
           childCommentTopic,
           codec.encode(
             JSON.stringify(

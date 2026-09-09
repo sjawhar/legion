@@ -15,6 +15,7 @@ function boardIssue(overrides: Record<string, unknown> = {}): Record<string, unk
       number: 42,
       title: "Resync this Legion tree",
       repository: "sjawhar/legion",
+      updated_at: "2026-08-24T00:00:00.000Z",
     },
     status: "Todo",
     labels: [],
@@ -270,7 +271,7 @@ describe("runResync", () => {
           issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
           payload: {
             action: "labeled",
-            issue: { number: 42 },
+            issue: { number: 42, updated_at: "2026-08-24T00:00:00.000Z" },
             label: { name: "human-approved" },
             repository: { full_name: "sjawhar/legion" },
           },
@@ -283,7 +284,7 @@ describe("runResync", () => {
           issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
           payload: {
             action: "unlabeled",
-            issue: { number: 42 },
+            issue: { number: 42, updated_at: "2026-08-24T00:00:00.000Z" },
             label: { name: "needs-approval" },
             repository: { full_name: "sjawhar/legion" },
           },
@@ -711,6 +712,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toEqual({
       ...before,
       headUpdatedAt: Date.parse("2026-08-24T00:00:03.000Z"),
+      headUpdatedAtSource: "webhook",
     });
     expect(dispatched).toEqual([]);
   });
@@ -842,6 +844,59 @@ describe("runResync", () => {
     expect(
       dispatched.flat().map((effect) => (effect.kind === "publish" ? effect.payload : effect.kind))
     ).toEqual([{ type: "ci-green", sha: "head-c" }]);
+  });
+
+  it("a resync-sourced head read outranks a same-clock webhook synchronize that disagrees with it", async () => {
+    // Unlike two webhooks racing each other at the same clock (the test
+    // above, a legitimate same-second sequence), a webhook that arrives
+    // after GitHub's own authoritative read has already settled that
+    // instant must not re-open the tie: resync wins regardless of order.
+    const state = newLegionState("omp", 1);
+    const pr = prAtHeadA(state);
+    const T = "2026-08-24T00:00:05.000Z";
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "passing" as const,
+          mergeableStatus: null,
+          headSha: "head-c",
+          updatedAt: T,
+          checkRuns: [{ name: "build", id: 990 }],
+          isOpen: true,
+        },
+      }),
+    });
+    expect(pr).toMatchObject({
+      headSha: "head-c",
+      headUpdatedAt: Date.parse(T),
+      headUpdatedAtSource: "resync",
+    });
+
+    reduceGithubEvent(
+      state,
+      "notifications.github.sjawhar.legion.pull_request.synchronize",
+      {
+        event_id: "webhook-head-b",
+        issued_at: Date.parse(T),
+        payload: {
+          kind: "pr",
+          action: "synchronize",
+          repo: "sjawhar/legion",
+          number: "7",
+          head_sha: "head-b",
+          updated_at: T,
+        },
+      },
+      resyncDeps(state, []).config
+    );
+
+    expect(pr).toMatchObject({
+      headSha: "head-c",
+      headUpdatedAt: Date.parse(T),
+      headUpdatedAtSource: "resync",
+    });
   });
   it("fences a resynced head against a redelivered older synchronize", async () => {
     const state = newLegionState("omp", 1);

@@ -9,24 +9,47 @@ import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
 import * as daemonIndex from "../index";
 import { newLegionState } from "../legion-state";
+import type { DurableMessageControl } from "../nats-transport";
 
 const { startDaemon } = daemonIndex;
 
 class FakeNats {
   readonly subscriptions: Array<{
     subject: string;
-    callback: (subject: string, data: string) => void;
+    callback: (subject: string, data: string, control: DurableMessageControl) => void;
   }> = [];
   readonly publications: Array<{ subject: string; data: string }> = [];
   closed = false;
   readyCalls = 0;
 
   subscribe(subject: string, callback: (subject: string, data: string) => void): () => void {
-    const subscription = { subject, callback };
+    const subscription = {
+      subject,
+      callback: (s: string, d: string) => callback(s, d),
+    };
     this.subscriptions.push(subscription);
     return () => {
       const index = this.subscriptions.indexOf(subscription);
       if (index >= 0) this.subscriptions.splice(index, 1);
+    };
+  }
+
+  consumeDurable(
+    _stream: string,
+    _durable: string,
+    filterSubjects: string[],
+    callback: (subject: string, data: string, control: DurableMessageControl) => void
+  ): () => void {
+    const registered = filterSubjects.map((subject) => {
+      const subscription = { subject, callback };
+      this.subscriptions.push(subscription);
+      return subscription;
+    });
+    return () => {
+      for (const subscription of registered) {
+        const index = this.subscriptions.indexOf(subscription);
+        if (index >= 0) this.subscriptions.splice(index, 1);
+      }
     };
   }
 
@@ -37,9 +60,16 @@ class FakeNats {
     return JSON.stringify({ type: "ack" });
   }
 
-  emit(subject: string, data: string): void {
+  emit(subject: string, data: string, ack: () => void = () => {}): void {
+    const control: DurableMessageControl = {
+      streamSequence: 1,
+      deliverySequence: 1,
+      ack,
+      nak: () => {},
+      term: () => {},
+    };
     for (const subscription of this.subscriptions) {
-      if (matches(subscription.subject, subject)) subscription.callback(subject, data);
+      if (matches(subscription.subject, subject)) subscription.callback(subject, data, control);
     }
   }
   async close(): Promise<void> {
@@ -48,6 +78,7 @@ class FakeNats {
   async ready(): Promise<void> {
     this.readyCalls += 1;
   }
+  async flush(): Promise<void> {}
 }
 
 function matches(pattern: string, subject: string): boolean {
@@ -157,6 +188,7 @@ function config(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
+    repos: ["acme/widgets"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 4,
     workerBudget: 6,
@@ -368,6 +400,7 @@ describe("startDaemon", () => {
                   number: 42,
                   title: "Recovered issue",
                   repository: "acme/widgets",
+                  updated_at: "2026-08-24T00:00:00.000Z",
                 },
                 status: "Todo",
                 labels: [],
@@ -378,6 +411,7 @@ describe("startDaemon", () => {
                   number: 43,
                   title: "Awaiting approval",
                   repository: "acme/widgets",
+                  updated_at: "2026-08-24T00:00:00.000Z",
                 },
                 status: "Todo",
                 labels: ["human-approved"],
@@ -452,6 +486,114 @@ describe("startDaemon", () => {
     } finally {
       await daemon?.stop();
       console.log = originalLog;
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("does not resolve until boot-time admission reconciliation, including its tmux orphan reap, has settled", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const issue = formatIssueKey("acme", "widgets", 42);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[issue] = {
+      key: issue,
+      title: "Queued at boot",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[issue] = {
+      root: issue,
+      generation: 0,
+      status: "queued",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.admission.queue.push(issue);
+    await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
+      recursive: true,
+    });
+    const listWindowsGate = Promise.withResolvers<void>();
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      const starting = startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
+              const workspaceDir = command[3];
+              if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            if (command[0]?.endsWith("/tmux") && command[1] === "list-windows") {
+              // reconcileAdmission's boot-time orphan reap: slow to prove
+              // startDaemon does not resolve until it — and every promotion
+              // it gates — has fully settled.
+              await listWindowsGate.promise;
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
+            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
+            if (
+              command[0]?.endsWith("/tmux") &&
+              (command[1] === "new-session" || command[1] === "new-window")
+            ) {
+              return { stdout: "@42", stderr: "", exitCode: 0 };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      let started = false;
+      void starting.then((handle) => {
+        started = true;
+        daemon = handle;
+      });
+
+      // The reap's list-windows call is gated shut, so reconcileAdmission
+      // cannot have settled yet — no real wait needed to know this.
+      expect(started).toBe(false);
+
+      listWindowsGate.resolve();
+      daemon = await starting;
+      expect(started).toBe(true);
+      expect(state.admission.active).toEqual([issue]);
+      expect(state.trees[issue]?.status).toBe("active");
+    } finally {
+      await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });
@@ -779,7 +921,7 @@ describe("startDaemon", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ project: "acme1" });
       expect(nats.subscriptions.map((subscription) => subscription.subject)).toEqual([
-        "notifications.github.>",
+        "notifications.github.acme.widgets.>",
         "notifications.slack.*.*.mention",
         "notifications.envoy.exceptions.notifications.role.>",
       ]);
@@ -876,7 +1018,11 @@ describe("startDaemon", () => {
               shProbeCalls += 1;
               if (shProbeCalls === 1) {
                 // First sh-shaped probe: verifyOmpAgentsCapability.
-                return { stdout: "LEGION_OMP_AGENTS=available\n", stderr: "", exitCode: 0 };
+                return {
+                  stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                  stderr: "",
+                  exitCode: 0,
+                };
               }
               // Second sh-shaped probe: verifyLegionPluginLoaded. The plugin is
               // disabled/unregistered, so the marker never appears.
@@ -1008,7 +1154,9 @@ describe("startDaemon", () => {
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
         readPluginManifest: async () => validLegionPluginManifest,
-        envoyPublish: async () => {},
+        envoyPublish: async () => {
+          throw new Error("listener down");
+        },
         fetchGitHubProjectItems: async () => ({
           items: [],
           excludedNullContentItems: 0,
@@ -1034,7 +1182,25 @@ describe("startDaemon", () => {
     });
 
     try {
-      nats.emit("notifications.github.acme.widgets.issue.1.comment", "not JSON");
+      // A well-formed envelope whose durable processing fails (the publish
+      // rejects) is nak'd for redelivery — a genuine, still-pending failure
+      // that surfaces through drain()/stop(), unlike a malformed envelope
+      // (which is termed and resolves normally; see events.test.ts's
+      // poison-message coverage).
+      nats.emit(
+        "notifications.github.acme.widgets.mention",
+        JSON.stringify({
+          event_id: "mention-1",
+          source: "github",
+          source_event_id: "mention-1",
+          topic: "notifications.github.acme.widgets.mention",
+          dedupe_key: "dedupe-mention-1",
+          issued_at: 1_000,
+          payload_summary: "mention",
+          payload: JSON.stringify({ text: "@legion please investigate" }),
+          trace_id: "trace-mention-1",
+        })
+      );
 
       await expect(daemon.stop()).rejects.toThrow();
       expect(nats.closed).toBe(true);
@@ -1044,6 +1210,53 @@ describe("startDaemon", () => {
     } finally {
       daemon.server.stop();
       await nats.close();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a second daemon for the same project's state directory while the first is running", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const daemonDeps = {
+      loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+      saveState: async () => {},
+      createNatsTransport: async () => new FakeNats(),
+      runner: async () => ({
+        stdout: "[]",
+        stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+        exitCode: 0,
+      }),
+      resolveDaemonEnvironment: async () => daemonEnvironment,
+      statPrompt: async () => {},
+      envoyPublish: async () => {},
+      fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
+      tokenManager: {
+        getToken: async () => ({
+          token: "test-token",
+          expiresAt: "2026-08-25T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "1+legion-implement[bot]@users.noreply.github.com",
+          },
+        }),
+      },
+      setTimeout: () => 1 as never,
+      clearTimeout: () => {},
+      setInterval: () => 1 as never,
+      clearInterval: () => {},
+      onSignal: () => {},
+      exit: () => {},
+      now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+    };
+
+    const first = await startDaemon(daemonConfig, { deps: daemonDeps });
+    try {
+      await expect(startDaemon(daemonConfig, { deps: daemonDeps })).rejects.toThrow(
+        `Legion daemon already running for this project (pid ${process.pid}`
+      );
+    } finally {
+      first.server.stop();
+      await first.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });

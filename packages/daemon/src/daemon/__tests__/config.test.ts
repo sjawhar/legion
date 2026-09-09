@@ -5,6 +5,7 @@ import { loadConfig, loadConfigFromFile, resolveDaemonConfig } from "../config";
 const requiredEnv = {
   LEGION_ID: "Acme/42",
   ENVOY_NATS_URL: "nats://one:4222, nats://two:4222",
+  LEGION_REPOS: "acme/widgets",
 };
 
 describe("daemon config", () => {
@@ -34,6 +35,7 @@ describe("daemon config", () => {
       envoyUrl: "http://127.0.0.1:9020",
       natsUrls: ["nats://one:4222", "nats://two:4222"],
       boardProjectIds: ["PVT_alpha", "PVT_beta"],
+      repos: ["acme/widgets"],
       appLogins: ["legion-implement[bot]", "legion-review[bot]"],
       maxFixAttempts: 5,
       admissionCap: 7,
@@ -86,6 +88,8 @@ describe("daemon config", () => {
         "  - nats://one:4222",
         "board_project_ids:",
         "  - PVT_one",
+        "repos:",
+        "  - acme/widgets",
         "app_logins:",
         "  - legion-implement[bot]",
         "max_fix_attempts: 4",
@@ -111,6 +115,7 @@ describe("daemon config", () => {
       envoyUrl: "http://listener:9020",
       natsUrls: ["nats://one:4222"],
       boardProjectIds: ["PVT_one"],
+      repos: ["acme/widgets"],
       appLogins: ["legion-implement[bot]"],
       maxFixAttempts: 4,
       admissionCap: 3,
@@ -141,6 +146,18 @@ describe("daemon config", () => {
 
   it("rejects missing NATS configuration instead of inventing a transport", () => {
     expect(() => loadConfig({ LEGION_ID: "acme/7" })).toThrow("ENVOY_NATS_URL");
+  });
+
+  it("rejects an empty repos list", () => {
+    expect(() => resolveDaemonConfig({ env: { ...requiredEnv, LEGION_REPOS: "" } })).toThrow(
+      "repos is required"
+    );
+  });
+
+  it("rejects a repos entry that is not owner/name", () => {
+    expect(() =>
+      resolveDaemonConfig({ env: { ...requiredEnv, LEGION_REPOS: "not-a-slug" } })
+    ).toThrow(/entries must be "owner\/name"/);
   });
 
   it("rejects invalid lifecycle numbers from either configuration source", () => {

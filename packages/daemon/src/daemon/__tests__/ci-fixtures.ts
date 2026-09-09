@@ -4,17 +4,55 @@
 import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
 import type { DaemonConfig } from "../config";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
+import type { DurableMessageControl } from "../nats-transport";
 
 interface Subscription {
   subject: string;
-  callback: (subject: string, data: string) => void;
+  callback: (subject: string, data: string, control: DurableMessageControl) => void;
+}
+
+interface DurableConsumer {
+  stream: string;
+  durable: string;
+  filterSubjects: string[];
+}
+
+/** A durable delivery's `ack`/`nak`/`term` calls, recorded for assertions. */
+export interface FakeDurableControlCalls {
+  acks: number;
+  naks: Array<number | undefined>;
+  terms: Array<string | undefined>;
+}
+
+function fakeControl(
+  overrides: Partial<DurableMessageControl> = {},
+  calls?: FakeDurableControlCalls
+): DurableMessageControl {
+  return {
+    streamSequence: 1,
+    deliverySequence: 1,
+    ack: () => {
+      if (calls) calls.acks += 1;
+    },
+    nak: (delayMs) => {
+      if (calls) calls.naks.push(delayMs);
+    },
+    term: (reason) => {
+      if (calls) calls.terms.push(reason);
+    },
+    ...overrides,
+  };
 }
 
 export class FakeNats {
   readonly subscriptions: Subscription[] = [];
+  readonly durableConsumers: DurableConsumer[] = [];
 
   subscribe(subject: string, callback: (subject: string, data: string) => void): () => void {
-    const subscription = { subject, callback };
+    const subscription = {
+      subject,
+      callback: (s: string, d: string) => callback(s, d),
+    };
     this.subscriptions.push(subscription);
     return () => {
       const index = this.subscriptions.indexOf(subscription);
@@ -22,11 +60,50 @@ export class FakeNats {
     };
   }
 
+  consumeDurable(
+    stream: string,
+    durable: string,
+    filterSubjects: string[],
+    callback: (subject: string, data: string, control: DurableMessageControl) => void
+  ): () => void {
+    this.durableConsumers.push({ stream, durable, filterSubjects });
+    const registered = filterSubjects.map((subject) => {
+      const subscription = { subject, callback };
+      this.subscriptions.push(subscription);
+      return subscription;
+    });
+    return () => {
+      for (const subscription of registered) {
+        const index = this.subscriptions.indexOf(subscription);
+        if (index >= 0) this.subscriptions.splice(index, 1);
+      }
+    };
+  }
+
   publish(): void {}
 
-  emit(subject: string, data: string): void {
+  flushCalls = 0;
+  flush(): Promise<void> {
+    this.flushCalls += 1;
+    return Promise.resolve();
+  }
+
+  /**
+   * Dispatches `data` to every subscription matching `subject`. `control`
+   * overrides the fake `ack`/`nak`/`term` control object (a plain function
+   * is treated as `ack`, matching the common single-callback test shape);
+   * pass `calls` to record which of `ack`/`nak`/`term` fired.
+   */
+  emit(
+    subject: string,
+    data: string,
+    control: Partial<DurableMessageControl> | (() => void) = {},
+    calls?: FakeDurableControlCalls
+  ): void {
+    const overrides = typeof control === "function" ? { ack: control } : control;
+    const fullControl = fakeControl(overrides, calls);
     for (const subscription of this.subscriptions) {
-      if (matches(subscription.subject, subject)) subscription.callback(subject, data);
+      if (matches(subscription.subject, subject)) subscription.callback(subject, data, fullControl);
     }
   }
 }
@@ -51,6 +128,7 @@ export function config(): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
+    repos: ["acme/widgets"],
     appLogins: ["legion[bot]"],
     admissionCap: 4,
     workerBudget: 6,

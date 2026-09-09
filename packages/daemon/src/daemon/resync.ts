@@ -14,6 +14,7 @@ import {
   reduceGithubEvent,
   resetPrHead,
   settleCiVerdict,
+  supersededBy,
   uncertifyCiVerdict,
   writeCiFence,
 } from "./reducers";
@@ -62,6 +63,7 @@ function boardIssue(item: Record<string, unknown>):
       number: number;
       open: boolean;
       erroring: boolean;
+      updatedAt?: string;
     }
   | undefined {
   const content = record(item.content);
@@ -80,12 +82,14 @@ function boardIssue(item: Record<string, unknown>):
 
   const projectStatus = item.status;
   const status = typeof projectStatus === "string" ? projectStatus.toLowerCase() : "";
+  const updatedAt = typeof content.updated_at === "string" ? content.updated_at : undefined;
   return {
     issue: formatIssueKey(owner, repo, number),
     repository,
     number,
     open: status !== "done" && status !== "closed",
     erroring: status.includes("error") || status.includes("failed"),
+    ...(updatedAt !== undefined ? { updatedAt } : {}),
   };
 }
 
@@ -101,7 +105,7 @@ function boardLabels(item: Record<string, unknown>): Set<string> | undefined {
 }
 
 function labeledBoardIssue(
-  board: { issue: IssueKey; repository: string; number: number },
+  board: { issue: IssueKey; repository: string; number: number; updatedAt?: string },
   action: "labeled" | "unlabeled",
   label: string,
   now: number
@@ -111,7 +115,7 @@ function labeledBoardIssue(
     issued_at: now,
     payload: {
       action,
-      issue: { number: board.number },
+      issue: { number: board.number, updated_at: board.updatedAt },
       label: { name: label },
       repository: { full_name: board.repository },
     },
@@ -210,6 +214,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
         (pr.headUpdatedAt === undefined || headUpdatedAt > pr.headUpdatedAt)
       ) {
         pr.headUpdatedAt = headUpdatedAt;
+        pr.headUpdatedAtSource = "resync";
       }
     } else {
       if (!status.updatedAt) {
@@ -218,14 +223,20 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       if (Number.isNaN(headUpdatedAt)) {
         throw new Error(`GitHub CI status has an invalid updatedAt for ${prKey}`);
       }
-      if (pr.headUpdatedAt !== undefined && headUpdatedAt < pr.headUpdatedAt) {
+      if (
+        supersededBy(
+          { updatedAt: headUpdatedAt, source: "resync" },
+          { updatedAt: pr.headUpdatedAt, source: pr.headUpdatedAtSource ?? "webhook" }
+        )
+      ) {
         console.debug(
-          `[legion] ignored stale resync head for ${prKey} fetched=${status.headSha}@${status.updatedAt} known=${pr.headSha}@${new Date(pr.headUpdatedAt).toISOString()}`
+          `[legion] ignored stale resync head for ${prKey} fetched=${status.headSha}@${status.updatedAt} known=${pr.headSha}@${new Date(pr.headUpdatedAt ?? 0).toISOString()}`
         );
         continue;
       }
       resetPrHead(pr, status.headSha);
       pr.headUpdatedAt = headUpdatedAt;
+      pr.headUpdatedAtSource = "resync";
     }
     // GitHub's rollup carries an attempt set with no listener identity. It
     // advances the stored fence, applies at an equal set, applies unfenced, or

@@ -8,6 +8,7 @@ import {
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { HeldEvent, LegionState, TreeState } from "./legion-state";
+import type { DurableMessageControl, NatsTransport } from "./nats-transport";
 import {
   classifySettlement,
   type Effect,
@@ -24,14 +25,85 @@ const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.check
 const EXCEPTION_TOPIC = "notifications.envoy.exceptions.notifications.role.";
 const MAX_RETRY_DELAY_MS = 30_000;
 const INITIAL_RETRY_DELAY_MS = 1_000;
+/** JetStream stream carrying durable notifications; mirrors packages/envoy/internal/bus/nats.go:18. */
+const GITHUB_STREAM = "ENVOY_NOTIFICATIONS";
+/** Fixed nak delay for a durable delivery that fails for a reason that may be transient (see processDurableMessage). */
+const DURABLE_NAK_DELAY_MS = 30_000;
+
+/** Bounds a JetStream `term` reason so an oversized reducer/parse error never fails the term frame itself. */
+const MAX_TERM_REASON_BYTES = 1_024;
+const TERM_REASON_ELLIPSIS = "…";
+const textEncoder = new TextEncoder();
+
+/** Truncates `reason` so its UTF-8 byte length, including the appended ellipsis, never exceeds `MAX_TERM_REASON_BYTES`. */
+export function truncateTermReason(reason: string): string {
+  if (textEncoder.encode(reason).length <= MAX_TERM_REASON_BYTES) return reason;
+  const budget = MAX_TERM_REASON_BYTES - textEncoder.encode(TERM_REASON_ELLIPSIS).length;
+  let truncated = reason.slice(0, budget);
+  while (textEncoder.encode(truncated).length > budget) truncated = truncated.slice(0, -1);
+  return `${truncated}${TERM_REASON_ELLIPSIS}`;
+}
+
+/** Logs a poison durable message (never redeliverable) and terminates it so JetStream never retries it. */
+function poisonMessage(
+  subject: string,
+  control: DurableMessageControl,
+  reason: string,
+  eventId?: string
+): void {
+  const truncatedReason = truncateTermReason(reason);
+  console.error(
+    `[legion] poison durable message on ${subject} (stream_seq=${control.streamSequence} delivery_seq=${control.deliverySequence}${eventId ? ` event_id=${eventId}` : ""}): ${truncatedReason}`
+  );
+  control.term(truncatedReason);
+}
+
+/**
+ * Wraps a synchronous reducer's throw so `processDurableMessage` can tell it
+ * apart from every other durable-lane failure (a rejected `saveState`, a
+ * rejected publish): reducers are pure and deterministic, so a throw here
+ * will throw identically on every redelivery — it is poison, not a
+ * transient condition, and gets termed with a loud log instead of nak'd.
+ */
+class DurableReducerFailure extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "DurableReducerFailure";
+  }
+}
+
+/**
+ * Wraps a failure from a reducer-derived event's effect dispatch (a
+ * non-404 publish/controller rejection, or an `onLinger`/`onProbe`/
+ * `onApprovalStatus` handler throwing) or its `saveState` — anything
+ * `applyDurableEvent` hits after the reducer has already mutated live
+ * state. Distinguishes this from `DurableReducerFailure` (poison, no
+ * mutation risk) and from a GitHub mention's publish failure (no
+ * reducer, so no mutation risk either): only this class means memory may
+ * be dirty, and `processDurableMessage` responds by going fatal instead
+ * of nak'ing.
+ */
+class DurableFatalFailure extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "DurableFatalFailure";
+  }
+}
 
 type JsonRecord = Record<string, unknown>;
 
+export interface UndeliverableInfo {
+  role: string;
+  eventId: string;
+  envelope: EnvelopeJson;
+  subject: string;
+  /** `envelope.payload_summary`, surfaced directly so a hook doesn't have to re-derive it. */
+  summary?: string;
+  kind: "publish" | "controller";
+}
+
 export interface EventPumpDeps {
-  nats: {
-    subscribe(subject: string, cb: (subject: string, data: string) => void): () => void;
-    publish(subject: string, data: string): void;
-  };
+  nats: Pick<NatsTransport, "subscribe" | "consumeDurable" | "publish" | "flush">;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   state: LegionState;
   saveState(): Promise<void>;
@@ -39,6 +111,26 @@ export interface EventPumpDeps {
   onLinger(tree: IssueKey): Promise<void>;
   onProbe(tree: IssueKey): Promise<void>;
   onApprovalStatus(effect: Extract<Effect, { kind: "approval-status" }>): Promise<void>;
+  /**
+   * Called when a durable effect's role has no live holder (Envoy 404).
+   * State is already durable and correct by this point — the effect is a
+   * wake the role missed, and the worker's own catch-up on ready/resume
+   * (see catchup.ts) recovers it from current state, not from replaying
+   * this event. Defaults to a log line naming the role and event id.
+   */
+  onUndeliverable?(info: UndeliverableInfo): void | Promise<void>;
+  /**
+   * Called when a durable message's effect dispatch or `saveState` fails
+   * after its reducer has already mutated live state (`DurableFatalFailure`
+   * — see `applyDurableEvent`) or when a reducer itself throws
+   * (`DurableReducerFailure`, after the poison log/term). Memory may now
+   * be dirty, so the process must not keep serving other durable messages
+   * against it. Defaults to `process.exit(1)`: the daemon's supervisor is
+   * expected to restart it (see AGENTS.md), reloading state from the last
+   * successful save, so JetStream's redelivery of the still-unacked
+   * message runs against clean state.
+   */
+  fatal?(error: unknown): void | Promise<void>;
   config: DaemonConfig;
 }
 
@@ -113,8 +205,7 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
   const repo = `${match[1]}/${match[2]}` as `${string}/${string}`;
   const payload = recordPayload(envelope);
   if (
-    !payload ||
-    payload.kind !== "checks" ||
+    payload?.kind !== "checks" ||
     payload.repo !== repo ||
     payload.number !== String(number) ||
     (payload.is_head !== undefined && payload.is_head !== true)
@@ -237,11 +328,17 @@ function removeHeld(target: HeldTarget, held: HeldEvent): void {
   if (index >= 0) target.heldEvents.splice(index, 1);
 }
 
-function isMention(subject: string): boolean {
-  return (
-    (subject.startsWith("notifications.github.") || subject.startsWith("notifications.slack.")) &&
-    subject.endsWith(".mention")
-  );
+interface EffectPublisher {
+  publishRole(role: string, payload: LegionEventPayload): Promise<void>;
+  publishController(payload: LegionEventPayload): Promise<void>;
+}
+
+function isSlackMention(subject: string): boolean {
+  return subject.startsWith("notifications.slack.") && subject.endsWith(".mention");
+}
+
+function isGithubMention(subject: string): boolean {
+  return subject.startsWith("notifications.github.") && subject.endsWith(".mention");
 }
 
 function exceptionInfo(
@@ -277,6 +374,14 @@ function exceptionInfo(
 
 export interface EventPump {
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
+  /**
+   * Runs `fn` serialized against every durable GitHub message: enqueued
+   * after every earlier operation on this queue settles, and before any
+   * later one starts. Used to run resync exclusively of the durable lane
+   * (see the queue's doc comment in events.ts) — not for ordinary event
+   * handling, which already goes through the queue internally.
+   */
+  runExclusive<T>(fn: () => Promise<T>): Promise<T>;
   redeliverControllerEvents(): Promise<void>;
   publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void>;
   stop(): void;
@@ -369,41 +474,172 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     await publishRole(role, payloadJson, envelope, controllerTarget, undefined, 0);
   };
 
-  const applyEffects = async (effects: Effect[], envelope: EnvelopeJson): Promise<void> => {
+  /** True for the "no holder for role X" 404 Envoy's publish endpoint returns before a session claims the role — the normal state before one exists, never a broken publish path. */
+  function isNoHolderError(error: unknown): boolean {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "status" in error &&
+      (error as { status?: unknown }).status === 404
+    );
+  }
+
+  /**
+   * Publishes a GitHub mention directly through Envoy, propagating any
+   * rejection (including a 404 no holder) so the durable message naks and
+   * retries: unlike a reducer-derived effect, a mention has no persisted
+   * state to fall back on if it's lost — this is the only durability
+   * mechanism it gets. Failure logging happens once, in
+   * `processDurableMessage`'s catch (which already distinguishes a
+   * no-holder 404 from every other failure) — not here.
+   */
+  const publishRoleDirect = (role: string, payloadJson: string): Promise<void> =>
+    deps.envoyPublish(roleTopic(role), payloadJson);
+
+  const notifyUndeliverable = async (
+    role: string,
+    eventId: string,
+    envelope: EnvelopeJson,
+    subject: string,
+    kind: "publish" | "controller"
+  ): Promise<void> => {
+    if (deps.onUndeliverable) {
+      await deps.onUndeliverable({
+        role,
+        eventId,
+        envelope,
+        subject,
+        summary: envelope.payload_summary,
+        kind,
+      });
+      return;
+    }
+    console.error(
+      `legion: no holder for ${role}, event ${eventId} undelivered (subject=${subject}${envelope.payload_summary ? ` summary=${envelope.payload_summary}` : ""} effect=${kind}); recovered via the worker's own catch-up on resume`
+    );
+  };
+
+  /**
+   * Publishes a durable-GitHub-derived effect. A 404 "no holder" is
+   * handled: it calls `deps.onUndeliverable` and returns normally — the
+   * normal state before a session claims the role, recovered by that
+   * role's own catch-up on resume, not by retrying this event. Anything
+   * else propagates, so the caller's dispatch-then-save transaction
+   * (applyDurableEvent) treats it as fatal: this effect is not yet
+   * durable, and continuing with a live-state mutation whose full effect
+   * set didn't get applied would leave dirty memory serving other events.
+   */
+  const durablePublisher = (
+    eventId: string,
+    envelope: EnvelopeJson,
+    subject: string
+  ): EffectPublisher => {
+    const publishOrThrow = async (
+      role: string,
+      payloadJson: string,
+      kind: "publish" | "controller"
+    ): Promise<void> => {
+      try {
+        await deps.envoyPublish(roleTopic(role), payloadJson);
+      } catch (error) {
+        if (isNoHolderError(error)) {
+          await notifyUndeliverable(role, eventId, envelope, subject, kind);
+          return;
+        }
+        throw error;
+      }
+    };
+    return {
+      publishRole: (role, payload) => publishOrThrow(role, JSON.stringify(payload), "publish"),
+      publishController: (payload) =>
+        publishOrThrow(controllerToken(deps.state.project), JSON.stringify(payload), "controller"),
+    };
+  };
+
+  const heldPublisher = (envelope: EnvelopeJson): EffectPublisher => ({
+    publishRole: (role, payload) => publishEffect(role, payload, envelope),
+    publishController: (payload) => publishController(JSON.stringify(payload), envelope),
+  });
+
+  /** The single effect-application switch, shared by every lane; an unrecognized kind crashes loud instead of silently doing nothing. */
+  const dispatch = async (effects: Effect[], publisher: EffectPublisher): Promise<void> => {
     for (const effect of effects) {
-      if (effect.kind === "publish") await publishEffect(effect.role, effect.payload, envelope);
-      else if (effect.kind === "controller") {
-        await publishController(JSON.stringify(effect.payload), envelope);
-      } else if (effect.kind === "linger") {
-        await deps.onLinger(effect.tree);
-      } else if (effect.kind === "probe") {
-        await deps.onProbe(effect.tree);
-      } else if (effect.kind === "approval-status") {
-        await deps.onApprovalStatus(effect);
+      if (effect.kind === "publish") await publisher.publishRole(effect.role, effect.payload);
+      else if (effect.kind === "controller") await publisher.publishController(effect.payload);
+      else if (effect.kind === "linger") await deps.onLinger(effect.tree);
+      else if (effect.kind === "probe") await deps.onProbe(effect.tree);
+      else if (effect.kind === "approval-status") await deps.onApprovalStatus(effect);
+      else {
+        const unhandled: never = effect;
+        throw new Error(
+          `[legion] pump received an unhandled effect kind: ${JSON.stringify(unhandled)}`
+        );
       }
     }
   };
 
   const applyEffectsAndSave = async (effects: Effect[], envelope: EnvelopeJson): Promise<void> => {
-    await applyEffects(effects, envelope);
+    await dispatch(effects, heldPublisher(envelope));
     await deps.saveState();
   };
 
-  const handleChecks = async (subject: string, envelope: EnvelopeJson): Promise<boolean> => {
+  /**
+   * Runs a github-sourced reducer once, directly against the live state
+   * (mutating it in place, same as always), dispatches every derived
+   * effect, then durably saves. This is the whole transaction, and its
+   * order is deliberate: dispatching before saving means every effect
+   * (publish/controller/linger/probe/approval-status) has already run by
+   * the time state is marked durable, so a crash or failure anywhere in
+   * this function can never leave a "saved but not yet woken" or "acked
+   * but not yet dispatched" gap. State is the source of truth once this
+   * function returns; the caller (processDurableMessage) acks only then.
+   *
+   * - The reducer throwing is poison, not transient: reducers are
+   *   synchronous and pure, so the same throw happens on every redelivery
+   *   (see `DurableReducerFailure`, thrown here and termed by the caller).
+   * - Any other failure here (a non-404 effect dispatch, a rejected
+   *   `saveState`) is fatal (`DurableFatalFailure`): the reducer has
+   *   already mutated live state in memory, and that mutation cannot be
+   *   trusted to keep serving other messages once part of its effect set
+   *   or its save has failed. The caller does not ack or nak; it calls
+   *   `deps.fatal` to exit the process, so the supervisor restarts it,
+   *   state reloads from the last successful save, and JetStream
+   *   redelivers this still-unacked message against that clean state.
+   */
+  const applyDurableEvent = async (
+    subject: string,
+    envelope: EnvelopeJson,
+    reduce: (state: LegionState) => Effect[]
+  ): Promise<void> => {
+    let effects: Effect[];
+    try {
+      effects = reduce(deps.state);
+    } catch (error) {
+      throw new DurableReducerFailure(error);
+    }
+    try {
+      await dispatch(effects, durablePublisher(envelope.event_id, envelope, subject));
+      await deps.saveState();
+    } catch (error) {
+      throw new DurableFatalFailure(error);
+    }
+  };
+
+  const handleChecks = async (subject: string, envelope: EnvelopeJson): Promise<void> => {
     const input = checksInput(subject, envelope);
     if (!input) {
       console.debug(
         `[legion] ignored malformed or non-head checks event ${envelope.event_id} subject=${subject}`
       );
-      return false;
+      return;
     }
     const pr = deps.state.prs[`${input.repo}#${input.number}`];
-    if (!pr) return false;
+    if (!pr) return;
     if (pr.headSha !== input.sha) {
       console.debug(
         `[legion] ignored non-head checks event ${envelope.event_id} subject=${subject} sha=${input.sha} head_sha=${pr.headSha}`
       );
-      return false;
+      return;
     }
     const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
     const classification = classifySettlement(pr, { ...input, verdict, failing: input.failed });
@@ -411,20 +647,23 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
       );
-      return false;
+      return;
     }
-    if (classification === "duplicate") return false;
+    if (classification === "duplicate") return;
     if (classification === "conflict") {
       console.warn(
         `[legion] conflicting checks settlement ${envelope.event_id} subject=${subject} sha=${input.sha} stored_snapshot=${pr.ciSnapshot ?? "<none>"} incoming_snapshot=${input.snapshot}`
       );
-      return false;
+      return;
     }
     if (classification === "refresh") {
       // Agrees with the verdict a terminal GitHub read holds at this attempt
       // set: the listener identity moves, GitHub's authority stays.
-      refreshCiIdentity(pr, input.generation, input.snapshot, input.settledAt);
-      return true;
+      await applyDurableEvent(subject, envelope, () => {
+        refreshCiIdentity(pr, input.generation, input.snapshot, input.settledAt);
+        return [];
+      });
+      return;
     }
     // A newer attempt set, or a later generation at a set GitHub has not read:
     // the listener's view is authoritative for the names it reports until
@@ -434,33 +673,39 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       verdict,
       failing: input.failed,
     });
-    writeCiFence(pr, {
-      checkRuns: input.checkRuns,
-      generation: input.generation,
-      snapshot: input.snapshot,
-    });
-    pr.ciReconciled = false;
-    await applyEffects(
-      settleCiVerdict(
-        deps.state,
+    await applyDurableEvent(subject, envelope, (state) => {
+      writeCiFence(pr, {
+        checkRuns: input.checkRuns,
+        generation: input.generation,
+        snapshot: input.snapshot,
+      });
+      pr.ciReconciled = false;
+      return settleCiVerdict(
+        state,
         pr,
         { ...outcome, settledAt: input.settledAt },
         deps.config,
         envelope
-      ),
-      envelope
-    );
-    return true;
+      );
+    });
   };
 
-  const handleMessage = async (subject: string, data: string): Promise<void> => {
-    const envelope = EnvelopeSchema.parse(JSON.parse(data)) as EnvelopeJson;
-    let shouldSave = true;
-    if (CHECKS_TOPIC.test(subject)) shouldSave = await handleChecks(subject, envelope);
-    else if (isMention(subject)) {
+  const handleEnvelope = async (subject: string, envelope: EnvelopeJson): Promise<void> => {
+    if (CHECKS_TOPIC.test(subject)) {
+      await handleChecks(subject, envelope);
+    } else if (isSlackMention(subject)) {
       await publishController(
         typeof envelope.payload === "string" ? envelope.payload : "{}",
         envelope
+      );
+    } else if (isGithubMention(subject)) {
+      // A GitHub mention has no reducer or state to fall back on if it's
+      // lost — unlike every other durable effect, it keeps the
+      // publish-and-nak-on-failure contract (including on a 404 no
+      // holder): there is nothing else that will ever re-derive it.
+      await publishRoleDirect(
+        controllerToken(deps.state.project),
+        typeof envelope.payload === "string" ? envelope.payload : "{}"
       );
     } else {
       const rawPayload = recordPayload(envelope);
@@ -487,21 +732,149 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
           }
           await deps.onException(exception);
         } else {
-          await applyEffects(
-            reduceGithubEvent(deps.state, subject, envelope, deps.config),
-            envelope
+          await applyDurableEvent(subject, envelope, (state) =>
+            reduceGithubEvent(state, subject, envelope, deps.config)
           );
         }
       }
     }
-    if (shouldSave) await deps.saveState();
     console.log(`[legion] consumed event ${envelope.event_id} subject=${subject}`);
   };
 
+  const handleMessage = async (subject: string, data: string): Promise<void> => {
+    const envelope = EnvelopeSchema.parse(JSON.parse(data)) as EnvelopeJson;
+    await handleEnvelope(subject, envelope);
+  };
+
+  const githubDurable = `legion-${deps.config.project}-github`;
+  const githubFilterSubjects = deps.config.repos.map((repo) => {
+    const [owner, name] = repo.split("/");
+    return `notifications.github.${owner}.${name}.>`;
+  });
+
+  const runFatal = async (error: unknown): Promise<void> => {
+    if (deps.fatal) {
+      await deps.fatal(error);
+      return;
+    }
+    process.exit(1);
+  };
+
+  /**
+   * Parses and classifies one durable delivery, resolving it through
+   * exactly one of `control`'s ack/nak/term, or exiting the process:
+   * - JSON or envelope schema failing to parse is poison — termed after a
+   *   loud log naming the subject and stream/consumer sequence.
+   * - A reducer throw (`DurableReducerFailure`) is poison too — termed,
+   *   then fatal (the reducer may have partially mutated live state
+   *   before throwing; see `applyDurableEvent`'s doc comment).
+   * - Any other failure from a reducer-derived event (`DurableFatalFailure`
+   *   — a non-404 effect dispatch or a rejected `saveState`) is fatal:
+   *   logged once, then `deps.fatal`, with no ack or nak — the broker
+   *   still holds the message, and the restarted process's redelivery
+   *   runs against state reloaded from the last successful save.
+   * - Anything else (a rejected GitHub-mention publish, including a 404)
+   *   naks with a fixed delay: a mention has no reducer or saved state,
+   *   so a normal retry is correct and nothing is fatal about it.
+   * - Otherwise (`handleEnvelope` resolved): every effect already
+   *   dispatched and state is already saved, so just ack.
+   */
+  const processDurableMessage = async (
+    subject: string,
+    data: string,
+    control: DurableMessageControl
+  ): Promise<void> => {
+    let rawParsed: unknown;
+    try {
+      rawParsed = JSON.parse(data);
+    } catch (error) {
+      poisonMessage(subject, control, error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const parsed = EnvelopeSchema.safeParse(rawParsed);
+    if (!parsed.success) {
+      const eventId =
+        typeof rawParsed === "object" &&
+        rawParsed !== null &&
+        typeof (rawParsed as Record<string, unknown>).event_id === "string"
+          ? ((rawParsed as Record<string, unknown>).event_id as string)
+          : undefined;
+      poisonMessage(subject, control, parsed.error.message, eventId);
+      return;
+    }
+    const envelope = parsed.data as EnvelopeJson;
+
+    try {
+      await handleEnvelope(subject, envelope);
+    } catch (error) {
+      if (error instanceof DurableReducerFailure) {
+        try {
+          poisonMessage(subject, control, error.message, envelope.event_id);
+          // Term only writes a frame to the client's outgoing buffer; without
+          // a flush, the process below can exit before it reaches the
+          // server, and JetStream would redeliver a "poison" message the
+          // daemon already decided to never retry.
+          await deps.nats.flush();
+        } catch (termOrFlushError) {
+          console.error(
+            `[legion] failed to term/flush poison message on ${subject}: ${termOrFlushError instanceof Error ? termOrFlushError.message : termOrFlushError}`
+          );
+        }
+        await runFatal(error);
+        return;
+      }
+      if (error instanceof DurableFatalFailure) {
+        console.error(
+          `[legion] durable message fatally failed on ${subject} event_id=${envelope.event_id} (stream_seq=${control.streamSequence} delivery_seq=${control.deliverySequence}): ${error.message}`
+        );
+        await runFatal(error);
+        return;
+      }
+      if (!isNoHolderError(error)) {
+        console.error(
+          `[legion] durable message processing failed on ${subject} event_id=${envelope.event_id} (stream_seq=${control.streamSequence} delivery_seq=${control.deliverySequence}): ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      control.nak(DURABLE_NAK_DELAY_MS);
+      throw error;
+    }
+
+    control.ack();
+  };
+
+  // Durable GitHub messages and resync (see `runExclusive`, used by
+  // index.ts's resync scheduler) run one at a time, in delivery order,
+  // through a single promise chain: both mutate the same `PrState` CI
+  // fields (durable checks via writeCiFence/settleCiVerdict, resync via
+  // reconcilePrs's GitHub read), so interleaving them could publish an
+  // older resync-derived verdict after a newer durable settlement, or vice
+  // versa. The core-NATS lanes below (mention/exception) and the held-lane
+  // publisher's own retry/backoff stay concurrent with this queue and with
+  // each other: they only ever touch `controllerHeldEvents` and tree
+  // status/locators, never a `PrState`, and no writer ever replaces or
+  // restores another writer's in-flight object, so that remaining overlap
+  // is safe without serialization.
+  let githubQueue: Promise<void> = Promise.resolve();
+
+  const runExclusive = <T>(fn: () => Promise<T>): Promise<T> => {
+    const result = githubQueue.then(fn);
+    githubQueue = result.then(
+      () => {},
+      () => {}
+    );
+    track(result.then(() => {}));
+    return result;
+  };
+
   const unsubscribers = [
-    deps.nats.subscribe("notifications.github.>", (subject, data) => {
-      track(handleMessage(subject, data));
-    }),
+    deps.nats.consumeDurable(
+      GITHUB_STREAM,
+      githubDurable,
+      githubFilterSubjects,
+      (subject, data, control) => {
+        runExclusive(() => processDurableMessage(subject, data, control));
+      }
+    ),
     deps.nats.subscribe("notifications.slack.*.*.mention", (subject, data) => {
       track(handleMessage(subject, data));
     }),
@@ -512,6 +885,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
 
   return {
     applyEffects: applyEffectsAndSave,
+    runExclusive,
     async publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void> {
       await publishController(JSON.stringify(payload), envelope);
     },
