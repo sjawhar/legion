@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"net/url"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -185,6 +185,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.deps.Docs.SeedText(docs.WithTx(r.Context(), tx), tx, artifactID, markdown); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.replaceRefs(r.Context(), tx, "artifact", artifactID, markdown); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

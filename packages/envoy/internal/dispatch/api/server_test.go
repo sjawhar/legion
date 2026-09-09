@@ -1364,3 +1364,31 @@ func TestDocumentUploadIndexesDispatchReferences(t *testing.T) {
 		t.Fatalf("uploaded document references = %d, want 1", references)
 	}
 }
+
+func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Created references", "spec": "See dispatch://TEST-1/artifact/spec.",
+	}, "alice")
+	issue := decodeBody[struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	var references int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from refs
+		where from_kind = 'artifact' and from_id = $1 and to_kind = 'artifact' and to_id = 'TEST-1/spec'
+	`, issue.PrimaryArtifactID).Scan(&references); err != nil {
+		t.Fatalf("count created document references: %v", err)
+	}
+	if references != 1 {
+		t.Fatalf("created document references = %d, want 1", references)
+	}
+}
