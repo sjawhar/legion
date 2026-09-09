@@ -37,7 +37,12 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
   negotiated: boolean;
   getStateCalls: number;
   getStateImpl?: () => Promise<Record<string, unknown>>;
+  idleFireCount: number;
   emitRunState(state: "running" | "idle"): void;
+  /** Sets `runState` directly, bypassing the idle trigger entirely — models a real client's
+   * post-rejection restore (an undo, never a transition; see `WorkerRpcClient.prompt`'s doc
+   * comment), as opposed to `emitRunState`, which fires `onIdle` on a genuine idle transition. */
+  setRunStateSilently(state: "unknown" | "running" | "idle"): void;
 } {
   const closed = Promise.withResolvers<void>();
   let idleCallback: (() => void) | undefined;
@@ -51,6 +56,7 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
     negotiated: false,
     getStateCalls: 0,
     getStateImpl: undefined as (() => Promise<Record<string, unknown>>) | undefined,
+    idleFireCount: 0,
     async negotiate() {
       client.negotiated = true;
     },
@@ -67,7 +73,10 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
       const wasIdle = runState === "idle";
       runState = "idle";
       closed.resolve();
-      if (!wasIdle) idleCallback?.();
+      if (!wasIdle) {
+        client.idleFireCount += 1;
+        idleCallback?.();
+      }
     },
     onIdle(callback: () => void) {
       idleCallback = callback;
@@ -75,7 +84,13 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
     emitRunState(state: "running" | "idle") {
       const wasIdle = runState === "idle";
       runState = state;
-      if (state === "idle" && !wasIdle) idleCallback?.();
+      if (state === "idle" && !wasIdle) {
+        client.idleFireCount += 1;
+        idleCallback?.();
+      }
+    },
+    setRunStateSilently(state: "unknown" | "running" | "idle") {
+      runState = state;
     },
   };
   return client;
@@ -258,6 +273,39 @@ function manager(
     controlRequests,
     publications,
   };
+}
+
+/** Common setup for running-worker-cap tests: a fresh single-root-tree `LegionState` wired to
+ * `manager()` at the given `workerCap`, with a scratch `stateDir` already provisioned — cuts the
+ * `temporaryDir`/`newLegionState`/`tree`/`config` boilerplate those tests otherwise repeat. Not
+ * every `workerCap`-configured test in this file uses it: several earlier
+ * dead-worker/`--resume`/launch-failure-threshold tests need bespoke workspace-directory,
+ * `ompSessionFile`, or mock-command setup this fixture's minimal footprint does not cover, and
+ * are left as their own hand-rolled `manager()` calls rather than forced onto it. Callers seed
+ * `state.roles`/`state.workerAdmission.queue` on the returned `state` before touching
+ * `processes`; `overrides` merges into (and can replace) any of `manager()`'s own deps. */
+async function workerCapFixture(
+  workerCap: number,
+  overrides: Partial<
+    ProcessManagerDeps & { readProcessCmdline?: (pid: number) => Promise<string> }
+  > = {},
+  { skipEnablePromotion = false }: { skipEnablePromotion?: boolean } = {}
+) {
+  const stateDir = await temporaryDir();
+  const state = newLegionState("omp", 1);
+  tree(state);
+  const {
+    manager: processes,
+    state: managedState,
+    commands,
+    publications,
+    controlRequests,
+  } = manager(
+    state,
+    { config: config(stateDir, { workerCap }), ...overrides },
+    { skipEnablePromotion }
+  );
+  return { processes, state, managedState, commands, publications, controlRequests, stateDir };
 }
 
 function tmuxWindowEnvironment(command: readonly string[]): Record<string, string> {
@@ -1110,6 +1158,13 @@ describe("ProcessManager", () => {
         "legion-omp",
         "-F",
         "#{window_id}\t#{@legion_owner}\t#{window_activity}",
+      ],
+      [
+        "tmux",
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{window_id}\t#{@legion_owner}\t#{pane_start_command}\t#{pane_activity}",
       ],
     ]);
   });
@@ -3558,9 +3613,15 @@ describe("ProcessManager", () => {
   });
 
   it("leaves a queued idle-resume assignment intact and stops draining when the promotion prompt itself rejects", async () => {
-    const state = newLegionState("omp", 1);
-    tree(state);
     const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    client.emitRunState("idle");
+    client.prompt = async () => {
+      throw new Error("shim write failed");
+    };
+    const { processes, state, managedState } = await workerCapFixture(1, {
+      connectWorkerRpc: async () => client,
+    });
     state.roles[token] = {
       issue: root,
       role: "tester",
@@ -3575,15 +3636,6 @@ describe("ProcessManager", () => {
       },
     };
     state.workerAdmission.queue.push(token);
-    const client = fakeWorkerRpcClient();
-    client.emitRunState("idle");
-    client.prompt = async () => {
-      throw new Error("shim write failed");
-    };
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config("/state", { workerCap: 1 }),
-      connectWorkerRpc: async () => client,
-    });
 
     // Seed the cached client the decision phase reads from `workerClients` (established via a
     // prior connect, exactly as a real idle-resume queue entry would have one already cached).
@@ -3604,9 +3656,6 @@ describe("ProcessManager", () => {
   });
 
   it("clears a dead worker's locator and promotes the queue when its socket closes and one reconnect attempt fails", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 1);
-    tree(state);
     const clients: Array<{ close(): void }> = [];
     let connectAttempts = 0;
     const publications: Array<{ subject: string; json: string }> = [];
@@ -3617,8 +3666,7 @@ describe("ProcessManager", () => {
     const plannerToken = roleToken("omp", root, "planner");
     const testerToken = roleToken("omp", root, "tester");
     const architectTopic = roleTopic(roleToken("omp", root, "architect"));
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir, { workerCap: 1 }),
+    const { processes, managedState, stateDir } = await workerCapFixture(1, {
       sleep: async () => {},
       connectWorkerRpc: async () => {
         connectAttempts += 1;
@@ -3721,34 +3769,12 @@ describe("ProcessManager", () => {
   });
 
   it("mints nothing for a queued worker when an idle reconnect fires onIdle before enableWorkerPromotion, then promotes it once enabled", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 1);
-    tree(state);
     const idleToken = roleToken("omp", root, "planner");
     const queuedToken = roleToken("omp", root, "tester");
-    state.roles[idleToken] = {
-      issue: root,
-      role: "planner",
-      generation: 1,
-      sessionId: "ses_planner",
-      locator: {
-        tmuxSession: "legion-omp",
-        tmuxWindowId: "@42",
-        tmuxPaneId: "%1",
-        socketPath: "/state/workers/planner.sock",
-      },
-    };
-    state.roles[queuedToken] = {
-      issue: root,
-      role: "tester",
-      pendingAssignment: "verify #41",
-    };
-    state.workerAdmission.queue.push(queuedToken);
     let mintCalls = 0;
-    const { manager: processes, state: managedState } = manager(
-      state,
+    const { processes, state, managedState } = await workerCapFixture(
+      1,
       {
-        config: config(stateDir, { workerCap: 1 }),
         connectWorkerRpc: async () => {
           const client = fakeWorkerRpcClient();
           // Simulates the real worker-rpc client's get_state response seeding runState from
@@ -3768,6 +3794,24 @@ describe("ProcessManager", () => {
       },
       { skipEnablePromotion: true }
     );
+    state.roles[idleToken] = {
+      issue: root,
+      role: "planner",
+      generation: 1,
+      sessionId: "ses_planner",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/planner.sock",
+      },
+    };
+    state.roles[queuedToken] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: "verify #41",
+    };
+    state.workerAdmission.queue.push(queuedToken);
 
     await processes.reconnectWorkers();
 
@@ -3790,10 +3834,18 @@ describe("ProcessManager", () => {
   });
 
   it("goes straight to markWorkerDead on a second close for the same generation, without chaining into a second reconnect", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 1);
-    tree(state);
     const token = roleToken("omp", root, "tester");
+    const clients: ReturnType<typeof fakeWorkerRpcClient>[] = [];
+    let connectCalls = 0;
+    const { processes, state, managedState } = await workerCapFixture(1, {
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        connectCalls += 1;
+        const client = fakeWorkerRpcClient();
+        clients.push(client);
+        return client;
+      },
+    });
     state.roles[token] = {
       issue: root,
       role: "tester",
@@ -3807,18 +3859,6 @@ describe("ProcessManager", () => {
         socketPath: "/state/workers/tester.sock",
       },
     };
-    const clients: ReturnType<typeof fakeWorkerRpcClient>[] = [];
-    let connectCalls = 0;
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir, { workerCap: 1 }),
-      sleep: async () => {},
-      connectWorkerRpc: async () => {
-        connectCalls += 1;
-        const client = fakeWorkerRpcClient();
-        clients.push(client);
-        return client;
-      },
-    });
 
     // Establishes the initial cached connection (connect #1).
     await processes.workerReady(root, "tester", "ses_tester", 1);
@@ -3920,11 +3960,20 @@ describe("ProcessManager", () => {
   });
 
   it("retires an unlaunchable queue head at MAX_LAUNCH_FAILURES instead of blocking the queue forever", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 2);
-    tree(state);
     const failingToken = roleToken("omp", root, "planner");
     const okToken = roleToken("omp", root, "tester");
+    const records: Array<{ subject: string; json: string }> = [];
+    let resolvePromoted: (() => void) | undefined;
+    const promoted = new Promise<void>((resolve) => {
+      resolvePromoted = resolve;
+    });
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const { processes, state, managedState, stateDir } = await workerCapFixture(2, {
+      natsPublish: (subject, json) => {
+        records.push({ subject, json });
+        if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
+      },
+    });
     state.roles[failingToken] = {
       issue: root,
       role: "planner",
@@ -3940,19 +3989,6 @@ describe("ProcessManager", () => {
       pendingAssignment: "verify #41",
     };
     state.workerAdmission.queue.push(failingToken, okToken);
-    const publications: Array<{ subject: string; json: string }> = [];
-    let resolvePromoted: (() => void) | undefined;
-    const promoted = new Promise<void>((resolve) => {
-      resolvePromoted = resolve;
-    });
-    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir, { workerCap: 2 }),
-      natsPublish: (subject, json) => {
-        publications.push({ subject, json });
-        if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
-      },
-    });
 
     await processes.reconcileWorkerAdmission();
     await promoted;
@@ -3967,23 +4003,19 @@ describe("ProcessManager", () => {
     const okClaim = managedState.roles[okToken];
     if (!okClaim || !("issue" in okClaim)) throw new Error("tester claim missing");
     expect(okClaim.locator).toBeDefined();
-    expect(publications).toContainEqual({
+    expect(records).toContainEqual({
       subject: architectTopic,
       json: JSON.stringify({ type: "launch-failed", issue: root, role: "planner", failures: 3 }),
     });
     // launch-failed publishes exactly once, at the exact tick the threshold is crossed — not
     // again on some later, otherwise-nonexistent retry of the now-retired token.
-    expect(
-      publications.filter((publication) => publication.json.includes("launch-failed"))
-    ).toHaveLength(1);
+    expect(records.filter((record) => record.json.includes("launch-failed"))).toHaveLength(1);
   });
 
   it("rotates a below-threshold launch failure to the tail instead of blocking the queue behind it", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 1);
-    tree(state);
     const failingToken = roleToken("omp", root, "planner");
     const okToken = roleToken("omp", root, "tester");
+    const { processes, state, managedState, stateDir } = await workerCapFixture(1);
     state.roles[failingToken] = {
       issue: root,
       role: "planner",
@@ -3998,13 +4030,10 @@ describe("ProcessManager", () => {
       pendingAssignment: "verify #41",
     };
     state.workerAdmission.queue.push(failingToken, okToken);
+
     // Cap 1: once okToken successfully launches (occupying the only slot), the drain loop's own
     // cap check stops it from immediately re-attempting the rotated failingToken again in the
     // same pass — isolating this test to exactly one below-threshold rotation.
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir, { workerCap: 1 }),
-    });
-
     await processes.reconcileWorkerAdmission();
 
     // failingToken failed once (below threshold), was rotated to the tail rather than left
@@ -4020,10 +4049,16 @@ describe("ProcessManager", () => {
   });
 
   it("stops the drain after one below-threshold failure on a single-item queue instead of burning every MAX_LAUNCH_FAILURES attempt in one pass", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 1);
-    tree(state);
     const failingToken = roleToken("omp", root, "planner");
+    let launchAttempts = 0;
+    const { processes, state, managedState, stateDir } = await workerCapFixture(1, {
+      run: async (command) => {
+        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
+          launchAttempts += 1;
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
     state.roles[failingToken] = {
       issue: root,
       role: "planner",
@@ -4035,16 +4070,6 @@ describe("ProcessManager", () => {
       resumeSessionFile: path.join(stateDir, "missing-planner-session.json"),
     };
     state.workerAdmission.queue.push(failingToken);
-    let launchAttempts = 0;
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir, { workerCap: 1 }),
-      run: async (command) => {
-        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
-          launchAttempts += 1;
-        }
-        return { stdout: "", exitCode: 0 };
-      },
-    });
 
     await processes.reconcileWorkerAdmission();
 
@@ -4152,41 +4177,61 @@ describe("ProcessManager", () => {
     expect(plannerResult.status).toBe("spawned");
   });
 
-  it("a concurrent admission decision during the post-locator-write, pre-saveState window sees exactly one occupied slot", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 1);
-    tree(state);
+  it("a concurrent admission decision during the post-locator-write, pre-saveState window sees exactly one occupied slot, not two, and only releases/re-checks the queue after the save settles", async () => {
     const saveStateCalled = Promise.withResolvers<void>();
     const releaseSave = Promise.withResolvers<void>();
     let saveStateCalls = 0;
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir, { workerCap: 1 }),
+    const sequence: string[] = [];
+    const plannerToken = roleToken("omp", root, "planner");
+    const { processes, managedState } = await workerCapFixture(2, {
       saveState: async () => {
         saveStateCalls += 1;
-        // Only planner's own post-locator-write save is held open — a concurrent decision
-        // racing in during exactly this window must never see zero AND never see two occupied
-        // (the `launching` reservation was already released by this point, before this call).
+        // Only planner's own post-locator-write save is held open. `launchWorker` writes the
+        // claim's locator (in memory) *before* calling this, and the caller's `finally` — which
+        // releases planner's `launching` reservation and re-checks the queue — only runs once
+        // this whole `launchWorker` call (including this save) resolves. During this exact
+        // window planner's reservation is still held in `this.launching` AND its locator is
+        // already written — `runningWorkerCount()` must count that as one occupied slot, not
+        // two.
         if (saveStateCalls === 1) {
           saveStateCalled.resolve();
           await releaseSave.promise;
+          sequence.push("saveState resolved");
         }
+      },
+      // Test-only hook (see `WorkerAdmissionDeps.onAdmissionEvent`'s doc comment): records the
+      // exact moment `launchOrQueue`'s own `finally` releases planner's reservation and
+      // triggers the queue re-check, so this test can assert both happen strictly after the
+      // gated save resolves — never during, and never because of the concurrent tester
+      // decision racing in below.
+      onAdmissionEvent: (token, event) => {
+        if (token !== plannerToken) return;
+        sequence.push(event === "reservation-released" ? "release" : "promote");
       },
     });
 
     const plannerPromise = processes.spawnWorker(root, root, "planner", "plan #41");
     await saveStateCalled.promise;
 
-    // Racing in right as planner's locator write has landed (and its `launching` reservation
-    // has already been released) but before its saveState has settled: this must queue, never
-    // spawn — over-admitting past cap 1 if the release-then-persist window left a gap where
-    // neither `launching` nor the claim's own locator counted planner's slot as occupied.
+    // Racing in right as planner's locator write has landed but before its saveState — and
+    // therefore the release of its own `launching` reservation — has settled: at cap 2 this
+    // must LAUNCH, not queue. A formula that sums `this.launching` unconditionally alongside
+    // every locator-bearing claim would double-count planner here (reserved *and* located) and
+    // wrongly report both of cap 2's slots already occupied, queuing this tester instead.
     const testerResult = await processes.spawnWorker(root, root, "tester", "verify #41");
-    expect(testerResult.status).toBe("queued");
+    expect(testerResult.status).toBe("spawned");
+
+    // Still gated: planner's own release/promote must not have fired yet, regardless of the
+    // concurrent tester decision above (that decision never touches planner's reservation).
+    expect(sequence).toEqual([]);
 
     releaseSave.resolve();
     const plannerResult = await plannerPromise;
     expect(plannerResult.status).toBe("spawned");
-    expect(managedState.workerAdmission.queue).toEqual([roleToken("omp", root, "tester")]);
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    // Release and the queue-drain trigger both fire exactly once, strictly after the gated
+    // save resolves — never before it, and never more than once.
+    expect(sequence).toEqual(["saveState resolved", "release", "promote"]);
   });
 
   it("retires the pane instead of writing a claim when closeTree closes the tree while a launch is still in flight", async () => {
@@ -4229,29 +4274,25 @@ describe("ProcessManager", () => {
   });
 
   it("re-evaluates a persisted running-worker queue against a raised cap across a restart", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 1);
-    tree(state);
     const testerToken = roleToken("omp", root, "tester");
+    const records: Array<{ subject: string; json: string }> = [];
+    let resolvePromoted: (() => void) | undefined;
+    const promoted = new Promise<void>((resolve) => {
+      resolvePromoted = resolve;
+    });
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const { processes, state, managedState } = await workerCapFixture(2, {
+      natsPublish: (subject, json) => {
+        records.push({ subject, json });
+        if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
+      },
+    });
     state.roles[testerToken] = {
       issue: root,
       role: "tester",
       pendingAssignment: "verify #41",
     };
     state.workerAdmission.queue.push(testerToken);
-    const publications: Array<{ subject: string; json: string }> = [];
-    let resolvePromoted: (() => void) | undefined;
-    const promoted = new Promise<void>((resolve) => {
-      resolvePromoted = resolve;
-    });
-    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir, { workerCap: 2 }),
-      natsPublish: (subject, json) => {
-        publications.push({ subject, json });
-        if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
-      },
-    });
 
     await processes.reconcileWorkerAdmission();
     await promoted;
@@ -4260,7 +4301,7 @@ describe("ProcessManager", () => {
     const promotedClaim = managedState.roles[testerToken];
     if (!promotedClaim || !("issue" in promotedClaim)) throw new Error("tester claim missing");
     expect(promotedClaim.locator).toBeDefined();
-    expect(publications).toContainEqual({
+    expect(records).toContainEqual({
       subject: architectTopic,
       json: JSON.stringify({ type: "worker-started", issue: root, role: "tester" }),
     });
@@ -4448,6 +4489,50 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.pendingAssignment).toBe("verify #55");
+  });
+
+  it("treats a saveState failure after a successful prompt as a persistence issue, not a prompt failure: keeps the delivered phase and cleared pendingAssignment regardless", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    let saveStateCalls = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => client,
+      saveState: async () => {
+        saveStateCalls += 1;
+        // Both the original persist and its one retry fail here — mirroring launchWorker's
+        // post-locator-write save handling (see the "treats a saveState failure after a
+        // successful launch..." test above): the prompt itself already succeeded (the worker
+        // is already working), so this must never surface as a failure to the caller.
+        throw new Error("disk full");
+      },
+    });
+
+    await processes.workerReady(root, "tester", "ses_tester", 1);
+
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(saveStateCalls).toBe(2);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    // The in-memory claim remains authoritative even though both persist attempts failed: the
+    // phase registration and cleared pendingAssignment stay exactly as the successful prompt
+    // left them, never rolled back.
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.promptFailures).toBe(0);
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
   });
 
   it("reconnects to every worker claim with a locator on daemon start", async () => {
@@ -4704,5 +4789,475 @@ describe("ProcessManager", () => {
     });
 
     await expect(processes.markControllerReady()).resolves.toBeUndefined();
+  });
+
+  it("restores runState to idle without firing onIdle when a queued idle-resume prompt rejects, keeping the assignment queued", async () => {
+    const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    client.prompt = async (message: string) => {
+      client.prompts.push(message);
+      const previous = client.runState;
+      client.setRunStateSilently("running");
+      // Mirrors the real worker-rpc.ts fix: an ordinary rejection restores runState silently —
+      // an undo, not a transition — never firing onIdle (see WorkerRpcClient.prompt's doc
+      // comment). A "transition" restore here would re-trigger promoteWorkerQueue synchronously
+      // mid-rejection: an unbounded retry storm for a persistently-broken client.
+      client.setRunStateSilently(previous);
+      throw new Error("shim write failed");
+    };
+    const { processes, state, managedState } = await workerCapFixture(2, {
+      connectWorkerRpc: async () => client,
+    });
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    await processes.reconnectWorkers();
+
+    await processes.reconcileWorkerAdmission();
+
+    expect(client.runState).toBe("idle");
+    expect(client.idleFireCount).toBe(0);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+    expect(claim.pendingAssignment).toBe("verify #41");
+    expect(claim.locator).toBeDefined();
+    expect(claim.promptFailures).toBe(1);
+  });
+
+  it("retires a persistently-rejecting queued worker after MAX_LAUNCH_FAILURES consecutive prompt rejections, falling through to a fresh launch on the next drain", async () => {
+    const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    client.prompt = async (message: string) => {
+      client.prompts.push(message);
+      const previous = client.runState;
+      client.setRunStateSilently("running");
+      client.setRunStateSilently(previous);
+      throw new Error("shim write failed");
+    };
+    const { processes, state, managedState } = await workerCapFixture(1, {
+      connectWorkerRpc: async () => client,
+      run: async (command) => {
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%301 23456\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return { stdout: "%301\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    await processes.reconnectWorkers();
+
+    // Three separate drain attempts, each a rejected prompt — the third crosses
+    // MAX_LAUNCH_FAILURES (3) and retires the pane (markWorkerDeadLocked, invoked via
+    // WorkerAdmissionDeps.retireDeadClaim).
+    await processes.reconcileWorkerAdmission();
+    await processes.reconcileWorkerAdmission();
+    await processes.reconcileWorkerAdmission();
+
+    const retiredClaim = managedState.roles[token];
+    if (!retiredClaim || !("issue" in retiredClaim)) throw new Error("tester claim disappeared");
+    expect(retiredClaim.promptFailures).toBe(3);
+    expect(retiredClaim.locator).toBeUndefined();
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
+
+    // Falls through to the launch path on the next drain: a fresh cold launch, not another
+    // prompt attempt against the now-retired client.
+    await processes.reconcileWorkerAdmission();
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const launchedClaim = managedState.roles[token];
+    if (!launchedClaim || !("issue" in launchedClaim)) throw new Error("tester claim disappeared");
+    expect(launchedClaim.locator).toBeDefined();
+    expect(launchedClaim.locator?.tmuxPaneId).toBe("%301");
+    expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
+  });
+
+  it("resets promptFailures to 0 on a successful prompt after prior rejections", async () => {
+    const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    let shouldReject = true;
+    client.prompt = async (message: string) => {
+      client.prompts.push(message);
+      if (shouldReject) {
+        const previous = client.runState;
+        client.setRunStateSilently("running");
+        client.setRunStateSilently(previous);
+        throw new Error("shim write failed");
+      }
+      client.emitRunState("running");
+    };
+    const { processes, state, managedState } = await workerCapFixture(2, {
+      connectWorkerRpc: async () => client,
+    });
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    await processes.reconnectWorkers();
+
+    await processes.reconcileWorkerAdmission();
+    const rejectedClaim = managedState.roles[token];
+    if (!rejectedClaim || !("issue" in rejectedClaim)) throw new Error("tester claim disappeared");
+    expect(rejectedClaim.promptFailures).toBe(1);
+
+    shouldReject = false;
+    await processes.reconcileWorkerAdmission();
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const promotedClaim = managedState.roles[token];
+    if (!promotedClaim || !("issue" in promotedClaim)) throw new Error("tester claim disappeared");
+    expect(promotedClaim.promptFailures).toBe(0);
+  });
+
+  it("does not drop a queued idle-resume assignment as stale when its client is alive but not currently idle, only stops the drain until it goes idle", async () => {
+    const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    const { processes, state, managedState } = await workerCapFixture(2, {
+      connectWorkerRpc: async () => client,
+    });
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    await processes.reconnectWorkers();
+    // The client is alive (a real session, confirmed sessionId) but currently mid-turn/busy —
+    // not idle, so this queued idle-resume assignment must stay queued and untouched instead of
+    // being dropped as stale (only a genuinely dead/never-connected client is stale here).
+    client.emitRunState("running");
+
+    await processes.reconcileWorkerAdmission();
+
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+    expect(claim.pendingAssignment).toBe("verify #41");
+    expect(claim.locator).toBeDefined();
+    expect(client.prompts).toEqual([]);
+
+    // Once it genuinely goes idle, the exact same queued assignment promotes normally.
+    client.emitRunState("idle");
+    await Bun.sleep(0);
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(client.prompts).toEqual(["verify #41"]);
+  });
+
+  it("stops the drain after one below-threshold failure each for two queued tokens instead of burning every MAX_LAUNCH_FAILURES attempt on both in one pass", async () => {
+    const failingTokenA = roleToken("omp", root, "planner");
+    const failingTokenB = roleToken("omp", root, "tester");
+    const { processes, state, managedState, stateDir } = await workerCapFixture(1);
+    state.roles[failingTokenA] = {
+      issue: root,
+      role: "planner",
+      pendingAssignment: "plan #41",
+      // Deterministic, permanent failures (missing session files, never appear on retry) — but
+      // launchFailures starts at 0 for both, so one attempt each stays *below* MAX_LAUNCH_FAILURES.
+      resumeSessionFile: path.join(stateDir, "missing-planner-session.json"),
+    };
+    state.roles[failingTokenB] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: "verify #41",
+      resumeSessionFile: path.join(stateDir, "missing-tester-session.json"),
+    };
+    state.workerAdmission.queue.push(failingTokenA, failingTokenB);
+
+    await processes.reconcileWorkerAdmission();
+
+    // Without the attempted-token tracking, rotating a below-threshold failure to the tail
+    // exposes the OTHER token as the new head, and rotating THAT one exposes the first again —
+    // the drain would cycle both tokens through every MAX_LAUNCH_FAILURES attempt in this one
+    // synchronous pass. With it: each token gets exactly one attempt this pass, both still
+    // queued (rotated back to their original order — two rotations of a two-item queue is a
+    // no-op on ordering), and the drain stops instead of continuing a third time.
+    expect(managedState.workerAdmission.queue).toEqual([failingTokenA, failingTokenB]);
+    const claimA = managedState.roles[failingTokenA];
+    if (!claimA || !("issue" in claimA)) throw new Error("planner claim missing");
+    expect(claimA.launchFailures).toBe(1);
+    expect(claimA.locator).toBeUndefined();
+    const claimB = managedState.roles[failingTokenB];
+    if (!claimB || !("issue" in claimB)) throw new Error("tester claim missing");
+    expect(claimB.launchFailures).toBe(1);
+    expect(claimB.locator).toBeUndefined();
+  });
+
+  it("treats a saveState failure after a successful launch as a persistence issue, not a launch failure: keeps the locator and pendingAssignment, never bumps launchFailures, never re-queues", async () => {
+    const token = roleToken("omp", root, "planner");
+    const secondToken = roleToken("omp", root, "tester");
+    let saveStateCalls = 0;
+    const saveStateCalled = Promise.withResolvers<void>();
+    const releaseSave = Promise.withResolvers<void>();
+    const { processes, state, managedState } = await workerCapFixture(1, {
+      saveState: async () => {
+        saveStateCalls += 1;
+        if (saveStateCalls === 1) {
+          saveStateCalled.resolve();
+          await releaseSave.promise;
+          throw new Error("disk full");
+        }
+        // The one retry `launchWorker`'s own catch attempts also fails here, proving the
+        // in-memory claim stays authoritative (never rethrown, never rotated, never retried a
+        // second time) even when persistence never recovers within this call.
+        throw new Error("disk still full");
+      },
+    });
+    state.roles[token] = { issue: root, role: "planner", pendingAssignment: "plan #41" };
+    state.roles[secondToken] = { issue: root, role: "tester", pendingAssignment: "verify #41" };
+    state.workerAdmission.queue.push(token, secondToken);
+
+    const reconciling = processes.reconcileWorkerAdmission();
+    await saveStateCalled.promise;
+
+    // Planner's failing save is still gated. `launchWorker` already spliced planner out of the
+    // queue (in memory) before calling this gated save — proving the second queued token is
+    // completely untouched while planner's own attempt is in flight: `drainWorkerQueue`'s loop
+    // awaits each token's own `promoteQueuedWorker` call fully before peeking the next one.
+    expect(managedState.workerAdmission.queue).toEqual([secondToken]);
+    const untouchedTester = managedState.roles[secondToken];
+    if (!untouchedTester || !("issue" in untouchedTester)) {
+      throw new Error("tester claim missing");
+    }
+    expect(untouchedTester.locator).toBeUndefined();
+
+    releaseSave.resolve();
+    await reconciling;
+
+    // The pane already exists at this point (a real, running worker-shim process) — a
+    // `saveState` failure here is a durable-state persistence issue, not a launch failure:
+    // the launch itself succeeded regardless. `launchFailures` is never bumped (that counter
+    // tracks failures *before* a pane exists, not this), the token is never re-queued (it
+    // already has a live pane; re-queuing it would launch a second pane for the same
+    // issue/role the next time it is promoted), and the locator plus `pendingAssignment`
+    // stay exactly as `launchWorker` wrote them — the in-memory claim remains authoritative
+    // even though both persist attempts failed. The pane's own `/worker/started` ->
+    // `/worker/ready` handshake calls back into the daemon independent of this save.
+    expect(saveStateCalls).toBe(2);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("planner claim missing");
+    expect(claim.launchFailures).toBe(0);
+    expect(claim.locator).toBeDefined();
+    expect(claim.pendingAssignment).toBe("plan #41");
+    // Planner's own (never-rolled-back) locator keeps cap 1 fully occupied, so the second
+    // queued token correctly never promotes either.
+    expect(managedState.workerAdmission.queue).toEqual([secondToken]);
+  });
+
+  it("boot reconciliation kills an unrecorded worker-shim pane split into a known window, leaves recorded panes (even in an otherwise-unknown window) alone", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (state.trees[root]?.locator) state.trees[root].locator.tmuxPaneId = "%42";
+    const recordedPaneId = state.trees[root]?.locator?.tmuxPaneId;
+    if (!recordedPaneId) throw new Error("test root tree is missing its own recorded pane id");
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "list-windows") {
+          // The tree's own window is known (excluded from `known` in this fixture only via the
+          // orphan-pane path below, not this one) — return no unowned windows, isolating this
+          // test to pane-level reconciliation only.
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "list-panes" && command[2] === "-a") {
+          return {
+            stdout: [
+              // Recorded: this tree's own root pane. Must never be reaped, even tagged with a
+              // window id this fixture's `known` set (built from locators only) does not
+              // separately special-case — `known.has(paneId)` alone must protect it.
+              `${recordedPaneId}\t@42\tlegion-omp\tworker-shim --socket x -- omp --mode rpc\t1000`,
+              // Unrecorded worker-shim pane split into the SAME known window @42 — exactly the
+              // crash-window orphan item 3 targets: a real process the daemon forgot about.
+              `%99\t@42\tlegion-omp\tworker-shim --socket y -- omp --mode rpc\t1000`,
+              // A pane in a window owned by a different session entirely — never touched.
+              `%50\t@50\tlegion-other\tworker-shim --socket z -- omp --mode rpc\t1000`,
+            ].join("\n"),
+            exitCode: 0,
+          };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.reconcileTmuxWindows(0);
+
+    const killedPanes = commands
+      .filter((command) => command[0] === "tmux" && command[1] === "kill-pane")
+      .map((command) => command[3]);
+    expect(killedPanes).toEqual(["%99"]);
+  });
+
+  it("exempts a known window's panes from reaping when its owning tree/controller locator never recorded a pane id, while still reaping a genuine orphan pane in a fully-recorded known window", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    // Root tree's own locator: `tree()`'s default carries a `tmuxWindowId` but no `tmuxPaneId` —
+    // exactly the pre-backfill state this exemption protects.
+    if (state.trees[root]?.locator?.tmuxPaneId !== undefined) {
+      throw new Error("test setup expects the root tree locator to start without a pane id");
+    }
+    state.controllerLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@43",
+      socketPath: "/state/controller.sock",
+    };
+    const plannerToken = roleToken("omp", root, "planner");
+    state.roles[plannerToken] = {
+      issue: root,
+      role: "planner",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@44",
+        tmuxPaneId: "%44",
+        socketPath: "/state/workers/planner.sock",
+      },
+    };
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "list-windows") {
+          // Every window here (@42, @43, @44) is known via a recorded `tmuxWindowId` — none are
+          // candidates for window-level reaping regardless of whether their owner's pane id is
+          // recorded; isolates this test to the pane-level pass.
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "list-panes" && command[2] === "-a") {
+          return {
+            stdout: [
+              // Root tree's own pane, in its known window @42 — but this locator never recorded
+              // a pane id, so this pane cannot be distinguished from a real orphan by id alone.
+              // Must be exempted, not killed.
+              `%10\t@42\tlegion-omp\tworker-shim --socket root -- omp --mode rpc\t1000`,
+              // Controller's own pane, same situation, in its known window @43.
+              `%11\t@43\tlegion-omp\tworker-shim --socket ctrl -- omp --mode rpc\t1000`,
+              // Planner's own recorded pane in its fully-recorded known window @44 — never a
+              // reap candidate; `known.has(paneId)` alone already protects it.
+              `%44\t@44\tlegion-omp\tworker-shim --socket planner -- omp --mode rpc\t1000`,
+              // A genuinely unrecorded worker-shim pane split into that SAME fully-recorded
+              // window @44 — no ambiguity here (the window's owner's own pane id IS known), so
+              // this one is still a real orphan and must be reaped exactly as before.
+              `%99\t@44\tlegion-omp\tworker-shim --socket orphan -- omp --mode rpc\t1000`,
+            ].join("\n"),
+            exitCode: 0,
+          };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.reconcileTmuxWindows(0);
+
+    const killedPanes = commands
+      .filter((command) => command[0] === "tmux" && command[1] === "kill-pane")
+      .map((command) => command[3]);
+    expect(killedPanes).toEqual(["%99"]);
+  });
+
+  it("backfills a tree locator's missing pane id once probe confirms it alive, and a controller locator's once controllerAlive confirms it alive", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    // `tree()`'s default locator carries a `tmuxWindowId` but no `tmuxPaneId` — exactly the
+    // pre-backfill state this test exercises (see the exemption test above for the same
+    // invariant asserted directly).
+    state.controllerLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@43",
+      socketPath: "/state/controller.sock",
+    };
+    let saveStateCalls = 0;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      saveState: async () => {
+        saveStateCalls += 1;
+      },
+      readProcessCmdline: async () => "omp\0",
+      run: async (command) => {
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          const windowId = command[2] === "-t" ? command[3] : undefined;
+          if (windowId === "@42") return { stdout: "%42\n", exitCode: 0 };
+          if (windowId === "@43") return { stdout: "%43\n", exitCode: 0 };
+          return { stdout: "", exitCode: 1 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        if (command[0] === "kill") return { stdout: "", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    expect(await processes.probe(root)).toBe("alive");
+    expect(state.trees[root]?.locator?.tmuxPaneId).toBe("%42");
+
+    await processes.ensureController();
+    expect(state.controllerLocator?.tmuxPaneId).toBe("%43");
+    expect(saveStateCalls).toBeGreaterThanOrEqual(2);
   });
 });

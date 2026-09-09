@@ -29,7 +29,11 @@ export interface WorkerRpcClient {
   negotiate(): Promise<void>;
   /** Marks `runState` as `"running"` before the request is even sent, so a concurrent caller
    * checking occupancy never sees free capacity in the gap between sending a prompt to an
-   * already-idle worker and its `agent_start` frame arriving. */
+   * already-idle worker and its `agent_start` frame arriving. If the prompt is refused (an
+   * ordinary `{success:false}` response, socket and shim still alive) `runState` is restored to
+   * whatever it was before this call instead of staying wrongly stuck at `"running"` — a rejected
+   * prompt never started a real turn, so nothing will ever emit the `agent_end` frame that would
+   * otherwise be the only way back to `"idle"`. */
   prompt(message: string): Promise<void>;
   /** Also seeds `runState` from the response's `isStreaming` field (`true` -> `"running"`,
    * `false` -> `"idle"`, firing `onIdle` on a transition into idle) when present, so a worker
@@ -164,8 +168,23 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
       }
     },
     async prompt(message) {
+      const previousRunState = runState;
       runState = "running";
-      await request("prompt", { message });
+      try {
+        await request("prompt", { message });
+      } catch (error) {
+        // An ordinary {success:false} rejection means the worker refused the prompt but the
+        // socket and its shim are still alive -- restore whatever runState was before this
+        // attempt (usually "idle") instead of leaving it wrongly stuck at "running" forever,
+        // which would make a live, idle worker look permanently busy to every later admission
+        // decision. A socket-close rejection is different: the close handler above already
+        // reset runState to "unknown" *synchronously*, before this catch ever runs (promise
+        // rejection handling is always a later microtask) -- only restore when we are still
+        // marked "running" (nothing else has touched it since), so a close's more authoritative
+        // "unknown" is never clobbered back to the stale pre-prompt value.
+        if (runState === "running") runState = previousRunState;
+        throw error;
+      }
     },
     getState(timeoutMs = DEFAULT_RPC_TIMEOUT_MS) {
       return request("get_state", {}, timeoutMs).then((response) => {

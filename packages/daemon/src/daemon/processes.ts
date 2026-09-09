@@ -19,11 +19,11 @@ import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
 import type { LegionState, TreeState, WorkerLocator, WorkerRoleClaim } from "./legion-state";
 import * as tmux from "./tmux";
+import { MAX_LAUNCH_FAILURES, WorkerAdmission } from "./worker-admission";
 import type { WorkerRpcClient } from "./worker-rpc";
 
 const HOUR_MS = 60 * 60 * 1000;
 
-const MAX_LAUNCH_FAILURES = 3;
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../pi-envoy");
 const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, "../cli/index.ts");
 
@@ -96,40 +96,17 @@ export interface ProcessManagerDeps {
   /** Overridable for tests; defaults to a real timer. Used only to bound the wait for a
    * retiring worker's pane to exit before it is killed outright. */
   sleep?(ms: number): Promise<void>;
+  /** Overridable for tests only, to observe the ordering of `WorkerAdmission`'s own
+   * reservation-release and queue-drain-trigger relative to the `launchWorker`/
+   * `promptExistingWorker` call preceding them — see `WorkerAdmissionDeps.onAdmissionEvent`'s
+   * doc comment. Threaded straight through in the constructor below; production never
+   * supplies this. */
+  onAdmissionEvent?(token: string, event: "reservation-released" | "queue-drain-triggered"): void;
   workerCatchup: WorkerCatchupDeps;
   now(): number;
 }
 
 type RoleBacking = WorkerRoleClaim;
-
-/** The outcome of `promoteQueuedWorker`'s admission-lock critical section: `"launch"` carries
- * everything needed to run `launchWorker` outside the lock; `"prompt"` carries an already-live,
- * cached, idle client to prompt in place (the resume-at-cap path queued via
- * `enqueueIdleWorker` never touched the locator, so there is a real pane to reuse instead of
- * relaunching) — its token deliberately stays on the queue until the prompt actually succeeds
- * (see `promoteQueuedWorker`'s handling below), so a failed prompt never strands the
- * assignment. */
-type PromotionDecision =
-  | { kind: "retry" }
-  | { kind: "stop" }
-  | { kind: "stale" }
-  | {
-      kind: "prompt";
-      client: WorkerRpcClient;
-      treeKey: IssueKey;
-      issue: IssueKey;
-      role: LegionRole;
-      sessionId: string;
-      task: string;
-    }
-  | {
-      kind: "launch";
-      claim: WorkerRoleClaim;
-      treeKey: IssueKey;
-      issue: IssueKey;
-      role: LegionRole;
-      task: string;
-    };
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 const TMUX_RECONCILIATION_GRACE_MS = 120_000;
@@ -221,26 +198,9 @@ export class ProcessManager {
   private readonly resurrecting = new Map<IssueKey, Promise<void>>();
   private readonly workerClients = new Map<string, WorkerRpcClient>();
   private readonly workerConnections = new Map<string, Promise<WorkerRpcClient>>();
-  /** Serializes tmux window creation per issue and launch decisions per role, so two concurrent
-   * spawns never each see "no window yet" and open two, or each see "no live claim" and launch
-   * twice. Keyed by issue for the former, by role token for the latter. */
+  /** Serializes tmux window creation per issue, so two concurrent spawns never each see "no
+   * window yet" and open two. */
   private readonly issueLaunchQueue = new Map<IssueKey, Promise<unknown>>();
-  private readonly roleLaunchQueue = new Map<string, Promise<unknown>>();
-  /** Single-key critical section (via `serialize`, fixed key `"global"`) around every
-   * running-worker admission decision: `launchOrQueue`'s read-count->decide->launch-or-enqueue,
-   * and each `drainWorkerQueue` promotion attempt's read-count->re-peek-head->decide. Without it
-   * two concurrent decisions (different roles, or two racing idle/exit promotions) could both
-   * observe capacity before either commits it, over-admitting or double-launching a queue head.
-   * Always acquired *inside* the per-role `roleLaunchQueue` critical section for the token in
-   * play, never the other way around, so the two locks can never deadlock on each other. */
-  private readonly admissionLock = new Map<string, Promise<unknown>>();
-  /** Role tokens currently mid-launch (decided admitted under `admissionLock`, but
-   * `launchWorker`'s tmux/workspace-provisioning work is still running outside any lock so a
-   * slow or hung launch never blocks other admission decisions). Counted by
-   * `runningWorkerCount()` as occupying a slot; a token is added the moment admission is granted
-   * and removed once `launchWorker` settles (success — the claim now has a real locator — or
-   * failure). */
-  private readonly launching = new Set<string>();
   /** Tracks, per `<token>:<generation>`, whether a worker's socket close has already spent its
    * one reconnect attempt for that generation — `onWorkerClientClosed` consults this so a
    * reconnect's own close goes straight to `markWorkerDead` instead of chaining into another
@@ -255,26 +215,32 @@ export class ProcessManager {
   private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
-  /** Gates every worker-queue drain (`promoteWorkerQueue`'s fire-and-forget trigger and
-   * `reconcileWorkerAdmission`'s explicit call alike — neither bypasses this) until
-   * `enableWorkerPromotion` flips it. False from construction protects boot: `reconnectWorkers`
-   * (called before the daemon's HTTP `api` is ever assigned, since it needs no `api` reference)
-   * can synchronously trigger a chain of `get_state` -> `isStreaming: false` -> `onIdle` ->
-   * `promoteWorkerQueue` -> `launchWorker` -> `mintWorkerBootToken`, and that last step reads
-   * `api` by reference through a closure that does not exist yet at that point in boot — a
-   * queued token would otherwise mint nothing (a spurious launch failure) at every daemon
-   * restart with a non-empty queue.
-   */
-  private workerPromotionEnabled = false;
+  /** Owns the running-worker cap: admission decisions, the FIFO queue, the reservation set, and
+   * the promotion drain. See `worker-admission.ts` for the full design. */
+  private readonly workerAdmission: WorkerAdmission;
 
-  constructor(private readonly deps: ProcessManagerDeps) {}
+  constructor(private readonly deps: ProcessManagerDeps) {
+    this.workerAdmission = new WorkerAdmission({
+      state: deps.state,
+      config: deps.config,
+      getWorkerClient: (token) => this.workerClients.get(token),
+      persist: () => this.persist(),
+      publishArchitect: (treeKey, payload) => this.publishArchitect(treeKey, payload),
+      launchWorker: (treeKey, issue, role, claim, task) =>
+        this.launchWorker(treeKey, issue, role, claim, task),
+      promptExistingWorker: (client, token, issue, role, sessionId, task) =>
+        this.promptExistingWorker(client, token, issue, role, sessionId, task),
+      retireDeadClaim: (token, locator) => this.markWorkerDeadLocked(token, locator),
+      onAdmissionEvent: deps.onAdmissionEvent,
+      rootForIssue: (issue) => this.rootForIssue(issue),
+    });
+  }
 
-  /** The only way `workerPromotionEnabled` is ever set to `true`. Call once, after the
-   * daemon's HTTP `api` is assigned, before the first explicit `reconcileWorkerAdmission()` —
-   * every worker-queue drain from that point on (fire-and-forget triggers and the explicit
-   * call alike) is safe to actually launch/prompt something. */
+  /** The only way worker-queue promotion is ever allowed to actually launch or prompt
+   * something. Call once, after the daemon's HTTP `api` is assigned, before the first explicit
+   * `reconcileWorkerAdmission()` — see `WorkerAdmission`'s own doc comment for why. */
   enableWorkerPromotion(): void {
-    this.workerPromotionEnabled = true;
+    this.workerAdmission.enableWorkerPromotion();
   }
 
   private serialize<T>(
@@ -417,7 +383,7 @@ export class ProcessManager {
       );
     }
     const token = roleToken(this.deps.state.project, issue, role);
-    return this.serialize(this.roleLaunchQueue, token, async () => {
+    return this.workerAdmission.mutateClaim(token, async () => {
       const existing = this.deps.state.roles[token];
       const claim = existing && "issue" in existing ? existing : undefined;
 
@@ -443,162 +409,53 @@ export class ProcessManager {
           // its running-worker slot — prompting it is not a new admission, so it goes straight
           // through. An *idle* client is not currently counted by `runningWorkerCount()`, so
           // prompting it unconditionally would flip an uncounted-idle worker to running past
-          // `config.workerCap`: gate that one case through the same `admissionLock` decision
-          // every other admission goes through. Below cap, `this.launching` reserves the token
-          // for the gap between the decision and `client.prompt()` actually flipping `runState`
-          // (which happens synchronously as `prompt()`'s first action, but only once called
-          // outside the lock — see `launchOrQueue`'s doc comment for why no I/O runs inside it).
-          const shouldPrompt = await this.serialize(this.admissionLock, "global", async () => {
-            if (client.runState !== "idle") return true;
-            if (this.runningWorkerCount() >= this.deps.config.workerCap) {
-              this.enqueueIdleWorker(token, claim, task);
-              return false;
-            }
-            this.launching.add(token);
-            return true;
-          });
-          if (!shouldPrompt) {
-            await this.deps.saveState();
-            this.publishArchitect(treeKey, { type: "worker-queued", issue, role });
+          // `config.workerCap`: `WorkerAdmission.resumeOrQueueExisting` gates that one case
+          // through the same `admissionLock` decision every other admission goes through, and
+          // itself owns the actual `promptExistingWorker` call and releasing that reservation
+          // once it settles (mirroring `launchOrQueue`'s admitted branch, which likewise owns
+          // its own `launchWorker` call end to end).
+          const decision = await this.workerAdmission.resumeOrQueueExisting(
+            token,
+            treeKey,
+            issue,
+            role,
+            claim,
+            claim.sessionId,
+            task,
+            client
+          );
+          if (decision.kind === "queued") {
             return { status: "queued", roleToken: token };
           }
-          try {
-            await this.promptExistingWorker(client, token, issue, role, claim.sessionId, task);
-            return { status: "resumed", roleToken: token };
-          } finally {
-            this.launching.delete(token);
-            this.promoteWorkerQueue();
-          }
+          return { status: "resumed", roleToken: token };
         }
         await this.retireWorkerLocator(token, claim.locator);
-        return this.launchOrQueue(token, treeKey, issue, role, claim, task);
+        return this.workerAdmission.launchOrQueue(token, treeKey, issue, role, claim, task);
       }
 
-      return this.launchOrQueue(token, treeKey, issue, role, claim, task);
+      return this.workerAdmission.launchOrQueue(token, treeKey, issue, role, claim, task);
     });
-  }
-
-  /**
-   * Launches a brand-new worker pane when a running-worker slot is available (fewer than
-   * `config.workerCap` role tokens currently busy on a turn), or queues the task on a
-   * locator-less claim and publishes `worker-queued` to the tree's architect otherwise. Every
-   * queued task is promoted in FIFO order by `promoteWorkerQueue` once a slot frees up. Only the
-   * read-count/decide/reserve-or-enqueue step runs inside the `admissionLock` critical section
-   * (pure in-memory claim/queue mutation only — no tmux, workspace, or save I/O), so a
-   * concurrent decision for a different role can never observe the same free slot before this
-   * one commits it, and never blocks behind this decision's own `saveState`/publish; the actual
-   * `launchWorker` call runs outside the lock so a slow or hung launch never wedges every other
-   * admission decision.
-   */
-  private async launchOrQueue(
-    token: string,
-    treeKey: IssueKey,
-    issue: IssueKey,
-    role: LegionRole,
-    claim: WorkerRoleClaim | undefined,
-    task: string
-  ): Promise<SpawnWorkerResponse> {
-    const admitted = await this.serialize(this.admissionLock, "global", async () => {
-      if (this.runningWorkerCount() >= this.deps.config.workerCap) {
-        this.enqueueClaimForLaunch(token, issue, role, claim, task);
-        return false;
-      }
-      this.launching.add(token);
-      return true;
-    });
-    if (!admitted) {
-      await this.deps.saveState();
-      this.publishArchitect(treeKey, { type: "worker-queued", issue, role });
-      return { status: "queued", roleToken: token };
-    }
-    try {
-      await this.launchWorker(treeKey, issue, role, claim, task);
-    } finally {
-      this.launching.delete(token);
-      this.promoteWorkerQueue();
-    }
-    return { status: "spawned", roleToken: token };
-  }
-
-  /**
-   * Counts role claims (phase workers and sub-architects — never the controller, which is
-   * tracked separately via `state.controllerLocator`) currently occupying a running-worker slot:
-   * a claim with a locator and no cached shim client (booting, or not yet reconnected after a
-   * restart) counts conservatively as running; one with a cached client counts unless that
-   * client's `runState` is `"idle"`. Also counts every token in `this.launching` — reserved by
-   * `launchOrQueue`/`promoteQueuedWorker`/`spawnWorker`'s idle-resume path the instant admission
-   * is granted, before the claim's locator (or `runState`) reflects it, so work still in flight
-   * is never double-admitted alongside a concurrent decision for a different role. Computed
-   * fresh on every call: nothing besides `launching` is reserved or released by hand. The root
-   * architect is never in `state.roles` at all (its own admission is tree-scoped via
-   * `state.trees[issue].locator`), so it needs no special-case exclusion here — a sub-architect
-   * claim always belongs in this count, including one whose child issue later graduates into
-   * its own tree root.
-   */
-  private runningWorkerCount(): number {
-    let count = this.launching.size;
-    for (const [token, claim] of Object.entries(this.deps.state.roles)) {
-      if (!("issue" in claim) || claim.locator === undefined) continue;
-      const client = this.workerClients.get(token);
-      if (!client || client.runState !== "idle") count += 1;
-    }
-    return count;
-  }
-
-  /**
-   * Pure in-memory mutation (called only from inside `admissionLock`'s critical section — no
-   * I/O here; the caller does `saveState`/publish after the lock releases) for a worker with no
-   * live pane to reuse: records the task on the existing claim (mutated in place, never
-   * replaced, so `agentId`/`generation`/`launchFailures` survive) and appends its token to the
-   * FIFO running-worker queue. Any existing locator is cleared, moving its `ompSessionFile` to
-   * `resumeSessionFile` so the eventual promoted launch still resumes the same agent;
-   * `sessionId` is deliberately kept (never deleted) so a subsequent respawn's boot token still
-   * names this session as the one it must resume — the exact path a delayed promotion depends
-   * on to reject a boot that comes back as a different agent.
-   */
-  private enqueueClaimForLaunch(
-    token: string,
-    issue: IssueKey,
-    role: LegionRole,
-    claim: WorkerRoleClaim | undefined,
-    task: string
-  ): void {
-    const target: WorkerRoleClaim = claim ?? { issue, role };
-    const resumeSessionFile = target.locator?.ompSessionFile ?? target.resumeSessionFile;
-    target.pendingAssignment = task;
-    delete target.locator;
-    if (resumeSessionFile) target.resumeSessionFile = resumeSessionFile;
-    else delete target.resumeSessionFile;
-    this.deps.state.roles[token] = target;
-    const queue = this.deps.state.workerAdmission.queue;
-    if (!queue.includes(token)) queue.push(token);
-  }
-
-  /**
-   * Pure in-memory mutation (same `admissionLock`-only calling convention as
-   * `enqueueClaimForLaunch`) for a worker whose pane is still alive and idle but the cap has no
-   * free slot right now: the locator and cached client are left completely alone — the worker
-   * is not retired, its pane is not touched — since `promoteQueuedWorker`'s `"prompt"` branch
-   * only needs to `prompt()` it in place once a slot frees up, never relaunch it.
-   */
-  private enqueueIdleWorker(token: string, claim: WorkerRoleClaim, task: string): void {
-    claim.pendingAssignment = task;
-    const queue = this.deps.state.workerAdmission.queue;
-    if (!queue.includes(token)) queue.push(token);
   }
 
   /** Prompts an already-connected, already-live worker client with `task` — the shared
-   * implementation behind every "resume an existing worker" path (`spawnWorker`'s direct
-   * alive-idle-resume-below-cap branch, `promoteQueuedWorker`'s `"prompt"` decision, and
-   * `/worker/ready`), as opposed to `launchWorker`, which opens a fresh pane. Releases this
-   * token's `launching` reservation and re-checks the queue the instant `prompt()` resolves and
-   * flips `runState` away from `"idle"` — `runningWorkerCount()`'s client-based counting picks
-   * this worker up from that exact moment, so the reservation would otherwise outlive its
-   * purpose and needlessly delay a concurrent decision that could safely see this slot as
-   * occupied. Then registers the current phase (`state.phases[issue]`) so `phase/complete` can
-   * find it, clears the claim's `pendingAssignment` if it was still set, and persists. Throws
-   * (without touching phases/`pendingAssignment`/persisting) if `prompt()` itself rejects — the
-   * caller decides what "the prompt failed" means for its own bookkeeping. */
+   * implementation behind every "resume an existing worker" path (`WorkerAdmission`'s
+   * `resumeOrQueueExisting` admitted branch, its `"prompt"` queue-promotion decision, and
+   * `/worker/ready`), as opposed to `launchWorker`, which opens a fresh pane. Does not touch the
+   * running-worker admission count itself — the caller owns reserving and releasing that slot
+   * (mirroring `launchWorker`, which is likewise unaware of admission bookkeeping) since only
+   * the caller knows whether this prompt represents a new admission (`resumeOrQueueExisting`'s
+   * below-cap idle-resume, or a queue promotion) or none at all (`/worker/ready` resuming a
+   * worker whose slot was already counted via its locator from the moment `launchWorker` wrote
+   * it, so nothing here needs releasing or re-checking). Registers the current phase
+   * (`state.phases[issue]`) so `phase/complete` can find it, and clears the claim's
+   * `pendingAssignment` if it was still set. Throws (without touching
+   * phases/`pendingAssignment`/persisting) only if `prompt()` itself rejects — the caller
+   * decides what "the prompt failed" means for its own bookkeeping. A `persist` failure
+   * *after* `prompt()` already succeeded is a durable-state persistence issue, not a prompt
+   * failure: the worker is already working, mirroring `launchWorker`'s post-locator-write
+   * save handling. Retries the persist once; if that also fails, logs it and returns
+   * normally — never rethrown, since the caller (and, transitively, the architect) would
+   * otherwise see a failure for a worker that is actually already running the task. */
   private async promptExistingWorker(
     client: WorkerRpcClient,
     token: string,
@@ -608,223 +465,29 @@ export class ProcessManager {
     task: string
   ): Promise<void> {
     await client.prompt(task);
-    this.launching.delete(token);
-    this.promoteWorkerQueue();
     this.deps.state.phases[issue] = { phase: role, sessionId };
     const claim = this.deps.state.roles[token];
-    if (claim && "issue" in claim) delete claim.pendingAssignment;
-    await this.persist();
-  }
-
-  /** Fire-and-forget trigger: "something may have changed, re-check the running-worker queue."
-   * Safe to call any number of times from any locator-clearing or client-idle/close event —
-   * `drainWorkerQueue` serializes itself per role token and re-derives occupancy on every step.
-   * No-ops with a log until `enableWorkerPromotion` has been called — see
-   * `workerPromotionEnabled`'s doc comment for why. */
-  private promoteWorkerQueue(): void {
-    if (!this.workerPromotionEnabled) {
-      console.error(
-        "[legion] worker-queue promotion trigger ignored: not yet enabled (still booting)"
-      );
-      return;
+    if (claim && "issue" in claim) {
+      delete claim.pendingAssignment;
+      // A successful prompt confirms this worker is responsive again — any accumulated
+      // rejection count from a prior transient failure must never carry into a future one.
+      claim.promptFailures = 0;
     }
-    void this.drainWorkerQueue();
-  }
-
-  /** Promotes queued workers in FIFO order, one at a time, while a running-worker slot is
-   * available. Each pass re-peeks the current queue head (outside any lock — staleness is
-   * re-validated inside `promoteQueuedWorker`) and runs the actual admission decision through
-   * the same per-role launch queue `spawnWorker` uses, keyed to that token, so a concurrent
-   * `spawnWorker` call and a promotion attempt for the same role token can never both decide to
-   * launch it. Two concurrent `drainWorkerQueue` runs racing for one freed slot both peek the
-   * same head and both queue up on that token's `roleLaunchQueue` entry; only the first actually
-   * launches; the second finds (inside the lock) that the head has already moved on and no-ops. */
-  private async drainWorkerQueue(): Promise<void> {
-    for (;;) {
-      const token = this.deps.state.workerAdmission.queue[0];
-      if (token === undefined) return;
-      const shouldContinue = await this.serialize(this.roleLaunchQueue, token, () => {
-        return this.promoteQueuedWorker(token);
-      });
-      if (!shouldContinue) return;
-    }
-  }
-
-  /** Runs the actual admission decision for one candidate queue-head token. Only the
-   * read-count/re-peek-head/decide step runs inside the single global `admissionLock` critical
-   * section (nested inside this token's `roleLaunchQueue` entry, acquired by the caller) — so
-   * the running-worker count is read and committed atomically against every other admission
-   * decision, whether that is another promotion attempt or a concurrent `spawnWorker` call for a
-   * different role — while the actual `launchWorker`/`client.prompt()` call runs outside the
-   * lock, so a slow or hung launch never wedges every other admission decision. Re-checks that
-   * `token` is still the queue head before doing anything: by the time this call gets its turn
-   * on the per-role queue, another promotion may already have consumed or dropped it. A claim
-   * that still carries a locator (queued via `spawnWorker`'s idle-resume-at-cap path, which
-   * never touched it) is promoted by prompting its already-live, already-idle-cached client in
-   * place rather than relaunching a pane that is already running. Returns `true` if
-   * `drainWorkerQueue` should loop again (progress was made, a stale entry was dropped, this
-   * attempt was a no-op because the head moved on, an unlaunchable head was retired at
-   * `MAX_LAUNCH_FAILURES` so the rest of the queue is not permanently blocked behind it, or a
-   * below-threshold failure rotated the head to the tail so the next-in-line gets a turn) or
-   * `false` if it should stop (still at cap, or queue empty). */
-  private async promoteQueuedWorker(token: string): Promise<boolean> {
-    const decision = await this.serialize(
-      this.admissionLock,
-      "global",
-      async (): Promise<PromotionDecision> => {
-        const queue = this.deps.state.workerAdmission.queue;
-        if (queue[0] !== token) return { kind: "retry" };
-        if (this.runningWorkerCount() >= this.deps.config.workerCap) return { kind: "stop" };
-        const claim = this.deps.state.roles[token];
-        const parsed = parseRoleToken(this.deps.state.project, token);
-        const treeKey =
-          parsed && !("controller" in parsed) ? this.rootForIssue(parsed.issue) : undefined;
-        if (
-          claim === undefined ||
-          !("issue" in claim) ||
-          claim.pendingAssignment === undefined ||
-          parsed === undefined ||
-          "controller" in parsed ||
-          treeKey === undefined
-        ) {
-          // Stale entry: the claim vanished, lost its task, or isn't a real issue/tree. Drop and
-          // continue.
-          queue.shift();
-          return { kind: "stale" };
-        }
-        if (claim.locator !== undefined) {
-          const client = this.workerClients.get(token);
-          if (!client || client.runState !== "idle" || !claim.sessionId) {
-            // The idle-resume-at-cap invariant this entry was queued under no longer holds (the
-            // client died, started running some other way, or never confirmed a session) —
-            // stale, drop and continue.
-            queue.shift();
-            return { kind: "stale" };
-          }
-          this.launching.add(token);
-          // Deliberately NOT shifted here — this token stays on the queue until the prompt
-          // below actually succeeds (see the `"prompt"` handling), so a failed prompt never
-          // strands the assignment with no queue entry and no launched pane.
-          return {
-            kind: "prompt",
-            client,
-            treeKey,
-            issue: parsed.issue,
-            role: parsed.role,
-            sessionId: claim.sessionId,
-            task: claim.pendingAssignment,
-          };
-        }
-        this.launching.add(token);
-        return {
-          kind: "launch",
-          claim,
-          treeKey,
-          issue: parsed.issue,
-          role: parsed.role,
-          task: claim.pendingAssignment,
-        };
-      }
-    );
-
-    if (decision.kind === "stale") {
-      await this.persist();
-      return true;
-    }
-    if (decision.kind === "retry") return true;
-    if (decision.kind === "stop") return false;
-
-    if (decision.kind === "prompt") {
-      try {
-        await this.promptExistingWorker(
-          decision.client,
-          token,
-          decision.issue,
-          decision.role,
-          decision.sessionId,
-          decision.task
-        );
-      } catch (error) {
-        console.error(`[legion] failed to prompt queued worker ${token}:`, error);
-        // The token was never removed from the queue for this decision (see the admission-lock
-        // section above) and `promptExistingWorker` only mutates the claim's
-        // `pendingAssignment` after `client.prompt()` succeeds — both are left exactly as they
-        // were. Stop draining instead of looping straight back into the same broken client
-        // (deliberately no `promoteWorkerQueue()` call here — that would just re-peek this same
-        // head and retry the same broken prompt again): the close handler will notice this
-        // socket died (or never confirms idle again) and clear the locator via
-        // `markWorkerDead`, whose own `promoteWorkerQueue()` call then re-promotes this
-        // still-queued assignment through a fresh `launchWorker` relaunch once that happens.
-        this.launching.delete(token);
-        await this.persist();
-        return false;
-      }
-      await this.serialize(this.admissionLock, "global", async () => {
-        const queue = this.deps.state.workerAdmission.queue;
-        const index = queue.indexOf(token);
-        if (index !== -1) queue.splice(index, 1);
-      });
-      await this.persist();
-      this.publishArchitect(decision.treeKey, {
-        type: "worker-started",
-        issue: decision.issue,
-        role: decision.role,
-      });
-      return true;
-    }
-
     try {
-      await this.launchWorker(
-        decision.treeKey,
-        decision.issue,
-        decision.role,
-        decision.claim,
-        decision.task
-      );
-      this.publishArchitect(decision.treeKey, {
-        type: "worker-started",
-        issue: decision.issue,
-        role: decision.role,
-      });
-      return true;
-    } catch (error) {
-      console.error(`[legion] failed to promote queued worker ${token}:`, error);
-      // launchWorker's own catch already recorded launchFailures on the claim and published
-      // `launch-failed` exactly once, at the tick it crosses MAX_LAUNCH_FAILURES. Mirror tree
-      // admission: once that threshold is hit, retire the head from the queue so an
-      // unlaunchable entry (e.g. a missing session file — a deterministic, permanent failure)
-      // never blocks every other queued worker behind it forever. Below the threshold, rotate
-      // the head to the tail instead of leaving it parked at the head: nothing else ever retries
-      // a queue head on its own (there is no periodic promotion tick besides the boot/cap-change
-      // sweep and this drain loop itself), so leaving it in place would starve every worker
-      // queued behind it until this exact token's own next `spawnWorker` call happens to retry
-      // it. A single-item queue rotating in place exposes the same head again — the returned
-      // `shouldContinue` below stops the drain in that case instead of burning every
-      // MAX_LAUNCH_FAILURES attempt in one pass; the periodic sweep or the next idle/dead event
-      // retries it.
-      const shouldContinue = await this.serialize(this.admissionLock, "global", async () => {
-        const claim = this.deps.state.roles[token];
-        const failures = claim && "issue" in claim ? (claim.launchFailures ?? 0) : 0;
-        const queue = this.deps.state.workerAdmission.queue;
-        if (failures >= MAX_LAUNCH_FAILURES) {
-          const index = queue.indexOf(token);
-          if (index !== -1) queue.splice(index, 1);
-        } else if (queue[0] === token) {
-          queue.shift();
-          queue.push(token);
-        }
-        return queue[0] !== token;
-      });
       await this.persist();
-      return shouldContinue;
-    } finally {
-      // No `promoteWorkerQueue()` call here: the success path already released the reservation
-      // and re-checked the queue inside `launchWorker` itself, right after its locator write;
-      // the failure path's `shouldContinue` above already tells `drainWorkerQueue`'s own loop
-      // whether to continue — calling it again here would re-peek this same still-at-the-head
-      // token immediately on a `false` result, defeating the very rotation-stop this method just
-      // decided on.
-      this.launching.delete(token);
+    } catch (persistError) {
+      console.error(
+        `[legion] failed to persist ${token}'s phase/pendingAssignment after a successful prompt (worker is already working regardless):`,
+        persistError
+      );
+      try {
+        await this.persist();
+      } catch (retryError) {
+        console.error(
+          `[legion] retry-persist for ${token} also failed; in-memory claim remains authoritative:`,
+          retryError
+        );
+      }
     }
   }
 
@@ -832,20 +495,10 @@ export class ProcessManager {
    * boot (after `reconnectWorkers` has rebuilt live shim connections) and by the periodic linger
    * sweep, so a cap raised between restarts, or a below-threshold launch failure that rotated
    * its head to the tail with nothing else to trigger a retry, both eventually get another
-   * promotion attempt. Awaited by the boot caller (unlike the fire-and-forget
-   * `promoteWorkerQueue` trigger used elsewhere) so a live, real request racing in during boot
-   * serializes on `admissionLock` behind this convergence instead of deciding against a
-   * possibly-stale running-worker count. Never bypasses `workerPromotionEnabled` — the same gate
-   * `promoteWorkerQueue` respects — so a caller (boot, the periodic sweep, or a test) must
-   * `enableWorkerPromotion()` first; there is no second, ungated way into `drainWorkerQueue`. */
+   * promotion attempt. See `WorkerAdmission.reconcileWorkerAdmission` for the gate this respects.
+   */
   async reconcileWorkerAdmission(): Promise<void> {
-    if (!this.workerPromotionEnabled) {
-      console.error(
-        "[legion] worker-admission reconciliation skipped: promotion not yet enabled (call enableWorkerPromotion() first)"
-      );
-      return;
-    }
-    await this.drainWorkerQueue();
+    await this.workerAdmission.reconcileWorkerAdmission();
   }
 
   private publishArchitect(
@@ -882,32 +535,37 @@ export class ProcessManager {
     await this.promptExistingWorker(client, token, issue, role, sessionId, task);
   }
 
-  /** A worker's socket confirmed dead — a boot-time reconnect probe failed, or a live
-   * connection's own `client.closed` handler tried and failed its one reconnect attempt — so
-   * its locator is retired and cleared: retires whatever pane it may still be running, then
-   * clears the locator — moving its `ompSessionFile` to `resumeSessionFile` so the eventual
-   * respawn/promotion still resumes the same agent — leaving `pendingAssignment` so it still
-   * delivers the queued task, then re-checks the running-worker queue, since clearing the
-   * locator may have freed the slot this worker was occupying. Runs inside this token's
-   * `roleLaunchQueue` critical section — the same one `launchWorker`/`promoteQueuedWorker` use —
-   * and re-checks that the claim's current locator still matches the one it was handed before
-   * touching anything: by the time this call gets its turn, a newer launch for the same token
-   * may already have replaced it (or the claim may be gone entirely, e.g. `closeTree`), and
-   * this must never delete a newer launch's locator or retire a pane that isn't the one it was
-   * told to. */
+  /** The inner logic behind a worker's socket being confirmed dead — a boot-time reconnect
+   * probe failed, or a live connection's own `client.closed` handler tried and failed its one
+   * reconnect attempt, or the prompt-failure circuit breaker retired a persistently-broken
+   * worker (see `WorkerAdmissionDeps.retireDeadClaim`) — so its locator is retired and cleared:
+   * retires whatever pane it may still be running, then clears the locator — moving its
+   * `ompSessionFile` to `resumeSessionFile` so the eventual respawn/promotion still resumes the
+   * same agent — leaving `pendingAssignment` so it still delivers the queued task. Assumes the
+   * caller already holds this token's `roleLaunchQueue` critical section — the same one
+   * `launchWorker`/`promoteQueuedWorker` use — and re-checks that the claim's current locator
+   * still matches the one it was handed before touching anything: by the time this call gets
+   * its turn, a newer launch for the same token may already have replaced it (or the claim may
+   * be gone entirely, e.g. `closeTree`), and this must never delete a newer launch's locator or
+   * retire a pane that isn't the one it was told to. */
+  private async markWorkerDeadLocked(token: string, locator: WorkerLocator): Promise<void> {
+    const current = this.deps.state.roles[token];
+    if (!current || !("issue" in current) || current.locator?.tmuxPaneId !== locator.tmuxPaneId) {
+      return;
+    }
+    await this.retireWorkerLocator(token, locator);
+    const resumeSessionFile = current.locator?.ompSessionFile ?? current.resumeSessionFile;
+    delete current.locator;
+    if (resumeSessionFile) current.resumeSessionFile = resumeSessionFile;
+    await this.persist();
+  }
+
+  /** Acquires this token's `roleLaunchQueue` critical section (see `markWorkerDeadLocked` for
+   * the actual logic) then re-checks the running-worker queue, since clearing the locator may
+   * have freed the slot this worker was occupying. */
   private async markWorkerDead(token: string, locator: WorkerLocator): Promise<void> {
-    await this.serialize(this.roleLaunchQueue, token, async () => {
-      const current = this.deps.state.roles[token];
-      if (!current || !("issue" in current) || current.locator?.tmuxPaneId !== locator.tmuxPaneId) {
-        return;
-      }
-      await this.retireWorkerLocator(token, locator);
-      const resumeSessionFile = current.locator?.ompSessionFile ?? current.resumeSessionFile;
-      delete current.locator;
-      if (resumeSessionFile) current.resumeSessionFile = resumeSessionFile;
-      await this.persist();
-    });
-    this.promoteWorkerQueue();
+    await this.workerAdmission.mutateClaim(token, () => this.markWorkerDeadLocked(token, locator));
+    this.workerAdmission.promoteWorkerQueue();
   }
 
   /** Reconnects to every live worker's shim socket after a daemon restart, probing liveness.
@@ -987,7 +645,7 @@ export class ProcessManager {
     await this.deps.saveState();
     // Deleting this tree's claims may have freed running-worker slots other trees' queues are
     // waiting on.
-    this.promoteWorkerQueue();
+    this.workerAdmission.promoteWorkerQueue();
   }
 
   /**
@@ -997,23 +655,65 @@ export class ProcessManager {
    * not yet recorded) is never mistaken for an orphan. Boot calls this with
    * `graceMs: 0`: it never trusts a window it did not itself record, so
    * there is no such race to protect against there (see `reconcileAdmission`).
+   * Also reaps unrecorded worker-shim *panes* split into a window this state
+   * DOES still recognize — a window-level orphan check alone can never see
+   * these: `launchWorker` persists a locator only after opening the pane
+   * (see its own doc comment), so a crash in that exact gap leaves a real,
+   * running process inside a window nothing else ever flags as unowned.
+   *
+   * `tmuxPaneId` is optional on every locator (state predating the field, or any other
+   * pane-id-less write) — a window whose owning tree/role/controller locator has a known
+   * `tmuxWindowId` but no recorded `tmuxPaneId` is exempted from the pane-level pass entirely:
+   * every pane in that window (including the owner's own, since we cannot tell which one it is
+   * without the id) would otherwise look exactly like the unrecorded-crash-window-orphan this
+   * pass exists to catch, and killing it would kill a live root/controller/worker the daemon
+   * itself is still actively running. `probe`/`controllerAlive` backfill `tmuxPaneId` the next
+   * time they confirm that locator alive, so this exemption — and the ambiguity it accepts —
+   * shrinks to nothing as every surviving locator gets its pane id recorded.
    */
   async reconcileTmuxWindows(graceMs = TMUX_RECONCILIATION_GRACE_MS): Promise<void> {
     const session = `legion-${this.deps.state.project}`;
     const owner = session;
-    const known = new Set(
-      [
-        ...Object.values(this.deps.state.trees).map((tree) => tree.locator?.tmuxWindowId),
-        ...Object.values(this.deps.state.roles).map((claim) =>
-          "issue" in claim ? claim.locator?.tmuxWindowId : undefined
-        ),
-        this.deps.state.controllerLocator?.tmuxWindowId,
-      ].filter((windowId): windowId is string => windowId !== undefined)
+    const locators = [
+      ...Object.values(this.deps.state.trees).map((tree) => tree.locator),
+      ...Object.values(this.deps.state.roles).map((claim) =>
+        "issue" in claim ? claim.locator : undefined
+      ),
+      this.deps.state.controllerLocator,
+    ];
+    const knownWindows = new Set(
+      locators
+        .map((locator) => locator?.tmuxWindowId)
+        .filter((windowId): windowId is string => windowId !== undefined)
     );
-    const unknown = await tmux.listUnknownOwnedWindows(this.deps.run, session, owner, known);
-    for (const { windowId, activityAt } of unknown) {
+    const unknownWindows = await tmux.listUnknownOwnedWindows(
+      this.deps.run,
+      session,
+      owner,
+      knownWindows
+    );
+    for (const { windowId, activityAt } of unknownWindows) {
       if (this.deps.now() - activityAt < graceMs) continue;
       await tmux.killWindow(this.deps.run, windowId);
+    }
+
+    const knownPanes = new Set(
+      locators
+        .map((locator) => locator?.tmuxPaneId)
+        .filter((paneId): paneId is string => paneId !== undefined)
+    );
+    const exemptWindows = new Set(
+      locators
+        .filter(
+          (locator) => locator?.tmuxWindowId !== undefined && locator.tmuxPaneId === undefined
+        )
+        .map((locator) => locator?.tmuxWindowId)
+    );
+    const unknownPanes = await tmux.listUnknownPanes(this.deps.run, owner, knownPanes);
+    for (const { paneId, windowId, activityAt } of unknownPanes) {
+      if (exemptWindows.has(windowId)) continue;
+      if (this.deps.now() - activityAt < graceMs) continue;
+      await tmux.killPane(this.deps.run, paneId);
     }
   }
 
@@ -1087,6 +787,11 @@ export class ProcessManager {
     await this.controllerSpawn;
   }
 
+  /** Probes a tree's recorded locator for liveness. Backfills `locator.tmuxPaneId` once
+   * confirmed alive if it was never recorded (state predating the field, or any other
+   * pane-id-less write) — see `reconcileTmuxWindows`'s doc comment for why a locator missing
+   * its own pane id exempts its whole window from pane-level reaping; this is what shrinks
+   * that exemption to nothing over time. */
   async probe(treeKey: IssueKey): Promise<"alive" | "dead"> {
     const tree = this.deps.state.trees[treeKey];
     const locator = tree?.locator;
@@ -1095,7 +800,15 @@ export class ProcessManager {
     const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
     const pid = await tmux.panePid(this.deps.run, target);
     if (pid === undefined) return "dead";
-    return (await this.isOmpPane(pid)) ? "alive" : "dead";
+    if (!(await this.isOmpPane(pid))) return "dead";
+    if (locator.tmuxPaneId === undefined) {
+      const paneId = await tmux.firstPaneId(this.deps.run, locator.tmuxWindowId);
+      if (paneId !== undefined) {
+        locator.tmuxPaneId = paneId;
+        await this.persist();
+      }
+    }
+    return "alive";
   }
 
   async controlDirective(
@@ -1569,7 +1282,7 @@ export class ProcessManager {
         throw error;
       }
       this.workerClients.set(token, client);
-      client.onIdle(() => this.promoteWorkerQueue());
+      client.onIdle(() => this.workerAdmission.promoteWorkerQueue());
       // Detached from this connect call on purpose (the caller must not wait on the worker's
       // eventual close) — `.catch` here is not error recovery, it is the only thing standing
       // between an `onWorkerClientClosed` rejection (tmux/saveState failures included) and an
@@ -1761,15 +1474,12 @@ export class ProcessManager {
       );
       // `closeTree` may have deleted this tree (and every claim under it) while this launch's
       // I/O was in flight above — writing a fresh claim for a tree that is now closed would
-      // create a zombie occupying a running-worker slot forever, since nothing would ever
-      // release it (closeTree already ran its own release/queue-promotion pass and has no way
-      // to know this launch was still in flight). Retire the pane this launch just opened and
-      // return without writing anything.
+      // create a zombie occupying a running-worker slot forever. Retire the pane this launch
+      // just opened and return without writing anything; the caller (`WorkerAdmission`'s own
+      // `launchOrQueue`/`promoteQueuedWorker` finally) releases the reservation this launch was
+      // holding the moment this call resolves, same as any other return or throw here.
       if (this.rootForIssue(issue) !== treeKey || this.requireTree(treeKey).status === "closed") {
         await this.retireWorkerLocator(token, locator);
-        // This launch never wrote a claim — the slot it was reserving is simply free again.
-        this.launching.delete(token);
-        this.promoteWorkerQueue();
         return;
       }
 
@@ -1797,15 +1507,44 @@ export class ProcessManager {
       };
       const queueIndex = this.deps.state.workerAdmission.queue.indexOf(token);
       if (queueIndex !== -1) this.deps.state.workerAdmission.queue.splice(queueIndex, 1);
-      // The claim now has a locator: runningWorkerCount()'s claim-based counting picks this
-      // worker up from this instant (a claim with a locator and no cached client counts
-      // conservatively as running), so the `launching` reservation held since admission is no
-      // longer needed — release it (and re-check the queue) now, before the saveState below,
-      // instead of leaving a concurrent admission decision waiting on this launch's full I/O
-      // (workspace provisioning, saveState) to settle before it can see this slot as occupied.
-      this.launching.delete(token);
-      this.promoteWorkerQueue();
-      await this.deps.saveState();
+      // Persists the new claim's locator before this call resolves and the caller (`launchOrQueue`/
+      // `promoteQueuedWorker`'s own finally) releases the reservation: a crash between opening
+      // this pane and this point would otherwise leave a real, running worker-shim process the
+      // daemon has completely forgotten about on disk (`reconnectWorkers` only ever reconnects
+      // to locators it can read back from state, and `reconcileTmuxWindows` only reaps whole
+      // *windows* it doesn't recognize -- a split-pane worker shares its window with the tree's
+      // other recognized occupants, so the window itself stays "known" and the orphaned pane
+      // inside it is never swept). Holding the reservation through this save is the honest cost
+      // of that guarantee: a concurrent admission decision waits slightly longer to see this
+      // slot as durably occupied, instead of trusting an in-memory claim that might still
+      // vanish on a crash.
+      try {
+        await this.deps.saveState();
+      } catch (saveError) {
+        // The pane already exists at this point (opened, locator and `pendingAssignment`
+        // already written above) — a failure here is a durable-state persistence failure, not
+        // a launch failure: the launch itself succeeded. Never re-queues or rotates this
+        // token (it already has a live pane; re-queuing it would launch a second pane for the
+        // same issue/role the next time it is promoted) and never bumps `launchFailures` (this
+        // is not what that counter tracks — see the outer `catch` below, which only ever runs
+        // for a failure *before* a pane exists). Retries the persist exactly once more; if
+        // that also fails, logs it and leaves the in-memory claim authoritative — never
+        // rethrown, since the launch genuinely succeeded regardless of whether this save did.
+        // The pane's own `/worker/started` -> `/worker/ready` handshake calls back into the
+        // daemon independent of this save and persists normally on its own next success.
+        console.error(
+          `[legion] failed to persist ${token}'s locator after a successful launch (pane is live regardless):`,
+          saveError
+        );
+        try {
+          await this.deps.saveState();
+        } catch (retryError) {
+          console.error(
+            `[legion] retry-persist for ${token} also failed; in-memory claim remains authoritative:`,
+            retryError
+          );
+        }
+      }
     } catch (error) {
       const failures = (claim?.launchFailures ?? 0) + 1;
       const failingClaim = this.deps.state.roles[token];
@@ -1939,17 +1678,31 @@ export class ProcessManager {
     else await tmux.killWindow(this.deps.run, locator.tmuxWindowId);
   }
 
+  /** Probes the controller's recorded locator for liveness. Backfills `tmuxPaneId` once
+   * confirmed alive if it was never recorded — see `probe`/`reconcileTmuxWindows`'s doc
+   * comments for why. */
   private async controllerAlive(): Promise<boolean> {
-    const windowId = this.deps.state.controllerLocator?.tmuxWindowId;
-    if (!windowId) return false;
-    const pid = await tmux.panePid(this.deps.run, windowId);
+    const locator = this.deps.state.controllerLocator;
+    if (!locator) return false;
+    const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
+    const pid = await tmux.panePid(this.deps.run, target);
     if (pid === undefined) {
       delete this.deps.state.controllerLocator;
       return false;
     }
     const alive = await this.isOmpPane(pid);
-    if (!alive) delete this.deps.state.controllerLocator;
-    return alive;
+    if (!alive) {
+      delete this.deps.state.controllerLocator;
+      return false;
+    }
+    if (locator.tmuxPaneId === undefined) {
+      const paneId = await tmux.firstPaneId(this.deps.run, locator.tmuxWindowId);
+      if (paneId !== undefined) {
+        locator.tmuxPaneId = paneId;
+        await this.persist();
+      }
+    }
+    return true;
   }
 
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {

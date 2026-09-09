@@ -431,7 +431,7 @@ async function startDaemonLocked(
   // these calls on the same `admissionLock`, which can at most let it jump ahead of a queued
   // tree/worker in FIFO order. `enableWorkerPromotion()` opens the gate `reconcileWorkerAdmission`
   // (and every `onIdle`/`markWorkerDead`/`closeTree` trigger from this point on) requires —
-  // see `ProcessManager.workerPromotionEnabled`'s doc comment.
+  // see `WorkerAdmission.workerPromotionEnabled`'s doc comment.
   processManager.enableWorkerPromotion();
   await processManager.reconcileAdmission();
   await processManager.reconcileWorkerAdmission();
