@@ -16,6 +16,7 @@ type API interface {
 	Text(ctx context.Context, artifactID string) (string, error)
 	SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error)
 	CommitVersion(artifactID string, version model.Version)
+	SetIssueClosed(issueKey string, closed bool)
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error)
 	ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, with string, actor model.Actor) error
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error)

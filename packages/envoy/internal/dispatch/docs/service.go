@@ -101,6 +101,9 @@ type servicePersistenceAdapter struct {
 
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	result, err := a.store.Load(context.Background(), room)
+	if err == nil {
+		err = validateUpdate(result.Update)
+	}
 	if err != nil {
 		a.service.failRoom(room, err)
 		return nil, err
@@ -126,6 +129,24 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
 	_, err := a.store.Compact(ctx, room, 500)
+	return err
+}
+
+func validateUpdate(update []byte) error {
+	if len(update) == 0 {
+		return nil
+	}
+	return crdt.ApplyUpdateV1(crdt.New(), update, nil)
+}
+
+func (s *Service) validateRoomLoad(ctx context.Context, room string) error {
+	result, err := s.persistence.Load(ctx, room)
+	if err == nil {
+		err = validateUpdate(result.Update)
+	}
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		s.failRoom(room, err)
+	}
 	return err
 }
 
@@ -176,6 +197,16 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := s.roomFailure(room); err != nil {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
+	}
+	if _, err := s.requestActor(r); err != nil {
+		s.srv.ServeHTTP(w, r)
+		return
+	}
+	if s.srv.GetDoc(room) == nil {
+		if err := s.validateRoomLoad(r.Context(), room); err != nil {
+			http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
+			return
+		}
 	}
 	connection := &connectionState{}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
@@ -260,6 +291,9 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
 		s.failRoom(artifactID, err)
 		return "", s.roomFailure(artifactID)
 	}
@@ -447,7 +481,7 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	if room == "" {
 		room = path.Base(r.URL.Path)
 	}
-	if s.roomClosed(room) || s.roomFailure(room) != nil {
+	if s.roomFailure(room) != nil {
 		return websocket.ConnectionConfig{}, false
 	}
 	open, err := s.issueOpen(r.Context(), room)
@@ -507,13 +541,18 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	return nil
 }
 
-func (s *Service) onLoadDocument(_ context.Context, room string, doc *crdt.Doc) error {
+func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
 	if err := s.roomFailure(room); err != nil {
 		return err
 	}
-	if s.roomClosed(room) {
-		return ErrIssueClosed
+	open, err := s.issueOpen(ctx, room)
+	if err != nil {
+		return err
 	}
+	state := s.room(room)
+	state.mu.Lock()
+	state.closed = !open
+	state.mu.Unlock()
 	doc.OnUpdate(func(_ []byte, _ any) {
 		s.recordConnectedActors(room)
 		s.scheduleSettle(room)
@@ -627,6 +666,45 @@ func (s *Service) waitSettles(ctx context.Context) {
 	}
 }
 
+func (s *Service) SetIssueClosed(issueKey string, closed bool) {
+	rows, err := s.store.Pool.Query(context.Background(), `
+		select id::text from artifacts where issue_key = $1 and kind = 'doc'
+	`, issueKey)
+	if err != nil {
+		return
+	}
+	var rooms []string
+	for rows.Next() {
+		var room string
+		if err := rows.Scan(&room); err != nil {
+			rows.Close()
+			return
+		}
+		rooms = append(rooms, room)
+	}
+	if rows.Err() != nil {
+		rows.Close()
+		return
+	}
+	rows.Close()
+	for _, room := range rooms {
+		state := s.room(room)
+		state.mu.Lock()
+		changed := state.closed != closed
+		state.closed = closed
+		if closed && changed {
+			state.gen++
+			if state.settle != nil && state.settle.Stop() {
+				s.settleWG.Done()
+			}
+		}
+		state.mu.Unlock()
+		if closed && changed {
+			_ = s.srv.CloseRoom(room, true)
+		}
+	}
+}
+
 func (s *Service) waitEvents(ctx context.Context) {
 	done := make(chan struct{})
 	go func() {
@@ -643,51 +721,9 @@ func (s *Service) watchIssueClosures(eventStream <-chan model.Event) {
 	defer s.eventWG.Done()
 	for event := range eventStream {
 		if event.Type == "issue.closed" {
-			s.closeIssueRooms(event.IssueKey)
+			s.SetIssueClosed(event.IssueKey, true)
 		}
 	}
-}
-
-func (s *Service) closeIssueRooms(issueKey string) {
-	rows, err := s.store.Pool.Query(context.Background(), `
-		select id::text from artifacts where issue_key = $1 and kind = 'doc'
-	`, issueKey)
-	if err != nil {
-		return
-	}
-	var rooms []string
-	for rows.Next() {
-		var room string
-		if err := rows.Scan(&room); err != nil {
-			rows.Close()
-			return
-		}
-		rooms = append(rooms, room)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return
-	}
-	rows.Close()
-	for _, room := range rooms {
-		s.closeIssueRoom(room)
-	}
-}
-
-func (s *Service) closeIssueRoom(room string) {
-	state := s.room(room)
-	state.mu.Lock()
-	if state.closed {
-		state.mu.Unlock()
-		return
-	}
-	state.closed = true
-	state.gen++
-	if state.settle != nil && state.settle.Stop() {
-		s.settleWG.Done()
-	}
-	state.mu.Unlock()
-	_ = s.srv.CloseRoom(room, true)
 }
 
 func (s *Service) failRoom(room string, cause error) {

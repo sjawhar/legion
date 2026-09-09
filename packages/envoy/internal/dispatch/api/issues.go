@@ -392,6 +392,9 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if (before.ClosedAt == nil) != (after.ClosedAt == nil) {
+		s.deps.Docs.SetIssueClosed(key, after.ClosedAt != nil)
+	}
 	s.publish(events...)
 	writeJSON(w, http.StatusOK, after)
 }
