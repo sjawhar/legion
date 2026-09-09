@@ -1,4 +1,5 @@
 import { renderMermaidSVG } from "beautiful-mermaid";
+import DOMPurify from "dompurify";
 import { type ReactNode, useEffect, useMemo, useRef } from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -9,6 +10,31 @@ interface MermaidDiagramProps {
 }
 
 type MermaidRender = { svg: string } | { error: string };
+
+export function sanitizeMermaidSvg(svg: string): DocumentFragment {
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = DOMPurify.sanitize(`<div>${svg}</div>`, {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true },
+  });
+  const diagram = wrapper.querySelector("svg");
+  const fragment = document.createDocumentFragment();
+  if (diagram === null) {
+    return fragment;
+  }
+
+  for (const script of diagram.querySelectorAll("script")) {
+    script.remove();
+  }
+  for (const element of [diagram, ...diagram.querySelectorAll("*")]) {
+    for (const attribute of [...element.attributes]) {
+      if (attribute.name.toLowerCase().startsWith("on")) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
+  fragment.append(diagram);
+  return fragment;
+}
 
 function MermaidDiagram({ source }: MermaidDiagramProps): ReactNode {
   const target = useRef<HTMLDivElement>(null);
@@ -24,8 +50,7 @@ function MermaidDiagram({ source }: MermaidDiagramProps): ReactNode {
     if (!("svg" in rendered) || target.current === null) {
       return;
     }
-    const parsed = new DOMParser().parseFromString(rendered.svg, "image/svg+xml");
-    target.current.replaceChildren(document.importNode(parsed.documentElement, true));
+    target.current.replaceChildren(sanitizeMermaidSvg(rendered.svg));
   }, [rendered]);
 
   if ("error" in rendered) {

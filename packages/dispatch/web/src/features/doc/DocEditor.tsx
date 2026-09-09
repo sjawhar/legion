@@ -1,5 +1,5 @@
 import { markdown } from "@codemirror/lang-markdown";
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -38,11 +38,23 @@ export function wsUrl(artifactId: string): string {
   return `${protocol}//${window.location.host}/ws/doc/${encodeURIComponent(artifactId)}`;
 }
 
+function editorAccess(isClosed: boolean) {
+  return [EditorState.readOnly.of(isClosed), EditorView.editable.of(!isClosed)];
+}
+
 export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNode {
   const host = useRef<HTMLDivElement>(null);
+  const isClosedRef = useRef(isClosed);
+  const providerRef = useRef<HocuspocusProvider | null>(null);
+  const userLoginRef = useRef(user.login);
+  const viewRef = useRef<EditorView | null>(null);
+  const readOnlyRef = useRef<Compartment | null>(null);
+  isClosedRef.current = isClosed;
+  userLoginRef.current = user.login;
   const queryClient = useQueryClient();
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [content, setContent] = useState("");
+  const [synced, setSynced] = useState(false);
   const [mode, setMode] = useState<EditorMode>("edit");
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [showDiff, setShowDiff] = useState(false);
@@ -74,7 +86,7 @@ export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNo
       setShowDiff(false);
     },
   });
-  const liveMarkdown = content || liveTextQuery.data?.markdown || "";
+  const liveMarkdown = synced ? content : (liveTextQuery.data?.markdown ?? content);
   const selectedMarkdown =
     versionTextQuery.data !== undefined && "markdown" in versionTextQuery.data
       ? versionTextQuery.data.markdown
@@ -99,6 +111,12 @@ export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNo
           setConnection(status === "disconnected" ? "offline" : status);
         }
       },
+      onSynced: ({ state }) => {
+        if (mounted) {
+          setSynced(state);
+          setContent(document.getText("content").toString());
+        }
+      },
       url: wsUrl(artifact.id),
     });
     const awareness = provider.awareness;
@@ -108,40 +126,77 @@ export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNo
       throw new Error("Dispatch document provider did not create awareness.");
     }
     awareness.setLocalStateField("user", {
-      color: colorForLogin(user.login),
-      name: user.login,
+      color: colorForLogin(userLoginRef.current),
+      name: userLoginRef.current,
     });
     const ytext = document.getText("content");
-    const syncContent = () => setContent(ytext.toString());
+    const syncContent = () => {
+      if (mounted) {
+        setContent(ytext.toString());
+      }
+    };
     ytext.observe(syncContent);
-    syncContent();
-    const extensions = [
-      markdown(),
-      EditorView.lineWrapping,
-      EditorView.theme({ "&": { minHeight: "24rem" } }),
-      yCollab(ytext, awareness),
-    ];
-    if (isClosed) {
-      extensions.push(EditorState.readOnly.of(true), EditorView.editable.of(false));
-    }
+
+    const readOnly = new Compartment();
     const view = new EditorView({
       parent,
       state: EditorState.create({
         extensions: [
           EditorView.contentAttributes.of({ "aria-label": "Document editor" }),
-          ...extensions,
+          markdown(),
+          EditorView.lineWrapping,
+          EditorView.theme({ "&": { minHeight: "24rem" } }),
+          yCollab(ytext, awareness),
+          readOnly.of(editorAccess(isClosedRef.current)),
         ],
       }),
     });
+    providerRef.current = provider;
+    viewRef.current = view;
+    readOnlyRef.current = readOnly;
+    setConnection("connecting");
+    setContent("");
+    setSynced(false);
 
     return () => {
       mounted = false;
-      view.destroy();
       ytext.unobserve(syncContent);
+      view.destroy();
       provider.destroy();
       document.destroy();
+      if (providerRef.current === provider) {
+        providerRef.current = null;
+      }
+      if (viewRef.current === view) {
+        viewRef.current = null;
+      }
+      if (readOnlyRef.current === readOnly) {
+        readOnlyRef.current = null;
+      }
     };
-  }, [artifact.id, isClosed, user.login]);
+  }, [artifact.id]);
+
+  useEffect(() => {
+    const awareness = providerRef.current?.awareness;
+    if (awareness === null || awareness === undefined) {
+      return;
+    }
+
+    awareness.setLocalStateField("user", {
+      color: colorForLogin(user.login),
+      name: user.login,
+    });
+  }, [user.login]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    const readOnly = readOnlyRef.current;
+    if (view === null || readOnly === null) {
+      return;
+    }
+
+    view.dispatch({ effects: readOnly.reconfigure(editorAccess(isClosed)) });
+  }, [isClosed]);
 
   const selectVersion = (value: string) => {
     setSelectedVersion(value === "" ? null : Number(value));

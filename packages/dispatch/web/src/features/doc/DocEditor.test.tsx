@@ -1,7 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
+import { EditorView } from "@codemirror/view";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { Artifact } from "../../api/types";
 import { DocEditor } from "./DocEditor";
 
@@ -39,7 +40,8 @@ test("DocEditor destroys its room provider when it unmounts", () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  const destroy = spyOn(HocuspocusProvider.prototype, "destroy");
+  const destroyProvider = spyOn(HocuspocusProvider.prototype, "destroy");
+  const destroyEditor = spyOn(EditorView.prototype, "destroy");
 
   try {
     const { unmount } = render(
@@ -48,9 +50,11 @@ test("DocEditor destroys its room provider when it unmounts", () => {
       </QueryClientProvider>
     );
     unmount();
-    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(destroyProvider).toHaveBeenCalledTimes(1);
+    expect(destroyEditor).toHaveBeenCalledTimes(1);
   } finally {
-    destroy.mockRestore();
+    destroyProvider.mockRestore();
+    destroyEditor.mockRestore();
     globalThis.WebSocket = originalWebSocket;
   }
 });
@@ -72,6 +76,109 @@ test("DocEditor makes a closed document visibly read-only", () => {
     expect(container.querySelector(".cm-content")?.getAttribute("contenteditable")).toBe("false");
     unmount();
   } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
+test("DocEditor preserves the room when the issue closes", () => {
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const providerConfiguration = spyOn(HocuspocusProvider.prototype, "setConfiguration");
+  const destroy = spyOn(HocuspocusProvider.prototype, "destroy");
+
+  try {
+    const { rerender, unmount } = render(
+      <QueryClientProvider client={queryClient}>
+        <DocEditor artifact={artifact} isClosed={false} user={{ login: "alice" }} />
+      </QueryClientProvider>
+    );
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <DocEditor artifact={artifact} isClosed={true} user={{ login: "alice" }} />
+      </QueryClientProvider>
+    );
+
+    expect(providerConfiguration).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
+    unmount();
+  } finally {
+    providerConfiguration.mockRestore();
+    destroy.mockRestore();
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
+test("DocEditor uses an empty synchronized document in preview and version diffs", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+  const version = {
+    authors: [{ id: "alice", kind: "user" as const }],
+    created_at: "2026-09-09T00:00:00Z",
+    named: false,
+    number: 1,
+    summary: null,
+  };
+  const artifactWithVersion = { ...artifact, versions: [version] };
+  let provider: HocuspocusProvider | undefined;
+  const originalSetConfiguration = HocuspocusProvider.prototype.setConfiguration;
+  const captureProvider = spyOn(
+    HocuspocusProvider.prototype,
+    "setConfiguration"
+  ).mockImplementation(function (this: HocuspocusProvider, configuration) {
+    provider = this;
+    return originalSetConfiguration.call(this, configuration);
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["artifact", artifact.id], artifactWithVersion);
+  queryClient.setQueryData(["artifact", artifact.id, "text"], {
+    markdown: "Use SQLite",
+    version: 1,
+  });
+  queryClient.setQueryData(["artifact", artifact.id, "version", 1], {
+    markdown: "Use SQLite",
+    version: 1,
+  });
+  let unmount: (() => void) | undefined;
+
+  try {
+    const rendered = render(
+      <QueryClientProvider client={queryClient}>
+        <DocEditor artifact={artifactWithVersion} isClosed={false} user={{ login: "alice" }} />
+      </QueryClientProvider>
+    );
+    unmount = rendered.unmount;
+    const documentEditor = within(rendered.container);
+    await waitFor(() => expect(provider).toBeDefined());
+    const documentProvider = provider;
+    if (documentProvider === undefined) {
+      throw new Error("DocEditor did not create a document provider.");
+    }
+    const ytext = documentProvider.document.getText("content");
+    act(() => {
+      ytext.insert(0, "Use SQLite");
+      documentProvider.synced = true;
+      ytext.delete(0, ytext.length);
+    });
+
+    fireEvent.click(documentEditor.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(documentEditor.queryByText("Use SQLite")).toBeNull());
+
+    fireEvent.change(documentEditor.getByLabelText("Version"), { target: { value: "1" } });
+    await documentEditor.findByTestId("version-view");
+    fireEvent.click(documentEditor.getByRole("button", { name: "Diff vs current" }));
+    await waitFor(() => {
+      const diff = documentEditor.getByTestId("version-diff");
+      expect(diff.querySelector("del")?.textContent).toContain("Use SQLite");
+      expect(diff.querySelector("ins")).toBeNull();
+    });
+  } finally {
+    unmount?.();
+    captureProvider.mockRestore();
     globalThis.WebSocket = originalWebSocket;
   }
 });
