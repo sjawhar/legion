@@ -386,6 +386,16 @@ func TestExternalIssueResolutionAndAutoCreation(t *testing.T) {
 	}
 }
 
+func TestExternalIssueRejectsUnmappedProject(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"external": "unmapped/repository#1",
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"PROJECT_UNMAPPED"`) {
+		t.Fatalf("create unmapped external issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestArtifactVersionsAndPrimaryDocument(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -1487,5 +1497,122 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	}
 	if err == nil || response == nil || (response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden) {
 		t.Fatalf("revoked cookie websocket: response=%#v err=%v, want rejected handshake", response, err)
+	}
+}
+
+func TestArtifactUploadSummaryCreatesNamedVersions(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Named uploads", "before")
+	for _, test := range []struct {
+		name        string
+		artifact    string
+		contentType string
+		content     []byte
+	}{
+		{name: "document", artifact: "notes.md", contentType: "text/markdown", content: []byte("# Notes")},
+		{name: "blob", artifact: "data.pdf", contentType: "application/pdf", content: []byte("%PDF")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+				"name": test.artifact, "summary": "Initial upload",
+			}, test.artifact, test.contentType, test.content, "alice")
+			if response.Code != http.StatusCreated {
+				t.Fatalf("upload artifact: status=%d body=%s", response.Code, response.Body.String())
+			}
+			upload := decodeBody[struct {
+				Version model.Version `json:"version"`
+			}](t, response)
+			if !upload.Version.Named || upload.Version.Summary == nil || *upload.Version.Summary != "Initial upload" {
+				t.Fatalf("upload version = %#v, want named version with summary", upload.Version)
+			}
+		})
+	}
+}
+
+func TestSSEReplayCapsAtOneThousandAndResumes(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into events (issue_key, seq, type, actor, payload, notify)
+		select $1, value, 'seeded', jsonb_build_object('kind', 'session', 'id', 'seed'), jsonb_build_object('seq', value), false
+		from generate_series(2, 1006) as value
+	`, issue.Key); err != nil {
+		t.Fatalf("seed replay events: %v", err)
+	}
+
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/api/v1/events?since=1", nil)
+	if err != nil {
+		t.Fatalf("construct capped SSE request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer agent-token")
+	stream, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("open capped SSE stream: %v", err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK {
+		t.Fatalf("capped SSE status: got %d, want %d", stream.StatusCode, http.StatusOK)
+	}
+	scanner := bufio.NewScanner(stream.Body)
+	for wantID := 2; wantID <= 1001; wantID++ {
+		frame := readSSEFrame(t, scanner)
+		if frame[0] != fmt.Sprintf("id: %d", wantID) {
+			t.Fatalf("replay frame %d = %#v, want id %d", wantID-1, frame, wantID)
+		}
+	}
+	// The subscription cannot backfill ids the capped replay skipped, so the server ends
+	// the stream; an EventSource then reconnects with Last-Event-ID and drains the rest.
+	streamEnded := make(chan bool, 1)
+	go func() {
+		more := scanner.Scan()
+		streamEnded <- !more
+	}()
+	select {
+	case ended := <-streamEnded:
+		if !ended {
+			t.Fatalf("capped replay emitted an additional line: %q", scanner.Text())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("capped SSE stream stayed open instead of ending for reconnect")
+	}
+	cancel()
+
+	resume, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events", nil)
+	if err != nil {
+		t.Fatalf("construct resumed SSE request: %v", err)
+	}
+	resume.Header.Set("Authorization", "Bearer agent-token")
+	resume.Header.Set("Last-Event-ID", "1001")
+	resumed, err := http.DefaultClient.Do(resume)
+	if err != nil {
+		t.Fatalf("open resumed SSE stream: %v", err)
+	}
+	defer resumed.Body.Close()
+	if resumed.StatusCode != http.StatusOK {
+		t.Fatalf("resumed SSE status: got %d, want %d", resumed.StatusCode, http.StatusOK)
+	}
+	resumedScanner := bufio.NewScanner(resumed.Body)
+	for wantID := 1002; wantID <= 1006; wantID++ {
+		frame := readSSEFrame(t, resumedScanner)
+		if frame[0] != fmt.Sprintf("id: %d", wantID) {
+			t.Fatalf("resumed replay frame %d = %#v, want id %d", wantID-1001, frame, wantID)
+		}
 	}
 }

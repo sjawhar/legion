@@ -132,6 +132,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/issues/{key}/comments", s.listComments)
 	mux.HandleFunc("POST /api/v1/issues/{key}/comments", s.createComment)
 	mux.HandleFunc("POST /api/v1/comments/{id}/resolve", s.resolveComment)
+	mux.HandleFunc("GET /api/v1/comments/{id}", s.getComment)
 	mux.HandleFunc("POST /api/v1/comments/{id}/accept", s.acceptComment)
 	mux.HandleFunc("POST /api/v1/comments/{id}/reject", s.rejectComment)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}", s.getArtifact)

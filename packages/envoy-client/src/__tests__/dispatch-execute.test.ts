@@ -274,4 +274,267 @@ describe("executeDispatchTool", () => {
       summary: "Record final wording",
     });
   });
+
+  test("creates an unlinked external issue once, then resolves it for later tool calls", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    let resolves = 0;
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = { url: String(url), init: init ?? {} };
+      requests.push(request);
+      const target = new URL(request.url);
+      if (target.pathname === "/api/v1/issues/resolve") {
+        resolves += 1;
+        return resolves === 1
+          ? new Response(JSON.stringify({ code: "NOT_FOUND", error: "issue not found" }), {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            })
+          : response({ key: "DSP-42" });
+      }
+      if (target.pathname === "/api/v1/issues") return response({ key: "DSP-42" });
+      if (target.pathname === "/api/v1/issues/DSP-42/messages") {
+        return response({ id: `message-${resolves}`, issue_key: "DSP-42" });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const input = {
+      tool: "dispatch_message",
+      args: { issue: "owner/repo#42", body: "Proceed" },
+      cwd: "/workspace",
+      host: "omp" as const,
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    };
+
+    await executeDispatchTool(input);
+    await executeDispatchTool(input);
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
+      "/api/v1/issues",
+      "/api/v1/issues/DSP-42/messages",
+      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
+      "/api/v1/issues/DSP-42/messages",
+    ]);
+    expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
+      external: "owner/repo#42",
+      actor: { kind: "session", id: "session-42" },
+    });
+  });
+
+  test("names the unmapped external repository and DISPATCH_REPO_PROJECTS", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/resolve") {
+        return new Response(JSON.stringify({ code: "NOT_FOUND", error: "issue not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (path === "/api/v1/issues") {
+        return new Response(
+          JSON.stringify({
+            code: "PROJECT_UNMAPPED",
+            error: "repository is not mapped in DISPATCH_REPO_PROJECTS",
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_message",
+        args: { issue: "owner/repo#42", body: "Proceed" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow("repository owner/repo is not mapped in DISPATCH_REPO_PROJECTS");
+  });
+
+  test("does not send a blank body when posting a suggestion without a rationale", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = { url: String(url), init: init ?? {} };
+      requests.push(request);
+      const path = new URL(request.url).pathname;
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+        });
+      }
+      if (path === "/api/v1/issues/DSP-42/comments") {
+        return response({ id: "comment-42", issue_key: "DSP-42" });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_suggest",
+      args: {
+        issue: "DSP-42",
+        artifact: "spec",
+        quote: "draft",
+        replace_with: "final",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
+      anchor: { artifact: "artifact-42", quote: "draft" },
+      suggestion: { replace_with: "final" },
+    });
+    expect(JSON.parse(requests[1]?.init.body as string)).not.toHaveProperty("body");
+  });
+
+  test("reads the targeted ask from a Dispatch ask reference", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/asks/ask-42") {
+        return response({
+          id: "ask-42",
+          issue_key: "DSP-42",
+          author: { kind: "session", id: "author-1" },
+          question: "Which API should we ship?",
+          options: [{ label: "JSON", description: "Use the HTTP API." }, { label: "MCP" }],
+          multiple: false,
+          custom: true,
+          urgency: "high",
+          anchor: null,
+          state: "answered",
+          answer: {
+            user: "sami",
+            selected: ["JSON"],
+            text: "Ship JSON.",
+            at: "2026-09-09T00:00:00Z",
+          },
+          created_at: "2026-09-09T00:00:00Z",
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: "dispatch://DSP-42/ask/ask-42" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).resolves.toEqual({
+      text: [
+        "Question: Which API should we ship?",
+        "Options:",
+        "- JSON — Use the HTTP API.",
+        "- MCP",
+        "State: answered",
+        "Answer:",
+        "- By: sami",
+        "- Selected: JSON",
+        "- Text: Ship JSON.",
+      ].join("\n"),
+      details: { issue: "DSP-42" },
+    });
+    expect(requests).toEqual(["/api/v1/asks/ask-42"]);
+  });
+
+  test("reads the targeted comment and quoted reply chain from a Dispatch comment reference", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/comments/comment-42") {
+        return response({
+          comment: {
+            id: "comment-42",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "reviewer-1" },
+            body: "Please revise this.",
+            anchor: {
+              artifact_id: "artifact-42",
+              version: 1,
+              quote: "Initial wording",
+              from: 0,
+              to: 15,
+              orphaned: false,
+            },
+            reply_to: null,
+            resolved: false,
+            suggestion: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [
+            {
+              id: "comment-43",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Revised.",
+              anchor: {
+                artifact_id: "artifact-42",
+                version: 2,
+                quote: "Revised wording",
+                from: 0,
+                to: 15,
+                orphaned: false,
+              },
+              reply_to: "comment-42",
+              resolved: false,
+              suggestion: null,
+              created_at: "2026-09-09T00:01:00Z",
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: "dispatch://DSP-42/comment/comment-42" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).resolves.toEqual({
+      text: [
+        "Comment:",
+        "comment-42 · session reviewer-1",
+        "> Initial wording",
+        "Body: Please revise this.",
+        "Reply chain:",
+        "comment-43 · user sami",
+        "> Revised wording",
+        "Body: Revised.",
+      ].join("\n"),
+      details: { issue: "DSP-42" },
+    });
+    expect(requests).toEqual(["/api/v1/comments/comment-42"]);
+  });
 });

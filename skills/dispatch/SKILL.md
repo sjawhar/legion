@@ -15,7 +15,9 @@ It refuses over-limit input; it never truncates it. GitHub threads and markers n
 ## Your issue
 
 Every session works on an issue. Legion pre-fills `issue` from `LEGION_ISSUE`; otherwise pass the
-issue to every issue-scoped tool as its native `KEY` or an external `owner/repo#n` reference.
+issue to every issue-scoped tool as its native `KEY` or an external `owner/repo#n` reference. On
+first use, an external reference creates its native issue in the project mapped by
+`DISPATCH_REPO_PROJECTS`.
 
 Architects create newly tracked child work with:
 ```ts
@@ -139,8 +141,10 @@ reach you. Session-authored events never wake sessions. After a restart, catch u
 dispatch_read({ issue?, ref? })
 ```
 
-It returns the issue summary, open asks, and recent events with `details` `{ issue }`. Use
-`dispatch_doc_read` for document contents.
+With an issue ref, it returns the issue summary, open asks, and recent events with `details`
+`{ issue }`. With an ask ref, it returns that ask's question, options, state, and answer. With a
+comment ref, it returns that comment and its quoted reply chain. Use `dispatch_doc_read` for
+document contents.
 
 ## References
 

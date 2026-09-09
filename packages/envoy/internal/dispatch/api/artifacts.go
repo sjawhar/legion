@@ -189,10 +189,10 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	if kind == "doc" {
 		if err := tx.QueryRow(r.Context(), `
-			insert into artifact_versions (artifact_id, number, markdown, authors, summary)
-			values ($1, $2, $3, $4, $5)
+			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary)
+			values ($1, $2, $3, $4, $5, $6)
 			returning number, named, summary, authors, created_at
-		`, artifact.ID, nextNumber, string(content), authors, summaryValue).Scan(
+		`, artifact.ID, nextNumber, string(content), authors, summary != "", summaryValue).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, err)
@@ -215,10 +215,10 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	} else {
 		size := len(content)
 		if err := tx.QueryRow(r.Context(), `
-			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, summary)
-			values ($1, $2, $3, $4, $5, $6, $7, $8)
+			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			returning number, named, summary, authors, created_at, size, mime, sha256
-		`, artifact.ID, nextNumber, content, contentType, size, sha, authors, summaryValue).Scan(
+		`, artifact.ID, nextNumber, content, contentType, size, sha, authors, summary != "", summaryValue).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
 			&version.Size, &version.MIME, &version.SHA256,
 		); err != nil {
@@ -442,7 +442,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	applied, err := s.deps.Docs.ApplyOps(r.Context(), artifact.ID, input.Ops, actor)
+	applied, err := s.deps.Docs.ApplyOps(docs.WithTx(r.Context(), tx), artifact.ID, input.Ops, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -12,9 +12,11 @@ import {
 import {
   type Actor,
   type Artifact,
+  type Ask,
   type AskInput,
   type AskUrgency,
   type Comment,
+  type CommentRead,
   DispatchClient,
   DispatchServiceError,
   type EditOperation,
@@ -42,7 +44,8 @@ export interface DispatchToolResult {
 
 interface ParsedDispatchRef {
   readonly issue: string;
-  readonly artifact?: string;
+  readonly kind: "issue" | "spec" | "artifact" | "ask" | "comment";
+  readonly id: string;
   readonly version?: number;
 }
 
@@ -83,16 +86,23 @@ function askUrgency(args: Record<string, unknown>): AskUrgency | undefined {
 
 function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   const match = ref.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(?:spec|artifact\/([^/@]+)(?:@v(\d+))?|ask\/[^/]+|comment\/[^/]+))?$/
+    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+))?$/
   );
   if (!match) return null;
-  const [, issue, artifact, version] = match;
+  const [, issue, spec, artifact, version, ask, comment] = match;
   if (!issue || (version !== undefined && Number(version) < 1)) return null;
-  return {
-    issue,
-    ...(artifact === undefined ? {} : { artifact }),
-    ...(version === undefined ? {} : { version: Number(version) }),
-  };
+  if (spec) return { issue, kind: "spec", id: spec };
+  if (artifact) {
+    return {
+      issue,
+      kind: "artifact",
+      id: artifact,
+      ...(version === undefined ? {} : { version: Number(version) }),
+    };
+  }
+  if (ask) return { issue, kind: "ask", id: ask };
+  if (comment) return { issue, kind: "comment", id: comment };
+  return { issue, kind: "issue", id: issue };
 }
 
 function toolSchema(tool: string): z.ZodObject<z.ZodRawShape> {
@@ -125,8 +135,8 @@ async function resolveIssueArguments(
       args: {
         ...args,
         ...(issueArgument === undefined && ref?.issue !== undefined ? { issue: ref.issue } : {}),
-        ...(artifactArgument === undefined && ref?.artifact !== undefined
-          ? { artifact: ref.artifact }
+        ...(artifactArgument === undefined && (ref?.kind === "spec" || ref?.kind === "artifact")
+          ? { artifact: ref.id }
           : {}),
         ...(versionArgument === undefined && ref?.version !== undefined
           ? { version: ref.version }
@@ -203,6 +213,44 @@ function issueSummary(issue: IssueDetails, events: readonly Event[]): string {
   ].join("\n");
 }
 
+function askSummary(ask: Ask): string {
+  const answer = ask.answer;
+  return [
+    `Question: ${ask.question}`,
+    "Options:",
+    ...(ask.options.length === 0
+      ? ["- none"]
+      : ask.options.map(
+          (option) => `- ${option.label}${option.description ? ` — ${option.description}` : ""}`
+        )),
+    `State: ${ask.state}`,
+    "Answer:",
+    ...(answer === null
+      ? ["- none"]
+      : [
+          `- By: ${answer.user}`,
+          `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
+          ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
+        ]),
+  ].join("\n");
+}
+
+function commentSummary({ comment, replies }: CommentRead): string {
+  const root = [
+    `${comment.id} · ${comment.author.kind} ${comment.author.id}`,
+    ...(comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`]),
+    `Body: ${comment.body}`,
+  ];
+  const chain = replies.flatMap((reply) => [
+    `${reply.id} · ${reply.author.kind} ${reply.author.id}`,
+    ...(reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`]),
+    `Body: ${reply.body}`,
+  ]);
+  return ["Comment:", ...root, "Reply chain:", ...(chain.length === 0 ? ["- none"] : chain)].join(
+    "\n"
+  );
+}
+
 async function openArtifactMarks(
   client: DispatchClient,
   resolved: ResolvedArtifact
@@ -243,7 +291,14 @@ export async function executeDispatchTool(
   const args = toolSchema(input.tool).parse(issueArguments.args) as Record<string, unknown>;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = new DispatchClient(input.config.url, input.config.token, input.fetchImpl);
-  const issue = () => stringArg(args, "issue");
+  const issueKey =
+    input.tool === "dispatch_issue"
+      ? null
+      : await ensureIssue(client, stringArg(args, "issue"), actor);
+  const issue = () => {
+    if (issueKey === null) throw new Error("issue is required");
+    return issueKey;
+  };
 
   switch (input.tool) {
     case "dispatch_issue": {
@@ -316,8 +371,9 @@ export async function executeDispatchTool(
       const resolved = await resolveArtifact(client, issue(), stringArg(args, "artifact"));
       const anchored = anchor(resolved.artifact, args);
       if (anchored === undefined) throw new Error("quote is required");
+      const body = optionalString(args, "body");
       const comment = await client.suggest(issue(), {
-        body: optionalString(args, "body") ?? "",
+        ...(body === undefined ? {} : { body }),
         anchor: anchored,
         replace_with: stringArg(args, "replace_with"),
         actor,
@@ -365,7 +421,11 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_doc_read": {
-      const artifactReference = optionalString(args, "artifact") ?? issueArguments.ref?.artifact;
+      const artifactReference =
+        optionalString(args, "artifact") ??
+        (issueArguments.ref?.kind === "spec" || issueArguments.ref?.kind === "artifact"
+          ? issueArguments.ref.id
+          : undefined);
       const resolved = await resolveArtifact(client, issue(), artifactReference);
       const version = optionalNumber(args, "version") ?? issueArguments.ref?.version;
       const document = await client.docRead(resolved.artifact.id, version);
@@ -399,6 +459,14 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_read": {
+      if (issueArguments.ref?.kind === "ask") {
+        const ask = await client.getAsk(issueArguments.ref.id);
+        return { text: askSummary(ask), details: { issue: ask.issue_key } };
+      }
+      if (issueArguments.ref?.kind === "comment") {
+        const comment = await client.getComment(issueArguments.ref.id);
+        return { text: commentSummary(comment), details: { issue: comment.comment.issue_key } };
+      }
       const read = await client.read(issue());
       return { text: issueSummary(read.issue, read.events), details: { issue: read.issue.key } };
     }
@@ -407,6 +475,21 @@ export async function executeDispatchTool(
   }
 }
 
+async function ensureIssue(
+  client: DispatchClient,
+  issueReference: string,
+  actor: Actor
+): Promise<string> {
+  try {
+    return await client.ensureIssue(issueReference, actor);
+  } catch (error) {
+    if (error instanceof DispatchServiceError && error.code === "PROJECT_UNMAPPED") {
+      const repository = issueReference.slice(0, issueReference.lastIndexOf("#"));
+      throw new Error(`repository ${repository} is not mapped in DISPATCH_REPO_PROJECTS`);
+    }
+    throw error;
+  }
+}
 function asObject(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -47,6 +48,51 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, comments)
 }
 
+func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	comment, err := s.loadComment(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `
+		with recursive replies as (
+			select id, issue_key, author, body, anchor, reply_to, resolved, suggestion, created_at
+			from comments where reply_to = $1
+			union all
+			select c.id, c.issue_key, c.author, c.body, c.anchor, c.reply_to, c.resolved, c.suggestion, c.created_at
+			from comments c join replies r on c.reply_to = r.id
+		)
+		select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
+		from replies
+		order by created_at, id
+	`, comment.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer rows.Close()
+	replies := []model.Comment{}
+	for rows.Next() {
+		reply, err := scanComment(rows)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		replies = append(replies, reply)
+	}
+	if err := rows.Err(); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Comment model.Comment   `json:"comment"`
+		Replies []model.Comment `json:"replies"`
+	}{Comment: comment, Replies: replies})
+}
+
 func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Body       string             `json:"body"`
@@ -65,7 +111,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if strings.TrimSpace(input.Body) == "" {
+	if input.Suggestion == nil && strings.TrimSpace(input.Body) == "" {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
 	}
@@ -257,7 +303,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 				writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
 				return
 			}
-			if err := s.deps.Docs.ApplyReplace(r.Context(), comment.Anchor.ArtifactID, *comment.Anchor, comment.Suggestion.ReplaceWith, actor); err != nil {
+			if err := s.deps.Docs.ApplyReplace(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, *comment.Anchor, comment.Suggestion.ReplaceWith, actor); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
@@ -305,6 +351,13 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	}
 	s.publish(event)
 	writeJSON(w, http.StatusOK, comment)
+}
+
+func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.Comment, error) {
+	return scanComment(q.QueryRow(ctx, `
+		select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
+		from comments where id = $1
+	`, id))
 }
 
 func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {

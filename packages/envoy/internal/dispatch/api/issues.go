@@ -84,7 +84,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		project, mapped := s.deps.RepoProjects[externalRepo]
 		if !mapped {
-			writeError(w, "EXTERNAL_REPO_UNMAPPED", http.StatusBadRequest, "repository is not mapped in DISPATCH_REPO_PROJECTS")
+			writeError(w, "PROJECT_UNMAPPED", http.StatusBadRequest, "repository is not mapped in DISPATCH_REPO_PROJECTS")
 			return
 		}
 		if input.Project != "" && input.Project != project {

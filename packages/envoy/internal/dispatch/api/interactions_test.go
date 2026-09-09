@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/persistence"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -1022,4 +1025,249 @@ func TestNamedArtifactVersionEventCarriesUnifiedDiff(t *testing.T) {
 		return
 	}
 	t.Fatalf("artifact.version event not found in %#v", log)
+}
+
+func TestSuggestionAllowsEmptyBodyWithoutRelaxingCommentValidation(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Empty suggestion", "before")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"suggestion": map[string]string{"replace_with": "after"},
+		"actor":      sessionActor(),
+	})
+	if suggestion.Code != http.StatusCreated {
+		t.Fatalf("create empty-body suggestion: status=%d body=%s", suggestion.Code, suggestion.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, suggestion)
+	if comment.Body != "" {
+		t.Fatalf("empty-body suggestion body = %q, want empty", comment.Body)
+	}
+	ordinary := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": " ", "actor": sessionActor(),
+	})
+	if ordinary.Code != http.StatusBadRequest || !strings.Contains(ordinary.Body.String(), `"code":"INVALID_COMMENT"`) {
+		t.Fatalf("empty ordinary comment: status=%d body=%s", ordinary.Code, ordinary.Body.String())
+	}
+}
+
+func TestGetCommentReturnsReplyChain(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Comment thread", "before")
+	createComment := func(body string, replyTo *string) model.Comment {
+		t.Helper()
+		input := map[string]any{"body": body, "actor": sessionActor()}
+		if replyTo != nil {
+			input["reply_to"] = *replyTo
+		}
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", input)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create comment %q: status=%d body=%s", body, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Comment](t, response)
+	}
+	root := createComment("root", nil)
+	first := createComment("first reply", &root.ID)
+	nested := createComment("nested reply", &first.ID)
+	second := createComment("second reply", &root.ID)
+	base := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
+	for index, comment := range []model.Comment{root, first, nested, second} {
+		if _, err := database.Pool.Exec(context.Background(), `
+			update comments set created_at = $2 where id = $1
+		`, comment.ID, base.Add(time.Duration(index)*time.Second)); err != nil {
+			t.Fatalf("set comment timestamp: %v", err)
+		}
+	}
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+root.ID, nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read comment thread: status=%d body=%s", response.Code, response.Body.String())
+	}
+	thread := decodeBody[struct {
+		Comment model.Comment   `json:"comment"`
+		Replies []model.Comment `json:"replies"`
+	}](t, response)
+	if thread.Comment.ID != root.ID {
+		t.Fatalf("thread root = %q, want %q", thread.Comment.ID, root.ID)
+	}
+	if len(thread.Replies) != 3 {
+		t.Fatalf("thread replies = %#v, want three replies", thread.Replies)
+	}
+	for index, want := range []string{first.ID, nested.ID, second.ID} {
+		if thread.Replies[index].ID != want {
+			t.Fatalf("thread reply %d = %q, want %q", index, thread.Replies[index].ID, want)
+		}
+	}
+}
+
+func TestGetCommentReturnsNotFound(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/00000000-0000-0000-0000-000000000000", nil, "alice")
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"NOT_FOUND"`) {
+		t.Fatalf("read absent comment: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestEditArtifactRollbackLeavesPersistedDocumentUnchanged(t *testing.T) {
+	var failure *postApplyFailureDocs
+	var persistenceStore *recordingVersionedStore
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		persistenceStore = &recordingVersionedStore{
+			VersionedStore: docs.NewPgVersioned(database),
+			updates:        make(chan struct{}, 2),
+		}
+		documentService := docs.New(docs.Deps{
+			Store: database, Persistence: persistenceStore, Settle: time.Hour,
+		})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		failure = &postApplyFailureDocs{
+			API: documentService, applied: make(chan struct{}), release: make(chan struct{}),
+		}
+		return failure
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Transactional edit", "before")
+	drainDocumentUpdates(persistenceStore)
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
+		})
+	}()
+	waitForPostApply(t, failure)
+	waitForDocumentUpdate(t, persistenceStore)
+	close(failure.release)
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if markdown := reloadedDocumentText(t, database, issue.PrimaryArtifactID); markdown != "before" {
+		t.Fatalf("persisted document after failed edit = %q, want %q", markdown, "before")
+	}
+}
+
+func TestSuggestionAcceptRollbackLeavesPersistedDocumentUnchanged(t *testing.T) {
+	var failure *postApplyFailureDocs
+	var persistenceStore *recordingVersionedStore
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		persistenceStore = &recordingVersionedStore{
+			VersionedStore: docs.NewPgVersioned(database),
+			updates:        make(chan struct{}, 2),
+		}
+		documentService := docs.New(docs.Deps{
+			Store: database, Persistence: persistenceStore, Settle: time.Hour,
+		})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		failure = &postApplyFailureDocs{
+			API: documentService, applied: make(chan struct{}), release: make(chan struct{}),
+		}
+		return failure
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Transactional suggestion", "before")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":       "replace it",
+		"anchor":     map[string]any{"artifact": "spec", "quote": "before"},
+		"suggestion": map[string]string{"replace_with": "after"},
+		"actor":      sessionActor(),
+	})
+	if suggestion.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", suggestion.Code, suggestion.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, suggestion)
+	drainDocumentUpdates(persistenceStore)
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	}()
+	waitForPostApply(t, failure)
+	waitForDocumentUpdate(t, persistenceStore)
+	close(failure.release)
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("accept with forced post-apply failure: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if markdown := reloadedDocumentText(t, database, issue.PrimaryArtifactID); markdown != "before" {
+		t.Fatalf("persisted document after failed accept = %q, want %q", markdown, "before")
+	}
+}
+
+type recordingVersionedStore struct {
+	docs.VersionedStore
+	updates chan struct{}
+}
+
+func (s *recordingVersionedStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	version, err := s.VersionedStore.AppendUpdate(ctx, room, update)
+	if err == nil {
+		s.updates <- struct{}{}
+	}
+	return version, err
+}
+
+func (s *recordingVersionedStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
+	version, err := s.VersionedStore.AppendUpdateTx(ctx, tx, room, update)
+	if err == nil {
+		s.updates <- struct{}{}
+	}
+	return version, err
+}
+
+type postApplyFailureDocs struct {
+	docs.API
+	applied chan struct{}
+	release chan struct{}
+}
+
+func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
+	applied, err := d.API.ApplyOps(ctx, artifactID, ops, actor)
+	if err != nil {
+		return 0, err
+	}
+	close(d.applied)
+	<-d.release
+	return applied, errors.New("forced post-apply failure")
+}
+
+func (d *postApplyFailureDocs) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, replacement string, actor model.Actor) error {
+	if err := d.API.ApplyReplace(ctx, artifactID, anchor, replacement, actor); err != nil {
+		return err
+	}
+	close(d.applied)
+	<-d.release
+	return errors.New("forced post-apply failure")
+}
+
+func drainDocumentUpdates(store *recordingVersionedStore) {
+	for {
+		select {
+		case <-store.updates:
+		default:
+			return
+		}
+	}
+}
+
+func waitForPostApply(t *testing.T, docs *postApplyFailureDocs) {
+	t.Helper()
+	select {
+	case <-docs.applied:
+	case <-time.After(time.Second):
+		t.Fatal("document mutation did not complete")
+	}
+}
+
+func waitForDocumentUpdate(t *testing.T, store *recordingVersionedStore) {
+	t.Helper()
+	select {
+	case <-store.updates:
+	case <-time.After(time.Second):
+		t.Fatal("document mutation did not reach persistence")
+	}
+}
+
+func reloadedDocumentText(t *testing.T, database *store.Store, artifactID string) string {
+	t.Helper()
+	documentService := docs.New(docs.Deps{Store: database, Settle: time.Hour})
+	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+	markdown, err := documentService.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read persisted document: %v", err)
+	}
+	return markdown
 }

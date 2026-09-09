@@ -64,6 +64,7 @@ the table says human only.
 | `/api/v1/asks/{id}` | GET | user or bearer | Read an ask. |
 | `/api/v1/asks/{id}/answer` | POST | human only | Answer an open ask. |
 | `/api/v1/issues/{key}/comments` | GET, POST | user or bearer | List or create comments and suggestions. |
+| `/api/v1/comments/{id}` | GET | user or bearer | Read a comment and its reply chain. |
 | `/api/v1/comments/{id}/resolve` | POST | user or bearer | Resolve a comment. |
 | `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. |
 | `/api/v1/comments/{id}/reject` | POST | human only | Reject a suggestion. |

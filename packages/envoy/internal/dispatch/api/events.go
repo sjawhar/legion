@@ -12,6 +12,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
+const maxSSEReplay = 1000
+
 func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -103,6 +105,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		lastID = event.ID
 	}
 	flusher.Flush()
+	if len(replay) == maxSSEReplay {
+		// The subscription only carries events appended after it was taken, so a capped
+		// replay would leave a gap the live tail never fills. Ending the stream makes the
+		// client reconnect with Last-Event-ID and page through the rest.
+		return
+	}
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -173,8 +181,8 @@ func (s *server) readEventsAfterID(ctx context.Context, after int64) ([]model.Ev
 	return s.readEventRows(ctx, `
 		select id, issue_key, seq, type, actor, notify, created_at, payload
 		from events where id > $1
-		order by id asc
-	`, after)
+		order by id asc limit $2
+	`, after, maxSSEReplay)
 }
 
 func (s *server) readEventRows(ctx context.Context, query string, arguments ...any) ([]model.Event, error) {

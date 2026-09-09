@@ -6,7 +6,8 @@ export interface DispatchToolSpec {
   readonly arguments: <E extends SchemaNode<E>>(z: SchemaApi<E>) => ToolArgumentsShape;
 }
 
-const ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference.";
+const ISSUE_REFERENCE =
+  "An issue is a native KEY or external owner/repo#n reference; an external reference creates its native issue on first use when its repository is mapped in DISPATCH_REPO_PROJECTS.";
 
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
@@ -168,8 +169,8 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_read",
     description:
-      "Read an issue summary, open asks, and recent events. Do not use it for document contents; use " +
-      "dispatch_doc_read instead. Supply issue or ref. " +
+      "Read an issue summary, targeted ask, or targeted comment reply chain. Do not use it for document " +
+      "contents; use dispatch_doc_read instead. Supply issue or ref. " +
       ISSUE_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),

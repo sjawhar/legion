@@ -151,6 +151,11 @@ export interface IssueDetails extends Issue {
   readonly open_asks: Ask[];
   readonly children: { readonly key: string; readonly title: string; readonly status: string }[];
 }
+export interface CommentRead {
+  readonly comment: Comment;
+  readonly replies: Comment[];
+}
+
 export interface IssueRead {
   readonly issue: IssueDetails;
   readonly events: Event[];
@@ -301,10 +306,20 @@ export class DispatchClient {
 
   async suggest(
     issue: string,
-    input: Omit<CommentInput, "suggestion"> & { readonly replace_with: string }
+    input: Omit<CommentInput, "body" | "suggestion"> & {
+      readonly body?: string;
+      readonly replace_with: string;
+    }
   ): Promise<Comment> {
     const { replace_with, ...comment } = input;
-    return this.comment(issue, { ...comment, suggestion: { replace_with } });
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
+      {
+        ...comment,
+        suggestion: { replace_with },
+      }
+    );
   }
 
   async message(
@@ -363,6 +378,10 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "asks", id]);
   }
 
+  async getComment(id: string): Promise<CommentRead> {
+    return this.#json("GET", ["api", "v1", "comments", id]);
+  }
+
   async getComments(issue: string, artifact?: string): Promise<Comment[]> {
     return this.#json(
       "GET",
@@ -370,6 +389,21 @@ export class DispatchClient {
       undefined,
       artifact ? { artifact } : undefined
     );
+  }
+
+  async ensureIssue(issueReference: string, actor: Actor): Promise<string> {
+    if (!issueReference.includes("#")) return issueReference;
+    try {
+      return await this.#resolveIssue(issueReference);
+    } catch (error) {
+      if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
+    }
+    const created = await this.#json<Issue>("POST", ["api", "v1", "issues"], {
+      external: issueReference,
+      actor,
+    });
+    this.#resolvedIssues.set(issueReference, Promise.resolve(created.key));
+    return created.key;
   }
 
   async #resolveIssue(issueReference: string): Promise<string> {
@@ -381,7 +415,12 @@ export class DispatchClient {
       }).then((resolution) => resolution.key);
       this.#resolvedIssues.set(issueReference, resolved);
     }
-    return resolved;
+    try {
+      return await resolved;
+    } catch (error) {
+      this.#resolvedIssues.delete(issueReference);
+      throw error;
+    }
   }
   async #json<T>(
     method: string,

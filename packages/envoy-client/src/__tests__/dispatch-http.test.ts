@@ -193,4 +193,66 @@ describe("DispatchClient", () => {
       "/api/v1/issues/DSP-42/events?after=0&limit=10",
     ]);
   });
+
+  test("creates an unlinked external issue once and resolves it on a later client request", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ code: "NOT_FOUND", error: "issue was not found" }, 404),
+      jsonResponse({ key: "DSP-42" }, 201),
+      jsonResponse({ key: "DSP-42" }),
+    ]);
+    const firstClient = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const secondClient = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(firstClient.ensureIssue("owner/repo#42", actor)).resolves.toBe("DSP-42");
+    await expect(secondClient.ensureIssue("owner/repo#42", actor)).resolves.toBe("DSP-42");
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
+      "/api/v1/issues",
+      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
+    ]);
+    expect(requestBody(requests[1] as RecordedRequest)).toEqual({
+      external: "owner/repo#42",
+      actor,
+    });
+  });
+
+  test("maps comment reply-chain reads to the API", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({
+        comment: {
+          id: "comment-1",
+          issue_key: "DSP-1",
+          author: actor,
+          body: "Root comment",
+          anchor: null,
+          reply_to: null,
+          resolved: false,
+          suggestion: null,
+          created_at: "2026-09-09T00:00:00Z",
+        },
+        replies: [
+          {
+            id: "comment-2",
+            issue_key: "DSP-1",
+            author: actor,
+            body: "Reply",
+            anchor: null,
+            reply_to: "comment-1",
+            resolved: false,
+            suggestion: null,
+            created_at: "2026-09-09T00:01:00Z",
+          },
+        ],
+      }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await client.getComment("comment-1");
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual(["/api/v1/comments/comment-1"]);
+  });
 });
