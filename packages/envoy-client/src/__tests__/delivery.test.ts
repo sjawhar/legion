@@ -99,10 +99,9 @@ describe("renderInbound", () => {
     expect(rendered.content.match(/A comment was created on issue 42\./g)).toHaveLength(1);
   });
 
-  test("renders direct agent metadata with a one-line summary and body once each", async () => {
+  test("renders direct agent metadata with a one-line summary and no payload", async () => {
     const sender = "01a0bbbb-cccc-7ddd-eeee-0123456789ab";
     const summary = "First paragraph.";
-    const body = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
     const rendered = await renderInbound(
       JSON.stringify({
         event_id: "agent-message-2",
@@ -114,7 +113,6 @@ describe("renderInbound", () => {
         issued_at: Date.parse("2026-09-07T04:41:12Z"),
         expires_at: Date.parse("2026-09-07T05:00:00Z"),
         payload_summary: summary,
-        payload: body,
         trace_id: "trace-agent-message-2",
         sender: { session_id: sender, title: "Reviewer", roles: ["legion-reviewer"] },
         in_reply_to: "agent-message-1",
@@ -141,12 +139,70 @@ describe("renderInbound", () => {
         `  reply_with: "envoy_send(session_id=\\"${sender}\\", message=\\"...\\")"`,
         '  reply_role: "envoy_publish(topic=\\"notifications.role.legion-reviewer\\", message=\\"...\\")"',
         "  summary: First paragraph.",
-        '  message: "First paragraph.\\n\\nSecond paragraph.\\n\\nThird paragraph."',
       ].join("\n"),
       envelope: expect.any(Object),
     });
     expect(rendered.content.match(/\n {2}summary:/g)).toHaveLength(1);
-    expect(rendered.content.match(/\n {2}message:/g)).toHaveLength(1);
+    expect(rendered.content).not.toMatch(/\n {2}message:/);
+  });
+
+  test("omits the summary when it is the leading truncation of a longer agent message", async () => {
+    const sender = "01a0bbbb-cccc-7ddd-eeee-0123456789ab";
+    const head = "A".repeat(159);
+    const firstLine = `${head}B long first line continues past the truncation cap.`;
+    const body = `${firstLine}\n\nSecond paragraph.`;
+    const summary = `${head}…`;
+    const rendered = await renderInbound(
+      JSON.stringify({
+        event_id: "agent-message-3",
+        source: "agent",
+        source_session: sender,
+        source_event_id: "agent.message-3",
+        topic: `notifications.agent.${reader}`,
+        dedupe_key: "agent-message-3",
+        issued_at: Date.parse("2026-09-07T04:41:12Z"),
+        payload_summary: summary,
+        payload: body,
+        trace_id: "trace-agent-message-3",
+      }),
+      reader
+    );
+
+    expect(rendered.content).not.toMatch(/\n {2}summary:/);
+    expect(rendered.content).toContain(`  message: "${body.replace(/\n/g, "\\n")}"`);
+  });
+
+  test("keeps a github headline alongside a structured payload it does not summarize", async () => {
+    const rendered = await renderInbound(
+      JSON.stringify({
+        event_id: "github-comment-2",
+        source: "github",
+        source_event_id: "github.issue_comment.43",
+        topic: "notifications.github.example-org.example-repo.issue.43.comment",
+        dedupe_key: "github-comment-2",
+        issued_at: Date.parse("2026-09-07T04:41:12Z"),
+        payload_summary: "A comment was created on issue 43.",
+        payload: JSON.stringify({ author: "Reviewer", body: "A comment was created", number: 43 }),
+        trace_id: "trace-github-comment-2",
+      }),
+      reader
+    );
+
+    expect(rendered).toMatchObject({
+      skip: false,
+      content: [
+        "envoy:",
+        "  from: github",
+        '  at: "2026-09-07T04:41:12Z"',
+        "  id: github-comment-2",
+        "  summary: A comment was created on issue 43.",
+        "  message:",
+        "    author: Reviewer",
+        "    body: A comment was created",
+        "    number: 43",
+      ].join("\n"),
+      envelope: expect.any(Object),
+    });
   });
 
   test("notes a foreign session named only in a payload", async () => {
