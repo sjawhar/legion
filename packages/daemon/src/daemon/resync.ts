@@ -261,17 +261,19 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       if (status.ciStatus === "pending" || status.ciStatus === "failing") uncertifyCiVerdict(pr);
       continue;
     }
+    const envelope = {
+      event_id: `resync:${ref.owner}/${ref.repo}#${ref.number}:ci`,
+      issued_at: now,
+    };
     const effects = settleCiVerdict(
       deps.state,
       pr,
       { verdict, failing, failingStatuses, settledAt: now },
-      deps.config
+      deps.config,
+      envelope
     );
     if (effects.length === 0) continue;
-    await deps.applyEffects(effects, {
-      event_id: `resync:${ref.owner}/${ref.repo}#${ref.number}:ci`,
-      issued_at: now,
-    });
+    await deps.applyEffects(effects, envelope);
   }
   return ciFetchFailures;
 }

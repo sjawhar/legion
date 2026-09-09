@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
+import { formatIssueKey, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
 import {
   type Effect,
@@ -7,6 +7,7 @@ import {
   type ReducerConfig,
   reduceCiEmission,
   reduceGithubEvent,
+  settleCiVerdict,
   uncertifyCiVerdict,
 } from "../reducers";
 
@@ -64,9 +65,12 @@ function rootState(status: "active" | "lingering" | "closed" = "active"): Legion
   return state;
 }
 
-function claim(state: LegionState, key: IssueKey, role: "architect" | "implementer"): string {
+function claim(state: LegionState, key: IssueKey, role: LegionRole): string {
   const token = roleToken(state.project, key, role);
   state.roles[token] = { issue: key, role };
+  if (role !== "architect") {
+    state.phases[key] = { phase: role, sessionId: `${role}-session` };
+  }
   return token;
 }
 
@@ -513,10 +517,133 @@ describe("reduceGithubEvent", () => {
     ]);
   });
 
-  it("holds inactive child issue comments without a role claim", () => {
+  it("keeps routing to the active phase while a tree lingers", () => {
+    const state = rootState("lingering");
+    const implementer = claim(state, root, "implementer");
+
+    expect(
+      effects(state, {
+        action: "created",
+        issue: issue(1),
+        comment: {
+          user: { login: "sami" },
+          body: "Any update?",
+          html_url: "comment-url",
+        },
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: implementer,
+        payload: {
+          type: "issue-comment",
+          author: "sami",
+          body: "Any update?",
+          url: "comment-url",
+        },
+      },
+    ]);
+  });
+
+  it("wakes the controller for activity on a closed tree instead of publishing or holding", () => {
+    const state = rootState("closed");
+
+    expect(
+      effects(state, {
+        action: "created",
+        issue: issue(1),
+        comment: {
+          user: { login: "sami" },
+          body: "Still around?",
+          html_url: "comment-url",
+        },
+      })
+    ).toEqual([
+      {
+        kind: "controller",
+        payload: {
+          type: "closed-tree-activity",
+          issue: root,
+          root,
+          event: {
+            type: "issue-comment",
+            author: "sami",
+            body: "Still around?",
+            url: "comment-url",
+          },
+        },
+      },
+    ]);
+    expect(state.trees[root].heldEvents).toEqual([]);
+  });
+
+  it("wakes the controller exactly once for a closed tree's approved review at a green head", () => {
+    const state = rootState("closed");
+    attachChild(state);
+    addPr(state, { verdict: "green", ciSettledAt: 0 });
+
+    const result = effects(state, {
+      action: "submitted",
+      pull_request: { number: prNumber, head: { sha: "old-sha" } },
+      review: {
+        user: { login: "sami" },
+        state: "approved",
+        commit_id: "old-sha",
+        body: "Looks good",
+      },
+    });
+
+    expect(result.filter((effect) => effect.kind === "controller")).toEqual([
+      {
+        kind: "controller",
+        payload: {
+          type: "closed-tree-activity",
+          issue: child,
+          root,
+          event: {
+            type: "pr-review",
+            state: "approved",
+            author: "sami",
+            body: "Looks good",
+          },
+        },
+      },
+    ]);
+    expect(result).toContainEqual({ kind: "approval-status", repo, pr: prNumber, sha: "old-sha" });
+  });
+
+  it("wakes the controller exactly once when closing the last open child of a closed tree", () => {
+    const state = rootState("closed");
+    attachChild(state);
+
+    expect(
+      effects(state, {
+        action: "closed",
+        issue: issue(2, { state: "closed", state_reason: "completed" }),
+      })
+    ).toEqual([
+      {
+        kind: "controller",
+        payload: {
+          type: "closed-tree-activity",
+          issue: root,
+          root,
+          event: {
+            type: "child-closed",
+            child,
+            completion: "completed",
+            remaining: 0,
+            finalCommentRef: null,
+          },
+        },
+      },
+    ]);
+  });
+
+  it("routes comments on an unreleased child to the tree's architect and never holds them", () => {
     const state = rootState();
     attachChild(state, false);
-    const childArchitect = roleToken(state.project, child, "architect");
+    const architect = roleToken(state.project, root, "architect");
     expect(
       effects(
         state,
@@ -534,9 +661,8 @@ describe("reduceGithubEvent", () => {
       )
     ).toEqual([
       {
-        kind: "hold",
-        tree: root,
-        role: childArchitect,
+        kind: "publish",
+        role: architect,
         payload: {
           type: "issue-comment",
           author: "sami",
@@ -545,19 +671,7 @@ describe("reduceGithubEvent", () => {
         },
       },
     ]);
-    expect(state.trees[root].heldEvents).toEqual([
-      {
-        eventId: "event-hold",
-        heldAt: "2023-11-14T22:13:20.000Z",
-        role: childArchitect,
-        payloadJson: JSON.stringify({
-          type: "issue-comment",
-          author: "sami",
-          body: "Hold this",
-          url: "comment-url",
-        }),
-      },
-    ]);
+    expect(state.trees[root].heldEvents).toEqual([]);
   });
 
   it("filters legion-footer and self-authored comments before routing", () => {
@@ -806,11 +920,10 @@ describe("reduceGithubEvent", () => {
     });
   });
 
-  it("treats a settled green PR as ready after an approved review", () => {
+  it("notifies the active implementer of a review and the subsequent CI-ready signal", () => {
     const state = rootState();
     attachChild(state);
     const implementer = claim(state, child, "implementer");
-    const architect = claim(state, child, "architect");
     addPr(state, {
       verdict: "green",
       ciSettledAt: 0,
@@ -841,18 +954,58 @@ describe("reduceGithubEvent", () => {
       { kind: "approval-status", repo, pr: prNumber, sha: "old-sha" },
       {
         kind: "publish",
+        role: implementer,
+        payload: { type: "pr-ready", pr: prNumber },
+      },
+    ]);
+    expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBe("approved");
+  });
+
+  it("falls back to the tree's architect for a review and its ready signal when no phase is active", () => {
+    const state = rootState();
+    attachChild(state);
+    const architect = roleToken(state.project, root, "architect");
+    addPr(state, {
+      verdict: "green",
+      ciSettledAt: 0,
+    });
+
+    expect(
+      effects(state, {
+        action: "submitted",
+        pull_request: { number: prNumber, head: { sha: "old-sha" } },
+        review: {
+          user: { login: "sami" },
+          state: "approved",
+          commit_id: "old-sha",
+          body: "Looks good",
+        },
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: {
+          type: "pr-review",
+          state: "approved",
+          author: "sami",
+          body: "Looks good",
+        },
+      },
+      { kind: "approval-status", repo, pr: prNumber, sha: "old-sha" },
+      {
+        kind: "publish",
         role: architect,
         payload: { type: "pr-ready", pr: prNumber },
       },
     ]);
   });
 
-  it("removes an unmerged PR mapping and tells the issue architect", () => {
+  it("removes an unmerged PR mapping and tells the tree's architect", () => {
     const state = rootState();
     attachChild(state);
     addPr(state);
-    const architect = roleToken(state.project, child, "architect");
-    claim(state, child, "architect");
+    const architect = roleToken(state.project, root, "architect");
 
     expect(
       effects(state, {
@@ -871,48 +1024,6 @@ describe("reduceGithubEvent", () => {
     ]);
     expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
     expect(state.prByBranch[`${repo}@legion/issue-2`]).toBeUndefined();
-  });
-
-  it("records review state, notifies the implementer, emits approval-status, and notifies ready architect on a new green approval", () => {
-    const state = rootState();
-    attachChild(state);
-    const implementer = claim(state, child, "implementer");
-    const architect = claim(state, child, "architect");
-    addPr(state, {
-      verdict: "green",
-      ciSettledAt: 0,
-    });
-
-    expect(
-      effects(state, {
-        action: "submitted",
-        pull_request: { number: prNumber, head: { sha: "old-sha" } },
-        review: {
-          user: { login: "sami" },
-          state: "approved",
-          commit_id: "old-sha",
-          body: "Looks good",
-        },
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: implementer,
-        payload: {
-          type: "pr-review",
-          state: "approved",
-          author: "sami",
-          body: "Looks good",
-        },
-      },
-      { kind: "approval-status", repo, pr: prNumber, sha: "old-sha" },
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "pr-ready", pr: prNumber },
-      },
-    ]);
-    expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBe("approved");
   });
 
   it("does not retain a review decision when the delivered review is pinned to a stale head", () => {
@@ -1005,7 +1116,7 @@ describe("reduceCiEmission", () => {
     const state = rootState();
     attachChild(state);
     addPr(state, { reviewDecision: "approved", verdict: "green", ciSettledAt: 0 });
-    const architect = claim(state, child, "architect");
+    const architect = roleToken(state.project, root, "architect");
 
     expect(
       reduceCiEmission(state, repo, prNumber, { type: "ci-green", sha: "old-sha" }, config)
@@ -1022,7 +1133,7 @@ describe("reduceCiEmission", () => {
     const state = rootState();
     attachChild(state);
     addPr(state, { fixAttempts: 3, verdict: "red", ciSettledAt: 0 });
-    const architect = claim(state, child, "architect");
+    const architect = roleToken(state.project, root, "architect");
 
     expect(
       reduceCiEmission(
@@ -1039,6 +1150,67 @@ describe("reduceCiEmission", () => {
         payload: { type: "pr-blocked", pr: prNumber, attempts: 3 },
       },
     ]);
+  });
+});
+
+describe("settleCiVerdict", () => {
+  it("routes a CI settlement to the issue's active phase instead of a fixed role", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    const tester = claim(state, child, "tester");
+
+    expect(
+      settleCiVerdict(
+        state,
+        state.prs[`${repo}#${prNumber}`],
+        { verdict: "green", failing: [], failingStatuses: [], settledAt: 5 },
+        config,
+        envelope({})
+      )
+    ).toEqual([{ kind: "publish", role: tester, payload: { type: "ci-green", sha: "old-sha" } }]);
+  });
+
+  it("wakes the controller exactly once for a closed-tree settlement, even when a ready signal would otherwise derive", () => {
+    const state = rootState("closed");
+    attachChild(state);
+    addPr(state, { reviewDecision: "approved" });
+
+    expect(
+      settleCiVerdict(
+        state,
+        state.prs[`${repo}#${prNumber}`],
+        { verdict: "green", failing: [], failingStatuses: [], settledAt: 5 },
+        config,
+        envelope({})
+      )
+    ).toEqual([
+      {
+        kind: "controller",
+        payload: {
+          type: "closed-tree-activity",
+          issue: child,
+          root,
+          event: { type: "ci-green", sha: "old-sha" },
+        },
+      },
+    ]);
+  });
+});
+
+describe("routeActive", () => {
+  it("crashes loud on a persisted phase that names no recognized role", () => {
+    const state = rootState();
+    attachChild(state);
+    state.phases[child] = { phase: "bogus", sessionId: "x" };
+
+    expect(() =>
+      effects(state, {
+        action: "created",
+        issue: issue(2),
+        comment: { user: { login: "sami" }, body: "hi", html_url: "u" },
+      })
+    ).toThrow(child);
   });
 });
 

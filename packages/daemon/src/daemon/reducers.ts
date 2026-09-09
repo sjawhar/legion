@@ -1,4 +1,10 @@
-import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
+import {
+  formatIssueKey,
+  type IssueKey,
+  isLegionRole,
+  type LegionRole,
+  roleToken,
+} from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
 
@@ -9,7 +15,6 @@ export interface LegionEventPayload {
 
 export type Effect =
   | { kind: "publish"; role: string; payload: LegionEventPayload }
-  | { kind: "hold"; tree: IssueKey; role: string; payload: LegionEventPayload }
   | { kind: "controller"; payload: LegionEventPayload }
   | { kind: "probe"; tree: IssueKey }
   | { kind: "linger"; tree: IssueKey }
@@ -331,23 +336,29 @@ export function settleCiVerdict(
   state: LegionState,
   pr: PrState,
   input: CiSettlementInput,
-  config: ReducerConfig
+  config: ReducerConfig,
+  envelope: EnvelopeJson
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  return ciVerdictEmissions(pr, input.verdict, input.failing, input.failingStatuses).flatMap(
-    (emission) => [
-      {
-        kind: "publish" as const,
-        role: roleToken(state.project, pr.key, "implementer"),
-        payload: emission,
-      },
-      ...reduceCiEmission(state, pr.repo, pr.number, emission, config),
-    ]
+  return collapseClosedTreeWakes(
+    ciVerdictEmissions(pr, input.verdict, input.failing, input.failingStatuses).flatMap(
+      (emission) => [
+        ...routeActive(state, pr.key, emission, envelope),
+        ...reduceCiEmission(state, pr.repo, pr.number, emission, config),
+      ]
+    )
   );
 }
 
 type JsonRecord = Record<string, unknown>;
-type RoutedRole = "architect" | "implementer";
+
+/** The controller wake payload for GitHub activity on a tree that has already closed. */
+export interface ClosedTreeActivityPayload extends LegionEventPayload {
+  type: "closed-tree-activity";
+  issue: IssueKey;
+  root: IssueKey;
+  event: LegionEventPayload;
+}
 
 const SURVIVING_LABELS: Record<string, true> = {
   "needs-approval": true,
@@ -448,45 +459,77 @@ function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
   return undefined;
 }
 
-function hold(
-  tree: TreeState,
-  role: string,
-  payload: LegionEventPayload,
-  envelope: EnvelopeJson
-): void {
-  tree.heldEvents.push({
-    role,
-    payloadJson: JSON.stringify(payload),
-    heldAt: new Date(envelope.issued_at).toISOString(),
-    eventId: envelope.event_id,
-  });
-}
-
+/**
+ * Routes an event to an explicit role token. The daemon does not hold events
+ * at the reducer level: release and liveness gating happen where the event
+ * is actually delivered (the event pump's per-publish active check, and the
+ * delivery-exception path when no subscriber is holding the role).
+ */
 function routeToken(
   state: LegionState,
   issue: IssueKey,
   token: string,
   payload: LegionEventPayload,
-  envelope: EnvelopeJson
+  _envelope: EnvelopeJson
 ): Effect[] {
-  const node = state.issues[issue];
-  const tree = treeFor(state, issue);
-  if (!node || !tree) return [];
-  if (node.released && tree.status !== "closed" && state.roles[token]) {
-    return [{ kind: "publish", role: token, payload }];
-  }
-  hold(tree, token, payload, envelope);
-  return [{ kind: "hold", tree: tree.root, role: token, payload }];
+  if (!treeFor(state, issue)) return [];
+  return [{ kind: "publish", role: token, payload }];
 }
 
-function route(
+/**
+ * Routes an event about `issue` to whichever role the shared routing table
+ * names: the issue's active phase worker (`state.phases[issue]`, written by
+ * `handlePhase`), or the tree's architect when no phase is active. A closed
+ * tree instead wakes the controller so a human can decide whether to resume
+ * it.
+ */
+export function routeActive(
   state: LegionState,
   issue: IssueKey,
-  role: RoutedRole,
   payload: LegionEventPayload,
-  envelope: EnvelopeJson
+  _envelope: EnvelopeJson
 ): Effect[] {
-  return routeToken(state, issue, roleToken(state.project, issue, role), payload, envelope);
+  const tree = treeFor(state, issue);
+  if (!tree) return [];
+  if (tree.status === "closed") {
+    return [
+      {
+        kind: "controller",
+        payload: { type: "closed-tree-activity", issue, root: tree.root, event: payload },
+      },
+    ];
+  }
+  const phase = state.phases[issue];
+  if (phase && !isLegionRole(phase.phase)) {
+    throw new Error(
+      `state.phases[${issue}] has an unrecognized phase: ${JSON.stringify(phase.phase)}`
+    );
+  }
+  const token = phase
+    ? roleToken(state.project, issue, phase.phase as LegionRole)
+    : roleToken(state.project, tree.root, "architect");
+  return [{ kind: "publish", role: token, payload }];
+}
+
+/**
+ * One incoming GitHub or CI event can fan through multiple `routeActive`
+ * calls in a single reducer pass — a primary route plus a derived one (a
+ * review and its `pr-ready` follow-on, a child closing and the
+ * `children-complete` it triggers, a CI settlement and the ready/blocked
+ * signal it derives). On a closed tree each call independently wakes the
+ * controller, so one event can produce several `closed-tree-activity`
+ * effects for the same tree. Collapses them to the first (the primary
+ * event) per tree; every other effect kind passes through unchanged.
+ */
+function collapseClosedTreeWakes(effects: Effect[]): Effect[] {
+  const wokenRoots = new Set<IssueKey>();
+  return effects.filter((effect) => {
+    if (effect.kind !== "controller" || effect.payload.type !== "closed-tree-activity") return true;
+    const root = effect.payload.root as IssueKey;
+    if (wokenRoots.has(root)) return false;
+    wokenRoots.add(root);
+    return true;
+  });
 }
 
 function openChildren(state: LegionState, parent: IssueNode): number {
@@ -663,10 +706,9 @@ function subIssue(
     const child = state.issues[childKey] ?? addNode(state, childKey, rawChild, false, parentKey);
     child.parent = parentKey;
     if (known || treeFor(state, parentKey)?.status !== "active") return [];
-    return route(
+    return routeActive(
       state,
       parentKey,
-      "architect",
       {
         type: "child-adopted",
         child: childKey,
@@ -681,10 +723,9 @@ function subIssue(
   const wasOpen = child?.state === "open";
   parent.children = parent.children.filter((key) => key !== childKey);
   if (child?.parent === parentKey) delete child.parent;
-  const result = route(
+  const result = routeActive(
     state,
     parentKey,
-    "architect",
     {
       type: "child-removed",
       child: childKey,
@@ -693,7 +734,7 @@ function subIssue(
     envelope
   );
   if (wasOpen && openChildren(state, parent) === 0) {
-    result.push(...route(state, parentKey, "architect", { type: "children-complete" }, envelope));
+    result.push(...routeActive(state, parentKey, { type: "children-complete" }, envelope));
   }
   return result;
 }
@@ -718,7 +759,7 @@ function issueEvent(
       if (node.labels.includes(label)) return [];
       node.labels.push(label);
       return label === "human-approved"
-        ? route(state, key, "architect", { type: "human-approved" }, envelope)
+        ? routeActive(state, key, { type: "human-approved" }, envelope)
         : [];
     }
     if (!node.labels.includes(label)) return [];
@@ -734,10 +775,9 @@ function issueEvent(
       return state.trees[key]?.status === "active" ? [{ kind: "linger", tree: key }] : [];
     }
     if (!wasOpen) return [];
-    const result = route(
+    const result = routeActive(
       state,
       node.parent,
-      "architect",
       {
         type: "child-closed",
         child: key,
@@ -752,9 +792,7 @@ function issueEvent(
       envelope
     );
     if (openChildren(state, parent) === 0) {
-      result.push(
-        ...route(state, node.parent, "architect", { type: "children-complete" }, envelope)
-      );
+      result.push(...routeActive(state, node.parent, { type: "children-complete" }, envelope));
     }
     return result;
   }
@@ -763,7 +801,7 @@ function issueEvent(
   node.state = "open";
   delete node.finalCommentRef;
   if (node.parent)
-    return route(state, node.parent, "architect", { type: "child-reopened", child: key }, envelope);
+    return routeActive(state, node.parent, { type: "child-reopened", child: key }, envelope);
   const tree = state.trees[key];
   if (!tree) {
     return [
@@ -778,7 +816,13 @@ function issueEvent(
     ];
   }
   if (tree.status === "lingering") {
-    return route(state, key, "architect", { type: "reopened" }, envelope);
+    return routeToken(
+      state,
+      key,
+      roleToken(state.project, key, "architect"),
+      { type: "reopened" },
+      envelope
+    );
   }
   return [
     { kind: "controller", payload: { type: "reactivation", issue: key } },
@@ -805,13 +849,11 @@ function issueComment(
   if (rawIssue.pull_request !== undefined) {
     const pr = state.prs[`${repo}#${number}`];
     return pr
-      ? route(state, pr.key, "implementer", { type: "pr-comment", author, body, url }, envelope)
+      ? routeActive(state, pr.key, { type: "pr-comment", author, body, url }, envelope)
       : [];
   }
   const key = keyFor(repo, number);
-  return key
-    ? route(state, key, "architect", { type: "issue-comment", author, body, url }, envelope)
-    : [];
+  return key ? routeActive(state, key, { type: "issue-comment", author, body, url }, envelope) : [];
 }
 
 function reviewComment(
@@ -829,10 +871,9 @@ function reviewComment(
     return [];
   const pr = state.prs[`${repo}#${number}`];
   if (!pr) return [];
-  return route(
+  return routeActive(
     state,
     pr.key,
-    "implementer",
     {
       type: "pr-review-comment",
       author: stringValue(asRecord(comment.user)?.login) ?? "",
@@ -863,10 +904,9 @@ function review(
   if (isCurrentHead && (decision === "approved" || decision === "changes_requested")) {
     pr.reviewDecision = decision;
   }
-  const result = route(
+  const result = routeActive(
     state,
     pr.key,
-    "implementer",
     {
       type: "pr-review",
       state: decision,
@@ -877,7 +917,7 @@ function review(
   );
   result.push({ kind: "approval-status", repo, pr: number, sha: pr.headSha });
   if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.verdict === "green") {
-    result.push(...route(state, pr.key, "architect", { type: "pr-ready", pr: number }, envelope));
+    result.push(...routeActive(state, pr.key, { type: "pr-ready", pr: number }, envelope));
   }
   return result;
 }
@@ -899,10 +939,9 @@ function pullRequest(
   if (payload.action === "opened") {
     const pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
     if (!pr) return [];
-    return route(
+    return routeActive(
       state,
       pr.key,
-      "implementer",
       { type: "pr-opened", pr: number, url: stringValue(payload.url) ?? "" },
       envelope
     );
@@ -939,7 +978,7 @@ function pullRequest(
   if (payload.action === "closed" && payload.merged === "false") {
     delete state.prs[prKey];
     removeBranchMappings(state, prKey);
-    return route(state, pr.key, "architect", { type: "pr-closed-unmerged", pr: number }, envelope);
+    return routeActive(state, pr.key, { type: "pr-closed-unmerged", pr: number }, envelope);
   }
   return [];
 }
@@ -958,15 +997,15 @@ export function reduceGithubEvent(
   if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/issue-")) return [];
   // Only pullRequest understands Envoy's normalized GitHub envelopes. The issue, issue-comment,
   // review, and projects_v2_item reducers still require raw GitHub nesting and ignore Envoy payloads.
-  return (
+  return collapseClosedTreeWakes(
     ingress(state, payload, config) ??
-    subIssue(state, payload, envelope) ??
-    issueComment(state, payload, envelope, config) ??
-    reviewComment(state, payload, envelope, config) ??
-    review(state, payload, envelope) ??
-    pullRequest(state, payload, envelope) ??
-    issueEvent(state, payload, envelope) ??
-    []
+      subIssue(state, payload, envelope) ??
+      issueComment(state, payload, envelope, config) ??
+      reviewComment(state, payload, envelope, config) ??
+      review(state, payload, envelope) ??
+      pullRequest(state, payload, envelope) ??
+      issueEvent(state, payload, envelope) ??
+      []
   );
 }
 
@@ -985,14 +1024,13 @@ export function reduceCiEmission(
   };
   if (emission.type === "ci-green") {
     return pr.reviewDecision === "approved"
-      ? route(state, pr.key, "architect", { type: "pr-ready", pr: number }, envelope)
+      ? routeActive(state, pr.key, { type: "pr-ready", pr: number }, envelope)
       : [];
   }
   return pr.fixAttempts >= config.maxFixAttempts
-    ? route(
+    ? routeActive(
         state,
         pr.key,
-        "architect",
         { type: "pr-blocked", pr: number, attempts: pr.fixAttempts },
         envelope
       )
