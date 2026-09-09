@@ -76,7 +76,7 @@ export function replyWith(envelope: DeliveryEnvelope): string | undefined {
 // plus artifact_name, artifact.created {artifact}, artifact.version
 // {artifact_id, name, version, diff?}, and child.status {child_key, from, to}.
 // Bus frames are untrusted, so each schema below declares exactly the fields
-// this renderer prints and a frame that disagrees renders without them.
+// this renderer surfaces and a frame that disagrees renders without them.
 const DispatchEventSchema = z.object({
   issue_key: z.string(),
   type: z.string(),
@@ -127,123 +127,48 @@ const ChildStatusPayloadSchema = z.object({
   to: z.string().optional(),
 });
 
-function dispatchActorLabel(actor: DispatchEvent["actor"]): string {
-  return `${actor.kind} ${actor.id ?? "unknown"}`;
+// Each Dispatch event type validates its payload with the schema that matches the
+// wire contract documented above. A frame whose payload disagrees with its type's
+// schema keeps the raw (already-parsed) payload object rather than dropping data.
+const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
+  "issue.created": IssuePayloadSchema,
+  "issue.updated": IssuePayloadSchema,
+  "issue.closed": IssuePayloadSchema,
+  "artifact.created": ArtifactCreatedPayloadSchema,
+  "artifact.version": ArtifactVersionPayloadSchema,
+  "ask.opened": AskPayloadSchema,
+  "ask.answered": AskPayloadSchema,
+  "comment.created": CommentPayloadSchema,
+  "comment.resolved": CommentPayloadSchema,
+  "suggestion.accepted": CommentPayloadSchema,
+  "suggestion.rejected": CommentPayloadSchema,
+  "message.created": MessagePayloadSchema,
+  "child.status": ChildStatusPayloadSchema,
+};
+
+function dispatchPayload(event: DispatchEvent): unknown {
+  const schema = DISPATCH_PAYLOAD_SCHEMAS[event.type];
+  if (schema === undefined) return event.payload;
+  const parsed = schema.safeParse(event.payload);
+  return parsed.success ? parsed.data : event.payload;
 }
 
-function dispatchBody(event: DispatchEvent): string[] {
-  const lines: string[] = [];
+// A Dispatch bus frame's JSON payload either matches the wire contract documented
+// above (`event`) or it doesn't — invalid JSON, or a JSON value that disagrees with
+// `DispatchEventSchema` — in which case the raw parsed value (object or string) is
+// kept (`raw`) so no data is dropped and nothing renders as a hand-built text
+// template.
+type DispatchFrame = { readonly event: DispatchEvent } | { readonly raw: unknown };
 
-  switch (event.type) {
-    case "issue.created":
-    case "issue.updated":
-    case "issue.closed": {
-      const parsed = IssuePayloadSchema.safeParse(event.payload);
-      if (!parsed.success) break;
-      if (parsed.data.title) lines.push(`Title: ${parsed.data.title}`);
-      if (parsed.data.status) lines.push(`Status: ${parsed.data.status}`);
-      if (parsed.data.route) lines.push(`Route: ${parsed.data.route}`);
-      break;
-    }
-    case "artifact.created": {
-      const parsed = ArtifactCreatedPayloadSchema.safeParse(event.payload);
-      const name = parsed.success ? parsed.data.artifact?.name : undefined;
-      if (name) lines.push(`Artifact: ${name}`);
-      break;
-    }
-    case "artifact.version": {
-      const parsed = ArtifactVersionPayloadSchema.safeParse(event.payload);
-      if (!parsed.success) break;
-      const version = parsed.data.version;
-      if (parsed.data.name) lines.push(`Artifact: ${parsed.data.name}`);
-      if (version?.number !== undefined) lines.push(`Version: ${version.number}`);
-      if (version?.summary) lines.push(`Summary: ${version.summary}`);
-      if (parsed.data.diff) lines.push("Diff:", parsed.data.diff);
-      break;
-    }
-    case "ask.opened":
-    case "ask.answered": {
-      const parsed = AskPayloadSchema.safeParse(event.payload);
-      if (!parsed.success) break;
-      if (parsed.data.question) lines.push(`Question: ${parsed.data.question}`);
-      if (event.type === "ask.opened") {
-        const options = (parsed.data.options ?? [])
-          .map((option) => option.label)
-          .filter((label): label is string => label !== undefined);
-        if (options.length > 0) lines.push(`Options: ${options.join(", ")}`);
-        break;
-      }
-      const answer = parsed.data.answer;
-      lines.push(`Selected: ${answer?.selected?.join(", ") || "none"}`);
-      if (answer?.text) lines.push(`Text: ${answer.text}`);
-      break;
-    }
-    case "comment.created":
-    case "comment.resolved": {
-      const parsed = CommentPayloadSchema.safeParse(event.payload);
-      if (!parsed.success) break;
-      const quote = parsed.data.anchor?.quote;
-      if (parsed.data.artifact_name) lines.push(`Artifact: ${parsed.data.artifact_name}`);
-      if (quote) lines.push(`> ${quote}`);
-      if (parsed.data.reply_to) lines.push(`Reply chain: ${parsed.data.reply_to}`);
-      if (parsed.data.body) lines.push(`Body: ${parsed.data.body}`);
-      break;
-    }
-    case "suggestion.accepted":
-    case "suggestion.rejected": {
-      const parsed = CommentPayloadSchema.safeParse(event.payload);
-      if (!parsed.success) break;
-      const quote = parsed.data.anchor?.quote;
-      const replacement = parsed.data.suggestion?.replace_with;
-      if (parsed.data.artifact_name) lines.push(`Artifact: ${parsed.data.artifact_name}`);
-      if (quote) lines.push(`> ${quote}`);
-      if (quote && replacement) lines.push(`${quote} → ${replacement}`);
-      break;
-    }
-    case "message.created": {
-      const parsed = MessagePayloadSchema.safeParse(event.payload);
-      const body = parsed.success ? parsed.data.body : undefined;
-      if (body) lines.push(`Body: ${body}`);
-      break;
-    }
-    case "child.status": {
-      const parsed = ChildStatusPayloadSchema.safeParse(event.payload);
-      if (!parsed.success) break;
-      const { child_key: child, from, to } = parsed.data;
-      if (child && from && to) lines.push(`Child: ${child} ${from} → ${to}`);
-      break;
-    }
-  }
-  return lines;
-}
-
-function renderDispatch(envelope: InboundEnvelope, sessionID: string): RenderInboundResult {
-  const invalid = (): RenderInboundResult => ({
-    skip: false,
-    content: "dispatch: invalid event",
-    envelope,
-  });
-  if (envelope.payload === undefined) return invalid();
-  let rawEvent: unknown;
+function parseDispatchFrame(rawPayload: string): DispatchFrame {
+  let value: unknown;
   try {
-    rawEvent = JSON.parse(envelope.payload);
+    value = JSON.parse(rawPayload);
   } catch {
-    return invalid();
+    return { raw: rawPayload };
   }
-  const parsed = DispatchEventSchema.safeParse(rawEvent);
-  if (!parsed.success) return invalid();
-  const event = parsed.data;
-  if (event.actor.kind === "session" && event.actor.id === sessionID) {
-    return { skip: true, content: "", envelope };
-  }
-  return {
-    skip: false,
-    content: [
-      `dispatch ${event.issue_key} · ${event.type} · by ${dispatchActorLabel(event.actor)}`,
-      ...dispatchBody(event),
-    ].join("\n"),
-    envelope,
-  };
+  const parsed = DispatchEventSchema.safeParse(value);
+  return parsed.success ? { event: parsed.data } : { raw: value };
 }
 
 export function inboundTimestamp(milliseconds: number | undefined): string {
@@ -287,13 +212,33 @@ export function renderInbound(
     const data = tolerant.data as Partial<InboundEnvelope>;
     envelope = { ...data, source: data.source ?? "unknown" };
   }
+  let dispatchEvent: unknown;
+  let dispatchIssue: string | undefined;
+  const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
   if (envelope.source === "dispatch") {
-    const renderedDispatch = renderDispatch(envelope, sessionID);
-    if (renderedDispatch !== null) return renderedDispatch;
+    if (envelope.payload === undefined) {
+      dispatchIssue = "payload";
+    } else {
+      const frame = parseDispatchFrame(envelope.payload);
+      if ("event" in frame) {
+        if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
+          return { skip: true, content: "", envelope };
+        }
+        dispatchEvent = {
+          issue_key: frame.event.issue_key,
+          type: frame.event.type,
+          actor: frame.event.actor,
+          payload: dispatchPayload(frame.event),
+        };
+      } else {
+        dispatchEvent = frame.raw;
+      }
+    }
   }
 
   let parsedPayload: unknown;
   if (
+    !dispatchRendered &&
     envelope.payload !== undefined &&
     (envelope.source === "github" || envelope.payload !== envelope.payload_summary)
   ) {
@@ -306,7 +251,9 @@ export function renderInbound(
 
   const payloadSummary = envelope.payload_summary ?? "unknown";
   const message =
-    envelope.payload !== undefined && envelope.payload !== envelope.payload_summary
+    !dispatchRendered &&
+    envelope.payload !== undefined &&
+    envelope.payload !== envelope.payload_summary
       ? parsedPayload
       : undefined;
   const summaryIsHead =
@@ -332,7 +279,11 @@ export function renderInbound(
       ? undefined
       : `source=${envelope.source}`;
   const unrecognised =
-    [...parseIssues, ...(sourceIssue === undefined ? [] : [sourceIssue])].join(", ") || undefined;
+    [
+      ...parseIssues,
+      ...(sourceIssue === undefined ? [] : [sourceIssue]),
+      ...(dispatchIssue === undefined ? [] : [dispatchIssue]),
+    ].join(", ") || undefined;
   const rendered = {
     ...(envelope.topic === agentSubject(sessionID)
       ? { to: `you (${sessionID.slice(0, 4)}…)` }
@@ -351,8 +302,12 @@ export function renderInbound(
       : {
           reply_role: `envoy_publish(topic="notifications.role.${role}", message="...")`,
         }),
-    ...(summaryIsHead ? {} : { summary: payloadSummary }),
-    ...(message === undefined ? {} : { message }),
+    ...(dispatchRendered
+      ? { dispatch: dispatchEvent }
+      : {
+          ...(summaryIsHead ? {} : { summary: payloadSummary }),
+          ...(message === undefined ? {} : { message }),
+        }),
     ...(foreignSession === undefined
       ? {}
       : {
