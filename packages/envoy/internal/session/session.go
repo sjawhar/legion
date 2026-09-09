@@ -113,8 +113,11 @@ func (d Deliverer) Text(item contracts.Envelope) string {
 	if item.Sender != nil && len(item.Sender.Roles) > 0 {
 		lines = append(lines, fmt.Sprintf("Reply Role: envoy_publish(topic=%q, message=%q)", contracts.RoleTopicPrefix+item.Sender.Roles[0], "..."))
 	}
-	lines = append(lines, "Summary: "+item.PayloadSummary)
-	if item.Payload != "" && item.Payload != item.PayloadSummary {
+	messageRendered := item.Payload != "" && item.Payload != item.PayloadSummary
+	if !messageRendered || !strings.HasPrefix(item.Payload, strings.TrimSuffix(item.PayloadSummary, "…")) {
+		lines = append(lines, "Summary: "+item.PayloadSummary)
+	}
+	if messageRendered {
 		lines = append(lines, "Message:", item.Payload)
 	}
 	if foreign := foreignSession(item); foreign != "" {

@@ -494,7 +494,10 @@ func TestText_FallsBackToSummaryWhenPayloadEmpty(t *testing.T) {
 	}
 }
 
-func TestText_RendersSignalQualityFieldsAndBodyOnce(t *testing.T) {
+// The payload_summary here is the literal first line of the payload, so it is
+// a truncation (with no ellipsis needed) of the message body: Summary is
+// omitted and only Message carries the text.
+func TestText_OmitsSummaryWhenItDuplicatesPayloadHead(t *testing.T) {
 	deliverer := session.Deliverer{}
 	expiresAt := int64(1788757200000)
 	payload := "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
@@ -530,7 +533,6 @@ In Reply To: evt-parent
 Supersedes: evt-old
 Reply With: envoy_send(session_id="ses_sender", message="...")
 Reply Role: envoy_publish(topic="notifications.role.reviewer", message="...")
-Summary: First paragraph.
 Message:
 First paragraph.
 
@@ -544,6 +546,37 @@ Topic: notifications.agent.ses_target`
 	}
 	if strings.Count(got, payload) != 1 {
 		t.Fatalf("full payload appears %d times, want once: %s", strings.Count(got, payload), got)
+	}
+	if strings.Contains(got, "Summary:") {
+		t.Fatalf("Text() should omit the redundant Summary line: %s", got)
+	}
+}
+
+// PayloadSummary is the 160-rune-capped, ellipsis-terminated truncation that
+// OneLineSummary produces for a long first line; Payload is the full message
+// starting with that same text. Summary duplicates the head of Message, so it
+// is omitted.
+func TestText_OmitsEllipsisTruncatedSummaryWhenItDuplicatesPayloadHead(t *testing.T) {
+	deliverer := session.Deliverer{}
+	head := strings.Repeat("A", 159)
+	payload := head + "B long first line continues past the cap.\n\nSecond paragraph."
+	item := contracts.Envelope{
+		EventID:        "evt-2",
+		Source:         "agent",
+		SourceSession:  "ses_sender",
+		Topic:          "notifications.agent.ses_target",
+		IssuedAt:       1788756072000,
+		PayloadSummary: head + "…",
+		Payload:        payload,
+	}
+
+	got := deliverer.Text(item)
+	if strings.Contains(got, "Summary:") {
+		t.Fatalf("Text() should omit the ellipsis-truncated Summary line: %s", got)
+	}
+	want := "Message:\n" + payload
+	if !strings.Contains(got, want) {
+		t.Fatalf("Text() missing full payload as Message: %s", got)
 	}
 }
 

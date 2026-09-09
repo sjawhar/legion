@@ -149,6 +149,14 @@ export function renderInbound(
     envelope.payload !== undefined && envelope.payload !== envelope.payload_summary
       ? parsedPayload
       : undefined;
+  const summaryIsHead =
+    typeof message === "string" &&
+    envelope.payload_summary !== undefined &&
+    message.startsWith(
+      envelope.payload_summary.endsWith("…")
+        ? envelope.payload_summary.slice(0, -1)
+        : envelope.payload_summary
+    );
   const body = `${envelope.payload_summary ?? ""}\n${envelope.payload ?? ""}`;
   let foreignSession: string | undefined;
   for (const match of body.matchAll(FOREIGN_SESSION_ID)) {
@@ -183,7 +191,7 @@ export function renderInbound(
       : {
           reply_role: `envoy_publish(topic="notifications.role.${role}", message="...")`,
         }),
-    summary: payloadSummary,
+    ...(summaryIsHead ? {} : { summary: payloadSummary }),
     ...(message === undefined ? {} : { message }),
     ...(foreignSession === undefined
       ? {}
