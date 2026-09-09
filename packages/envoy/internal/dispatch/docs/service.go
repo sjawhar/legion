@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path"
 	"sort"
@@ -40,6 +41,7 @@ type Deps struct {
 	Events      *events.Broker
 	Identity    identity.Identity
 	AgentToken  string
+	ServerURL   string
 	Settle      time.Duration
 }
 
@@ -58,6 +60,7 @@ type Service struct {
 	events         *events.Broker
 	identity       identity.Identity
 	agentToken     string
+	serverURL      string
 	settle         time.Duration
 	rooms          sync.Map
 	nextConnection atomic.Uint64
@@ -257,6 +260,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 		}()
 	}
 	changed := false
+	var markdown string
 	var updates [][]byte
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		var unsubscribe func()
@@ -267,6 +271,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 			defer unsubscribe()
 		}
 		changed = mutate(doc, transact)
+		if changed {
+			markdown = doc.GetText("content").ToString()
+		}
 	})
 	if !joinedTransaction {
 		return err
@@ -284,6 +291,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update); err != nil {
 		s.failRoom(artifactID, err)
 		return fmt.Errorf("append transactional live document update: %w", err)
+	}
+	if err := s.reresolveAnchors(ctx, tx, artifactID, markdown); err != nil {
+		return fmt.Errorf("reresolve transactional document anchors: %w", err)
 	}
 	return nil
 }
@@ -334,6 +344,7 @@ func New(deps Deps) *Service {
 		events:      deps.Events,
 		identity:    deps.Identity,
 		agentToken:  deps.AgentToken,
+		serverURL:   strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:      settle,
 		suppressed:  make(map[string][]*suppressSlot),
 	}
@@ -489,7 +500,7 @@ func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID str
 	}
 	capture.authors[actorKey(actor)] = actor
 	authors = actorSlice(capture.authors)
-	version, err := writeVersion(ctx, tx, artifactID, markdown, false, nil, authors)
+	version, err := s.writeVersion(ctx, tx, artifactID, markdown, false, nil, authors)
 	if err != nil {
 		return model.Version{}, false, err
 	}
@@ -604,7 +615,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 			return ErrIssueClosed
 		}
 
-		version, err = writeVersion(ctx, tx, artifactID, markdown, true, new(summary), authors)
+		version, err = s.writeVersion(ctx, tx, artifactID, markdown, true, new(summary), authors)
 		return err
 	})
 	if err != nil {
@@ -734,6 +745,10 @@ func (s *Service) scheduleSettle(room string) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	s.scheduleSettleLocked(room, state)
+}
+
+func (s *Service) scheduleSettleLocked(room string, state *roomState) {
 	if s.stopping.Load() || state.closed || state.failed != nil || state.suppressSettle > 0 {
 		return
 	}
@@ -747,6 +762,16 @@ func (s *Service) scheduleSettle(room string) {
 		defer s.settleWG.Done()
 		s.settleRoom(room, generation)
 	})
+}
+
+func (s *Service) retrySettle(room string, generation uint64, err error) {
+	slog.Error("dispatch: settle document", "room", room, "error", err)
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.gen == generation {
+		s.scheduleSettleLocked(room, state)
+	}
 }
 
 func artifactVersionEventPayload(
@@ -775,10 +800,11 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	}
 	markdown := doc.GetText("content").ToString()
 	state.mu.Unlock()
-
 	ctx := context.Background()
+
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
+		s.retrySettle(room, generation, fmt.Errorf("begin document transaction: %w", err))
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -788,11 +814,16 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		select a.issue_key, a.name, i.closed_at is null
 		from artifacts a join issues i on i.key = a.issue_key
 		where a.id = $1 for update
-	`, room).Scan(&issueKey, &artifactName, &open); err != nil || !open {
+	`, room).Scan(&issueKey, &artifactName, &open); err != nil {
+		s.retrySettle(room, generation, fmt.Errorf("lock document artifact: %w", err))
+		return
+	}
+	if !open {
 		return
 	}
 	latest, err := latestVersion(ctx, tx, room)
 	if err != nil {
+		s.retrySettle(room, generation, err)
 		return
 	}
 	state.mu.Lock()
@@ -815,11 +846,13 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	authors := actorSlice(pending)
-	version, err := writeVersion(ctx, tx, room, markdown, false, nil, authors)
+	version, err := s.writeVersion(ctx, tx, room, markdown, false, nil, authors)
 	if err != nil {
+		s.retrySettle(room, generation, err)
 		return
 	}
 	if err := s.reresolveAnchors(ctx, tx, room, markdown); err != nil {
+		s.retrySettle(room, generation, err)
 		return
 	}
 	eventActor := model.Actor{}
@@ -833,9 +866,11 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		Payload:  artifactVersionEventPayload(room, artifactName, version, nil),
 	})
 	if err != nil {
+		s.retrySettle(room, generation, err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
+		s.retrySettle(room, generation, fmt.Errorf("commit document version: %w", err))
 		return
 	}
 	state.mu.Lock()
@@ -1169,7 +1204,7 @@ func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {
 	return version, nil
 }
 
-func writeVersion(ctx context.Context, tx pgx.Tx, artifactID, markdown string, named bool, summary *string, authors []model.Actor) (model.Version, error) {
+func (s *Service) writeVersion(ctx context.Context, tx pgx.Tx, artifactID, markdown string, named bool, summary *string, authors []model.Actor) (model.Version, error) {
 	encodedAuthors, err := json.Marshal(authors)
 	if err != nil {
 		return model.Version{}, fmt.Errorf("encode document version authors: %w", err)
@@ -1189,17 +1224,17 @@ func writeVersion(ctx context.Context, tx pgx.Tx, artifactID, markdown string, n
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return model.Version{}, fmt.Errorf("decode document version authors: %w", err)
 	}
-	if err := indexDocumentReferences(ctx, tx, artifactID, markdown); err != nil {
+	if err := s.indexDocumentReferences(ctx, tx, artifactID, markdown); err != nil {
 		return model.Version{}, err
 	}
 	return version, nil
 }
 
-func indexDocumentReferences(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error {
+func (s *Service) indexDocumentReferences(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error {
 	if _, err := tx.Exec(ctx, `delete from refs where from_kind = 'artifact' and from_id = $1`, artifactID); err != nil {
 		return fmt.Errorf("clear document references: %w", err)
 	}
-	for _, ref := range text.Extract(markdown, "") {
+	for _, ref := range text.Extract(markdown, s.serverURL) {
 		if ref.Kind == "url" {
 			continue
 		}

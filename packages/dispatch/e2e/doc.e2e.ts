@@ -70,18 +70,28 @@ test("document edits synchronize, version, and compare across users", async ({
     );
     await expect(aliceEditor).toContainText("Postgres");
     await expect(bobEditor).toContainText("Postgres");
-
-    alicePage.once("dialog", (dialog) => dialog.accept("Decided Postgres"));
-    await alicePage.getByRole("button", { name: "Name version" }).click();
+    // A summary-less API edit still records an unnamed version and its event.
     await expect
       .poll(async () => {
         const version = (await getArtifact(artifactId)).versions.find(({ number }) => number === 3);
         return version;
       })
-      .toMatchObject({ named: true, number: 3, summary: "Decided Postgres" });
+      .toMatchObject({ named: false, number: 3, summary: null });
+    await expect
+      .poll(() => getArtifactVersion(artifactId, 3).then(({ markdown }) => markdown))
+      .toContain("Postgres");
+
+    alicePage.once("dialog", (dialog) => dialog.accept("Decided Postgres"));
+    await alicePage.getByRole("button", { name: "Name version" }).click();
+    await expect
+      .poll(async () => {
+        const version = (await getArtifact(artifactId)).versions.find(({ number }) => number === 4);
+        return version;
+      })
+      .toMatchObject({ named: true, number: 4, summary: "Decided Postgres" });
 
     const versionPicker = alicePage.getByLabel("Version");
-    await expect(versionPicker).toContainText("Version 3 — Decided Postgres");
+    await expect(versionPicker).toContainText("Version 4 — Decided Postgres");
     await versionPicker.selectOption("2");
     await expect(alicePage.getByTestId("version-view")).toContainText("Use SQLite");
     await alicePage.getByRole("button", { name: "Diff vs current" }).click();

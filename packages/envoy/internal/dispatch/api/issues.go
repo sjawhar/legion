@@ -23,7 +23,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	parent := strings.TrimSpace(r.URL.Query().Get("parent"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select i.key, i.title, i.status, i.parent_key, i.updated_at,
-		       count(a.id) filter (where a.state = 'open')
+		       count(a.id) filter (where a.state = 'open' and i.closed_at is null)
 		from issues i
 		left join asks a on a.issue_key = i.key
 		where ($1 = '' or i.project_key = $1)

@@ -1,3 +1,4 @@
+import { resolve as resolvePath } from "node:path";
 import { ASK_URGENCIES, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
 import { z } from "zod";
 import type { DispatchConfigResolution } from "./dispatch-config";
@@ -73,6 +74,10 @@ interface ResolvedArtifact {
   readonly issue: IssueDetails;
   readonly artifact: Artifact;
 }
+
+const nativeIssueKeyPattern = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
+const externalIssueRefPattern = /^([^/\s]+)\/([^/\s#]+)#([1-9][0-9]*)$/;
+const bareIssueNumberPattern = /^[1-9][0-9]*$/;
 
 function dispatchTopic(issue: string): string {
   return `notifications.dispatch.issue.${issue}.>`;
@@ -167,6 +172,14 @@ async function resolveIssueArguments(
   }
   const legionIssue = env.LEGION_ISSUE;
   if (!legionIssue) throw new Error("issue is required; supply issue or set LEGION_ISSUE");
+  if (nativeIssueKeyPattern.test(legionIssue) || externalIssueRefPattern.test(legionIssue)) {
+    return { args: { ...args, issue: legionIssue }, ref: null };
+  }
+  if (!bareIssueNumberPattern.test(legionIssue)) {
+    throw new Error(
+      "LEGION_ISSUE must be a native issue key (e.g. LEGION-3), an external owner/repo#n reference, or a bare positive issue number"
+    );
+  }
   const repo = await resolveCwdRepo(cwd, exec);
   if (!repo) throw new Error("issue is required; LEGION_ISSUE needs a GitHub repository in cwd");
   return { args: { ...args, issue: `${repo}#${legionIssue}` }, ref: null };
@@ -455,7 +468,7 @@ export async function executeDispatchTool(
           marks.length === 0
             ? document.markdown
             : `${document.markdown}\n\nOpen anchored asks/comments: ${marks.join(", ")}`,
-        details: { issue: resolved.issue.key },
+        details: { issue: resolved.issue.key, topic: dispatchTopic(resolved.issue.key) },
       };
     }
     case "dispatch_artifact": {
@@ -463,7 +476,7 @@ export async function executeDispatchTool(
       const summary = optionalString(args, "summary");
       const result = await client.artifact(issue(), {
         name: stringArg(args, "name"),
-        file: Bun.file(stringArg(args, "path")),
+        file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
         ...(primary === undefined ? {} : { primary }),
         ...(summary === undefined ? {} : { summary }),
         actor,
@@ -481,14 +494,26 @@ export async function executeDispatchTool(
     case "dispatch_read": {
       if (issueArguments.ref?.kind === "ask") {
         const ask = await client.getAsk(issueArguments.ref.id);
-        return { text: askSummary(ask), details: { issue: ask.issue_key } };
+        return {
+          text: askSummary(ask),
+          details: { issue: ask.issue_key, topic: dispatchTopic(ask.issue_key) },
+        };
       }
       if (issueArguments.ref?.kind === "comment") {
         const comment = await client.getComment(issueArguments.ref.id);
-        return { text: commentSummary(comment), details: { issue: comment.comment.issue_key } };
+        return {
+          text: commentSummary(comment),
+          details: {
+            issue: comment.comment.issue_key,
+            topic: dispatchTopic(comment.comment.issue_key),
+          },
+        };
       }
       const read = await client.read(issue());
-      return { text: issueSummary(read.issue, read.events), details: { issue: read.issue.key } };
+      return {
+        text: issueSummary(read.issue, read.events),
+        details: { issue: read.issue.key, topic: dispatchTopic(read.issue.key) },
+      };
     }
     default:
       throw new Error(`Unknown Dispatch tool: ${input.tool}`);

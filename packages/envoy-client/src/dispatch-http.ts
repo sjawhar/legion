@@ -200,27 +200,32 @@ export interface CreateIssueInput {
   readonly actor: Actor;
 }
 
+export type AnchorInput =
+  | {
+      readonly artifact: string;
+      readonly quote: string;
+      readonly occurrence?: number;
+    }
+  | {
+      readonly artifact: string;
+      readonly from: number;
+      readonly to: number;
+      readonly quote?: string;
+    };
+
 export interface AskInput {
   readonly question: string;
   readonly options?: { readonly label: string; readonly description?: string }[];
   readonly multiple?: boolean;
   readonly custom?: boolean;
   readonly urgency?: AskUrgency;
-  readonly anchor?: {
-    readonly artifact: string;
-    readonly quote: string;
-    readonly occurrence?: number;
-  };
+  readonly anchor?: AnchorInput;
   readonly actor: Actor;
 }
 
 export interface CommentInput {
   readonly body: string;
-  readonly anchor?: {
-    readonly artifact: string;
-    readonly quote: string;
-    readonly occurrence?: number;
-  };
+  readonly anchor?: AnchorInput;
   readonly reply_to?: string;
   readonly suggestion?: { readonly replace_with: string };
   readonly actor: Actor;

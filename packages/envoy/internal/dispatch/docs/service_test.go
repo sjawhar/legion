@@ -29,10 +29,11 @@ func newTestService(t *testing.T) (*Service, string) {
 	database := openTestStore(t)
 	artifactID := createDocument(t, database, "# First")
 	service := New(Deps{
-		Store:    database,
-		Events:   events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
-		Settle:   20 * time.Millisecond,
+		Store:     database,
+		Events:    events.NewBroker(),
+		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		ServerURL: "https://dispatch.example",
+		Settle:    20 * time.Millisecond,
 	})
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
@@ -231,6 +232,61 @@ func TestTransactionalApplyDoesNotScheduleSettlement(t *testing.T) {
 	}
 	if got, err := service.Text(ctx, artifactID); err != nil || got != "after" {
 		t.Fatalf("document after transactional edit = %q (%v), want after", got, err)
+	}
+}
+
+func TestTransactionalApplyReresolvesAnchoredComment(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "target")
+	anchorJSON, err := json.Marshal(model.Anchor{
+		ArtifactID: artifactID,
+		Version:    1,
+		Quote:      "target",
+		From:       0,
+		To:         len("target"),
+	})
+	if err != nil {
+		t.Fatalf("encode comment anchor: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		insert into comments (issue_key, author, body, anchor)
+		values ('DOC-1', '{"kind":"user","id":"alice"}', 'Anchored comment', $1)
+	`, anchorJSON); err != nil {
+		t.Fatalf("create anchored comment: %v", err)
+	}
+
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin transactional edit: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := service.ApplyOps(WithTx(context.Background(), tx), artifactID, []model.EditOp{{
+		Op: "insert", Markdown: "before ", Before: "start",
+	}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+		t.Fatalf("apply transactional edit: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit transactional edit: %v", err)
+	}
+
+	var stored []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `select anchor from comments where body = 'Anchored comment'`).Scan(&stored); err != nil {
+		t.Fatalf("load re-resolved comment anchor: %v", err)
+	}
+	var anchor model.Anchor
+	if err := json.Unmarshal(stored, &anchor); err != nil {
+		t.Fatalf("decode re-resolved comment anchor: %v", err)
+	}
+	if anchor.From != len("before ") || anchor.To != len("before target") || anchor.Quote != "target" || anchor.Orphaned {
+		t.Fatalf("transactional edit anchor = %#v, want target at [7,13)", anchor)
+	}
+	var versions int
+	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count transactional edit versions: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("transactional edit wrote %d versions, want no live-client settle", versions)
 	}
 }
 
@@ -708,6 +764,51 @@ func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
 	waitForDocumentVersion(t, service.store, artifactID, 2)
 }
 
+func TestSettleRetriesTransientVersionWriteFailure(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 10 * time.Millisecond
+	seedServiceText(t, service, artifactID, "before")
+	if _, err := service.store.Pool.Exec(context.Background(), `create sequence dispatch_test_settle_failure`); err != nil {
+		t.Fatalf("create settlement failure sequence: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		create function dispatch_test_fail_first_settlement() returns trigger language plpgsql as $$
+		begin
+			if new.number = 2 and nextval('dispatch_test_settle_failure') = 1 then
+				raise exception 'transient settlement write failure';
+			end if;
+			return new;
+		end;
+		$$
+	`); err != nil {
+		t.Fatalf("create settlement failure function: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		create trigger dispatch_test_fail_first_settlement
+		before insert on artifact_versions for each row
+		execute function dispatch_test_fail_first_settlement()
+	`); err != nil {
+		t.Fatalf("create settlement failure trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = service.store.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_fail_first_settlement on artifact_versions`)
+		_, _ = service.store.Pool.Exec(context.Background(), `drop function if exists dispatch_test_fail_first_settlement()`)
+		_, _ = service.store.Pool.Exec(context.Background(), `drop sequence if exists dispatch_test_settle_failure`)
+	})
+
+	if err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("change document before transient settle failure: %v", err)
+	}
+	time.Sleep(20 * service.settle)
+	var versions int
+	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count versions after transient settlement failure: %v", err)
+	}
+	if versions != 2 {
+		t.Fatalf("versions after transient settlement failure = %d, want 2 after retry", versions)
+	}
+}
+
 func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = 5 * time.Millisecond
@@ -995,6 +1096,28 @@ func TestNamedVersionIndexesDocumentReferences(t *testing.T) {
 	}
 	if references != 1 {
 		t.Fatalf("document references = %d, want 1", references)
+	}
+}
+
+func TestNamedVersionIndexesServerURLDocumentReferences(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.ReplaceText(context.Background(), artifactID, "See https://dispatch.example/issues/DOC-1/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("replace document text: %v", err)
+	}
+	if _, err := service.NamedVersion(context.Background(), artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write named version: %v", err)
+	}
+	var references int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from refs
+		where from_kind = 'artifact' and from_id = $1 and to_kind = 'artifact' and to_id = 'DOC-1/spec'
+	`, artifactID).Scan(&references); err != nil {
+		t.Fatalf("count browser-url document references: %v", err)
+	}
+	if references != 1 {
+		t.Fatalf("browser-url document references = %d, want 1", references)
 	}
 }
 

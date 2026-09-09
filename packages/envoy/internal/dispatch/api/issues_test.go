@@ -96,3 +96,50 @@ func TestCreateExternalIssueIsIdempotentDuringConcurrentCreation(t *testing.T) {
 		t.Fatalf("created rows: issues=%d links=%d, want one each", issueRows, linkRows)
 	}
 }
+
+func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
+	handler, _ := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue with an ask",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[model.Issue](t, created)
+	if ask := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]string{
+		"question": "Which option?",
+	}, "alice"); ask.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", ask.Code, ask.Body.String())
+	}
+
+	assertOpenAskCount := func(want int) {
+		t.Helper()
+		listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice")
+		if listed.Code != http.StatusOK {
+			t.Fatalf("list issues: status=%d body=%s", listed.Code, listed.Body.String())
+		}
+		issues := decodeBody[[]model.IssueSummary](t, listed)
+		if len(issues) != 1 || issues[0].OpenAsks != want {
+			t.Fatalf("listed issues = %#v, want one issue with open_asks=%d", issues, want)
+		}
+	}
+
+	assertOpenAskCount(1)
+	if closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"status": "done",
+	}, "alice"); closed.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	assertOpenAskCount(0)
+	if reopened := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"status": "todo",
+	}, "alice"); reopened.Code != http.StatusOK {
+		t.Fatalf("reopen issue: status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	assertOpenAskCount(1)
+}

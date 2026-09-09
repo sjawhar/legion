@@ -14,10 +14,11 @@ It refuses over-limit input; it never truncates it. GitHub threads and markers n
 
 ## Your issue
 
-Every session works on an issue. Legion pre-fills `issue` from `LEGION_ISSUE`; otherwise pass the
-issue to every issue-scoped tool as its native `KEY` or an external `owner/repo#n` reference. On
-first use, an external reference creates its native issue in the project mapped by
-`DISPATCH_REPO_PROJECTS`.
+Every session works on an issue. Legion pre-fills `issue` from `LEGION_ISSUE`: use a native issue key
+such as `LEGION-3`, an external `owner/repo#n` reference, or a bare positive number (resolved
+against the cwd repository). Otherwise pass the issue to every issue-scoped tool as its native key
+or an external `owner/repo#n` reference. On first use, an external reference creates its native issue in the
+project mapped by `DISPATCH_REPO_PROJECTS`.
 
 Architects create newly tracked child work with:
 ```ts

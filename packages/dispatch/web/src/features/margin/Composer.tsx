@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
 import {
   buildDispatchReference,
@@ -133,7 +133,12 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
   const references = useMemo(() => composerReferences(body), [body]);
   const save = useMutation({
     mutationFn: async () => {
-      const selection = { artifact: anchor.artifact, from: anchor.from, to: anchor.to };
+      const selection = {
+        artifact: anchor.artifact,
+        from: anchor.from,
+        quote: anchor.quote,
+        to: anchor.to,
+      };
       if (kind === "ask") {
         return api.createAsk(issueKey, { anchor: selection, question: body.trim() });
       }
@@ -319,7 +324,15 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
       {upload.isError ? (
         <p className="text-sm text-rose-700">{uploadErrorMessage(upload.error)}</p>
       ) : null}
-      {save.isError ? <p className="text-sm text-rose-700">Could not save this item.</p> : null}
+      {save.isError ? (
+        <p className="text-sm text-rose-700">
+          {save.error instanceof ApiError &&
+          save.error.status === 409 &&
+          save.error.code === "ANCHOR_STALE"
+            ? save.error.message
+            : "Could not save this item."}
+        </p>
+      ) : null}
       <button
         className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white enabled:hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
         disabled={!canSubmit}

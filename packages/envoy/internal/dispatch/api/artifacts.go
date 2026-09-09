@@ -107,6 +107,16 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// A CRDT replacement cannot be rolled back in memory, so failures after an
+	// existing document replacement evict the room after tx.Rollback and reload
+	// durable state on the next access (R30).
+	evictOnFailure := false
+	evictArtifactID := ""
+	defer func() {
+		if evictOnFailure {
+			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
+		}
+	}()
 	defer tx.Rollback(r.Context())
 	issueKey := r.PathValue("key")
 	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
@@ -202,6 +212,8 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		if created {
 			err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(content))
 		} else {
+			evictArtifactID = artifact.ID
+			evictOnFailure = true
 			err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(content), actor)
 		}
 		if err != nil {
@@ -254,6 +266,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	evictOnFailure = false
 	s.publish(event)
 	writeJSON(w, http.StatusCreated, map[string]any{"artifact": artifact, "version": version})
 }
@@ -460,29 +473,46 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var version *model.Version
 	var published []model.Event
-	if summary := strings.TrimSpace(input.Summary); applied > 0 && summary != "" {
-		namedVersion, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, summary, actor)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+	if applied > 0 {
+		summary := strings.TrimSpace(input.Summary)
+		if summary != "" {
+			namedVersion, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, summary, actor)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			version = &namedVersion
+		} else {
+			unnamedVersion, wrote, err := s.deps.Docs.SnapshotVersion(r.Context(), tx, artifact.ID, actor)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if wrote {
+				version = &unnamedVersion
+			}
 		}
-		version = &namedVersion
-		diff, err := s.namedVersionDiff(r.Context(), tx, artifact.ID, namedVersion)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+		if version != nil {
+			var diff *string
+			if version.Named {
+				diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, *version)
+				if err != nil {
+					s.writeHandlerError(w, err)
+					return
+				}
+			}
+			event, err := s.appendEvent(r.Context(), tx, model.Event{
+				IssueKey: artifact.IssueKey,
+				Type:     "artifact.version",
+				Actor:    actor,
+				Payload:  versionEventPayload(artifact.ID, artifact.Name, *version, diff),
+			})
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			published = append(published, event)
 		}
-		event, err := s.appendEvent(r.Context(), tx, model.Event{
-			IssueKey: artifact.IssueKey,
-			Type:     "artifact.version",
-			Actor:    actor,
-			Payload:  versionEventPayload(artifact.ID, artifact.Name, namedVersion, diff),
-		})
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		published = append(published, event)
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)

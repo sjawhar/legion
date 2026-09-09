@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool } from "../dispatch-execute";
+import { dispatchSubscriptionTopic } from "../dispatch-subscribe";
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -73,6 +77,92 @@ describe("executeDispatchTool", () => {
       topic: "notifications.dispatch.issue.DSP-41.>",
       ask: "ask-1",
     });
+  });
+  test("prefills an omitted issue from a native LEGION_ISSUE without resolving cwd repo", async () => {
+    const requests: string[] = [];
+    let execCalls = 0;
+    const exec: ExecFn = async () => {
+      execCalls += 1;
+      throw new Error("cwd repository lookup must not run");
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/LEGION-3/messages") {
+        return response({ id: "message-3", issue_key: "LEGION-3" });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { body: "Native issue" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: { LEGION_ISSUE: "LEGION-3" },
+      exec,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toMatchObject({ issue: "LEGION-3" });
+    expect(requests).toEqual(["/api/v1/issues/LEGION-3/messages"]);
+    expect(execCalls).toBe(0);
+  });
+
+  test("uses a full LEGION_ISSUE external reference without resolving cwd repo", async () => {
+    const requests: string[] = [];
+    let execCalls = 0;
+    const exec: ExecFn = async () => {
+      execCalls += 1;
+      throw new Error("cwd repository lookup must not run");
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/resolve") return response({ key: "LEGION-42" });
+      if (target.pathname === "/api/v1/issues/LEGION-42/messages") {
+        return response({ id: "message-42", issue_key: "LEGION-42" });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { body: "External issue" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: { LEGION_ISSUE: "owner/repo#42" },
+      exec,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toMatchObject({ issue: "LEGION-42" });
+    expect(requests).toEqual([
+      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
+      "/api/v1/issues/LEGION-42/messages",
+    ]);
+    expect(execCalls).toBe(0);
+  });
+
+  test("rejects a LEGION_ISSUE outside the native, external, or bare-number forms", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_message",
+        args: { body: "Invalid issue" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: { LEGION_ISSUE: "owner/repo#0" },
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(/native issue key.*owner\/repo#n.*bare positive issue number/);
   });
 
   test("rejects a dispatch operation that has neither an issue nor LEGION_ISSUE", async () => {
@@ -177,21 +267,25 @@ describe("executeDispatchTool", () => {
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
-    await expect(
-      executeDispatchTool({
-        tool: "dispatch_doc_read",
-        args: { ref: "dispatch://DSP-42/artifact/spec@v3" },
-        cwd: "/workspace",
-        host: "omp",
-        config,
-        env: {},
-        exec: repoExec("owner/repo"),
-        fetchImpl: fetchImpl as typeof fetch,
-      })
-    ).resolves.toEqual({
-      text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
-      details: { issue: "DSP-42" },
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { ref: "dispatch://DSP-42/artifact/spec@v3" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
     });
+
+    expect(result).toEqual({
+      text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
+      details: {
+        issue: "DSP-42",
+        topic: "notifications.dispatch.issue.DSP-42.>",
+      },
+    });
+    expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
@@ -273,6 +367,44 @@ describe("executeDispatchTool", () => {
       ops: [{ op: "replace", find: "draft", with: "final" }],
       summary: "Record final wording",
     });
+  });
+  test("uploads a relative artifact path from the Dispatch process cwd", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));
+    writeFileSync(path.join(cwd, "artifact.txt"), "artifact from Dispatch cwd");
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = { url: String(url), init: init ?? {} };
+      requests.push(request);
+      if (new URL(request.url).pathname === "/api/v1/issues/DSP-42/artifacts") {
+        return response({
+          artifact: { id: "artifact-42", issue_key: "DSP-42", name: "artifact.txt" },
+          version: { number: 1 },
+        });
+      }
+      throw new Error(`unexpected request: ${new URL(request.url).pathname}`);
+    };
+
+    try {
+      const result = await executeDispatchTool({
+        tool: "dispatch_artifact",
+        args: { issue: "DSP-42", name: "artifact.txt", path: "artifact.txt" },
+        cwd,
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+      expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42" });
+      expect(requests).toHaveLength(1);
+      const form = requests[0]?.init.body as FormData;
+      const file = form.get("file");
+      expect(file).toBeInstanceOf(Blob);
+      expect(await (file as Blob).text()).toBe("artifact from Dispatch cwd");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   test("creates an unlinked external issue once, then resolves it for later tool calls", async () => {
@@ -433,18 +565,18 @@ describe("executeDispatchTool", () => {
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
-    await expect(
-      executeDispatchTool({
-        tool: "dispatch_read",
-        args: { ref: "dispatch://DSP-42/ask/ask-42" },
-        cwd: "/workspace",
-        host: "omp",
-        config,
-        env: {},
-        exec: repoExec("owner/repo"),
-        fetchImpl: fetchImpl as typeof fetch,
-      })
-    ).resolves.toEqual({
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/ask/ask-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
       text: [
         "Question: Which API should we ship?",
         "Options:",
@@ -456,8 +588,12 @@ describe("executeDispatchTool", () => {
         "- Selected: JSON",
         "- Text: Ship JSON.",
       ].join("\n"),
-      details: { issue: "DSP-42" },
+      details: {
+        issue: "DSP-42",
+        topic: "notifications.dispatch.issue.DSP-42.>",
+      },
     });
+    expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
     expect(requests).toEqual(["/api/v1/asks/ask-42"]);
   });
 
@@ -511,18 +647,18 @@ describe("executeDispatchTool", () => {
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
-    await expect(
-      executeDispatchTool({
-        tool: "dispatch_read",
-        args: { ref: "dispatch://DSP-42/comment/comment-42" },
-        cwd: "/workspace",
-        host: "omp",
-        config,
-        env: {},
-        exec: repoExec("owner/repo"),
-        fetchImpl: fetchImpl as typeof fetch,
-      })
-    ).resolves.toEqual({
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/comment/comment-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
       text: [
         "Comment:",
         "comment-42 · session reviewer-1",
@@ -533,8 +669,46 @@ describe("executeDispatchTool", () => {
         "> Revised wording",
         "Body: Revised.",
       ].join("\n"),
-      details: { issue: "DSP-42" },
+      details: {
+        issue: "DSP-42",
+        topic: "notifications.dispatch.issue.DSP-42.>",
+      },
     });
+    expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
     expect(requests).toEqual(["/api/v1/comments/comment-42"]);
+  });
+  test("returns a subscription topic when reading an issue summary", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          last_seq: 0,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      issue: "DSP-42",
+      topic: "notifications.dispatch.issue.DSP-42.>",
+    });
+    expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
   });
 });

@@ -133,6 +133,7 @@ func main() {
 		Events:     broker,
 		Identity:   requestIdentity,
 		AgentToken: boot.AgentToken,
+		ServerURL:  serverURL,
 	})
 
 	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{

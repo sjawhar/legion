@@ -64,6 +64,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 			Events:     input.Events,
 			Identity:   input.Identity,
 			AgentToken: input.AgentToken,
+			ServerURL:  input.ServerURL,
 		})
 	}
 	return Deps{

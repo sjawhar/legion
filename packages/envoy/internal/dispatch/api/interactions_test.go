@@ -464,6 +464,37 @@ func TestDocumentEditMapsMissingAndAmbiguousTargets(t *testing.T) {
 	}
 }
 
+func TestDocumentEditWithoutSummaryWritesUnnamedVersionAndEvent(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Unnamed document edit", "before")
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("edit document without summary: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var versions int
+	var unnamed bool
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), coalesce(bool_and(not named), false)
+		from artifact_versions where artifact_id = $1 and number = 2
+	`, issue.PrimaryArtifactID).Scan(&versions, &unnamed); err != nil {
+		t.Fatalf("count unnamed versions: %v", err)
+	}
+	if versions != 1 || !unnamed {
+		t.Fatalf("summary-less edit versions = %d unnamed=%t, want one unnamed version", versions, unnamed)
+	}
+	var events int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from events where issue_key = $1 and type = 'artifact.version'
+	`, issue.Key).Scan(&events); err != nil {
+		t.Fatalf("count unnamed version events: %v", err)
+	}
+	if events != 1 {
+		t.Fatalf("summary-less edit artifact.version events = %d, want 1", events)
+	}
+}
+
 func TestAnchorsKeepCleanDocumentAtExistingVersion(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Clean document", "The quick brown fox")
@@ -594,6 +625,43 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	repeated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
 	if repeated.Code != http.StatusConflict || !strings.Contains(repeated.Body.String(), `"code":"ALREADY_ACTIONED"`) {
 		t.Fatalf("repeat accept: status=%d body=%s", repeated.Code, repeated.Body.String())
+	}
+}
+
+func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Accepted author", "before")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Replace before.", "anchor": map[string]any{"artifact": "spec", "quote": "before"},
+		"suggestion": map[string]string{"replace_with": "after"}, "actor": sessionActor(),
+	})
+	if suggestion.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", suggestion.Code, suggestion.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, suggestion)
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+
+	next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "after", "with": "next"}},
+		"summary": "Next version",
+		"actor":   sessionActor(),
+	})
+	if next.Code != http.StatusOK {
+		t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+	}
+	result := decodeBody[struct {
+		Version *model.Version `json:"version"`
+	}](t, next)
+	if result.Version == nil || len(result.Version.Authors) != 1 || result.Version.Authors[0] != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) {
+		t.Fatalf("next version authors = %#v, want only the next session editor", result.Version)
 	}
 }
 
@@ -957,7 +1025,7 @@ func TestEditArtifactCreatesNamedVersion(t *testing.T) {
 	}
 }
 
-func TestEditArtifactWithoutSummaryReturnsNoVersion(t *testing.T) {
+func TestEditArtifactWithoutSummaryReturnsUnnamedVersion(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Unversioned edit", "before")
 	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -971,8 +1039,8 @@ func TestEditArtifactWithoutSummaryReturnsNoVersion(t *testing.T) {
 		Applied int            `json:"applied"`
 		Version *model.Version `json:"version"`
 	}](t, edited)
-	if result.Applied != 1 || result.Version != nil {
-		t.Fatalf("edit result = %#v, want one applied operation and no named version", result)
+	if result.Applied != 1 || result.Version == nil || result.Version.Named || result.Version.Summary != nil {
+		t.Fatalf("edit result = %#v, want one applied operation and an unnamed version", result)
 	}
 }
 
@@ -1252,6 +1320,33 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
 }
 
+func TestDocumentUploadRollbackEvictsLiveDocument(t *testing.T) {
+	var documentService *docs.Service
+	var failure *postApplyFailureDocs
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		failure = &postApplyFailureDocs{
+			API: documentService, applied: make(chan struct{}), release: make(chan struct{}),
+		}
+		return failure
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Transactional upload", "before")
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+			"name": "spec.md",
+		}, "spec.md", "text/markdown", []byte("after"), "alice")
+	}()
+	waitForPostApply(t, failure)
+	close(failure.release)
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("upload with forced post-replace failure: status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+}
+
 type recordingVersionedStore struct {
 	docs.VersionedStore
 	updates chan struct{}
@@ -1297,6 +1392,16 @@ func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, 
 func (d *postApplyFailureDocs) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, replacement string, actor model.Actor) error {
 	d.waitBeforeApply()
 	if err := d.API.ApplyReplace(ctx, artifactID, anchor, replacement, actor); err != nil {
+		return err
+	}
+	close(d.applied)
+	<-d.release
+	return errors.New("forced post-apply failure")
+}
+
+func (d *postApplyFailureDocs) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) error {
+	d.waitBeforeApply()
+	if err := d.API.ReplaceText(ctx, artifactID, markdown, actor); err != nil {
 		return err
 	}
 	close(d.applied)

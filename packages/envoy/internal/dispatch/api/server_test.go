@@ -83,7 +83,7 @@ func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
 	database := openEmptyTestStore(t)
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, Settle: 20 * time.Millisecond})
+	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -97,6 +97,7 @@ func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
 		},
 		AgentToken:      "agent-token",
 		RepoProjectsRaw: "owner/repo=TEST",
+		ServerURL:       "https://dispatch.example",
 		Docs:            documentService,
 		Events:          broker,
 	})

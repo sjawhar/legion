@@ -47,6 +47,22 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, issueKey string, 
 		anchor.From = *input.From
 		anchor.To = *input.To
 		anchor.Quote = text.Slice16(live, anchor.From, anchor.To)
+	case input.Quote != nil && input.From != nil && input.To != nil && input.Occurrence == nil:
+		if *input.From < 0 || *input.From >= *input.To || *input.To > text.Len16(live) {
+			return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor range must satisfy 0 <= from < to <= text length")
+		}
+		anchor.Quote = *input.Quote
+		anchor.From = *input.From
+		anchor.To = *input.To
+		if text.Slice16(live, anchor.From, anchor.To) != anchor.Quote {
+			anchor.From, anchor.To, err = resolveQuoteNear(live, anchor.Quote, anchor.From)
+			if errors.Is(err, text.ErrTargetNotFound) {
+				return nil, "", nil, errorf(http.StatusConflict, "ANCHOR_STALE", "anchor quote %q is stale", anchor.Quote)
+			}
+			if err != nil {
+				return nil, "", nil, err
+			}
+		}
 	default:
 		return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor must provide artifact and either quote or from/to")
 	}
@@ -59,6 +75,34 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, issueKey string, 
 		return &anchor, artifact.Name, &version, nil
 	}
 	return &anchor, artifact.Name, nil, nil
+}
+
+// resolveQuoteNear selects the quote occurrence closest to a browser's original
+// range. Resolve owns selector semantics; this only derives its occurrence.
+func resolveQuoteNear(live, quote string, near int) (int, int, error) {
+	from, to, err := text.Resolve(live, quote, nil)
+	var ambiguous *text.ErrTargetAmbiguous
+	if !errors.As(err, &ambiguous) {
+		return from, to, err
+	}
+
+	occurrence := 0
+	distance := anchorDistance(ambiguous.Candidates[0].From, near)
+	for index, candidate := range ambiguous.Candidates[1:] {
+		candidateDistance := anchorDistance(candidate.From, near)
+		if candidateDistance < distance {
+			occurrence = index + 1
+			distance = candidateDistance
+		}
+	}
+	return text.Resolve(live, quote, &occurrence)
+}
+
+func anchorDistance(left, right int) int {
+	if left < right {
+		return right - left
+	}
+	return left - right
 }
 
 func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, issueKey, artifactRef string) (model.Artifact, error) {

@@ -22,7 +22,7 @@ export interface Anchor {
 
 export type AnchorInput =
   | { artifact: string; quote: string; occurrence?: number }
-  | { artifact: string; from: number; to: number };
+  | { artifact: string; from: number; to: number; quote?: string };
 
 export interface Project {
   key: string;

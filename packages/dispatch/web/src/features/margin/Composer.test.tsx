@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { Composer } from "./Composer";
 
 test("Composer uploads dropped files and inserts their references", async () => {
@@ -34,7 +34,7 @@ test("Composer uploads dropped files and inserts their references", async () => 
   });
 
   try {
-    render(
+    const view = render(
       <QueryClientProvider client={queryClient}>
         <Composer
           anchor={{ artifact: "document-1", from: 0, quote: "text", to: 4 }}
@@ -53,7 +53,89 @@ test("Composer uploads dropped files and inserts their references", async () => 
     });
 
     await waitFor(() => expect(textarea.value).toBe("dispatch://CORE-1/artifact/notes-md"));
+    view.unmount();
   } finally {
     uploadArtifact.mockRestore();
+  }
+});
+
+function renderComposer(kind: "ask" | "comment" | "suggestion") {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <Composer
+        anchor={{ artifact: "document-1", from: 8, quote: "selected", to: 16 }}
+        issueKey="CORE-1"
+        kind={kind}
+        onClose={() => {}}
+      />
+    </QueryClientProvider>
+  );
+}
+
+test("Composer sends the selected quote alongside ranges for asks, comments, and suggestions", async () => {
+  const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const anchor = { artifact: "document-1", from: 8, quote: "selected", to: 16 };
+
+  try {
+    const ask = renderComposer("ask");
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Why this text?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() =>
+      expect(createAsk).toHaveBeenCalledWith("CORE-1", {
+        anchor,
+        question: "Why this text?",
+      })
+    );
+    ask.unmount();
+
+    const comment = renderComposer("comment");
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", {
+        anchor,
+        body: "Please revise.",
+        reply_to: undefined,
+        suggestion: undefined,
+      })
+    );
+    comment.unmount();
+
+    const suggestion = renderComposer("suggestion");
+    fireEvent.change(screen.getByLabelText("Replacement"), { target: { value: "replacement" } });
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() =>
+      expect(createComment).toHaveBeenLastCalledWith("CORE-1", {
+        anchor,
+        body: "Suggested replacement.",
+        reply_to: undefined,
+        suggestion: { replace_with: "replacement" },
+      })
+    );
+    suggestion.unmount();
+  } finally {
+    createAsk.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
+test("Composer shows the server's stale anchor error", async () => {
+  const createComment = spyOn(api, "createComment").mockRejectedValue(
+    new ApiError(409, { code: "ANCHOR_STALE", error: 'anchor quote "selected" is stale' })
+  );
+
+  try {
+    const composer = renderComposer("comment");
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+
+    await waitFor(() => expect(screen.getByText('anchor quote "selected" is stale')).toBeTruthy());
+    composer.unmount();
+  } finally {
+    createComment.mockRestore();
   }
 });
