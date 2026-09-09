@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useMemo, useRef } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Event, UserIssueState, UserState } from "../../api/types";
@@ -71,6 +71,7 @@ export function LogTab({
   state: UserState | undefined;
 }): ReactNode {
   const queryClient = useQueryClient();
+  const [saveErrorIssueKey, setSaveErrorIssueKey] = useState<string>();
   const log = useInfiniteQuery({
     initialPageParam: null as number | null,
     queryKey: ["events", issueKey],
@@ -176,6 +177,7 @@ export function LogTab({
   const updateDismissed = (
     operation: DismissedStateOperation | ((dismissed: string[]) => DismissedStateOperation)
   ) => {
+    setSaveErrorIssueKey(undefined);
     let nextOperation: DismissedStateOperation | undefined;
     queryClient.setQueryData<UserState>(["user-state"], (current) => {
       nextOperation = typeof operation === "function" ? operation(issueState.dismissed) : operation;
@@ -190,19 +192,29 @@ export function LogTab({
     if (nextOperation === undefined) {
       return;
     }
-    void stateWrites.enqueue(issueKey, nextOperation, {
-      fetchState: async (key) => eventState(await api.getMyState(), key),
-      onDrained: (key, next) => {
-        queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-          ...current,
-          [key]: next,
-        }));
-      },
-      onError: () => {
-        void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-      },
-      putState: (key, dismissed) => api.putIssueState(key, { dismissed }),
-    });
+    void stateWrites
+      .enqueue(issueKey, nextOperation, {
+        fetchState: async (key) => eventState(await api.getMyState(), key),
+        onDrained: (key, next) => {
+          queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+            ...current,
+            [key]: next,
+          }));
+        },
+        onError: (key, next) => {
+          if (next === undefined) {
+            void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+          } else {
+            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+              ...current,
+              [key]: next,
+            }));
+          }
+          setSaveErrorIssueKey(key);
+        },
+        putState: (key, dismissed) => api.putIssueState(key, { dismissed }),
+      })
+      .catch(() => {});
   };
 
   if (log.isPending) {
@@ -214,6 +226,11 @@ export function LogTab({
 
   return (
     <section aria-label="Issue log" className="space-y-3">
+      {saveErrorIssueKey === issueKey ? (
+        <p className="text-sm text-rose-700" role="alert">
+          Couldn't save pin/dismiss — retry
+        </p>
+      ) : null}
       {items.map((item) => {
         if (item.kind === "new-divider") {
           return (

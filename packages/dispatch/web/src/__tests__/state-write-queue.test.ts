@@ -57,3 +57,106 @@ test("issue-state queue applies rapid operations against server state and publis
     issueState(["pinned_items:event:1", "event:2", "pinned_items:event:3"]),
   ]);
 });
+
+test("retries a failed operation from fetched state and keeps an operation queued during failure", async () => {
+  const queue = new IssueStateWriteQueue();
+  const secondStarted = deferred();
+  const failSecond = deferred();
+  const writes: string[][] = [];
+  const published: UserIssueState[] = [];
+  const errors: (UserIssueState | undefined)[] = [];
+  const fetched = [issueState([]), issueState(["pinned_items:event:1"])];
+  let fetchCount = 0;
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => fetched[fetchCount++] ?? issueState([]),
+    onDrained: (_issueKey, state) => published.push(state),
+    onError: (_issueKey, state) => errors.push(state),
+    putState: async (_issueKey, dismissed) => {
+      const attempt = writes.push(dismissed);
+      if (attempt === 2) {
+        secondStarted.release();
+        await failSecond.promise;
+        throw new Error("write failed");
+      }
+      return issueState(dismissed);
+    },
+  };
+
+  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "dismiss" }, worker);
+  await secondStarted.promise;
+  const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
+  failSecond.release();
+
+  await Promise.all([first, second, third]);
+  expect(writes).toEqual([
+    ["pinned_items:event:1"],
+    ["pinned_items:event:1", "event:2"],
+    ["pinned_items:event:1", "event:2"],
+    ["pinned_items:event:1", "event:2", "pinned_items:event:3"],
+  ]);
+  expect(published).toEqual([
+    issueState(["pinned_items:event:1", "event:2", "pinned_items:event:3"]),
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("a second failed write rejects queued operations, restores fetched state, and clears the queue", async () => {
+  const queue = new IssueStateWriteQueue();
+  const secondStarted = deferred();
+  const failSecond = deferred();
+  const writes: string[][] = [];
+  const published: UserIssueState[] = [];
+  const errors: (UserIssueState | undefined)[] = [];
+  const fetched = [
+    issueState([]),
+    issueState(["pinned_items:event:1"]),
+    issueState(["pinned_items:event:1"]),
+  ];
+  let fetchCount = 0;
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => fetched[fetchCount++] ?? issueState([]),
+    onDrained: (_issueKey, state) => published.push(state),
+    onError: (_issueKey, state) => errors.push(state),
+    putState: async (_issueKey, dismissed) => {
+      const attempt = writes.push(dismissed);
+      if (attempt === 2) {
+        secondStarted.release();
+        await failSecond.promise;
+      }
+      if (attempt === 2 || attempt === 3) {
+        throw new Error("write failed");
+      }
+      return issueState(dismissed);
+    },
+  };
+
+  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "dismiss" }, worker);
+  const secondResult = second.then(
+    () => undefined,
+    (error) => error
+  );
+  await secondStarted.promise;
+  const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
+  const thirdResult = third.then(
+    () => undefined,
+    (error) => error
+  );
+  failSecond.release();
+
+  await first;
+  const [secondError, thirdError] = await Promise.all([secondResult, thirdResult]);
+  expect(secondError).toBeInstanceOf(Error);
+  expect(thirdError).toBe(secondError);
+  expect(writes).toEqual([
+    ["pinned_items:event:1"],
+    ["pinned_items:event:1", "event:2"],
+    ["pinned_items:event:1", "event:2"],
+  ]);
+  expect(published).toEqual([]);
+  expect(errors).toEqual([issueState(["pinned_items:event:1"])]);
+
+  await queue.enqueue("CORE-1", { id: "event:4", op: "dismiss" }, worker);
+  expect(writes.at(-1)).toEqual(["pinned_items:event:1", "event:4"]);
+});
