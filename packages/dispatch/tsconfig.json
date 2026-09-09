@@ -6,8 +6,9 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "jsx": "preserve",
-    "types": ["bun"]
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["bun", "vite/client"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "web/src/**/*.ts", "web/vite.config.ts", "e2e/**/*.ts"]
+  "include": ["web/src/**/*.ts", "web/src/**/*.tsx", "web/vite.config.ts", "e2e/**/*.ts"]
 }

@@ -1,63 +1,46 @@
 # Dispatch Package
 
-The Dispatch dashboard SPA — the human approval and coordination surface used
-by Legion and Envoy workflows.
+Dispatch is the React single-page application for coordinating native Dispatch
+issues. The Go server lives in `packages/envoy/cmd/dispatch` and serves the
+production build from `web/dist`.
 
-## Overview
+## Layout
 
-This package contains only the Vite SPA. The HTTP backend is a Go binary in
-the `envoy` package:
+- `web/src/app.tsx` owns authentication, the HTTPS reference router, and the
+  responsive sidebar / main content / margin shell. The margin is a bottom
+  sheet below the `md` breakpoint.
+- `web/src/api/types.ts` mirrors the Dispatch JSON entities.
+- `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
+  browser API boundary.
+- `web/src/api/sse.ts` opens the issue event stream and invalidates TanStack
+  Query cache entries for the affected issue.
+- `web/src/main.tsx` installs React Router and the shared Query client.
 
-| Layer                | Location                                                |
-| -------------------- | ------------------------------------------------------- |
-| Dashboard SPA (this) | `packages/dispatch/web/`                                |
-| Backend HTTP server  | `packages/envoy/cmd/dispatch/`                          |
-| Backend internals    | `packages/envoy/internal/dispatch/`                     |
-| MCP endpoint         | `packages/envoy/internal/dispatch/mcp/` (served at `/mcp`) |
+`AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the
+GitHub sign-in link at `/auth/start`. All application requests use the same
+origin so the browser sends the signed-in cookie.
 
-The Go server serves the SPA build artifacts from `packages/dispatch/web/dist/`
-and exposes the OAuth + GitHub proxy + SSE + MCP routes.
+## Commands
 
-## Local development
+Run these from this package:
 
 ```bash
-# Build the SPA
+bun run dev
 bun run build:web
-
-# Start the backend (from packages/envoy)
-go run ./cmd/dispatch
+bun run typecheck
+bun run lint
+bun test
 ```
 
-Use `bun run typecheck`, `bun run lint`, and `bun test` before reporting SPA
-changes. For backend changes see `packages/envoy/cmd/dispatch/AGENTS.md`.
+## End-to-end tests
 
-## Discovery
+`bun run e2e` drives Playwright against the real Go Dispatch server and
+Postgres. The harness runs `e2e/run-server.sh` unless
+`PLAYWRIGHT_BASE_URL` selects an already deployed server. It defaults
+`DATABASE_URL` to the Lane C development database and uses the trusted
+`X-Dispatch-User` header identity for `alice` and `bob`; do not replace it
+with a fixture server.
 
-The dashboard has no watched-repos configuration. On sign-in it fetches the
-signed-in user's Envoy App installations (`GET /api/installations`) and
-searches `is:issue is:open label:dispatch-thread` scoped to `user:<owner>`
-for every distinct installation owner (user or org) the App is installed on
-and the signer can see. A new repo under an already-installed owner needs no
-configuration; a user with zero visible installations sees an explicit error
-state instead of an empty sidebar.
-
-## Conversations
-
-A thread is a sequence of turns: the issue body, then every `dispatch:ask` follow-up comment
-(`web/src/asks.ts`). An ask is answered when an answer comment names its `askId` (a legacy
-answer without `forAsk` settles the body's asks by index). Only the latest turn's unanswered
-asks are open; unanswered asks of earlier turns are superseded — the follow-up restated the
-question — and render as "superseded by a later follow-up" linking to that turn. A follow-up
-with no `ask` list is one free-text ask whose question is the text under its `## Question`.
-The detail view renders one form per open ask (`#detail-ask-forms`; a free-text ask gets a
-textarea only) and each answer beneath the question it settles; the sidebar's `needs you`
-badge counts open asks from the last 30 comments returned by the search query, or from the
-full comment list once loaded.
-
-Painting never rebuilds the page: every action and event calls one `paint()` (`web/src/main.ts`);
-`web/src/dom.ts` writes a region only when its markup changed since the last paint and
-reconciles ask forms by `askId` (a form whose answer is still posting stays, disabled), so the
-reply textarea, half-filled forms, search focus, and an unchanged conversation survive events.
-GitHub references in rendered markdown are linkified and unfurled to titles through the REST
-proxy (`web/src/unfurl.ts`). Browser behaviour is covered by `bun run e2e`
-(`e2e/`, Playwright against a fixture backend that speaks the service's HTTP contract).
+`e2e/seed.ts` truncates the test database before each scenario. For a deployed
+server, set `PLAYWRIGHT_DATABASE_URL` for the same database and
+`E2E_AGENT_TOKEN` for bearer-seeded API calls.
