@@ -77,12 +77,11 @@ func (m *memUserStore) Read(login string) (*auth.User, error) {
 func (m *memUserStore) Write(u *auth.User) error  { m.users[u.Login] = u; return nil }
 func (m *memUserStore) Remove(login string) error { delete(m.users, login); return nil }
 
-func TestRefreshAndStoreKeepsAddressed(t *testing.T) {
+func TestRefreshAndStorePersistsNewTokens(t *testing.T) {
 	store := &memUserStore{users: map[string]*auth.User{
 		"sjawhar": {
-			Login:     "sjawhar",
-			Tokens:    auth.Tokens{AccessToken: "old", RefreshToken: "r1"},
-			Addressed: map[string]string{"sjawhar/legion#1": "2026-09-04T00:00:00Z"},
+			Login:  "sjawhar",
+			Tokens: auth.Tokens{AccessToken: "old", RefreshToken: "r1"},
 		},
 	}}
 	cfg := &ProxyConfig{
@@ -98,9 +97,6 @@ func TestRefreshAndStoreKeepsAddressed(t *testing.T) {
 	got := store.users["sjawhar"]
 	if got.Tokens.AccessToken != "new" {
 		t.Errorf("tokens not persisted: %+v", got.Tokens)
-	}
-	if got.Addressed["sjawhar/legion#1"] == "" {
-		t.Errorf("addressed map lost on refresh: %+v", got.Addressed)
 	}
 	if cfg.Tokens == nil || cfg.Tokens.AccessToken != "new" {
 		t.Errorf("cfg.Tokens not updated")

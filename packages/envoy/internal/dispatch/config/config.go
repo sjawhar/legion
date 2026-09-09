@@ -18,6 +18,7 @@ import (
 type DispatchConfig struct {
 	Enabled   bool   `json:"enabled,omitempty"`
 	ServerURL string `json:"serverUrl,omitempty"`
+	Token     string `json:"token,omitempty"`
 }
 
 // EnvoyConfig is the top-level envoy.json shape.
@@ -38,6 +39,7 @@ type LoadOptions struct {
 var dispatchKnownKeys = map[string]struct{}{
 	"enabled":   {},
 	"serverUrl": {},
+	"token":     {},
 }
 
 // InvalidConfigError reports an envoy.json file that failed validation — an
@@ -177,6 +179,11 @@ func parseDispatch(raw json.RawMessage) (*DispatchConfig, []string) {
 			out.ServerURL = s
 		}
 	}
+	if v, ok := m["token"]; ok {
+		if err := json.Unmarshal(v, &out.Token); err != nil {
+			issues = append(issues, "dispatch.token: Expected string")
+		}
+	}
 	return out, issues
 }
 
@@ -212,6 +219,9 @@ func mergeConfig(base, override *EnvoyConfig) *EnvoyConfig {
 			}
 			if override.Dispatch.ServerURL != "" {
 				merged.ServerURL = override.Dispatch.ServerURL
+			}
+			if override.Dispatch.Token != "" {
+				merged.Token = override.Dispatch.Token
 			}
 		}
 		out.Dispatch = merged
