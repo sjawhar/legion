@@ -20,7 +20,7 @@ describe("daemon config", () => {
         LEGION_ADMISSION_CAP: "7",
         LEGION_MAX_RECURSION_DEPTH: "11",
         LEGION_LINGER_HOURS: "48",
-        LEGION_WORKER_BUDGET: "9",
+        LEGION_WORKER_CAP: "9",
         LEGION_OMP_INVOCATION: "custom-omp-from-env",
       },
       cliOverrides: {
@@ -41,7 +41,7 @@ describe("daemon config", () => {
       admissionCap: 7,
       maxRecursionDepth: 11,
       lingerHours: 48,
-      workerBudget: 9,
+      workerCap: 9,
       resyncIntervalMs: 600_000,
       gates: { design: "root-issues", merge: "human" },
       ompInvocation: "custom-omp-from-env",
@@ -78,6 +78,80 @@ describe("daemon config", () => {
     ).toThrow(/DISPATCH_MCP_URL/);
   });
 
+  it("resolves the optional dispatch service base URL from the environment", () => {
+    const { config } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_BOARD_PROJECT_IDS: "PVT_x",
+        DISPATCH_URL: "http://127.0.0.1:18766",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
+  });
+
+  it("normalizes a trailing slash off the dispatch service base URL", () => {
+    const { config } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_BOARD_PROJECT_IDS: "PVT_x",
+        DISPATCH_URL: "http://127.0.0.1:18766/",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
+  });
+
+  it("rejects an invalid dispatch service URL", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          LEGION_BOARD_PROJECT_IDS: "PVT_x",
+          DISPATCH_URL: "not a url",
+        },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(/DISPATCH_URL/);
+  });
+
+  it("rejects a dispatch service URL still carrying the /mcp alias", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          LEGION_BOARD_PROJECT_IDS: "PVT_x",
+          DISPATCH_URL: "http://127.0.0.1:18766/mcp",
+        },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(/DISPATCH_URL must be the dispatch service base URL, not the \/mcp endpoint/);
+  });
+
+  it("accepts dispatch_url from the YAML loader shape without an unknown-key warning", () => {
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "dispatch_url: http://127.0.0.1:18766",
+        "gates:",
+        "  design: off",
+        "  merge: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+    const { config } = resolveDaemonConfig({ env: requiredEnv, configFile: file });
+
+    expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
+  });
+
   it("loads lifecycle settings from the existing YAML loader shape", () => {
     const file = loadConfigFromFile(
       [
@@ -96,7 +170,7 @@ describe("daemon config", () => {
         "admission_cap: 3",
         "max_recursion_depth: 6",
         "linger_hours: 24",
-        "worker_budget: 2",
+        "worker_cap: 2",
         "resync_interval_seconds: 120",
         "omp_invocation: mise x github:acme/oh-my-pi@18.0.3 -- omp",
         "state_dir: ./state",
@@ -121,7 +195,7 @@ describe("daemon config", () => {
       admissionCap: 3,
       maxRecursionDepth: 6,
       lingerHours: 24,
-      workerBudget: 2,
+      workerCap: 2,
       resyncIntervalMs: 120_000,
       stateDir: "/tmp/legion-config/state",
       gates: { design: "off", merge: "off" },
@@ -165,8 +239,8 @@ describe("daemon config", () => {
       "LEGION_ADMISSION_CAP"
     );
     expect(() =>
-      loadConfigFromFile("project: acme/7\nworker_budget: 1.5\n", "/tmp/legion-config")
-    ).toThrow("worker_budget");
+      loadConfigFromFile("project: acme/7\nworker_cap: 1.5\n", "/tmp/legion-config")
+    ).toThrow("worker_cap");
   });
 
   it("rejects a design gate left on without board_project_ids configured", () => {

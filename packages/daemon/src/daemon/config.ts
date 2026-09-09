@@ -27,6 +27,14 @@ export interface DaemonConfig {
    * config.
    */
   dispatchMcpUrl?: string;
+  /**
+   * Optional dispatch service base URL (no `/mcp` suffix), passed through to
+   * spawned session environments as DISPATCH_URL so the native dispatch tool
+   * targets a specific service (the smoke rig points it at its own
+   * instance). When unset, sessions fall back to their envoy.json dispatch
+   * config.
+   */
+  dispatchUrl?: string;
   natsUrls: string[];
   ompInvocation: string;
   boardProjectIds: string[];
@@ -34,7 +42,7 @@ export interface DaemonConfig {
   repos: string[];
   appLogins: string[];
   admissionCap: number;
-  workerBudget: number;
+  workerCap: number;
   maxRecursionDepth: number;
   lingerHours: number;
   maxFixAttempts: number;
@@ -80,7 +88,7 @@ type ValueSource = "cli" | "config" | "env" | "default";
 const DEFAULT_PORT = 13370;
 const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 const DEFAULT_ADMISSION_CAP = 4;
-const DEFAULT_WORKER_BUDGET = 6;
+const DEFAULT_WORKER_CAP = 10;
 const DEFAULT_MAX_RECURSION_DEPTH = 8;
 const DEFAULT_LINGER_HOURS = 72;
 const DEFAULT_MAX_FIX_ATTEMPTS = 3;
@@ -92,13 +100,14 @@ const CONFIG_SCHEMA: ConfigSchema = {
   port: null,
   envoy_url: null,
   dispatch_mcp_url: null,
+  dispatch_url: null,
   nats_urls: null,
   omp_invocation: null,
   board_project_ids: null,
   repos: null,
   app_logins: null,
   admission_cap: null,
-  worker_budget: null,
+  worker_cap: null,
   max_recursion_depth: null,
   linger_hours: null,
   max_fix_attempts: null,
@@ -209,6 +218,25 @@ function validateRepoSlug(value: string, field: string): string {
     throw new Error(`${field} entries must be "owner/name" (got "${value}")`);
   }
   return value;
+}
+
+/** The dispatch service base URL never carries its clients' `/mcp` alias; the clients strip it
+ * themselves. Rejecting it here surfaces a stale config value instead of silently misrouting.
+ * Checked against the parsed URL's pathname (trailing slash stripped) rather than the raw
+ * string, so `.../mcp/` and `.../mcp?query=1` are caught too, not just an exact `/mcp` suffix. */
+function requireNoMcpSuffix(value: string, field: string): string {
+  const pathname = new URL(value).pathname.replace(/\/+$/, "");
+  if (pathname.endsWith("/mcp")) {
+    throw new Error(`${field} must be the dispatch service base URL, not the /mcp endpoint`);
+  }
+  return value;
+}
+
+/** Canonicalizes a validated base URL to have no trailing slash, so appending a path segment
+ * (e.g. `` `${dispatchUrl}/mcp` ``) never doubles the slash regardless of how the operator wrote
+ * the configured value (`http://x` and `http://x/` both resolve to `http://x`). */
+function normalizeBaseUrl(value: string): string {
+  return new URL(value).toString().replace(/\/+$/, "");
 }
 
 function collectUnknownKeys(
@@ -375,6 +403,10 @@ export function loadConfigFromFile(
   if (dispatchMcpUrlField !== undefined) {
     fields.dispatchMcpUrl = validateUrl(dispatchMcpUrlField, "dispatch_mcp_url");
   }
+  const dispatchUrlField = readString(config.dispatch_url, "dispatch_url");
+  if (dispatchUrlField !== undefined) {
+    fields.dispatchUrl = validateUrl(dispatchUrlField, "dispatch_url");
+  }
   const natsUrls = readStringArray(config.nats_urls, "nats_urls");
   if (natsUrls !== undefined) fields.natsUrls = natsUrls;
   const ompInvocation = readString(config.omp_invocation, "omp_invocation");
@@ -390,7 +422,7 @@ export function loadConfigFromFile(
 
   for (const [fileKey, configKey] of [
     ["admission_cap", "admissionCap"],
-    ["worker_budget", "workerBudget"],
+    ["worker_cap", "workerCap"],
     ["max_recursion_depth", "maxRecursionDepth"],
     ["linger_hours", "lingerHours"],
     ["max_fix_attempts", "maxFixAttempts"],
@@ -455,6 +487,12 @@ export function resolveDaemonConfig(
     env.DISPATCH_MCP_URL,
     undefined
   );
+  const dispatchUrl = resolveValue(
+    undefined,
+    fileString(fields, "dispatchUrl"),
+    env.DISPATCH_URL,
+    undefined
+  );
   const natsUrls = resolveValue(
     opts.cliOverrides?.natsUrls,
     fileStringArray(fields, "natsUrls"),
@@ -499,11 +537,11 @@ export function resolveDaemonConfig(
     parseEnvPositiveInteger(env.LEGION_ADMISSION_CAP, "LEGION_ADMISSION_CAP"),
     DEFAULT_ADMISSION_CAP
   );
-  const workerBudget = resolveValue(
-    opts.cliOverrides?.workerBudget,
-    fileNumber(fields, "workerBudget"),
-    parseEnvPositiveInteger(env.LEGION_WORKER_BUDGET, "LEGION_WORKER_BUDGET"),
-    DEFAULT_WORKER_BUDGET
+  const workerCap = resolveValue(
+    opts.cliOverrides?.workerCap,
+    fileNumber(fields, "workerCap"),
+    parseEnvPositiveInteger(env.LEGION_WORKER_CAP, "LEGION_WORKER_CAP"),
+    DEFAULT_WORKER_CAP
   );
   const maxRecursionDepth = resolveValue(
     opts.cliOverrides?.maxRecursionDepth,
@@ -532,7 +570,7 @@ export function resolveDaemonConfig(
 
   const lifecycleNumbers: Record<string, number> = {
     admissionCap: admissionCap.value,
-    workerBudget: workerBudget.value,
+    workerCap: workerCap.value,
     maxRecursionDepth: maxRecursionDepth.value,
     lingerHours: lingerHours.value,
     maxFixAttempts: maxFixAttempts.value,
@@ -579,13 +617,20 @@ export function resolveDaemonConfig(
         dispatchMcpUrl.value === undefined
           ? undefined
           : validateUrl(dispatchMcpUrl.value, "DISPATCH_MCP_URL"),
+      dispatchUrl:
+        dispatchUrl.value === undefined
+          ? undefined
+          : requireNoMcpSuffix(
+              normalizeBaseUrl(validateUrl(dispatchUrl.value, "DISPATCH_URL")),
+              "DISPATCH_URL"
+            ),
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       boardProjectIds: boardProjectIds.value,
       repos: repos.value,
       appLogins: appLogins.value,
       admissionCap: admissionCap.value,
-      workerBudget: workerBudget.value,
+      workerCap: workerCap.value,
       maxRecursionDepth: maxRecursionDepth.value,
       lingerHours: lingerHours.value,
       maxFixAttempts: maxFixAttempts.value,

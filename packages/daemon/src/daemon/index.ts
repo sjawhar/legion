@@ -355,9 +355,10 @@ async function startDaemonLocked(
     now: deps.now,
   });
 
-  // reconcileAdmission is now awaited further down (see the comment near its call), once
-  // `api` is assigned: its promotion cascade calls back into `mintBootToken`/
-  // `mintControllerCapability` closures that read `api` by reference.
+  // reconcileAdmission and reconcileWorkerAdmission are both awaited further down (see the
+  // comment near their calls), once `api` is assigned: their promotion cascades call back into
+  // `mintBootToken`/`mintWorkerBootToken`/`mintControllerCapability` closures that read `api` by
+  // reference.
   void processManager.reconnectWorkers().catch((error) => {
     console.error(`[legion] worker reconnection failed:`, error);
   });
@@ -418,6 +419,10 @@ async function startDaemonLocked(
   // trigger calls back into `processManager`'s `mintBootToken`/
   // `mintControllerCapability` closures, which read `api` by reference.
   await processManager.reconcileAdmission();
+  // Same reasoning as reconcileAdmission above: a worker cap raised across a restart must finish
+  // promoting queued workers (whose launch mints a boot token via `api`) before the API starts
+  // serving /worker/spawn against a possibly-stale running-worker count.
+  await processManager.reconcileWorkerAdmission();
   const ready = nats.ready();
   const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 

@@ -37,10 +37,16 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
   negotiated: boolean;
   getStateCalls: number;
   getStateImpl?: () => Promise<Record<string, unknown>>;
+  emitRunState(state: "running" | "idle"): void;
 } {
   const closed = Promise.withResolvers<void>();
+  let idleCallback: (() => void) | undefined;
+  let runState: "unknown" | "running" | "idle" = "unknown";
   const client = {
     closed: closed.promise,
+    get runState() {
+      return runState;
+    },
     prompts: [] as string[],
     negotiated: false,
     getStateCalls: 0,
@@ -49,6 +55,7 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
       client.negotiated = true;
     },
     async prompt(message: string) {
+      runState = "running";
       client.prompts.push(message);
     },
     async getState() {
@@ -57,7 +64,18 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
     },
     shutdown() {},
     close() {
+      const wasIdle = runState === "idle";
+      runState = "idle";
       closed.resolve();
+      if (!wasIdle) idleCallback?.();
+    },
+    onIdle(callback: () => void) {
+      idleCallback = callback;
+    },
+    emitRunState(state: "running" | "idle") {
+      const wasIdle = runState === "idle";
+      runState = state;
+      if (state === "idle" && !wasIdle) idleCallback?.();
     },
   };
   return client;
@@ -74,7 +92,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     repos: ["sjawhar/legion"],
     appLogins: [],
     admissionCap: 1,
-    workerBudget: 5,
+    workerCap: 5,
     maxRecursionDepth: 8,
     lingerHours: 2,
     maxFixAttempts: 3,
@@ -335,7 +353,7 @@ describe("ProcessManager", () => {
       state,
       commands,
     } = manager(newLegionState("omp", 1), {
-      config: config(stateDir, { dispatchMcpUrl: "http://127.0.0.1:18766/mcp" }),
+      config: config(stateDir, { dispatchUrl: "http://127.0.0.1:18766" }),
       run: async (
         command: string[],
         opts?: {
@@ -441,6 +459,8 @@ describe("ProcessManager", () => {
         "GIT_TERMINAL_PROMPT=0",
         "-e",
         "PATH=/full/bin:/usr/bin",
+        "-e",
+        "DISPATCH_URL=http://127.0.0.1:18766",
         "-e",
         "DISPATCH_MCP_URL=http://127.0.0.1:18766/mcp",
         `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-architect-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
@@ -2865,6 +2885,113 @@ describe("ProcessManager", () => {
     expect(claim.generation).toBe(2);
   });
 
+  it("queues a dead worker retried at cap by preserving its resume session file, then promotes it with --resume once a slot frees", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const resumeFile = path.join(stateDir, "prior-tester-session.json");
+    await writeFile(resumeFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const plannerToken = roleToken("omp", root, "planner");
+    const testerToken = roleToken("omp", root, "tester");
+    const occupierClient = fakeWorkerRpcClient();
+    state.roles[plannerToken] = {
+      issue: root,
+      role: "planner",
+      generation: 1,
+      sessionId: "ses_planner",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/planner.sock",
+      },
+    };
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+        ompSessionFile: resumeFile,
+      },
+    };
+    let resolvePromoted: (() => void) | undefined;
+    const promoted = new Promise<void>((resolve) => {
+      resolvePromoted = resolve;
+    });
+    const {
+      manager: processes,
+      state: managedState,
+      commands,
+    } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+      sleep: async () => {},
+      connectWorkerRpc: async (socketPath) => {
+        if (socketPath === "/state/workers/dead-tester.sock") throw new Error("ECONNREFUSED");
+        return occupierClient;
+      },
+      saveState: async () => {
+        const testerClaim = managedState.roles[testerToken];
+        if (testerClaim && "issue" in testerClaim && testerClaim.locator) resolvePromoted?.();
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "list-panes" && command.includes("%7")) {
+          return { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%301 23456\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return { stdout: "%301\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Bring the planner into the cache as running, occupying the cap-1 slot.
+    const plannerResume = await processes.spawnWorker(root, root, "planner", "plan #41");
+    expect(plannerResume).toEqual({ status: "resumed", roleToken: plannerToken });
+    expect(occupierClient.prompts).toEqual(["plan #41"]);
+
+    const testerResult = await processes.spawnWorker(root, root, "tester", "verify again");
+
+    expect(testerResult).toEqual({ status: "queued", roleToken: testerToken });
+    expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+    const queuedClaim = managedState.roles[testerToken];
+    if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("tester claim disappeared");
+    expect(queuedClaim.locator).toBeUndefined();
+    expect(queuedClaim.resumeSessionFile).toBe(resumeFile);
+    expect(queuedClaim.pendingAssignment).toBe("verify again");
+    // Preserved in place, never replaced.
+    expect(queuedClaim.agentId).toBe("agt_tester");
+
+    occupierClient.emitRunState("idle");
+    await promoted;
+
+    const promotedClaim = managedState.roles[testerToken];
+    if (!promotedClaim || !("issue" in promotedClaim)) throw new Error("tester claim disappeared");
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(promotedClaim.resumeSessionFile).toBeUndefined();
+    const split = commands.find(
+      (command) => command[0] === "tmux" && command[1] === "split-window"
+    );
+    if (!split) throw new Error("promoted worker did not split into its persisted window");
+    expect(split).toContain("@42");
+    expect(split.at(-1)).toContain(`--resume=${resumeFile}`);
+  });
+
   it("kills a dead-socket worker's still-running pane before respawning it", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
@@ -3104,6 +3231,170 @@ describe("ProcessManager", () => {
     );
   });
 
+  it("queues a second spawnWorker call at the running-worker cap and publishes worker-queued to the architect", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+    });
+
+    const first = await processes.spawnWorker(root, root, "planner", "plan #41");
+    expect(first).toEqual({ status: "spawned", roleToken: roleToken("omp", root, "planner") });
+
+    const testerToken = roleToken("omp", root, "tester");
+    const second = await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    expect(second).toEqual({ status: "queued", roleToken: testerToken });
+    expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+    const queuedClaim = managedState.roles[testerToken];
+    if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("queued claim missing");
+    expect(queuedClaim.locator).toBeUndefined();
+    expect(queuedClaim.pendingAssignment).toBe("verify #41");
+    expect(publications).toContainEqual({
+      subject: roleTopic(roleToken("omp", root, "architect")),
+      json: JSON.stringify({ type: "worker-queued", issue: root, role: "tester" }),
+    });
+  });
+
+  it("promotes the queued worker once the running one goes idle, publishing worker-started", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const clients: Array<{ emitRunState(state: "running" | "idle"): void; close(): void }> = [];
+    const publications: Array<{ subject: string; json: string }> = [];
+    let resolvePromoted: (() => void) | undefined;
+    const promoted = new Promise<void>((resolve) => {
+      resolvePromoted = resolve;
+    });
+    const plannerToken = roleToken("omp", root, "planner");
+    const testerToken = roleToken("omp", root, "tester");
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+      connectWorkerRpc: async () => {
+        const client = fakeWorkerRpcClient();
+        clients.push(client);
+        return client;
+      },
+      natsPublish: (subject, json) => {
+        publications.push({ subject, json });
+        if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
+      },
+    });
+
+    await processes.spawnWorker(root, root, "planner", "plan #41");
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+    expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+
+    const plannerClaim = managedState.roles[plannerToken];
+    if (!plannerClaim || !("issue" in plannerClaim)) throw new Error("planner claim missing");
+    plannerClaim.sessionId = "ses_planner";
+    await processes.workerReady(root, "planner", "ses_planner", plannerClaim.generation ?? 1);
+    expect(clients).toHaveLength(1);
+
+    clients[0]?.emitRunState("idle");
+    await promoted;
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const promotedClaim = managedState.roles[testerToken];
+    if (!promotedClaim || !("issue" in promotedClaim)) throw new Error("tester claim missing");
+    expect(promotedClaim.locator).toBeDefined();
+    expect(publications).toContainEqual({
+      subject: architectTopic,
+      json: JSON.stringify({ type: "worker-started", issue: root, role: "tester" }),
+    });
+  });
+
+  it("promotes the queued worker once the running one dies, same as going idle", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const clients: Array<{ emitRunState(state: "running" | "idle"): void; close(): void }> = [];
+    const publications: Array<{ subject: string; json: string }> = [];
+    let resolvePromoted: (() => void) | undefined;
+    const promoted = new Promise<void>((resolve) => {
+      resolvePromoted = resolve;
+    });
+    const plannerToken = roleToken("omp", root, "planner");
+    const testerToken = roleToken("omp", root, "tester");
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+      connectWorkerRpc: async () => {
+        const client = fakeWorkerRpcClient();
+        clients.push(client);
+        return client;
+      },
+      natsPublish: (subject, json) => {
+        publications.push({ subject, json });
+        if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
+      },
+    });
+
+    await processes.spawnWorker(root, root, "planner", "plan #41");
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    const plannerClaim = managedState.roles[plannerToken];
+    if (!plannerClaim || !("issue" in plannerClaim)) throw new Error("planner claim missing");
+    plannerClaim.sessionId = "ses_planner";
+    await processes.workerReady(root, "planner", "ses_planner", plannerClaim.generation ?? 1);
+
+    clients[0]?.close();
+    await promoted;
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const promotedClaim = managedState.roles[testerToken];
+    if (!promotedClaim || !("issue" in promotedClaim)) throw new Error("tester claim missing");
+    expect(promotedClaim.locator).toBeDefined();
+    expect(publications).toContainEqual({
+      subject: architectTopic,
+      json: JSON.stringify({ type: "worker-started", issue: root, role: "tester" }),
+    });
+  });
+
+  it("re-evaluates a persisted running-worker queue against a raised cap across a restart", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const testerToken = roleToken("omp", root, "tester");
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: "verify #41",
+    };
+    state.workerAdmission.queue.push(testerToken);
+    const publications: Array<{ subject: string; json: string }> = [];
+    let resolvePromoted: (() => void) | undefined;
+    const promoted = new Promise<void>((resolve) => {
+      resolvePromoted = resolve;
+    });
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerCap: 2 }),
+      natsPublish: (subject, json) => {
+        publications.push({ subject, json });
+        if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
+      },
+    });
+
+    processes.reconcileWorkerAdmission();
+    await promoted;
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const promotedClaim = managedState.roles[testerToken];
+    if (!promotedClaim || !("issue" in promotedClaim)) throw new Error("tester claim missing");
+    expect(promotedClaim.locator).toBeDefined();
+    expect(publications).toContainEqual({
+      subject: architectTopic,
+      json: JSON.stringify({ type: "worker-started", issue: root, role: "tester" }),
+    });
+  });
+
   it("delivers a worker's pending assignment over its socket on worker/ready and clears it", async () => {
     const state = newLegionState("omp", 1);
     const token = roleToken("omp", root, "tester");
@@ -3279,6 +3570,40 @@ describe("ProcessManager", () => {
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.locator).toBeUndefined();
     expect(claim.pendingAssignment).toBe("verify #41");
+  });
+
+  it("passes both DISPATCH_URL and the transitional DISPATCH_MCP_URL alias to a spawned phase worker", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir, { dispatchUrl: "http://127.0.0.1:18766" }),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          return { stdout: "@99 %201 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    const windowCommand = commands.find(
+      (command) => command[0] === "tmux" && command[1] === "new-window" && command.includes("-n")
+    );
+    if (!windowCommand) throw new Error("worker spawn did not open a tmux window");
+    const environment = tmuxWindowEnvironment(windowCommand);
+    expect(environment.DISPATCH_URL).toBe("http://127.0.0.1:18766");
+    expect(environment.DISPATCH_MCP_URL).toBe("http://127.0.0.1:18766/mcp");
   });
 
   it("kills a still-running pane whose socket is unreachable before clearing its locator on reconnect", async () => {

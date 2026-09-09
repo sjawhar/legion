@@ -417,11 +417,11 @@ function labels(value: unknown): string[] {
   return result;
 }
 
-// Dispatch threads are human Q&A artifacts (GitHub sub-issues labeled by
-// dispatchLabel in packages/envoy/internal/dispatch/core/thread.go), never
-// Legion work items. Checked against the raw payload — deliberately not via
-// labels()/SURVIVING_LABELS, whose output persists into IssueNode.labels and
-// must stay within the GateLabelSchema enum in legion-state.ts.
+// Dispatch threads are human Q&A artifacts (GitHub sub-issues labeled
+// "dispatch-thread"), never Legion work items. Checked against the raw
+// payload — deliberately not via labels()/SURVIVING_LABELS, whose output
+// persists into IssueNode.labels and must stay within the GateLabelSchema
+// enum in legion-state.ts.
 function isDispatchThread(rawLabels: unknown): boolean {
   const source = Array.isArray(rawLabels) ? rawLabels : asRecord(rawLabels)?.nodes;
   if (!Array.isArray(source)) return false;

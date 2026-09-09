@@ -120,6 +120,7 @@ describe("legion state", () => {
       prByBranch: {},
       prTombstones: {},
       admission: { cap: 4, active: [], queue: [] },
+      workerAdmission: { queue: [] },
       phases: {},
       controllerHeldEvents: [],
     });
@@ -503,6 +504,16 @@ describe("legion state", () => {
       },
     };
     await writeFile(file, JSON.stringify({ ...current, version: 12 }), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v14 state by adding an empty running-worker queue", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v14-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const { workerAdmission: _workerAdmission, ...withoutWorkerAdmission } = current;
+    await writeFile(file, JSON.stringify({ ...withoutWorkerAdmission, version: 14 }), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
   });

@@ -20,7 +20,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
     repos: ["sjawhar/legion"],
     appLogins: [],
     admissionCap: 1,
-    workerBudget: 5,
+    workerCap: 5,
     maxRecursionDepth: 8,
     lingerHours: 2,
     maxFixAttempts: 3,

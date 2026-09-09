@@ -174,7 +174,7 @@ export const LegionDaemonApi = {
       task: nonEmptyString,
     }),
     response: z.object({
-      status: z.enum(["spawned", "resumed"]),
+      status: z.enum(["spawned", "resumed", "queued"]),
       roleToken: nonEmptyString,
     }),
   },

@@ -3,6 +3,16 @@ import { randomUUID } from "node:crypto";
 const DEFAULT_RPC_TIMEOUT_MS = 5_000;
 
 /**
+ * A worker's run state, tracked from the moment its socket connects: `"unknown"` until the first
+ * `agent_start`/`agent_end` frame is observed (including ones replayed from the shim's
+ * pre-connect backlog on a reconnect), `"running"` between an `agent_start` and its matching
+ * `agent_end`, `"idle"` otherwise. Callers treat anything other than `"idle"` as occupying a
+ * running-worker slot — `"unknown"` is the conservative default for a freshly-connected or
+ * mid-turn worker whose state hasn't been observed yet.
+ */
+export type WorkerRunState = "unknown" | "running" | "idle";
+
+/**
  * Minimal client for the OMP RPC protocol v2, reached through a worker's
  * `legion worker-shim` unix socket rather than a spawned process's stdio. The
  * shim forwards every frame between the socket and the wrapped `omp --mode rpc`
@@ -12,12 +22,25 @@ const DEFAULT_RPC_TIMEOUT_MS = 5_000;
 export interface WorkerRpcClient {
   /** Resolves once the underlying socket connection closes. */
   readonly closed: Promise<void>;
+  /** The worker's run state, updated from every `agent_start`/`agent_end` frame seen on the
+   * socket since it connected — including a reconnect's replayed backlog. */
+  readonly runState: WorkerRunState;
   negotiate(): Promise<void>;
+  /** Marks `runState` as `"running"` before the request is even sent, so a concurrent caller
+   * checking occupancy never sees free capacity in the gap between sending a prompt to an
+   * already-idle worker and its `agent_start` frame arriving. */
   prompt(message: string): Promise<void>;
   getState(timeoutMs?: number): Promise<Record<string, unknown>>;
   /** Asks the shim to close the wrapped OMP process's stdin; never SIGTERMs it. */
   shutdown(): void;
   close(): void;
+  /**
+   * Registers a callback fired once when `runState` transitions to `"idle"` from a non-idle
+   * state, and again when the socket closes. Pure trigger — "something may have freed capacity,
+   * re-check occupancy" — never a source of occupancy itself (that's always `runState`/a fresh
+   * `runningWorkerCount()` computation). Replaces any previously registered callback.
+   */
+  onIdle(callback: () => void): void;
 }
 
 interface PendingRequest {
@@ -34,6 +57,8 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
   let buffer = "";
   const pending = new Map<string, PendingRequest>();
   const closedResolvers = Promise.withResolvers<void>();
+  let runState: WorkerRunState = "unknown";
+  let idleCallback: (() => void) | undefined;
 
   const failAllPending = (error: Error): void => {
     for (const request of pending.values()) request.reject(error);
@@ -49,6 +74,13 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
       return;
     }
     if (!isRecord(frame)) return;
+    if (frame.type === "agent_start") {
+      runState = "running";
+    } else if (frame.type === "agent_end") {
+      const wasIdle = runState === "idle";
+      runState = "idle";
+      if (!wasIdle) idleCallback?.();
+    }
     const id = frame.id;
     if (typeof id === "string" && pending.has(id)) {
       const request = pending.get(id);
@@ -76,7 +108,13 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
       },
       close() {
         failAllPending(new Error("Worker RPC socket closed"));
+        // A dead client is no longer running anything — treat it the same as an observed idle
+        // transition, and treat this the same as one for the onIdle trigger, so a worker that
+        // dies while busy still frees its running-worker slot for the next promotion.
+        const wasIdle = runState === "idle";
+        runState = "idle";
         closedResolvers.resolve();
+        if (!wasIdle) idleCallback?.();
       },
       error(_socket, error) {
         failAllPending(error);
@@ -104,6 +142,9 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
 
   return {
     closed: closedResolvers.promise,
+    get runState() {
+      return runState;
+    },
     async negotiate() {
       const response = await request("negotiate_protocol", { protocolVersion: 2 });
       if (response.command !== "negotiate_protocol" || response.success !== true) {
@@ -111,6 +152,7 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
       }
     },
     async prompt(message) {
+      runState = "running";
       await request("prompt", { message });
     },
     getState(timeoutMs = DEFAULT_RPC_TIMEOUT_MS) {
@@ -121,6 +163,9 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
     },
     close() {
       socket.end();
+    },
+    onIdle(callback) {
+      idleCallback = callback;
     },
   };
 }

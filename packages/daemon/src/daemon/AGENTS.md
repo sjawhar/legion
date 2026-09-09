@@ -44,7 +44,7 @@ The localhost-only Legion API lives in `api.ts`.
 - Root processes and the controller are tmux windows under global admission control. The daemon stores tmux window IDs; names are cosmetic, escaped issue labels.
 - Process failure recovery is exception-driven. A root is trusted only when its recorded window's pane is live and running OMP; a dead root is resurrected under a generation lock.
 - A lingering or closed root releases its admission slot, kills every tmux window recorded for the tree (its own and every worker's), clears its locator, and removes its role claims. The linger sweep also removes session windows not recorded by a tree or controller.
-- `DaemonConfig` supplies all lifecycle defaults: admission cap, worker budget, recursion depth, linger duration, resync interval, and retry limit.
+- `DaemonConfig` supplies all lifecycle defaults: admission cap, worker cap, recursion depth, linger duration, resync interval, and retry limit.
 - Boot never resurrects trees; it only reconciles admission so slots opened by a raised cap promote queued issues in order.
 
 - Phase workers (planner/implementer/tester/reviewer/merger, and sub-architects for child issues) run headless — `omp --mode rpc` behind a `legion worker-shim` process — one tmux window per issue, one pane per worker. The issue's first worker opens the window; every later worker on that issue splits into it. Closing a tree kills every one of its windows directly (a pane/window kill, not a graceful per-worker shim shutdown).

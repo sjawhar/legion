@@ -27,7 +27,7 @@ function config(): DaemonConfig {
     repos: ["acme/widgets"],
     appLogins: [],
     admissionCap: 1,
-    workerBudget: 1,
+    workerCap: 1,
     maxRecursionDepth: 1,
     lingerHours: 1,
     maxFixAttempts: 1,

@@ -375,13 +375,153 @@ export class ProcessManager {
           return { status: "resumed", roleToken: token };
         }
         await this.retireWorkerLocator(token, claim.locator);
-        await this.launchWorker(treeKey, issue, role, claim, task);
-        return { status: "spawned", roleToken: token };
+        return this.launchOrQueue(token, treeKey, issue, role, claim, task);
       }
 
-      await this.launchWorker(treeKey, issue, role, claim, task);
-      return { status: "spawned", roleToken: token };
+      return this.launchOrQueue(token, treeKey, issue, role, claim, task);
     });
+  }
+
+  /**
+   * Launches a brand-new worker pane when a running-worker slot is available (fewer than
+   * `config.workerCap` role tokens currently busy on a turn), or queues the task on a
+   * locator-less claim and publishes `worker-queued` to the tree's architect otherwise. Every
+   * queued task is promoted in FIFO order by `promoteWorkerQueue` once a slot frees up.
+   */
+  private async launchOrQueue(
+    token: string,
+    treeKey: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    claim: WorkerRoleClaim | undefined,
+    task: string
+  ): Promise<SpawnWorkerResponse> {
+    if (this.runningWorkerCount() >= this.deps.config.workerCap) {
+      await this.enqueueWorker(token, treeKey, issue, role, claim, task);
+      return { status: "queued", roleToken: token };
+    }
+    await this.launchWorker(treeKey, issue, role, claim, task);
+    return { status: "spawned", roleToken: token };
+  }
+
+  /**
+   * Counts role claims (phase workers and sub-architects — never the root architect, whose own
+   * admission is tree-scoped, and never the controller) currently occupying a running-worker
+   * slot: a claim with a locator and no cached shim client (booting, or not yet reconnected
+   * after a restart) counts conservatively as running; one with a cached client counts unless
+   * that client's `runState` is `"idle"`. Computed fresh on every call: nothing is reserved or
+   * released by hand.
+   */
+  private runningWorkerCount(): number {
+    let count = 0;
+    for (const [token, claim] of Object.entries(this.deps.state.roles)) {
+      if (!("issue" in claim) || claim.locator === undefined) continue;
+      if (claim.role === "architect" && this.rootForIssue(claim.issue) === claim.issue) continue;
+      const client = this.workerClients.get(token);
+      if (!client || client.runState !== "idle") count += 1;
+    }
+    return count;
+  }
+
+  /** Records a queued worker's task on its existing claim (mutated in place, never replaced, so
+   * `agentId`/`generation`/`launchFailures` survive) and appends its token to the FIFO
+   * running-worker queue for `promoteWorkerQueue` to launch in order. Any existing locator is
+   * cleared, moving its `ompSessionFile` to `resumeSessionFile` so the eventual promoted launch
+   * still resumes the same agent. */
+  private async enqueueWorker(
+    token: string,
+    treeKey: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    claim: WorkerRoleClaim | undefined,
+    task: string
+  ): Promise<void> {
+    const target: WorkerRoleClaim = claim ?? { issue, role };
+    const resumeSessionFile = target.locator?.ompSessionFile ?? target.resumeSessionFile;
+    target.pendingAssignment = task;
+    delete target.locator;
+    delete target.sessionId;
+    if (resumeSessionFile) target.resumeSessionFile = resumeSessionFile;
+    else delete target.resumeSessionFile;
+    this.deps.state.roles[token] = target;
+    const queue = this.deps.state.workerAdmission.queue;
+    if (!queue.includes(token)) queue.push(token);
+    await this.deps.saveState();
+    this.publishArchitect(treeKey, { type: "worker-queued", issue, role });
+    this.promoteWorkerQueue();
+  }
+
+  /** Fire-and-forget trigger: "something may have changed, re-check the running-worker queue."
+   * Safe to call any number of times from any locator-clearing or client-idle/close event —
+   * `drainWorkerQueue` serializes itself per role token and re-derives occupancy on every step. */
+  private promoteWorkerQueue(): void {
+    void this.drainWorkerQueue();
+  }
+
+  /** Promotes queued workers in FIFO order, one at a time, while a running-worker slot is
+   * available — sequential (not a fire-and-forget loop) so each promotion's own locator is
+   * recorded, and counted by `runningWorkerCount()`, before the next is attempted. Each
+   * promotion runs through the same per-role launch queue `spawnWorker` uses. */
+  private async drainWorkerQueue(): Promise<void> {
+    while (this.runningWorkerCount() < this.deps.config.workerCap) {
+      const queue = this.deps.state.workerAdmission.queue;
+      const token = queue[0];
+      if (token === undefined) return;
+      const claim = this.deps.state.roles[token];
+      const parsed = parseRoleToken(this.deps.state.project, token);
+      const treeKey =
+        parsed && !("controller" in parsed) ? this.rootForIssue(parsed.issue) : undefined;
+      if (
+        claim === undefined ||
+        !("issue" in claim) ||
+        claim.locator !== undefined ||
+        claim.pendingAssignment === undefined ||
+        parsed === undefined ||
+        "controller" in parsed ||
+        treeKey === undefined
+      ) {
+        // Stale entry: the claim vanished, already has a pane, or lost its task. Drop and continue.
+        queue.shift();
+        this.persist();
+        continue;
+      }
+      const task = claim.pendingAssignment;
+      try {
+        await this.serialize(this.roleLaunchQueue, token, () =>
+          this.launchWorker(treeKey, parsed.issue, parsed.role, claim, task)
+        );
+        this.publishArchitect(treeKey, {
+          type: "worker-started",
+          issue: parsed.issue,
+          role: parsed.role,
+        });
+      } catch (error) {
+        // launchWorker's own catch already recorded launchFailures on the claim and published
+        // at MAX_LAUNCH_FAILURES; the token is still at the queue head for the next promotion
+        // tick (never removed on failure), so stop draining rather than spin on it immediately.
+        console.error(`[legion] failed to promote queued worker ${token}:`, error);
+        return;
+      }
+    }
+  }
+
+  /** Re-evaluates the running-worker queue against the current `config.workerCap` — called at
+   * boot (after `reconnectWorkers` has rebuilt live shim connections) so a cap raised between
+   * restarts promotes queued workers the same way `reconcileAdmission` does for tree admission. */
+  reconcileWorkerAdmission(): void {
+    this.promoteWorkerQueue();
+  }
+
+  private publishArchitect(
+    treeKey: IssueKey,
+    payload:
+      | { type: "worker-queued"; issue: IssueKey; role: LegionRole }
+      | { type: "worker-started"; issue: IssueKey; role: LegionRole }
+  ): void {
+    this.deps.natsPublish(
+      roleTopic(roleToken(this.deps.state.project, treeKey, "architect")),
+      JSON.stringify(payload)
+    );
   }
 
   async workerReady(
@@ -420,14 +560,22 @@ export class ProcessManager {
         try {
           const client = await this.workerClient(token, claim.locator.socketPath);
           await client.getState(5_000);
+          // Nothing to record: `runningWorkerCount()` already counts a claim with a locator and
+          // a cached client conservatively (anything other than an observed "idle" run state).
         } catch (error) {
           console.error(`[legion] failed to reconnect worker ${token}:`, error);
-          // Dead locator: retire whatever pane it may still be running, then clear the locator
-          // but leave pendingAssignment so the eventual respawn still delivers it.
+          // Dead locator: retire whatever pane it may still be running, then clear the locator —
+          // moving its ompSessionFile to resumeSessionFile so the eventual respawn still resumes
+          // the same agent — leaving pendingAssignment so it still delivers the queued task.
           await this.retireWorkerLocator(token, claim.locator);
           const current = this.deps.state.roles[token];
-          if (current && "issue" in current) delete current.locator;
+          if (current && "issue" in current) {
+            const resumeSessionFile = current.locator?.ompSessionFile ?? current.resumeSessionFile;
+            delete current.locator;
+            if (resumeSessionFile) current.resumeSessionFile = resumeSessionFile;
+          }
           this.persist();
+          this.promoteWorkerQueue();
         }
       })
     );
@@ -472,6 +620,9 @@ export class ProcessManager {
     }
     this.clearTreePhases(treeKey);
     await this.deps.saveState();
+    // Deleting this tree's claims may have freed running-worker slots other trees' queues are
+    // waiting on.
+    this.promoteWorkerQueue();
   }
 
   /**
@@ -955,7 +1106,11 @@ export class ProcessManager {
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
       PATH: this.deps.panePath,
-      DISPATCH_MCP_URL: this.deps.config.dispatchMcpUrl,
+      // DISPATCH_MCP_URL is a transitional alias for the not-yet-landed dispatch-native clients
+      // (#815): they read DISPATCH_URL directly, but envoy-client's dispatch-config.ts still
+      // reads DISPATCH_MCP_URL today. Delete once #815 lands and its clients ship.
+      DISPATCH_URL: this.deps.config.dispatchUrl,
+      DISPATCH_MCP_URL: this.deps.config.dispatchUrl && `${this.deps.config.dispatchUrl}/mcp`,
     });
     const addressingPrompt = addressingFragment(
       this.deps.state.project,
@@ -1028,6 +1183,13 @@ export class ProcessManager {
     return (await tmux.windowAlive(this.deps.run, candidate)) ? candidate : undefined;
   }
 
+  /**
+   * Connects (or reuses a cached connection) to a role's shim socket. `onIdle` is wired
+   * unconditionally for every connection (root architect, controller, phase worker, and
+   * sub-architect alike) purely as a trigger to re-check the running-worker queue — occupancy
+   * itself is always derived fresh by `runningWorkerCount()`, which excludes the root architect
+   * and the controller by iterating role claims, not by opting a connection in or out here.
+   */
   private async workerClient(token: string, socketPath: string): Promise<WorkerRpcClient> {
     const existing = this.workerClients.get(token);
     if (existing) return existing;
@@ -1042,6 +1204,7 @@ export class ProcessManager {
         throw error;
       }
       this.workerClients.set(token, client);
+      client.onIdle(() => this.promoteWorkerQueue());
       const evict = (): void => {
         if (this.workerClients.get(token) === client) this.workerClients.delete(token);
       };
@@ -1133,7 +1296,7 @@ export class ProcessManager {
     try {
       const workspace = await this.provisionWorkspace(issue);
       const promptPath = path.join(EXTENSION_PACKAGE, "roles", `${role}.md`);
-      const resumeSessionFile = claim?.locator?.ompSessionFile;
+      const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
 
       const bootToken = await this.deps.mintWorkerBootToken(
         treeKey,
@@ -1158,7 +1321,11 @@ export class ProcessManager {
         GIT_CONFIG_COUNT: "0",
         GIT_TERMINAL_PROMPT: "0",
         PATH: this.deps.panePath,
-        DISPATCH_MCP_URL: this.deps.config.dispatchMcpUrl,
+        // DISPATCH_MCP_URL is a transitional alias for the not-yet-landed dispatch-native
+        // clients (#815): they read DISPATCH_URL directly, but envoy-client's dispatch-config.ts
+        // still reads DISPATCH_MCP_URL today. Delete once #815 lands and its clients ship.
+        DISPATCH_URL: this.deps.config.dispatchUrl,
+        DISPATCH_MCP_URL: this.deps.config.dispatchUrl && `${this.deps.config.dispatchUrl}/mcp`,
       });
       const addressingPrompt = addressingFragment(this.deps.state.project, treeKey, issue, role);
       const locator = await this.launchShimmedProcess(
@@ -1186,7 +1353,11 @@ export class ProcessManager {
           ...locator,
           ...(resumeSessionFile ? { ompSessionFile: resumeSessionFile } : {}),
         },
+        // resumeSessionFile deliberately dropped: a fresh locator now carries its own
+        // ompSessionFile, so the standalone fallback field is stale.
       };
+      const queueIndex = this.deps.state.workerAdmission.queue.indexOf(token);
+      if (queueIndex !== -1) this.deps.state.workerAdmission.queue.splice(queueIndex, 1);
       await this.deps.saveState();
     } catch (error) {
       const failures = (claim?.launchFailures ?? 0) + 1;
@@ -1225,7 +1396,11 @@ export class ProcessManager {
       ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
       ENVOY_URL: this.deps.config.envoyUrl,
       PATH: this.deps.panePath,
-      DISPATCH_MCP_URL: this.deps.config.dispatchMcpUrl,
+      // DISPATCH_MCP_URL is a transitional alias for the not-yet-landed dispatch-native clients
+      // (#815): they read DISPATCH_URL directly, but envoy-client's dispatch-config.ts still
+      // reads DISPATCH_MCP_URL today. Delete once #815 lands and its clients ship.
+      DISPATCH_URL: this.deps.config.dispatchUrl,
+      DISPATCH_MCP_URL: this.deps.config.dispatchUrl && `${this.deps.config.dispatchUrl}/mcp`,
     });
     const window = await tmux.openWindow(
       this.deps.run,
