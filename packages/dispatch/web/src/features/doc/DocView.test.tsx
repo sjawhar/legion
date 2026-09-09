@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 
 import { DocView, sanitizeMermaidSvg } from "./DocView";
 
@@ -54,6 +54,37 @@ test("DocView explains when a cross-block selection cannot become an anchor", ()
   fireEvent.mouseUp(article);
 
   expect(screen.getByRole("status").textContent).toContain("cannot be anchored");
+});
+
+test("DocView anchors a selection whose boundary lands on the article rather than the text node", () => {
+  // A drag that starts before the first glyph or ends past the last glyph of a block -
+  // or a native "Select All" - resolves its Range boundary to the block's container
+  // element (offset into childNodes) rather than the text node itself. That's still an
+  // unambiguous selection inside a single Markdown block and must anchor normally.
+  let selection: { from: number; quote: string; to: number } | undefined;
+  const markdown = "The quick brown fox jumps over the lazy dog.";
+  const { container } = render(
+    <DocView
+      markdown={markdown}
+      onSelectionChange={(next) => {
+        selection = next;
+      }}
+    />
+  );
+  const article = container.querySelector("article");
+  if (article === null) {
+    throw new Error("Expected an article element in DocView.");
+  }
+  const range = document.createRange();
+  range.selectNodeContents(article);
+  const browserSelection = window.getSelection();
+  browserSelection?.removeAllRanges();
+  browserSelection?.addRange(range);
+
+  fireEvent.mouseUp(article);
+
+  expect(within(container).queryByRole("status")).toBeNull();
+  expect(selection).toMatchObject({ from: 0, quote: markdown, to: markdown.length });
 });
 
 test("DocView maps rendered heading, bold, and link text to Markdown source offsets", () => {
