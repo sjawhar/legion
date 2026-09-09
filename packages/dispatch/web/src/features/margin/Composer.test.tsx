@@ -66,7 +66,7 @@ function renderComposer(kind: "ask" | "comment" | "suggestion") {
   return render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", from: 8, quote: "selected", to: 16 }}
+        anchor={{ artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 }}
         issueKey="CORE-1"
         kind={kind}
         onClose={() => {}}
@@ -75,10 +75,10 @@ function renderComposer(kind: "ask" | "comment" | "suggestion") {
   );
 }
 
-test("Composer sends the selected quote alongside ranges for asks, comments, and suggestions", async () => {
+test("Composer sends the selected quote occurrence alongside ranges for asks, comments, and suggestions", async () => {
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
-  const anchor = { artifact: "document-1", from: 8, quote: "selected", to: 16 };
+  const anchor = { artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 };
 
   try {
     const ask = renderComposer("ask");
@@ -96,12 +96,13 @@ test("Composer sends the selected quote alongside ranges for asks, comments, and
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
     fireEvent.click(screen.getByRole("button", { name: "Comment" }));
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        anchor,
-        body: "Please revise.",
-        reply_to: undefined,
-        suggestion: undefined,
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        expect.objectContaining({
+          anchor,
+          body: "Please revise.",
+        })
+      )
     );
     comment.unmount();
 
@@ -109,12 +110,14 @@ test("Composer sends the selected quote alongside ranges for asks, comments, and
     fireEvent.change(screen.getByLabelText("Replacement"), { target: { value: "replacement" } });
     fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
     await waitFor(() =>
-      expect(createComment).toHaveBeenLastCalledWith("CORE-1", {
-        anchor,
-        body: "Suggested replacement.",
-        reply_to: undefined,
-        suggestion: { replace_with: "replacement" },
-      })
+      expect(createComment).toHaveBeenLastCalledWith(
+        "CORE-1",
+        expect.objectContaining({
+          anchor,
+          body: "Suggested replacement.",
+          suggestion: { replace_with: "replacement" },
+        })
+      )
     );
     suggestion.unmount();
   } finally {

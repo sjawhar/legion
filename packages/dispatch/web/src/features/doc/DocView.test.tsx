@@ -105,6 +105,33 @@ test("DocView maps rendered heading, bold, and link text to Markdown source offs
   }
 });
 
+test("DocView records a selected quote's occurrence in the source text", () => {
+  let selection: { occurrence?: number } | undefined;
+  const { container } = render(
+    <DocView
+      markdown="brown X brown"
+      onSelectionChange={(next) => {
+        selection = next;
+      }}
+    />
+  );
+  const article = container.querySelector("article");
+  const text = article?.querySelector("p")?.firstChild;
+  if (article === null || text === null || text === undefined) {
+    throw new Error("Expected selectable document text.");
+  }
+  const range = document.createRange();
+  range.setStart(text, 8);
+  range.setEnd(text, 13);
+  const browserSelection = window.getSelection();
+  browserSelection?.removeAllRanges();
+  browserSelection?.addRange(range);
+
+  fireEvent.mouseUp(article);
+
+  expect(selection).toMatchObject({ occurrence: 1 });
+});
+
 test("DocView maps a selection beginning after Markdown inline syntax", () => {
   let selection: { from: number; quote: string; to: number } | undefined;
   const { container } = render(

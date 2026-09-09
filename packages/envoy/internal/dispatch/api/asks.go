@@ -196,6 +196,15 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	unlockedAsk, err := s.loadAsk(r.Context(), tx, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.requireOpenIssue(r.Context(), tx, unlockedAsk.IssueKey); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	ask, err := s.loadAskForUpdate(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -203,10 +212,6 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if ask.State != "open" {
 		writeError(w, "ASK_CLOSED", http.StatusConflict, "ask is already answered")
-		return
-	}
-	if err := s.requireOpenIssue(r.Context(), tx, ask.IssueKey); err != nil {
-		s.writeHandlerError(w, err)
 		return
 	}
 	hasText := input.Text != nil && strings.TrimSpace(*input.Text) != ""

@@ -11,7 +11,7 @@ import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
 import { useMargin } from "../margin/Margin";
 import { anchorDecorationExtension, setActiveAnchorIds, setAnchorDecorations } from "./anchors";
-import { DocView } from "./DocView";
+import { DocView, quoteOccurrence } from "./DocView";
 import { VersionDiff } from "./VersionDiff";
 
 interface DocEditorProps {
@@ -76,12 +76,14 @@ function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNo
     if (rect === null) {
       return;
     }
+    const quote = view.state.sliceDoc(from, to);
     setSelection({
       artifact: artifact.id,
       artifactId: artifact.id,
       canSuggest: true,
       from,
-      quote: view.state.sliceDoc(from, to),
+      occurrence: quoteOccurrence(view.state.doc.toString(), quote, from),
+      quote,
       rect: { bottom: rect.bottom, left: rect.left, right: rect.right, top: rect.top },
       to,
     });

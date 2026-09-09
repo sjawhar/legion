@@ -21,8 +21,8 @@ export interface Anchor {
 }
 
 export type AnchorInput =
-  | { artifact: string; quote: string; occurrence?: number }
-  | { artifact: string; from: number; to: number; quote?: string };
+  | { artifact: string; quote: string; occurrence?: number; from?: never; to?: never }
+  | { artifact: string; from: number; to: number; quote?: string; occurrence?: number };
 
 export interface Project {
   key: string;

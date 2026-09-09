@@ -205,12 +205,15 @@ export type AnchorInput =
       readonly artifact: string;
       readonly quote: string;
       readonly occurrence?: number;
+      readonly from?: never;
+      readonly to?: never;
     }
   | {
       readonly artifact: string;
       readonly from: number;
       readonly to: number;
       readonly quote?: string;
+      readonly occurrence?: number;
     };
 
 export interface AskInput {

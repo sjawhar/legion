@@ -27,6 +27,7 @@ export interface ComposerReference {
 export interface ComposerAnchor {
   artifact: string;
   from: number;
+  occurrence?: number;
   quote: string;
   to: number;
 }
@@ -136,6 +137,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
       const selection = {
         artifact: anchor.artifact,
         from: anchor.from,
+        occurrence: anchor.occurrence,
         quote: anchor.quote,
         to: anchor.to,
       };

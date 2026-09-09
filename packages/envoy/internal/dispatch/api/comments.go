@@ -277,12 +277,17 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
+	unlockedComment, err := s.loadComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.requireOpenIssue(r.Context(), tx, comment.IssueKey); err != nil {
+	if err := s.requireOpenIssue(r.Context(), tx, unlockedComment.IssueKey); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

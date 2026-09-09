@@ -248,6 +248,47 @@ func TestAnchoredAskAnswerAndInbox(t *testing.T) {
 	}
 }
 
+func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Answer lock order", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Can this be answered?", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+
+	edit, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin edit transaction: %v", err)
+	}
+	defer func() { _ = edit.Rollback(context.Background()) }()
+	var lockedKey string
+	if err := edit.QueryRow(context.Background(), `select key from issues where key = $1 for update`, issue.Key).Scan(&lockedKey); err != nil {
+		t.Fatalf("lock issue for edit: %v", err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+			"text": "Yes.",
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, database, 1)
+	if _, err := edit.Exec(context.Background(), `update asks set anchor = anchor where id = $1`, ask.ID); err != nil {
+		t.Fatalf("edit anchors while answer awaits issue lock: %v", err)
+	}
+	if err := edit.Commit(context.Background()); err != nil {
+		t.Fatalf("commit edit transaction: %v", err)
+	}
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusOK {
+		t.Fatalf("answer after edit: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestClosedIssueAsksCannotBeAnsweredOrShown(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Closed ask", "A spec")

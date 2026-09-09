@@ -218,6 +218,17 @@ function sourceSegments(block: HTMLElement): SourceTextSegment[] {
   }
 }
 
+export function quoteOccurrence(text: string, quote: string, from: number): number | undefined {
+  let occurrence = 0;
+  for (let index = text.indexOf(quote); index !== -1; index = text.indexOf(quote, index + 1)) {
+    if (index === from) {
+      return occurrence;
+    }
+    occurrence++;
+  }
+  return undefined;
+}
+
 function rangeOffset(block: HTMLElement, node: Node, offset: number): number | undefined {
   if (!block.contains(node)) {
     return undefined;
@@ -254,7 +265,7 @@ function sourceRangeHasGap(
   return selected.some((segment, index) => index > 0 && selected[index - 1]?.to !== segment.from);
 }
 
-function selectedRange(root: HTMLElement): DocViewSelection | undefined {
+function selectedRange(root: HTMLElement, markdown: string): DocViewSelection | undefined {
   const selection = window.getSelection();
   if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) {
     return undefined;
@@ -283,10 +294,12 @@ function selectedRange(root: HTMLElement): DocViewSelection | undefined {
   ) {
     return undefined;
   }
+  const quote = selection.toString();
   const rect = range.getBoundingClientRect();
   return {
     from: absoluteFrom,
-    quote: selection.toString(),
+    occurrence: quoteOccurrence(markdown, quote, absoluteFrom),
+    quote,
     rect: { bottom: rect.bottom, left: rect.left, right: rect.right, top: rect.top },
     to: absoluteTo,
   };
@@ -359,6 +372,7 @@ export interface DocViewHighlight {
 
 export interface DocViewSelection {
   from: number;
+  occurrence?: number;
   quote: string;
   rect: { bottom: number; left: number; right: number; top: number };
   to: number;
@@ -394,7 +408,7 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
     if (root.current === null || onSelectionChange === undefined) {
       return;
     }
-    const selection = selectedRange(root.current);
+    const selection = selectedRange(root.current, markdown);
     const browserSelection = window.getSelection();
     setSelectionUnsupported(
       selection === undefined &&
