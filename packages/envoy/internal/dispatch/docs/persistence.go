@@ -31,7 +31,7 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
 	}
-	tx, err := p.pool().Begin(ctx)
+	tx, err := p.pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return persistence.LoadResult{}, fmt.Errorf("begin document load: %w", err)
 	}
