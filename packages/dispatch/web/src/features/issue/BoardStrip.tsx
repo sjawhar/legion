@@ -4,16 +4,18 @@ import type { ReactNode } from "react";
 import { api } from "../../api/client";
 import type { Issue, UserIssueState } from "../../api/types";
 import { AskCard } from "../inbox/AskCard";
-import { pinnedLogItems } from "./LogTab";
+import { pinnedEventIds } from "./log-model";
 
 export function BoardStrip({ issue, state }: { issue: Issue; state: UserIssueState }): ReactNode {
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
+  const ids = pinnedEventIds(state.dismissed);
   const events = useQuery({
-    queryKey: ["events", issue.key, "board"],
-    queryFn: () => api.getIssueEvents(issue.key, { limit: 200 }),
+    enabled: ids.length > 0,
+    queryKey: ["events", issue.key, "board", ids],
+    queryFn: () => api.getIssueEvents(issue.key, { ids }),
   });
   const openAsks = (inbox.data ?? []).filter((ask) => ask.issue_key === issue.key);
-  const pinned = pinnedLogItems(events.data ?? [], state);
+  const pinned = events.data ?? [];
 
   if (openAsks.length === 0 && pinned.length === 0) {
     return null;

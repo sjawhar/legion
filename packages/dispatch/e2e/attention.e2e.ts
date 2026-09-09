@@ -21,10 +21,18 @@ test("new events leave the reader's scroll position unchanged", async ({ browser
   const page = await context.newPage();
   await page.goto(`/issues/${issue.key}`);
   await expect(page.getByText("Existing message 29")).toBeVisible();
-  await page.waitForTimeout(1_100);
   await page.evaluate(() => window.scrollTo(0, 500));
   const before = await page.evaluate(() => window.scrollY);
   expect(before).toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      page.evaluate(async (issueKey) => {
+        const response = await fetch("/api/v1/me/state");
+        const state = (await response.json()) as Record<string, { last_read_seq: number }>;
+        return state[issueKey]?.last_read_seq ?? 0;
+      }, issue.key)
+    )
+    .toBeGreaterThan(0);
 
   await createMessage(issue.key, { body: "Arrived while reading" }, session);
 

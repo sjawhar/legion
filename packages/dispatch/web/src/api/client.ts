@@ -54,7 +54,10 @@ export interface ListIssuesOptions {
 
 export interface ListEventsOptions {
   after?: number;
+  before?: number;
+  ids?: string[];
   limit?: number;
+  order?: "desc";
 }
 
 export interface CreateProjectInput {
@@ -151,7 +154,10 @@ export class DispatchApiClient {
   }
 
   getIssueEvents(key: string, options: ListEventsOptions = {}): Promise<Event[]> {
-    return this.json<Event[]>(pathWithQuery(`/api/v1/issues/${pathSegment(key)}/events`, options));
+    const { ids, ...query } = options;
+    return this.json<Event[]>(
+      pathWithQuery(`/api/v1/issues/${pathSegment(key)}/events`, { ...query, ids: ids?.join(",") })
+    );
   }
 
   getInbox(project?: string): Promise<Ask[]> {

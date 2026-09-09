@@ -1,9 +1,14 @@
 import { expect, test } from "bun:test";
+import { QueryClient } from "@tanstack/react-query";
 
-import { applyEventInvalidations } from "../api/sse";
+import { applyEventInvalidations, prependEventToLog } from "../api/sse";
 import type { Event } from "../api/types";
 
-function event(type: Event["type"], payload: Record<string, unknown> = {}): Event {
+function event(
+  type: Event["type"],
+  payload: Record<string, unknown> = {},
+  overrides: Partial<Event> = {}
+): Event {
   return {
     actor: { kind: "user", id: "alice" },
     created_at: "2026-09-09T00:00:00Z",
@@ -13,6 +18,7 @@ function event(type: Event["type"], payload: Record<string, unknown> = {}): Even
     payload,
     seq: 4,
     type,
+    ...overrides,
   };
 }
 
@@ -73,5 +79,20 @@ test("message events refresh only the affected issue messages", () => {
     ["events", "CORE-1"],
     ["issues"],
     ["messages", "CORE-1"],
+  ]);
+});
+
+test("SSE event prepends a newer event to the loaded log page", () => {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(["events", "CORE-1"], {
+    pageParams: [null],
+    pages: [[event("message.created", {}, { id: 7, seq: 7 })]],
+  });
+
+  prependEventToLog(queryClient, event("message.created", {}, { id: 8, seq: 8 }));
+
+  expect(queryClient.getQueryData<{ pages: Event[][] }>(["events", "CORE-1"])?.pages[0]).toEqual([
+    event("message.created", {}, { id: 8, seq: 8 }),
+    event("message.created", {}, { id: 7, seq: 7 }),
   ]);
 });

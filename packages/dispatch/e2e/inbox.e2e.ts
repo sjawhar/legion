@@ -97,6 +97,9 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
     .toMatchObject({
       route: "role:legion-controller-core",
     });
+  await alicePage.getByLabel("Route").fill("");
+  await alicePage.getByRole("button", { name: "Save route" }).click();
+  await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ route: null });
   await expect(
     alicePage.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })
   ).toHaveAttribute("title", "GitHub details are unavailable for this sign-in.");

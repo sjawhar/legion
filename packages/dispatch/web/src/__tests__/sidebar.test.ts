@@ -70,4 +70,11 @@ test("sidebar keeps its active issue snapshot while new detail data is pending",
   const view = selectSidebarView("CORE-1", { groups: frozen, issueKey: "CORE-1" }, latest, true);
 
   expect(view.displayed).toBe(frozen);
+  const afterLeaving = selectSidebarView(
+    undefined,
+    { groups: frozen, issueKey: "CORE-1" },
+    latest,
+    true
+  );
+  expect(afterLeaving.frozen).toBeUndefined();
 });

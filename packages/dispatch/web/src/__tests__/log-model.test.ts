@@ -63,6 +63,6 @@ test("log model stores pinned event ids alongside dismissed ids", () => {
   const pinned = setEventPinned(["event:2"], source, true);
 
   expect(isPinnedEvent(pinned, source)).toBe(true);
-  expect(pinnedEventIds(pinned)).toEqual(["event:7"]);
+  expect(pinnedEventIds(pinned)).toEqual(["7"]);
   expect(dismissEvent(pinned, source)).toEqual(["event:2", "pinned_items:event:7", "event:7"]);
 });

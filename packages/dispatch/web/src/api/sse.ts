@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
 import type { Event, EventType } from "./types";
@@ -26,6 +26,27 @@ export interface QueryInvalidator {
 function artifactId(event: Event): string | undefined {
   const id = event.payload.artifact_id;
   return typeof id === "string" ? id : undefined;
+}
+
+interface EventPages {
+  pageParams: unknown[];
+  pages: Event[][];
+}
+
+export function prependEventToLog(queryClient: QueryClient, event: Event): void {
+  queryClient.setQueryData<EventPages>(["events", event.issue_key], (current) => {
+    if (current === undefined) {
+      return current;
+    }
+    const first = current.pages[0] ?? [];
+    if (event.seq <= (first[0]?.seq ?? 0)) {
+      return current;
+    }
+    return {
+      ...current,
+      pages: [[event, ...first], ...current.pages.slice(1)],
+    };
+  });
 }
 
 export function applyEventInvalidations(queryClient: QueryInvalidator, event: Event): void {
@@ -80,6 +101,7 @@ export function useEventStream(): void {
       if (Number.isFinite(eventId)) {
         lastId.current = eventId;
       }
+      prependEventToLog(queryClient, event);
       applyEventInvalidations(queryClient, event);
     };
 

@@ -13,9 +13,10 @@ export function isPinnedEvent(dismissed: string[], event: Event): boolean {
 }
 
 export function pinnedEventIds(dismissed: string[]): string[] {
+  const prefix = `${pinnedItemPrefix}event:`;
   return dismissed
-    .filter((item) => item.startsWith(pinnedItemPrefix))
-    .map((item) => item.slice(pinnedItemPrefix.length));
+    .filter((item) => item.startsWith(prefix))
+    .map((item) => item.slice(prefix.length));
 }
 
 export function setEventPinned(dismissed: string[], event: Event, pinned: boolean): string[] {

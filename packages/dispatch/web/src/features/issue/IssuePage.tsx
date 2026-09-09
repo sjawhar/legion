@@ -135,7 +135,7 @@ function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }):
   };
   const saveRoute = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (routePattern.test(route)) {
+    if (route === "" || routePattern.test(route)) {
       updateIssue.mutate({ route });
     }
   };

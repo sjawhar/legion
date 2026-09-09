@@ -111,11 +111,11 @@ export function selectSidebarView(
   arranged: SidebarGroup[],
   detailsPending: boolean
 ): { displayed: SidebarGroup[] | undefined; frozen: FrozenSidebar | undefined } {
-  if (detailsPending && (currentIssue === undefined || frozen?.issueKey !== currentIssue)) {
-    return { displayed: undefined, frozen };
-  }
   if (currentIssue === undefined) {
-    return { displayed: arranged, frozen: undefined };
+    return { displayed: detailsPending ? undefined : arranged, frozen: undefined };
+  }
+  if (detailsPending && frozen?.issueKey !== currentIssue) {
+    return { displayed: undefined, frozen };
   }
   if (frozen?.issueKey === currentIssue) {
     return { displayed: frozen.groups, frozen };
@@ -190,6 +190,9 @@ export function Sidebar(): ReactNode {
   if (issues.isError || state.isError) {
     return <p className="mt-8 text-sm text-rose-300">Could not load issues.</p>;
   }
+  if (issues.isPending || state.isPending) {
+    return <p className="mt-8 text-sm text-slate-400">Loading issues…</p>;
+  }
 
   const arranged = arrangeIssues(issues.data ?? [], state.data ?? {}, lastSeqByIssue);
   const view = selectSidebarView(
@@ -200,7 +203,7 @@ export function Sidebar(): ReactNode {
   );
   frozen.current = view.frozen;
 
-  if (issues.isPending || state.isPending || view.displayed === undefined) {
+  if (view.displayed === undefined) {
     return <p className="mt-8 text-sm text-slate-400">Loading issues…</p>;
   }
 

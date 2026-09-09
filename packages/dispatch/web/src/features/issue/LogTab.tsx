@@ -68,9 +68,13 @@ export function LogTab({
 }): ReactNode {
   const queryClient = useQueryClient();
   const log = useInfiniteQuery({
-    initialPageParam: 0,
+    initialPageParam: null as number | null,
     queryKey: ["events", issueKey],
-    queryFn: ({ pageParam }) => api.getIssueEvents(issueKey, { after: pageParam, limit: 200 }),
+    queryFn: ({ pageParam }) =>
+      api.getIssueEvents(
+        issueKey,
+        pageParam === null ? { limit: 200, order: "desc" } : { before: pageParam, limit: 200 }
+      ),
     getNextPageParam: (page) => (page.length === 200 ? page.at(-1)?.seq : undefined),
   });
   const issueState = eventState(state, issueKey);
@@ -241,7 +245,7 @@ export function LogTab({
           onClick={() => void log.fetchNextPage()}
           type="button"
         >
-          {log.isFetchingNextPage ? "Loading…" : "Load more log events"}
+          {log.isFetchingNextPage ? "Loading…" : "Load older"}
         </button>
       ) : null}
     </section>
@@ -293,8 +297,4 @@ function LogEvent({
       </div>
     </article>
   );
-}
-
-export function pinnedLogItems(events: Event[], state: UserIssueState | undefined): Event[] {
-  return events.filter((event) => isPinnedEvent(state?.dismissed ?? [], event));
 }
