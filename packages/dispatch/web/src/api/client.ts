@@ -117,12 +117,16 @@ export class DispatchApiClient {
     return (await response.json()) as T;
   }
 
-  private post<T>(path: string, body: unknown): Promise<T> {
+  private send<T>(method: "PATCH" | "POST" | "PUT", path: string, body: unknown): Promise<T> {
     return this.json<T>(path, {
       body: JSON.stringify(body),
       headers: { "Content-Type": "application/json" },
-      method: "POST",
+      method,
     });
+  }
+
+  private post<T>(path: string, body: unknown): Promise<T> {
+    return this.send<T>("POST", path, body);
   }
 
   getProjects(): Promise<Project[]> {
@@ -146,11 +150,7 @@ export class DispatchApiClient {
   }
 
   patchIssue(key: string, input: UpdateIssueInput): Promise<Issue> {
-    return this.json<Issue>(`/api/v1/issues/${pathSegment(key)}`, {
-      body: JSON.stringify(input),
-      headers: { "Content-Type": "application/json" },
-      method: "PATCH",
-    });
+    return this.send<Issue>("PATCH", `/api/v1/issues/${pathSegment(key)}`, input);
   }
 
   resolveIssue(ref: string): Promise<{ key: string }> {
@@ -275,11 +275,7 @@ export class DispatchApiClient {
   }
 
   putIssueState(key: string, input: Partial<UserIssueState>): Promise<UserIssueState> {
-    return this.json<UserIssueState>(`/api/v1/me/issues/${pathSegment(key)}/state`, {
-      body: JSON.stringify(input),
-      headers: { "Content-Type": "application/json" },
-      method: "PUT",
-    });
+    return this.send<UserIssueState>("PUT", `/api/v1/me/issues/${pathSegment(key)}/state`, input);
   }
 
   whoAmI(): Promise<AuthenticatedUser> {

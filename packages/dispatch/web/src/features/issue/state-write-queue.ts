@@ -76,6 +76,7 @@ export class IssueStateWriteQueue {
   private async drain(issueKey: string): Promise<void> {
     const queued = this.pending.get(issueKey);
     if (queued === undefined) {
+      this.running.delete(issueKey);
       return;
     }
     let state: UserIssueState;
@@ -83,7 +84,7 @@ export class IssueStateWriteQueue {
       state = await queued.worker.fetchState(issueKey);
     } catch (error) {
       this.rejectPending(issueKey, queued, error, undefined);
-      this.running.delete(issueKey);
+      this.finishDrain(issueKey);
       return;
     }
     try {
@@ -115,7 +116,15 @@ export class IssueStateWriteQueue {
       this.pending.delete(issueKey);
       queued.worker.onDrained(issueKey, state);
     } finally {
-      this.running.delete(issueKey);
+      this.finishDrain(issueKey);
+    }
+  }
+
+  private finishDrain(issueKey: string): void {
+    this.running.delete(issueKey);
+    if (this.pending.has(issueKey)) {
+      this.running.add(issueKey);
+      void this.drain(issueKey);
     }
   }
 

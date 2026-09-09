@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,7 +44,7 @@ type Deps struct {
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
-// store. SeedText needs the caller's artifact-creation transaction.
+// store. Document writes that join an API transaction use AppendUpdateTx.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateTx(context.Context, pgx.Tx, string, []byte) (persistence.Version, error)
@@ -62,6 +63,8 @@ type Service struct {
 	nextConnection atomic.Uint64
 	stopping       atomic.Bool
 	settleWG       sync.WaitGroup
+	suppressMu     sync.Mutex
+	suppressed     map[string][]*suppressSlot
 }
 
 type roomState struct {
@@ -71,7 +74,7 @@ type roomState struct {
 	settle          *time.Timer
 	gen             uint64
 	failed          error
-	failedDone     chan struct{}
+	failedDone      chan struct{}
 	closed          bool
 	mu              sync.Mutex
 }
@@ -89,6 +92,13 @@ type connectionState struct {
 }
 
 type connectionContextKey struct{}
+
+type suppressSlot struct {
+	ready    chan struct{}
+	update   []byte
+	canceled bool
+	consumed bool
+}
 
 // servicePersistenceAdapter observes ygo's otherwise asynchronous persistence
 // callbacks. A failed update evicts its room so the next access reloads durable
@@ -111,7 +121,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
-	if a.service.roomFailed(room) {
+	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) {
 		return nil
 	}
 	_, err := a.store.AppendUpdate(context.Background(), room, update)
@@ -122,7 +132,7 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 }
 
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
-	if a.service.roomFailed(room) {
+	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) {
 		return nil
 	}
 	_, err := a.store.AppendUpdate(ctx, room, update)
@@ -142,6 +152,140 @@ func validateUpdate(update []byte) error {
 		return nil
 	}
 	return crdt.ApplyUpdateV1(crdt.New(), update, nil)
+}
+
+func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
+	slot := &suppressSlot{ready: make(chan struct{})}
+	s.suppressMu.Lock()
+	defer s.suppressMu.Unlock()
+	if s.suppressed == nil {
+		s.suppressed = make(map[string][]*suppressSlot)
+	}
+	s.suppressed[room] = append(s.suppressed[room], slot)
+	return slot
+}
+
+func (s *Service) finishSuppressedPersistence(slot *suppressSlot, update []byte) {
+	s.suppressMu.Lock()
+	defer s.suppressMu.Unlock()
+	if slot.canceled || slot.update != nil {
+		return
+	}
+	slot.update = append([]byte(nil), update...)
+	close(slot.ready)
+}
+
+func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool {
+	for {
+		s.suppressMu.Lock()
+		slots := s.suppressed[room]
+		if len(slots) == 0 {
+			s.suppressMu.Unlock()
+			return false
+		}
+		slot := slots[0]
+		ready := slot.ready
+		s.suppressMu.Unlock()
+
+		<-ready
+
+		s.suppressMu.Lock()
+		slots = s.suppressed[room]
+		if len(slots) == 0 || slots[0] != slot {
+			s.suppressMu.Unlock()
+			continue
+		}
+		if slot.canceled || !bytes.Equal(slot.update, update) {
+			s.suppressMu.Unlock()
+			return false
+		}
+		slot.consumed = true
+		slots = slots[1:]
+		if len(slots) == 0 {
+			delete(s.suppressed, room)
+		} else {
+			s.suppressed[room] = slots
+		}
+		s.suppressMu.Unlock()
+		return true
+	}
+}
+
+func (s *Service) cancelSuppressedPersistence(room string, slot *suppressSlot) {
+	s.suppressMu.Lock()
+	defer s.suppressMu.Unlock()
+	if slot == nil || slot.consumed {
+		return
+	}
+	slots := s.suppressed[room]
+	for index, candidate := range slots {
+		if candidate == slot {
+			slots = append(slots[:index], slots[index+1:]...)
+			break
+		}
+	}
+	if len(slots) == 0 {
+		delete(s.suppressed, room)
+	} else {
+		s.suppressed[room] = slots
+	}
+	if !slot.canceled && slot.update == nil {
+		slot.canceled = true
+		close(slot.ready)
+	}
+}
+
+func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) bool) error {
+	tx, joinedTransaction := txFromContext(ctx)
+	var slot *suppressSlot
+	if joinedTransaction {
+		slot = s.prepareSuppressedPersistence(artifactID)
+	}
+	changed := false
+	var updates [][]byte
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		var unsubscribe func()
+		if joinedTransaction {
+			unsubscribe = doc.OnUpdate(func(update []byte, _ any) {
+				updates = append(updates, append([]byte(nil), update...))
+			})
+			defer unsubscribe()
+		}
+		changed = mutate(doc, transact)
+	})
+	if !joinedTransaction {
+		return err
+	}
+	if err != nil || !changed {
+		s.cancelSuppressedPersistence(artifactID, slot)
+		return err
+	}
+	update, err := mergeUpdates(updates)
+	if err != nil {
+		s.cancelSuppressedPersistence(artifactID, slot)
+		return err
+	}
+	s.finishSuppressedPersistence(slot, update)
+	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update); err != nil {
+		s.failRoom(artifactID, err)
+		return fmt.Errorf("append transactional live document update: %w", err)
+	}
+	return nil
+}
+
+func mergeUpdates(updates [][]byte) ([]byte, error) {
+	switch len(updates) {
+	case 0:
+		return nil, websocket.ErrNoChanges
+	case 1:
+		return updates[0], nil
+	default:
+		update, err := crdt.MergeUpdatesV1(updates...)
+		if err != nil {
+			return nil, fmt.Errorf("merge live document updates: %w", err)
+		}
+		return update, nil
+	}
 }
 
 func (s *Service) validateRoomLoad(ctx context.Context, room string) error {
@@ -176,10 +320,14 @@ func New(deps Deps) *Service {
 		identity:    deps.Identity,
 		agentToken:  deps.AgentToken,
 		settle:      settle,
+		suppressed:  make(map[string][]*suppressSlot),
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
 	srv.HocuspocusFraming = true
+	// Transactional server-side edits suppress one automatic ygo write and
+	// append it inside the API transaction, so persistence stays per update.
+	srv.PersistCoalesceWindow = -1
 	srv.CompactEvery = 200
 
 	service.srv = srv
@@ -217,6 +365,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.removeConnection(connection.room, connection.id)
 	}
 }
+
 // Shutdown stops queued settlements, joins any already-running callbacks, and
 // flushes ygo's document persistence workers.
 func (s *Service) Shutdown(ctx context.Context) error {
@@ -254,12 +403,12 @@ func (s *Service) SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown 
 // document uploads as a regular server-side transaction.
 func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) error {
 	var unchanged bool
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) bool {
 		content := doc.GetText("content")
 		length := content.Len()
 		if content.ToString() == markdown {
 			unchanged = true
-			return
+			return false
 		}
 		s.recordActor(artifactID, actor)
 		transact(func(transaction *crdt.Transaction) {
@@ -270,6 +419,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				content.Insert(transaction, 0, markdown, nil)
 			}
 		})
+		return true
 	})
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
 		return nil
@@ -295,7 +445,7 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 			return "", err
 		}
 		s.failRoom(artifactID, err)
-		return "", fmt.Errorf("%w: %v", ErrServiceUnavailable, err)
+		return "", fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
 	if len(loaded.Update) == 0 {
 		return "", nil
@@ -303,7 +453,7 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	doc := crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
-		return "", fmt.Errorf("%w: decode live document: %v", ErrServiceUnavailable, err)
+		return "", fmt.Errorf("%w: decode live document: %w", ErrServiceUnavailable, err)
 	}
 	return doc.GetText("content").ToString(), nil
 }
@@ -358,12 +508,12 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return 0, nil
 	}
 	var applyErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) bool {
 		content := doc.GetText("content")
 		mutations, err := resolveOperations(content.ToString(), ops)
 		if err != nil {
 			applyErr = err
-			return
+			return false
 		}
 		s.recordActor(artifactID, actor)
 		transact(func(transaction *crdt.Transaction) {
@@ -376,6 +526,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 				}
 			}
 		})
+		return true
 	})
 	if applyErr != nil {
 		return 0, applyErr
@@ -390,12 +541,12 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 // Server.Apply and replaces only its resolved range.
 func (s *Service) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, with string, actor model.Actor) error {
 	var applyErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) bool {
 		content := doc.GetText("content")
 		resolved := text.Reresolve(content.ToString(), anchor)
 		if resolved.Orphaned {
 			applyErr = text.ErrTargetNotFound
-			return
+			return false
 		}
 		s.recordActor(artifactID, actor)
 		transact(func(transaction *crdt.Transaction) {
@@ -406,6 +557,7 @@ func (s *Service) ApplyReplace(ctx context.Context, artifactID string, anchor mo
 				content.Insert(transaction, resolved.From, with, nil)
 			}
 		})
+		return true
 	})
 	if applyErr != nil {
 		return applyErr
@@ -471,7 +623,6 @@ func (s *Service) CompactAll(ctx context.Context, keep int) error {
 	}
 	return nil
 }
-
 
 func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) {
 	actor, err := s.requestActor(r)
@@ -721,8 +872,6 @@ func (s *Service) SetIssueClosed(issueKey string, closed bool) {
 	}
 }
 
-
-
 func (s *Service) failRoom(room string, cause error) {
 	state := s.room(room)
 	state.mu.Lock()
@@ -752,7 +901,7 @@ func (s *Service) roomFailure(room string) error {
 	if state.failed == nil {
 		return nil
 	}
-	return fmt.Errorf("%w: %v", ErrServiceUnavailable, state.failed)
+	return fmt.Errorf("%w: %w", ErrServiceUnavailable, state.failed)
 }
 
 func (s *Service) roomFailed(room string) bool {
@@ -856,8 +1005,8 @@ func (s *Service) issueOpen(ctx context.Context, artifactID string) (bool, error
 
 func (s *Service) room(name string) *roomState {
 	value, _ := s.rooms.LoadOrStore(name, &roomState{
-		connected: make(map[uint64]model.Actor),
-		pending:   make(map[string]model.Actor),
+		connected:       make(map[uint64]model.Actor),
+		pending:         make(map[string]model.Actor),
 		pendingVersions: make(map[int]versionPending),
 	})
 	return value.(*roomState)

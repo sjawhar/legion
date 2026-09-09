@@ -1,4 +1,4 @@
-import { dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
+import { ASK_URGENCIES, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
 import { z } from "zod";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import {
@@ -13,8 +13,8 @@ import {
   type Actor,
   type Artifact,
   type AskInput,
+  type AskUrgency,
   type Comment,
-  type CommentInput,
   DispatchClient,
   DispatchServiceError,
   type EditOperation,
@@ -74,6 +74,11 @@ function optionalBoolean(args: Record<string, unknown>, name: string): boolean |
 function optionalNumber(args: Record<string, unknown>, name: string): number | undefined {
   const value = args[name];
   return typeof value === "number" ? value : undefined;
+}
+
+function askUrgency(args: Record<string, unknown>): AskUrgency | undefined {
+  const value = args["urgency"];
+  return ASK_URGENCIES.find((urgency) => urgency === value);
 }
 
 function parseDispatchRef(ref: string): ParsedDispatchRef | null {
@@ -180,7 +185,7 @@ function toolActor(origin: DispatchOrigin, input: ExecuteDispatchToolInput): Act
 }
 
 function issueSummary(issue: IssueDetails, events: readonly Event[]): string {
-  const asks = Array.isArray(issue.open_asks) ? issue.open_asks : [];
+  const asks = issue.open_asks;
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
@@ -202,8 +207,7 @@ async function openArtifactMarks(
   client: DispatchClient,
   resolved: ResolvedArtifact
 ): Promise<string[]> {
-  const asks = Array.isArray(resolved.issue.open_asks) ? resolved.issue.open_asks : [];
-  const marks = asks
+  const marks = resolved.issue.open_asks
     .filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id)
     .map((ask) => `ask ${ask.id}`);
   let comments: Comment[];
@@ -233,6 +237,9 @@ export async function executeDispatchTool(
   const env = input.env ?? process.env;
   const exec = input.exec ?? defaultExec;
   const issueArguments = await resolveIssueArguments(input.tool, input.args, input.cwd, env, exec);
+  // The tool's strict Zod schema has validated every argument by the time it is
+  // read below: unknown keys and wrong types are rejected here, so a structured
+  // argument only needs the contract's shape named when it is forwarded.
   const args = toolSchema(input.tool).parse(issueArguments.args) as Record<string, unknown>;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = new DispatchClient(input.config.url, input.config.token, input.fetchImpl);
@@ -264,7 +271,7 @@ export async function executeDispatchTool(
       const options = args["options"];
       const multiple = optionalBoolean(args, "multiple");
       const custom = optionalBoolean(args, "custom");
-      const urgency = optionalString(args, "urgency") as AskInput["urgency"] | undefined;
+      const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const ask = await client.ask(issue(), {
         question: stringArg(args, "question"),
@@ -307,9 +314,11 @@ export async function executeDispatchTool(
     }
     case "dispatch_suggest": {
       const resolved = await resolveArtifact(client, issue(), stringArg(args, "artifact"));
+      const anchored = anchor(resolved.artifact, args);
+      if (anchored === undefined) throw new Error("quote is required");
       const comment = await client.suggest(issue(), {
         body: optionalString(args, "body") ?? "",
-        anchor: anchor(resolved.artifact, args) as NonNullable<CommentInput["anchor"]>,
+        anchor: anchored,
         replace_with: stringArg(args, "replace_with"),
         actor,
       });

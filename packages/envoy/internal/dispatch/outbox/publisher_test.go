@@ -101,6 +101,33 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	}
 }
 
+func TestRunSummarizesCommentBody(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	appendEvent(t, database, broker, model.Event{
+		IssueKey: "T-1",
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID:       "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b",
+				IssueKey: "T-1",
+				Body:     "Tighten this paragraph",
+			},
+			ArtifactName: "spec.md",
+		},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "comment publication", func() bool { return len(publisher.all()) == 1 })
+	if summary := publisher.all()[0].PayloadSummary; summary != "T-1 comment created: Tighten this paragraph" {
+		t.Fatalf("payload summary = %q", summary)
+	}
+}
+
 func TestRunAddsBoundRoutePublication(t *testing.T) {
 	for _, tc := range []struct {
 		name, route, wantTopic string

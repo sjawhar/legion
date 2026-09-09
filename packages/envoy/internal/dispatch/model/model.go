@@ -165,6 +165,14 @@ type Suggestion struct {
 	Accepted    *bool  `json:"accepted"`
 }
 
+// CommentEventPayload is the wire payload of comment.* and suggestion.* events:
+// the comment's own fields plus the anchored artifact's name. Comment is
+// embedded so the JSON stays flat, which is the shape every consumer reads.
+type CommentEventPayload struct {
+	Comment
+	ArtifactName string `json:"artifact_name"`
+}
+
 // Message is a short issue update.
 type Message struct {
 	ID        string    `json:"id"`

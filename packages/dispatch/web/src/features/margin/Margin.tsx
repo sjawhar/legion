@@ -413,6 +413,9 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
     scrolledRouteItem.current = routeItemId;
   }, [items, routeItemId, sheetExpanded, tab]);
 
+  // The list container mounts only on the Comments tab for a visible artifact, so the
+  // listeners must re-attach when either changes; the ref itself is not reactive.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tab and artifact gate the container's existence
   useEffect(() => {
     const container = list.current;
     if (container === null) {
@@ -445,13 +448,18 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       container.removeEventListener("mouseover", hoverCard);
       container.removeEventListener("mouseout", leaveCard);
     };
-  }, [selectItem, setHoveredItemId]);
+  }, [selectItem, setHoveredItemId, tab, visibleArtifact?.id]);
 
   useEffect(() => {
     if (selection !== undefined && selection.artifactId !== visibleArtifact?.id) {
       setSelection(undefined);
     }
   }, [selection, setSelection, visibleArtifact?.id]);
+  useEffect(() => {
+    if (composer !== undefined && composer.anchor.artifact !== visibleArtifact?.id) {
+      setComposer(undefined);
+    }
+  }, [composer, visibleArtifact?.id]);
 
   const openComposer = (kind: ComposerKind, anchor: ComposerAnchor, replyTo?: string) => {
     setComposer({ anchor, kind, replyTo });

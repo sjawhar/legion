@@ -18,10 +18,6 @@ func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if actor.Kind != "user" {
-		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "user state is only available to users")
-		return
-	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select issue_key, pinned, last_read_seq, dismissed
 		from user_issue_state where login = $1 order by issue_key

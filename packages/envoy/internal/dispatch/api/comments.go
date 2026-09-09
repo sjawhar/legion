@@ -105,7 +105,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	author, err := jsonActor(actor)
+	author, err := encodeJSON(actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -153,7 +153,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 			IssueKey: issueKey,
 			Type:     "artifact.version",
 			Actor:    actor,
-			Payload:  map[string]any{"artifact_id": anchor.ArtifactID, "name": artifactName, "version": *snapshot},
+			Payload:  versionEventPayload(anchor.ArtifactID, artifactName, *snapshot),
 		})
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -307,27 +307,14 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	writeJSON(w, http.StatusOK, comment)
 }
 
-type commentQueryer interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
 func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
-	return s.loadCommentRow(ctx, tx, `
+	return scanComment(tx.QueryRow(ctx, `
 		select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
 		from comments where id = $1 for update
-	`, id)
+	`, id))
 }
 
-func (s *server) loadCommentRow(ctx context.Context, q commentQueryer, query, id string) (model.Comment, error) {
-	row := q.QueryRow(ctx, query, id)
-	return scanComment(row)
-}
-
-type commentRow interface {
-	Scan(dest ...any) error
-}
-
-func scanComment(row commentRow) (model.Comment, error) {
+func scanComment(row pgx.Row) (model.Comment, error) {
 	var comment model.Comment
 	var author, anchor, suggestion []byte
 	if err := row.Scan(
@@ -355,8 +342,8 @@ func scanComment(row commentRow) (model.Comment, error) {
 	return comment, nil
 }
 
-func commentEventPayload(comment model.Comment, artifactName string) map[string]any {
-	return map[string]any{"comment": comment, "artifact_name": artifactName}
+func commentEventPayload(comment model.Comment, artifactName string) model.CommentEventPayload {
+	return model.CommentEventPayload{Comment: comment, ArtifactName: artifactName}
 }
 
 func (s *server) commentArtifactName(ctx context.Context, tx pgx.Tx, comment model.Comment) (string, error) {

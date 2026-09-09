@@ -66,7 +66,7 @@ func TestInstallationOwnersErrorsOnNon200(t *testing.T) {
 
 type memUserStore struct{ users map[string]*auth.User }
 
-func (m *memUserStore) Read(login string) (*auth.User, error) {
+func (m *memUserStore) Read(_ context.Context, login string) (*auth.User, error) {
 	u, ok := m.users[login]
 	if !ok {
 		return nil, nil
@@ -74,8 +74,11 @@ func (m *memUserStore) Read(login string) (*auth.User, error) {
 	copy := *u
 	return &copy, nil
 }
-func (m *memUserStore) Write(u *auth.User) error  { m.users[u.Login] = u; return nil }
-func (m *memUserStore) Remove(login string) error { delete(m.users, login); return nil }
+func (m *memUserStore) Write(_ context.Context, u *auth.User) error { m.users[u.Login] = u; return nil }
+func (m *memUserStore) Remove(_ context.Context, login string) error {
+	delete(m.users, login)
+	return nil
+}
 
 func TestRefreshAndStorePersistsNewTokens(t *testing.T) {
 	store := &memUserStore{users: map[string]*auth.User{

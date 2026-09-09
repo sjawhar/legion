@@ -287,7 +287,7 @@ describe("session title", () => {
   });
 });
 
-describe("heartbeat refreshes all busy sessions (fix 1a)", () => {
+describe("heartbeat refreshes all busy sessions", () => {
   it("re-subscribes every session that has been busy, not just the most recent", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     const originalHb = process.env.ENVOY_HEARTBEAT_MS;
@@ -358,7 +358,7 @@ describe("heartbeat refreshes all busy sessions (fix 1a)", () => {
   });
 });
 
-describe("prunes deleted sessions from the heartbeat (fix 2)", () => {
+describe("prunes deleted sessions from the heartbeat", () => {
   it("stops re-subscribing a session after session.deleted", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     const originalHb = process.env.ENVOY_HEARTBEAT_MS;
@@ -428,7 +428,7 @@ describe("prunes deleted sessions from the heartbeat (fix 2)", () => {
   });
 });
 
-describe("invalid ENVOY_HEARTBEAT_MS falls back to the default (fix 6)", () => {
+describe("invalid ENVOY_HEARTBEAT_MS falls back to the default", () => {
   it("does not hammer subscribe when the env value is negative", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     const originalHb = process.env.ENVOY_HEARTBEAT_MS;
@@ -599,18 +599,9 @@ describe("claims report whether this process drives the session", () => {
   });
 });
 
-// Serve-restart recovery must not hijack sessions that a LIVE process still
-// serves. Because opencode session state is on shared disk and every `oc -s`
-// launch is its own process, a new process in a shared directory re-pointed
-// every sibling session's route at itself (observed: 231 sessions claimed by one
-// process in a single burst, then refreshed every 2 minutes). Envoy then
-// delivers there, and that process starts its own model loop on a session
-// another process owns — two loops, one transcript.
-//
-// A process may therefore claim ONLY sessions it has actually run. Keeping
-// idle-but-owned sessions reachable is the daemon's job (it knows the serve port
-// and the session IDs it dispatched), not something a stranger process may
-// arrange by adopting routes.
+// Serve-restart recovery claims only sessions this process has actually run.
+// The daemon keeps idle-but-owned sessions reachable; a stranger process must
+// not adopt sibling routes from shared on-disk session state.
 describe("a process claims only sessions it has run", () => {
   const runReadopt = async (siblingPortAlive: boolean) => {
     const originalEnvoyUrl = process.env.ENVOY_URL;

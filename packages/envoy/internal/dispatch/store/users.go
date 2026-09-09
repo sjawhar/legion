@@ -23,13 +23,13 @@ func NewPgUserStore(pool *pgxpool.Pool) *PgUserStore {
 }
 
 // Read returns nil, nil when login has no stored token pair.
-func (s *PgUserStore) Read(login string) (*auth.User, error) {
+func (s *PgUserStore) Read(ctx context.Context, login string) (*auth.User, error) {
 	if s == nil || s.pool == nil {
 		return nil, errors.New("read user: Postgres pool required")
 	}
 	var user auth.User
 	var accessExpiresAt, refreshExpiresAt *time.Time
-	err := s.pool.QueryRow(context.Background(), `
+	err := s.pool.QueryRow(ctx, `
 		select login, access_token, refresh_token, access_expires_at, refresh_expires_at
 		from users
 		where login = $1
@@ -53,7 +53,7 @@ func (s *PgUserStore) Read(login string) (*auth.User, error) {
 }
 
 // Write upserts a user's current GitHub OAuth token pair.
-func (s *PgUserStore) Write(user *auth.User) error {
+func (s *PgUserStore) Write(ctx context.Context, user *auth.User) error {
 	if s == nil || s.pool == nil {
 		return errors.New("write user: Postgres pool required")
 	}
@@ -63,7 +63,7 @@ func (s *PgUserStore) Write(user *auth.User) error {
 	if user.Login == "" {
 		return errors.New("write user: login required")
 	}
-	_, err := s.pool.Exec(context.Background(), `
+	_, err := s.pool.Exec(ctx, `
 		insert into users (
 			login, access_token, refresh_token, access_expires_at, refresh_expires_at
 		) values ($1, $2, $3, $4, $5)
@@ -87,21 +87,22 @@ func (s *PgUserStore) Write(user *auth.User) error {
 }
 
 // Remove deletes a user's stored OAuth tokens. A missing user is a no-op.
-func (s *PgUserStore) Remove(login string) error {
+func (s *PgUserStore) Remove(ctx context.Context, login string) error {
 	if s == nil || s.pool == nil {
 		return errors.New("remove user: Postgres pool required")
 	}
-	if _, err := s.pool.Exec(context.Background(), "delete from users where login = $1", login); err != nil {
+	if _, err := s.pool.Exec(ctx, "delete from users where login = $1", login); err != nil {
 		return fmt.Errorf("remove user %q: %w", login, err)
 	}
 	return nil
 }
 
-func asTime(milliseconds int64) any {
+func asTime(milliseconds int64) *time.Time {
 	if milliseconds == 0 {
 		return nil
 	}
-	return time.UnixMilli(milliseconds).UTC()
+	value := time.UnixMilli(milliseconds).UTC()
+	return &value
 }
 
 func unixMilli(value *time.Time) int64 {

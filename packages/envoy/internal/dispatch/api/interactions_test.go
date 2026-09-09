@@ -317,6 +317,24 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 	if tooManyOptions.Code != http.StatusBadRequest || !strings.Contains(tooManyOptions.Body.String(), `"code":"CAP_EXCEEDED"`) {
 		t.Fatalf("options cap: status=%d body=%s", tooManyOptions.Code, tooManyOptions.Body.String())
 	}
+	missingRequiredOptions := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Options required", "custom": false, "actor": sessionActor(),
+	})
+	if missingRequiredOptions.Code != http.StatusBadRequest || !strings.Contains(missingRequiredOptions.Body.String(), `"code":"INVALID_ASK"`) {
+		t.Fatalf("missing required options: status=%d body=%s", missingRequiredOptions.Code, missingRequiredOptions.Body.String())
+	}
+	blankOption := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Blank option", "options": []map[string]string{{"label": " "}}, "actor": sessionActor(),
+	})
+	if blankOption.Code != http.StatusBadRequest || !strings.Contains(blankOption.Body.String(), `"code":"INVALID_ASK"`) {
+		t.Fatalf("blank option label: status=%d body=%s", blankOption.Code, blankOption.Body.String())
+	}
+	duplicateOption := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Duplicate option", "options": []map[string]string{{"label": "yes"}, {"label": "yes"}}, "actor": sessionActor(),
+	})
+	if duplicateOption.Code != http.StatusBadRequest || !strings.Contains(duplicateOption.Body.String(), `"code":"INVALID_ASK"`) {
+		t.Fatalf("duplicate option label: status=%d body=%s", duplicateOption.Code, duplicateOption.Body.String())
+	}
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Pick", "options": []map[string]string{{"label": "yes"}}, "custom": false, "actor": sessionActor(),
 	})
@@ -326,6 +344,15 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 	invalidAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{"selected": []string{"no"}}, "alice")
 	if invalidAnswer.Code != http.StatusBadRequest {
 		t.Fatalf("invalid selected answer: status=%d body=%s", invalidAnswer.Code, invalidAnswer.Body.String())
+	}
+	emptyRequiredOptionAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{"selected": []string{}}, "alice")
+	if emptyRequiredOptionAnswer.Code != http.StatusBadRequest || !strings.Contains(emptyRequiredOptionAnswer.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("empty required-option answer: status=%d body=%s", emptyRequiredOptionAnswer.Code, emptyRequiredOptionAnswer.Body.String())
+	}
+
+	blankRequiredOptionTextAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{"selected": []string{}, "text": "   "}, "alice")
+	if blankRequiredOptionTextAnswer.Code != http.StatusBadRequest || !strings.Contains(blankRequiredOptionTextAnswer.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("blank required-option text answer: status=%d body=%s", blankRequiredOptionTextAnswer.Code, blankRequiredOptionTextAnswer.Body.String())
 	}
 
 	customSingle := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -339,6 +366,15 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 	}, "alice")
 	if multipleSelected.Code != http.StatusBadRequest || !strings.Contains(multipleSelected.Body.String(), `"code":"INVALID_ANSWER"`) {
 		t.Fatalf("multiple answers for single-select custom ask: status=%d body=%s", multipleSelected.Code, multipleSelected.Body.String())
+	}
+	emptyCustomAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+customAsk.ID+"/answer", map[string]any{"selected": []string{}}, "alice")
+	if emptyCustomAnswer.Code != http.StatusBadRequest || !strings.Contains(emptyCustomAnswer.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("empty custom answer: status=%d body=%s", emptyCustomAnswer.Code, emptyCustomAnswer.Body.String())
+	}
+
+	blankCustomTextAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+customAsk.ID+"/answer", map[string]any{"selected": []string{}, "text": "   "}, "alice")
+	if blankCustomTextAnswer.Code != http.StatusBadRequest || !strings.Contains(blankCustomTextAnswer.Body.String(), `"code":"INVALID_ANSWER"`) {
+		t.Fatalf("blank custom text answer: status=%d body=%s", blankCustomTextAnswer.Code, blankCustomTextAnswer.Body.String())
 	}
 
 	tooLongComment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
@@ -666,13 +702,18 @@ func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
 }
 
 func TestInboxOrdersOpenAsksAcrossIssues(t *testing.T) {
-	handler := newTestHandler(t)
+	handler, database := newTestHandlerWithStore(t)
 	first := createInteractionIssue(t, handler, "TEST", "First", "first")
 	firstAsk := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/asks", map[string]any{"question": "First question", "actor": sessionActor()})
 	if firstAsk.Code != http.StatusCreated {
 		t.Fatalf("create first ask: status=%d body=%s", firstAsk.Code, firstAsk.Body.String())
 	}
-	time.Sleep(2 * time.Millisecond)
+	firstAskBody := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, firstAsk)
+	if _, err := database.Pool.Exec(context.Background(), `update asks set created_at = created_at - interval '1 minute' where id = $1`, firstAskBody.ID); err != nil {
+		t.Fatalf("move first ask earlier: %v", err)
+	}
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{"project": "TEST", "title": "Second", "spec": "second"}, "alice")
 	second := decodeBody[struct {
 		Key string `json:"key"`

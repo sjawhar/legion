@@ -531,6 +531,12 @@ func TestIssueRouteVersionEventsAndChildStatus(t *testing.T) {
 	if named.Code != http.StatusCreated || !strings.Contains(named.Body.String(), `"named":true`) {
 		t.Fatalf("create user named version: status=%d body=%s", named.Code, named.Body.String())
 	}
+	blankSummary := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+child.PrimaryArtifactID+"/versions", map[string]string{
+		"summary": "   ",
+	}, "alice")
+	if blankSummary.Code != http.StatusBadRequest || !strings.Contains(blankSummary.Body.String(), `"code":"INVALID_VERSION"`) {
+		t.Fatalf("blank-summary named version: status=%d body=%s", blankSummary.Code, blankSummary.Body.String())
+	}
 	sessionVersion := agentRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+child.PrimaryArtifactID+"/versions", map[string]any{
 		"summary": "agent checkpoint",
 		"actor":   map[string]string{"kind": "session", "id": "abcdef0123456789"},
@@ -852,6 +858,21 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 	resumedFrame := readSSEFrame(t, bufio.NewScanner(resumed.Body))
 	if resumedFrame[0] != "id: 2" || resumedFrame[1] != "event: issue.updated" {
 		t.Fatalf("Last-Event-ID replay: %#v", resumedFrame)
+	}
+	staleQueryRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
+	if err != nil {
+		t.Fatalf("construct stale-query SSE request: %v", err)
+	}
+	staleQueryRequest.Header.Set("Authorization", "Bearer agent-token")
+	staleQueryRequest.Header.Set("Last-Event-ID", "1")
+	staleQuery, err := http.DefaultClient.Do(staleQueryRequest)
+	if err != nil {
+		t.Fatalf("resume stale-query SSE: %v", err)
+	}
+	defer staleQuery.Body.Close()
+	staleQueryFrame := readSSEFrame(t, bufio.NewScanner(staleQuery.Body))
+	if staleQueryFrame[0] != "id: 2" || staleQueryFrame[1] != "event: issue.updated" {
+		t.Fatalf("Last-Event-ID with stale since query replay: %#v", staleQueryFrame)
 	}
 }
 

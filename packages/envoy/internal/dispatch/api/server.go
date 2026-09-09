@@ -104,6 +104,13 @@ type server struct {
 	deps Deps
 }
 
+// queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
+// serves both the plain-read and in-transaction paths.
+type queryer interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
 // Register mounts every native-workspace route on mux.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
@@ -161,21 +168,12 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
 		return
 	}
-	var ambiguous *targetAmbiguousError
+	var ambiguous *text.ErrTargetAmbiguous
 	if errors.As(err, &ambiguous) {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":      ambiguous.Error(),
 			"code":       "TARGET_AMBIGUOUS",
-			"candidates": ambiguous.candidates,
-		})
-		return
-	}
-	var targetAmbiguous *text.ErrTargetAmbiguous
-	if errors.As(err, &targetAmbiguous) {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":      targetAmbiguous.Error(),
-			"code":       "TARGET_AMBIGUOUS",
-			"candidates": targetAmbiguous.Candidates,
+			"candidates": ambiguous.Candidates,
 		})
 		return
 	}
@@ -341,7 +339,9 @@ func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) er
 	return nil
 }
 
-func jsonActor(actor model.Actor) ([]byte, error) { return encodeJSON(actor) }
+func versionEventPayload(artifactID, name string, version model.Version) map[string]any {
+	return map[string]any{"artifact_id": artifactID, "name": name, "version": version}
+}
 
 func externalRef(ref string) (repo string, number string, err error) {
 	match := externalRefPattern.FindStringSubmatch(ref)

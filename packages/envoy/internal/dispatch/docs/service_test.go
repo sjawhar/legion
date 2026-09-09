@@ -132,6 +132,42 @@ func TestReplaceTextUpdatesLiveDocumentAndSettlesVersion(t *testing.T) {
 	}
 }
 
+func TestReplaceTextWithTransactionRollsBackUpdate(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "# First")
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin replace transaction: %v", err)
+	}
+	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	if err := service.ReplaceText(WithTx(ctx, tx), artifactID, "# Rolled back", actor); err != nil {
+		t.Fatalf("replace text: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback replace transaction: %v", err)
+	}
+	if err := service.srv.CloseRoom(artifactID, true); err != nil {
+		t.Fatalf("close live document: %v", err)
+	}
+	waitForNoLiveDocument(t, service, artifactID)
+
+	got, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("read durable text: %v", err)
+	}
+	if got != "# First" {
+		t.Fatalf("durable text = %q, want %q", got, "# First")
+	}
+	var updates int
+	if err := service.store.Pool.QueryRow(ctx, "select count(*) from doc_updates where artifact_id = $1", artifactID).Scan(&updates); err != nil {
+		t.Fatalf("count document updates: %v", err)
+	}
+	if updates != 1 {
+		t.Fatalf("rolled-back replace left %d document updates, want 1", updates)
+	}
+}
+
 func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "one two one")
@@ -570,7 +606,6 @@ func TestReresolveAnchorsClosesRowsBeforeUpdating(t *testing.T) {
 		t.Fatalf("commit anchor transaction: %v", err)
 	}
 }
-
 
 func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -1050,8 +1085,6 @@ func waitForRoomFailure(t *testing.T, service *Service, artifactID string) {
 	}
 	t.Fatal("document room did not become unavailable after append failure")
 }
-
-
 
 func waitForNoLiveDocument(t *testing.T, service *Service, artifactID string) {
 	t.Helper()

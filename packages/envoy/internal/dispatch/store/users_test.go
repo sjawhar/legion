@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -33,10 +34,10 @@ func TestPgUserStoreRoundTrip(t *testing.T) {
 			GithubLogin:      login,
 		},
 	}
-	if err := users.Write(want); err != nil {
+	if err := users.Write(ctx, want); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got, err := users.Read(want.Login)
+	got, err := users.Read(ctx, want.Login)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -47,14 +48,35 @@ func TestPgUserStoreRoundTrip(t *testing.T) {
 		t.Errorf("round trip: got %+v, want %+v", got, want)
 	}
 
-	if err := users.Remove(want.Login); err != nil {
+	if err := users.Remove(ctx, want.Login); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	got, err = users.Read(want.Login)
+	got, err = users.Read(ctx, want.Login)
 	if err != nil {
 		t.Fatalf("read after remove: %v", err)
 	}
 	if got != nil {
 		t.Errorf("read after remove: got %+v, want nil", got)
+	}
+}
+
+func TestPgUserStoreHonorsContextCancellation(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	users := NewPgUserStore(store.Pool)
+	user := &auth.User{Login: "canceled-context", Tokens: auth.Tokens{AccessToken: "access", RefreshToken: "refresh"}}
+
+	if _, err := users.Read(ctx, user.Login); !errors.Is(err, context.Canceled) {
+		t.Fatalf("read error = %v, want context canceled", err)
+	}
+	if err := users.Write(ctx, user); !errors.Is(err, context.Canceled) {
+		t.Fatalf("write error = %v, want context canceled", err)
+	}
+	if err := users.Remove(ctx, user.Login); !errors.Is(err, context.Canceled) {
+		t.Fatalf("remove error = %v, want context canceled", err)
 	}
 }

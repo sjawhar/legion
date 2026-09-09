@@ -8,6 +8,12 @@ export interface DispatchToolSpec {
 
 const ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference.";
 
+/** Ask urgency levels the Dispatch server accepts, in ascending order. */
+export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
+
+/** Document edit operations the Dispatch server applies. */
+export const DOC_EDIT_OPS = ["replace", "delete", "insert"] as const;
+
 export const dispatchToolSpecs = [
   {
     name: "dispatch_issue",
@@ -42,10 +48,7 @@ export const dispatchToolSpecs = [
         .optional(),
       multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
       custom: z.boolean().describe("Whether a free-text answer is allowed.").optional(),
-      urgency: z
-        .enum(["low", "med", "high", "blocking"])
-        .describe("Optional decision urgency.")
-        .optional(),
+      urgency: z.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
       anchor: z
         .object({
           artifact: z.string().describe("Artifact slug or id containing the quoted text."),
@@ -117,7 +120,7 @@ export const dispatchToolSpecs = [
       ops: z
         .array(
           z.object({
-            op: z.enum(["replace", "delete", "insert"]).describe("Edit operation."),
+            op: z.enum(DOC_EDIT_OPS).describe("Edit operation."),
             find: z.string().describe("Text to find for replace or delete.").optional(),
             with: z.string().describe("Replacement text for replace.").optional(),
             occurrence: z

@@ -8,16 +8,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
-
-type issueQueryer interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
 
 func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -77,9 +69,9 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Project = strings.TrimSpace(input.Project)
 	input.Title = strings.TrimSpace(input.Title)
+	parentKey := ""
 	if input.Parent != nil {
-		parent := strings.TrimSpace(*input.Parent)
-		input.Parent = &parent
+		parentKey = strings.TrimSpace(*input.Parent)
 	}
 
 	var externalRepo, externalNumber string
@@ -115,9 +107,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if input.Parent != nil && *input.Parent != "" {
-		var parentExists string
-		if err := tx.QueryRow(r.Context(), `select key from issues where key = $1`, *input.Parent).Scan(&parentExists); err != nil {
+	if parentKey != "" {
+		if err := tx.QueryRow(r.Context(), `select key from issues where key = $1`, parentKey).Scan(new(string)); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -134,14 +125,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := fmt.Sprintf("%s-%d", input.Project, number)
-	actorJSON, err := jsonActor(actor)
+	actorJSON, err := encodeJSON(actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	var parent any
-	if input.Parent != nil && *input.Parent != "" {
-		parent = *input.Parent
+	if parentKey != "" {
+		parent = parentKey
 	}
 	if _, err := tx.Exec(r.Context(), `
 		insert into issues (key, project_key, number, title, parent_key, created_by)
@@ -184,7 +175,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.deps.Docs.SeedText(docs.WithTx(r.Context(), tx), tx, artifactID, markdown); err != nil {
+	if err := s.deps.Docs.SeedText(r.Context(), tx, artifactID, markdown); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -230,8 +221,8 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var openAsks int
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select count(*) from asks where issue_key = $1 and state = 'open'`, issue.Key).Scan(&openAsks); err != nil {
+	openAsks, err := s.loadOpenAsks(r.Context(), s.deps.Store.Pool, issue.Key)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -243,9 +234,32 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		model.Issue
 		Artifacts []model.Artifact   `json:"artifacts"`
-		OpenAsks  int                `json:"open_asks"`
+		OpenAsks  []model.Ask        `json:"open_asks"`
 		Children  []model.IssueChild `json:"children"`
 	}{Issue: issue, Artifacts: artifacts, OpenAsks: openAsks, Children: children})
+}
+
+// loadOpenAsks returns the issue's unanswered asks, oldest first. The issue
+// listing carries only a count; the detail response carries the asks themselves
+// so agents, which cannot read the human inbox, can see what is waiting.
+func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]model.Ask, error) {
+	rows, err := q.Query(ctx, `
+		select id::text, issue_key, author, question, options, multiple, custom, urgency, anchor, state, answer, created_at
+		from asks where issue_key = $1 and state = 'open' order by created_at, id
+	`, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	asks := []model.Ask{}
+	for rows.Next() {
+		ask, err := scanAsk(rows)
+		if err != nil {
+			return nil, err
+		}
+		asks = append(asks, ask)
+	}
+	return asks, rows.Err()
 }
 
 func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
@@ -269,13 +283,17 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "title must not be blank")
 		return
 	}
-	if input.Status != nil && strings.TrimSpace(*input.Status) == "" {
-		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "status must not be blank")
-		return
-	}
-	if input.Status != nil && !model.IsIssueStatus(strings.TrimSpace(*input.Status)) {
-		writeError(w, "INVALID_STATUS", http.StatusBadRequest, "status is not in the Legion lifecycle")
-		return
+	status := ""
+	if input.Status != nil {
+		status = strings.TrimSpace(*input.Status)
+		if status == "" {
+			writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "status must not be blank")
+			return
+		}
+		if !model.IsIssueStatus(status) {
+			writeError(w, "INVALID_STATUS", http.StatusBadRequest, "status is not in the Legion lifecycle")
+			return
+		}
 	}
 	if input.Route != nil && *input.Route != "" {
 		if _, err := model.ParseRoute(*input.Route); err != nil {
@@ -301,10 +319,6 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if before.ClosedAt != nil {
-		status := ""
-		if input.Status != nil {
-			status = strings.TrimSpace(*input.Status)
-		}
 		if status == "" || status == "done" || input.Title != nil || input.Labels != nil || input.Route != nil || input.ExternalLinks != nil {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 			return
@@ -319,7 +333,6 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 	if input.Status != nil {
-		status := strings.TrimSpace(*input.Status)
 		if _, err := tx.Exec(r.Context(), `
 			update issues
 			set status = $2, closed_at = case when $2 = 'done' then now() else null end, updated_at = now()
@@ -383,8 +396,9 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events := []model.Event{}
+	statusChanged := input.Status != nil && before.Status != after.Status
 	eventType := "issue.updated"
-	if input.Status != nil && before.Status != after.Status && after.Status == "done" {
+	if statusChanged && after.Status == "done" {
 		eventType = "issue.closed"
 	}
 	after.LastSeq++
@@ -394,7 +408,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events = append(events, event)
-	if input.Status != nil && before.Status != after.Status && after.Parent != nil {
+	if statusChanged && after.Parent != nil {
 		childEvent, err := s.appendEvent(r.Context(), tx, model.Event{
 			IssueKey: *after.Parent,
 			Type:     "child.status",
@@ -456,7 +470,7 @@ func (s *server) resolveIssueRef(ctx context.Context, ref string) (string, error
 	return key, nil
 }
 
-func (s *server) loadIssue(ctx context.Context, q issueQueryer, key string) (model.Issue, error) {
+func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Issue, error) {
 	var issue model.Issue
 	var createdBy []byte
 	if err := q.QueryRow(ctx, `
@@ -495,7 +509,7 @@ func (s *server) loadIssue(ctx context.Context, q issueQueryer, key string) (mod
 	return issue, nil
 }
 
-func (s *server) loadChildren(ctx context.Context, q issueQueryer, key string) ([]model.IssueChild, error) {
+func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
 	rows, err := q.Query(ctx, `select key, title, status from issues where parent_key = $1 order by key`, key)
 	if err != nil {
 		return nil, err

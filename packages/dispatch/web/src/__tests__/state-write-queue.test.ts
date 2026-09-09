@@ -58,6 +58,37 @@ test("issue-state queue applies rapid operations against server state and publis
   ]);
 });
 
+test("issue-state queue drains operations enqueued by completion callbacks", async () => {
+  const queue = new IssueStateWriteQueue();
+  const writes: string[][] = [];
+  let second: Promise<void> | undefined;
+  let secondResolved = false;
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => issueState([]),
+    onDrained: (issueKey) => {
+      if (second === undefined) {
+        second = queue.enqueue(issueKey, { id: "event:2", op: "dismiss" }, worker);
+        second.then(() => {
+          secondResolved = true;
+        });
+      }
+    },
+    onError: () => {},
+    putState: async (_issueKey, dismissed) => {
+      writes.push(dismissed);
+      return issueState(dismissed);
+    },
+  };
+
+  await queue.enqueue("CORE-1", { id: "event:1", op: "dismiss" }, worker);
+  for (let microtask = 0; microtask < 10; microtask++) {
+    await Promise.resolve();
+  }
+
+  expect(secondResolved).toBe(true);
+  expect(writes).toEqual([["event:1"], ["event:2"]]);
+});
+
 test("retries a failed operation from fetched state and keeps an operation queued during failure", async () => {
   const queue = new IssueStateWriteQueue();
   const secondStarted = deferred();

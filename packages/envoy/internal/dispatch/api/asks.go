@@ -57,6 +57,27 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	if input.Custom != nil {
 		custom = *input.Custom
 	}
+	if input.Options == nil {
+		input.Options = []model.AskOption{}
+	}
+	if !custom && len(input.Options) == 0 {
+		writeError(w, "INVALID_ASK", http.StatusBadRequest, "non-custom asks require answer options")
+		return
+	}
+	seenOptions := make(map[string]struct{}, len(input.Options))
+	for index := range input.Options {
+		label := strings.TrimSpace(input.Options[index].Label)
+		if label == "" {
+			writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask option labels are required")
+			return
+		}
+		if _, duplicate := seenOptions[label]; duplicate {
+			writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask option labels must be unique")
+			return
+		}
+		seenOptions[label] = struct{}{}
+		input.Options[index].Label = label
+	}
 	urgency := strings.TrimSpace(input.Urgency)
 	if urgency == "" {
 		urgency = "med"
@@ -82,16 +103,13 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if input.Options == nil {
-		input.Options = []model.AskOption{}
-	}
 
 	options, err := encodeJSON(input.Options)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	author, err := jsonActor(actor)
+	author, err := encodeJSON(actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -132,7 +150,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 			IssueKey: issueKey,
 			Type:     "artifact.version",
 			Actor:    actor,
-			Payload:  map[string]any{"artifact_id": anchor.ArtifactID, "name": artifactName, "version": *snapshot},
+			Payload:  versionEventPayload(anchor.ArtifactID, artifactName, *snapshot),
 		})
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -191,12 +209,17 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	hasText := input.Text != nil && strings.TrimSpace(*input.Text) != ""
 	if !ask.Multiple && len(input.Selected) > 1 {
 		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "single-select asks accept at most one selected answer")
 		return
 	}
-	if !ask.Custom && !selectedOptions(ask.Options, input.Selected) {
+	if len(input.Selected) > 0 && !selectedOptions(ask.Options, input.Selected) {
 		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "selected answers must be ask option labels")
+		return
+	}
+	if len(input.Selected) == 0 && (!ask.Custom || !hasText) {
+		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "answer requires a selected option or custom text")
 		return
 	}
 	answer := model.AskAnswer{User: actor.ID, Selected: input.Selected, Text: input.Text, At: time.Now().UTC()}
@@ -236,33 +259,21 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ask)
 }
 
-type askQueryer interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-func (s *server) loadAsk(ctx context.Context, q askQueryer, id string) (model.Ask, error) {
-	return s.loadAskRow(ctx, q, `
+func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
+	return scanAsk(q.QueryRow(ctx, `
 		select id::text, issue_key, author, question, options, multiple, custom, urgency, anchor, state, answer, created_at
 		from asks where id = $1
-	`, id)
+	`, id))
 }
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
-	return s.loadAskRow(ctx, tx, `
+	return scanAsk(tx.QueryRow(ctx, `
 		select id::text, issue_key, author, question, options, multiple, custom, urgency, anchor, state, answer, created_at
 		from asks where id = $1 for update
-	`, id)
+	`, id))
 }
 
-func (s *server) loadAskRow(ctx context.Context, q askQueryer, query, id string) (model.Ask, error) {
-	return scanAsk(q.QueryRow(ctx, query, id))
-}
-
-type askRow interface {
-	Scan(dest ...any) error
-}
-
-func scanAsk(row askRow) (model.Ask, error) {
+func scanAsk(row pgx.Row) (model.Ask, error) {
 	var ask model.Ask
 	var author, options, anchor, answer []byte
 	if err := row.Scan(

@@ -5,24 +5,24 @@ import type { ReactNode } from "react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Comment, Issue } from "../../api/types";
+import type { Artifact, Comment, Issue } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
 import { Margin, MarginProvider, useMargin } from "./Margin";
 
+const specArtifact: Artifact = {
+  created_at: "2026-09-09T00:00:00Z",
+  created_by: { id: "alice", kind: "user" },
+  id: "artifact-1",
+  issue_key: "CORE-1",
+  kind: "doc",
+  name: "spec.md",
+  primary: true,
+  slug: "spec",
+  versions: [],
+};
+
 const issue: Issue = {
-  artifacts: [
-    {
-      created_at: "2026-09-09T00:00:00Z",
-      created_by: { id: "alice", kind: "user" },
-      id: "artifact-1",
-      issue_key: "CORE-1",
-      kind: "doc",
-      name: "spec.md",
-      primary: true,
-      slug: "spec",
-      versions: [],
-    },
-  ],
+  artifacts: [specArtifact],
   closed_at: null,
   created_at: "2026-09-09T00:00:00Z",
   created_by: { id: "alice", kind: "user" },
@@ -38,6 +38,21 @@ const issue: Issue = {
   status: "open",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
+};
+
+const secondIssue: Issue = {
+  ...issue,
+  artifacts: [
+    {
+      ...specArtifact,
+      id: "artifact-2",
+      issue_key: "CORE-2",
+    },
+  ],
+  key: "CORE-2",
+  number: 2,
+  primary_artifact_id: "artifact-2",
+  title: "Second issue",
 };
 
 const comment: Comment = {
@@ -95,6 +110,38 @@ function SelectionButton(): ReactNode {
   );
 }
 
+function NavigateToIssue(): ReactNode {
+  const navigate = useNavigate();
+
+  return (
+    <button
+      onClick={() => navigate(buildIssuePath({ key: "CORE-1", kind: "issue" }))}
+      type="button"
+    >
+      Open issue
+    </button>
+  );
+}
+
+function NavigateToSecondIssue(): ReactNode {
+  const navigate = useNavigate();
+
+  return (
+    <button
+      onClick={() => navigate(buildIssuePath({ key: "CORE-2", kind: "issue" }))}
+      type="button"
+    >
+      Open second issue
+    </button>
+  );
+}
+
+function SelectedItemLabel(): ReactNode {
+  const { selectedItemId } = useMargin();
+
+  return <output aria-label="Selected margin item">{selectedItemId ?? "none"}</output>;
+}
+
 test("Margin hides an open composer when its issue closes", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -136,6 +183,48 @@ test("Margin hides an open composer when its issue closes", async () => {
   }
 });
 
+test("Margin hides an open composer when navigating to a different artifact", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["issue", secondIssue.key], secondIssue);
+  const getIssue = spyOn(api, "getIssue").mockImplementation(async (key) =>
+    key === "CORE-2" ? secondIssue : issue
+  );
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <SelectionButton />
+          <NavigateToSecondIssue />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("No comments, asks, or suggestions on this document.");
+    fireEvent.click(screen.getByRole("button", { name: "Select text" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await screen.findByLabelText("Ask composer");
+    fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
+
+    await waitFor(() => expect(screen.queryByLabelText("Ask composer")).toBeNull());
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+  }
+});
+
 test("a comment deep link activates Comments and scrolls its card from Pinned", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -151,6 +240,7 @@ test("a comment deep link activates Comments and scrolls its card from Pinned", 
       <QueryClientProvider client={queryClient}>
         <MarginProvider>
           <CommentLink />
+          <SelectedItemLabel />
           <Margin />
         </MarginProvider>
       </QueryClientProvider>
@@ -170,6 +260,9 @@ test("a comment deep link activates Comments and scrolls its card from Pinned", 
       );
       expect(scrollTo).toHaveBeenCalledTimes(1);
     });
+    const card = screen.getByTestId("margin-comment-comment-1");
+    fireEvent.click(card);
+    expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -177,5 +270,79 @@ test("a comment deep link activates Comments and scrolls its card from Pinned", 
     getMyState.mockRestore();
     listComments.mockRestore();
     scrollTo.mockRestore();
+  }
+});
+
+test("margin item listeners reattach after the comments tab remounts", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <SelectedItemLabel />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByTestId("margin-comment-comment-1");
+    fireEvent.click(screen.getByRole("tab", { name: "Pinned" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Comments" }));
+    const card = await screen.findByTestId("margin-comment-comment-1");
+    fireEvent.click(card);
+
+    expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+  }
+});
+
+test("margin item listeners attach after navigating from a route with no review list", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
+
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <NavigateToIssue />
+          <SelectedItemLabel />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    expect(screen.getByLabelText("Selected margin item").textContent).toBe("none");
+    fireEvent.click(screen.getByRole("button", { name: "Open issue" }));
+    const card = await screen.findByTestId("margin-comment-comment-1");
+    fireEvent.click(card);
+
+    expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
   }
 });

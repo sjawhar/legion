@@ -1,4 +1,9 @@
+import type { ASK_URGENCIES, DOC_EDIT_OPS } from "@legion/contracts";
 import type { DispatchHost } from "./dispatch-cwd";
+
+/** Ask urgency and document edit operations come from the shared tool contract. */
+export type AskUrgency = (typeof ASK_URGENCIES)[number];
+export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
 
 export type Actor =
   | { readonly kind: "user"; readonly id: string }
@@ -81,11 +86,12 @@ export interface Ask {
   readonly options: { readonly label: string; readonly description?: string }[];
   readonly multiple: boolean;
   readonly custom: boolean;
-  readonly urgency: "low" | "med" | "high" | "blocking";
+  readonly urgency: AskUrgency;
   readonly anchor: Anchor | null;
   readonly state: "open" | "answered";
   readonly answer: {
-    readonly user: Actor;
+    /** Answering user's login: the server stores the acting actor's id, not an actor object. */
+    readonly user: string;
     readonly selected: string[];
     readonly text: string | null;
     readonly at: string;
@@ -136,12 +142,13 @@ export interface Event {
   readonly actor: Actor;
   readonly notify: boolean;
   readonly created_at: string;
-  readonly payload: object;
+  /** Per-type JSON object; the shapes are validated where they are read (see delivery.ts). */
+  readonly payload: Record<string, unknown>;
 }
 
 export interface IssueDetails extends Issue {
   readonly artifacts: Artifact[];
-  readonly open_asks: Ask[] | number;
+  readonly open_asks: Ask[];
   readonly children: { readonly key: string; readonly title: string; readonly status: string }[];
 }
 export interface IssueRead {
@@ -193,7 +200,7 @@ export interface AskInput {
   readonly options?: { readonly label: string; readonly description?: string }[];
   readonly multiple?: boolean;
   readonly custom?: boolean;
-  readonly urgency?: "low" | "med" | "high" | "blocking";
+  readonly urgency?: AskUrgency;
   readonly anchor?: {
     readonly artifact: string;
     readonly quote: string;
@@ -223,7 +230,7 @@ export interface ArtifactUploadInput {
 }
 
 export interface EditOperation {
-  readonly op: "replace" | "delete" | "insert";
+  readonly op: DocEditOp;
   readonly find?: string;
   readonly with?: string;
   readonly occurrence?: number;

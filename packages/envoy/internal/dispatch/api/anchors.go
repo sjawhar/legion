@@ -2,9 +2,7 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -13,12 +11,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
-
-type targetAmbiguousError struct {
-	candidates []text.Candidate
-}
-
-func (e *targetAmbiguousError) Error() string { return "target is ambiguous" }
 
 func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, issueKey string, input *model.AnchorInput, actor model.Actor) (*model.Anchor, string, *model.Version, error) {
 	if input == nil {
@@ -70,29 +62,17 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, issueKey string, 
 }
 
 func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, issueKey, artifactRef string) (model.Artifact, error) {
-	var artifact model.Artifact
-	var createdBy []byte
-	if err := tx.QueryRow(ctx, `
+	return scanArtifact(tx.QueryRow(ctx, `
 		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts
 		where issue_key = $1 and (id::text = $2 or slug = $2)
 		for update
-	`, issueKey, artifactRef).Scan(
-		&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt,
-	); err != nil {
-		return model.Artifact{}, err
-	}
-	if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
-		return model.Artifact{}, fmt.Errorf("decode anchor artifact author: %w", err)
-	}
-	return artifact, nil
+	`, issueKey, artifactRef))
 }
 
+// anchorResolveError maps a missing quote to 422 (the caller's input is at
+// fault); an ambiguous quote already renders as 409 TARGET_AMBIGUOUS.
 func anchorResolveError(err error) error {
-	var ambiguous *text.ErrTargetAmbiguous
-	if errors.As(err, &ambiguous) {
-		return &targetAmbiguousError{candidates: ambiguous.Candidates}
-	}
 	if errors.Is(err, text.ErrTargetNotFound) {
 		return errorf(http.StatusUnprocessableEntity, "TARGET_NOT_FOUND", "anchor quote was not found")
 	}

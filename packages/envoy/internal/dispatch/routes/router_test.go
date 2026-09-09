@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,7 +21,7 @@ type memoryUserStore struct {
 	users map[string]*auth.User
 }
 
-func (s *memoryUserStore) Read(login string) (*auth.User, error) {
+func (s *memoryUserStore) Read(_ context.Context, login string) (*auth.User, error) {
 	user := s.users[login]
 	if user == nil {
 		return nil, nil
@@ -29,13 +30,13 @@ func (s *memoryUserStore) Read(login string) (*auth.User, error) {
 	return &copy, nil
 }
 
-func (s *memoryUserStore) Write(user *auth.User) error {
+func (s *memoryUserStore) Write(_ context.Context, user *auth.User) error {
 	copy := *user
 	s.users[user.Login] = &copy
 	return nil
 }
 
-func (s *memoryUserStore) Remove(login string) error {
+func (s *memoryUserStore) Remove(_ context.Context, login string) error {
 	delete(s.users, login)
 	return nil
 }
@@ -114,7 +115,7 @@ func TestOAuthCallbackRejectsUnlistedLoginBeforePersistingOrIssuingCookie(t *tes
 	if callbackResponse.Header().Get("Set-Cookie") != "" {
 		t.Errorf("unexpected cookie: %q", callbackResponse.Header().Get("Set-Cookie"))
 	}
-	if user, _ := users.Read("mallory"); user != nil {
+	if user, _ := users.Read(context.Background(), "mallory"); user != nil {
 		t.Errorf("unlisted user persisted: %+v", user)
 	}
 }

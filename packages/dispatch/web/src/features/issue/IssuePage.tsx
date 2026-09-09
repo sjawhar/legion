@@ -129,7 +129,7 @@ function IssueHeader({
   const [routeDirty, setRouteDirty] = useState(false);
   const events = useQuery({
     queryKey: ["events", issue.key, "active-sessions"],
-    queryFn: () => api.getIssueEvents(issue.key, { limit: 200 }),
+    queryFn: () => api.getIssueEvents(issue.key, { limit: 200, order: "desc" }),
   });
   const sessions = activeSessions(events.data ?? []);
   const updateIssue = useMutation({

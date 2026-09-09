@@ -180,6 +180,32 @@ describe("renderInbound dispatch events", () => {
     );
   });
 
+  test("renders a free-text answer whose nil Go slices arrive as null", () => {
+    expect(
+      renderInbound(
+        dispatchEvent("ask.answered", {
+          ...openAsk,
+          options: null,
+          state: "answered",
+          answer: {
+            user: "sami",
+            selected: null,
+            text: "Use JSON HTTP.",
+            at: "2026-09-09T00:01:00Z",
+          },
+        }),
+        reader
+      ).content
+    ).toBe(
+      [
+        "dispatch DSP-1 · ask.answered · by session session-1",
+        "Question: Which API?",
+        "Selected: none",
+        "Text: Use JSON HTTP.",
+      ].join("\n")
+    );
+  });
+
   test("renders created and resolved comments with their anchor and reply chain", () => {
     for (const eventComment of [comment, { ...comment, resolved: true }]) {
       const type = eventComment.resolved ? "comment.resolved" : "comment.created";

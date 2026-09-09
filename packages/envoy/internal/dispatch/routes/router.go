@@ -114,7 +114,7 @@ func (ctx *AppContext) App() *auth.AppConfig {
 }
 
 const (
-	pendingStateTTL = 10 * time.Minute
+	pendingStateTTL  = 10 * time.Minute
 	maxPendingStates = 1000
 )
 
@@ -195,7 +195,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	user := &auth.User{Login: tokens.GithubLogin, Tokens: *tokens}
-	if err := r.ctx.Users.Write(user); err != nil {
+	if err := r.ctx.Users.Write(req.Context(), user); err != nil {
 		slog.Error("dispatch: persist user failed", "login", user.Login, "error", err)
 		writeError(w, http.StatusInternalServerError, "persist user")
 		return
@@ -209,7 +209,7 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
-	if err := r.ctx.Users.Remove(login); err != nil {
+	if err := r.ctx.Users.Remove(req.Context(), login); err != nil {
 		slog.Warn("dispatch: remove user failed", "login", login, "error", err)
 	}
 	w.Header().Set("Set-Cookie", auth.ClearSessionCookie())
@@ -246,7 +246,7 @@ func (r *router) requireUser(w http.ResponseWriter, req *http.Request) *auth.Use
 	if !ok {
 		return nil
 	}
-	user, err := r.ctx.Users.Read(login)
+	user, err := r.ctx.Users.Read(req.Context(), login)
 	if err != nil {
 		slog.Warn("dispatch: read user failed", "login", login, "error", err)
 		writeError(w, http.StatusInternalServerError, "read user")

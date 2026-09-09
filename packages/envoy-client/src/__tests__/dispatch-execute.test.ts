@@ -160,6 +160,14 @@ describe("executeDispatchTool", () => {
           key: "DSP-42",
           primary_artifact_id: "artifact-42",
           artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          open_asks: [
+            {
+              id: "ask-1",
+              state: "open",
+              question: "Which API?",
+              anchor: { artifact_id: "artifact-42" },
+            },
+          ],
         });
       }
       if (target.pathname === "/api/v1/artifacts/artifact-42/versions/3") {
@@ -180,7 +188,10 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       })
-    ).resolves.toEqual({ text: "Version three", details: { issue: "DSP-42" } });
+    ).resolves.toEqual({
+      text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
+      details: { issue: "DSP-42" },
+    });
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",

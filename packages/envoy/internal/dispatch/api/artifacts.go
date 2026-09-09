@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"unicode"
@@ -58,10 +59,14 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "artifact name is required")
 		return
 	}
-	primary, err := strconv.ParseBool(defaultString(r.FormValue("primary"), "false"))
-	if err != nil {
-		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "primary must be true or false")
-		return
+	primary := false
+	if raw := r.FormValue("primary"); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "primary must be true or false")
+			return
+		}
+		primary = parsed
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
@@ -80,7 +85,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	contentType := header.Header.Get("Content-Type")
 	if contentType == "" {
-		contentType = mime.TypeByExtension(extension(name))
+		contentType = mime.TypeByExtension(path.Ext(name))
 	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -124,7 +129,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		actorJSON, err := jsonActor(actor)
+		actorJSON, err := encodeJSON(actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -226,7 +231,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	eventType := "artifact.version"
-	payload := map[string]any{"artifact_id": artifact.ID, "name": artifact.Name, "version": version}
+	payload := versionEventPayload(artifact.ID, artifact.Name, version)
 	if created {
 		eventType = "artifact.created"
 		artifact.Versions = []model.Version{version}
@@ -343,6 +348,11 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	summary := strings.TrimSpace(input.Summary)
+	if summary == "" {
+		writeError(w, "INVALID_VERSION", http.StatusBadRequest, "named versions require a summary")
+		return
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -362,7 +372,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	version, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, input.Summary, actor)
+	version, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, summary, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -371,7 +381,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		IssueKey: artifact.IssueKey,
 		Type:     "artifact.version",
 		Actor:    actor,
-		Payload:  map[string]any{"artifact_id": artifact.ID, "name": artifact.Name, "version": version},
+		Payload:  versionEventPayload(artifact.ID, artifact.Name, version),
 	})
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -437,7 +447,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			IssueKey: artifact.IssueKey,
 			Type:     "artifact.version",
 			Actor:    actor,
-			Payload:  map[string]any{"artifact_id": artifact.ID, "name": artifact.Name, "version": namedVersion},
+			Payload:  versionEventPayload(artifact.ID, artifact.Name, namedVersion),
 		})
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -520,7 +530,7 @@ func (s *server) setPrimaryArtifact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, issue)
 }
 
-func (s *server) loadArtifacts(ctx context.Context, q issueQueryer, issueKey string) ([]model.Artifact, error) {
+func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
 	rows, err := q.Query(ctx, `
 		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts where issue_key = $1 order by created_at, id
@@ -528,25 +538,15 @@ func (s *server) loadArtifacts(ctx context.Context, q issueQueryer, issueKey str
 	if err != nil {
 		return nil, err
 	}
-	artifacts := []model.Artifact{}
-	for rows.Next() {
-		var artifact model.Artifact
-		var createdBy []byte
-		if err := rows.Scan(&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("decode artifact author: %w", err)
-		}
-		artifacts = append(artifacts, artifact)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
+	artifacts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.Artifact, error) {
+		return scanArtifact(row)
+	})
+	if err != nil {
 		return nil, err
 	}
-	rows.Close()
+	if artifacts == nil {
+		artifacts = []model.Artifact{}
+	}
 	for index := range artifacts {
 		versions, err := s.loadVersions(ctx, q, artifacts[index].ID)
 		if err != nil {
@@ -557,17 +557,13 @@ func (s *server) loadArtifacts(ctx context.Context, q issueQueryer, issueKey str
 	return artifacts, nil
 }
 
-func (s *server) loadArtifact(ctx context.Context, q issueQueryer, id string) (model.Artifact, error) {
-	var artifact model.Artifact
-	var createdBy []byte
-	if err := q.QueryRow(ctx, `
+func (s *server) loadArtifact(ctx context.Context, q queryer, id string) (model.Artifact, error) {
+	artifact, err := scanArtifact(q.QueryRow(ctx, `
 		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts where id = $1
-	`, id).Scan(&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt); err != nil {
+	`, id))
+	if err != nil {
 		return model.Artifact{}, err
-	}
-	if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
-		return model.Artifact{}, fmt.Errorf("decode artifact author: %w", err)
 	}
 	versions, err := s.loadVersions(ctx, q, artifact.ID)
 	if err != nil {
@@ -577,7 +573,21 @@ func (s *server) loadArtifact(ctx context.Context, q issueQueryer, id string) (m
 	return artifact, nil
 }
 
-func (s *server) findArtifactByName(ctx context.Context, q issueQueryer, issueKey, name string) (model.Artifact, error) {
+// scanArtifact reads the canonical artifact column list:
+// id::text, issue_key, slug, name, kind, is_primary, created_by, created_at.
+func scanArtifact(row pgx.Row) (model.Artifact, error) {
+	var artifact model.Artifact
+	var createdBy []byte
+	if err := row.Scan(&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt); err != nil {
+		return model.Artifact{}, err
+	}
+	if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
+		return model.Artifact{}, fmt.Errorf("decode artifact author: %w", err)
+	}
+	return artifact, nil
+}
+
+func (s *server) findArtifactByName(ctx context.Context, q queryer, issueKey, name string) (model.Artifact, error) {
 	rows, err := s.loadArtifacts(ctx, q, issueKey)
 	if err != nil {
 		return model.Artifact{}, err
@@ -590,7 +600,7 @@ func (s *server) findArtifactByName(ctx context.Context, q issueQueryer, issueKe
 	return model.Artifact{}, pgx.ErrNoRows
 }
 
-func (s *server) loadVersions(ctx context.Context, q issueQueryer, artifactID string) ([]model.Version, error) {
+func (s *server) loadVersions(ctx context.Context, q queryer, artifactID string) ([]model.Version, error) {
 	rows, err := q.Query(ctx, `
 		select number, named, summary, authors, created_at, size, mime, sha256
 		from artifact_versions where artifact_id = $1 order by number
@@ -614,7 +624,7 @@ func (s *server) loadVersions(ctx context.Context, q issueQueryer, artifactID st
 	return versions, rows.Err()
 }
 
-func (s *server) loadVersion(ctx context.Context, q issueQueryer, artifactID string, number int, markdown *string) (model.Version, error) {
+func (s *server) loadVersion(ctx context.Context, q queryer, artifactID string, number int, markdown *string) (model.Version, error) {
 	var version model.Version
 	var authors []byte
 	if err := q.QueryRow(ctx, `
@@ -663,7 +673,7 @@ func artifactSlug(name string) string {
 	return result
 }
 
-func (s *server) nextArtifactSlug(ctx context.Context, q issueQueryer, issueKey, name string) (string, error) {
+func (s *server) nextArtifactSlug(ctx context.Context, q queryer, issueKey, name string) (string, error) {
 	base := artifactSlug(name)
 	for suffix := 1; ; suffix++ {
 		candidate := base
@@ -678,18 +688,4 @@ func (s *server) nextArtifactSlug(ctx context.Context, q issueQueryer, issueKey,
 			return candidate, nil
 		}
 	}
-}
-
-func extension(name string) string {
-	if index := strings.LastIndexByte(name, '.'); index >= 0 {
-		return name[index:]
-	}
-	return ""
-}
-
-func defaultString(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
 }

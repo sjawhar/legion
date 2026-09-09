@@ -206,7 +206,8 @@ export interface CreateIssueInput {
   project: string;
   title: string;
   parent?: string;
-  external?: ExternalLink[];
+  /** External issue reference as owner/repo#n; the server links it on create. */
+  external?: string;
   spec?: string;
   actor?: Actor;
 }

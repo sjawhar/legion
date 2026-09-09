@@ -1,7 +1,6 @@
 import { agentSubject, EnvelopeSchema } from "@legion/contracts";
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
-import type { Event } from "./dispatch-http";
 
 const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -72,174 +71,145 @@ export function replyWith(envelope: DeliveryEnvelope): string | undefined {
   return `envoy_send(session_id="${envelope.source_session}", message="...")`;
 }
 
-interface DispatchEventFields {
-  readonly issue_key?: unknown;
-  readonly type?: unknown;
-  readonly actor?: unknown;
-  readonly payload?: unknown;
-}
+// Dispatch event payloads follow the wire contract: issue.* carries the Issue,
+// ask.* the Ask, message.created the Message, comment.*/suggestion.* the Comment
+// plus artifact_name, artifact.created {artifact}, artifact.version
+// {artifact_id, name, version, diff?}, and child.status {child_key, from, to}.
+// Bus frames are untrusted, so each schema below declares exactly the fields
+// this renderer prints and a frame that disagrees renders without them.
+const DispatchEventSchema = z.object({
+  issue_key: z.string(),
+  type: z.string(),
+  actor: z.object({ kind: z.string(), id: z.string().optional() }).passthrough(),
+  payload: z.object({}).passthrough(),
+});
 
-interface DispatchPayload {
-  readonly title?: unknown;
-  readonly status?: unknown;
-  readonly route?: unknown;
-  readonly name?: unknown;
-  readonly artifact?: unknown;
-  readonly version?: unknown;
-  readonly diff?: unknown;
-  readonly question?: unknown;
-  readonly options?: unknown;
-  readonly answer?: unknown;
-  readonly artifact_name?: unknown;
-  readonly anchor?: unknown;
-  readonly reply_to?: unknown;
-  readonly body?: unknown;
-  readonly suggestion?: unknown;
-  readonly child_key?: unknown;
-  readonly from?: unknown;
-  readonly to?: unknown;
-}
+type DispatchEvent = z.infer<typeof DispatchEventSchema>;
 
-interface DispatchVersionPayload {
-  readonly number?: unknown;
-  readonly summary?: unknown;
-}
+const IssuePayloadSchema = z.object({
+  title: z.string().optional(),
+  status: z.string().optional(),
+  route: z.string().nullish(),
+});
 
-interface DispatchOptionPayload {
-  readonly label?: unknown;
-}
+const ArtifactCreatedPayloadSchema = z.object({
+  artifact: z.object({ name: z.string().optional() }).optional(),
+});
 
-interface DispatchAnswerPayload {
-  readonly selected?: unknown;
-  readonly text?: unknown;
-}
+const ArtifactVersionPayloadSchema = z.object({
+  name: z.string().optional(),
+  version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
+  diff: z.string().optional(),
+});
 
-interface DispatchAnchorPayload {
-  readonly quote?: unknown;
-}
+const AskPayloadSchema = z.object({
+  // A nil Go slice marshals to null, so every list here is nullable.
+  question: z.string().optional(),
+  options: z.array(z.object({ label: z.string().optional() })).nullish(),
+  answer: z
+    .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
+    .nullish(),
+});
 
-interface DispatchSuggestionPayload {
-  readonly replace_with?: unknown;
-}
+const CommentPayloadSchema = z.object({
+  artifact_name: z.string().optional(),
+  body: z.string().optional(),
+  reply_to: z.string().nullish(),
+  anchor: z.object({ quote: z.string().optional() }).nullish(),
+  suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
+});
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
+const MessagePayloadSchema = z.object({ body: z.string().optional() });
 
-function asObject<T>(value: unknown): T | null {
-  return asRecord(value) as T | null;
-}
+const ChildStatusPayloadSchema = z.object({
+  child_key: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+});
 
-function asDispatchEvent(value: unknown): Event | null {
-  const event = asObject<DispatchEventFields>(value);
-  if (
-    event === null ||
-    typeof event.issue_key !== "string" ||
-    typeof event.type !== "string" ||
-    typeof event.actor !== "object" ||
-    event.actor === null ||
-    typeof event.payload !== "object" ||
-    event.payload === null
-  ) {
-    return null;
-  }
-  return event as unknown as Event;
-}
-
-function dispatchActorLabel(actor: Event["actor"]): string {
+function dispatchActorLabel(actor: DispatchEvent["actor"]): string {
   return `${actor.kind} ${actor.id ?? "unknown"}`;
 }
 
-function dispatchBody(event: Event): string[] {
-  const payload = asObject<DispatchPayload>(event.payload);
-  if (payload === null) return [];
+function dispatchBody(event: DispatchEvent): string[] {
   const lines: string[] = [];
-  const text = (name: keyof DispatchPayload): string | undefined =>
-    typeof payload[name] === "string" ? (payload[name] as string) : undefined;
 
   switch (event.type) {
     case "issue.created":
     case "issue.updated":
     case "issue.closed": {
-      const title = text("title");
-      const status = text("status");
-      const route = text("route");
-      if (title) lines.push(`Title: ${title}`);
-      if (status) lines.push(`Status: ${status}`);
-      if (route) lines.push(`Route: ${route}`);
+      const parsed = IssuePayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      if (parsed.data.title) lines.push(`Title: ${parsed.data.title}`);
+      if (parsed.data.status) lines.push(`Status: ${parsed.data.status}`);
+      if (parsed.data.route) lines.push(`Route: ${parsed.data.route}`);
       break;
     }
     case "artifact.created": {
-      const name = asObject<{ readonly name?: unknown }>(payload.artifact)?.name;
-      if (typeof name === "string") lines.push(`Artifact: ${name}`);
+      const parsed = ArtifactCreatedPayloadSchema.safeParse(event.payload);
+      const name = parsed.success ? parsed.data.artifact?.name : undefined;
+      if (name) lines.push(`Artifact: ${name}`);
       break;
     }
     case "artifact.version": {
-      const name = text("name");
-      const version = asObject<DispatchVersionPayload>(payload.version);
-      if (name) lines.push(`Artifact: ${name}`);
-      if (typeof version?.number === "number") lines.push(`Version: ${version.number}`);
-      if (typeof version?.summary === "string") lines.push(`Summary: ${version.summary}`);
-      const diff = text("diff");
-      if (diff) lines.push("Diff:", diff);
+      const parsed = ArtifactVersionPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      const version = parsed.data.version;
+      if (parsed.data.name) lines.push(`Artifact: ${parsed.data.name}`);
+      if (version?.number !== undefined) lines.push(`Version: ${version.number}`);
+      if (version?.summary) lines.push(`Summary: ${version.summary}`);
+      if (parsed.data.diff) lines.push("Diff:", parsed.data.diff);
       break;
     }
     case "ask.opened":
     case "ask.answered": {
-      const question = text("question");
-      if (question) lines.push(`Question: ${question}`);
+      const parsed = AskPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      if (parsed.data.question) lines.push(`Question: ${parsed.data.question}`);
       if (event.type === "ask.opened") {
-        const options = Array.isArray(payload.options)
-          ? payload.options
-              .map((option) => asObject<DispatchOptionPayload>(option)?.label)
-              .filter((label): label is string => typeof label === "string")
-          : [];
+        const options = (parsed.data.options ?? [])
+          .map((option) => option.label)
+          .filter((label): label is string => label !== undefined);
         if (options.length > 0) lines.push(`Options: ${options.join(", ")}`);
-      } else {
-        const answer = asObject<DispatchAnswerPayload>(payload.answer);
-        const selected = Array.isArray(answer?.selected)
-          ? answer.selected.filter((choice): choice is string => typeof choice === "string")
-          : [];
-        lines.push(`Selected: ${selected.join(", ") || "none"}`);
-        if (typeof answer?.text === "string") lines.push(`Text: ${answer.text}`);
+        break;
       }
+      const answer = parsed.data.answer;
+      lines.push(`Selected: ${answer?.selected?.join(", ") || "none"}`);
+      if (answer?.text) lines.push(`Text: ${answer.text}`);
       break;
     }
     case "comment.created":
     case "comment.resolved": {
-      const artifactName = text("artifact_name");
-      const anchor = asObject<DispatchAnchorPayload>(payload.anchor);
-      const replyTo = text("reply_to");
-      const body = text("body");
-      if (artifactName) lines.push(`Artifact: ${artifactName}`);
-      if (typeof anchor?.quote === "string") lines.push(`> ${anchor.quote}`);
-      if (replyTo) lines.push(`Reply chain: ${replyTo}`);
-      if (body) lines.push(`Body: ${body}`);
+      const parsed = CommentPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      const quote = parsed.data.anchor?.quote;
+      if (parsed.data.artifact_name) lines.push(`Artifact: ${parsed.data.artifact_name}`);
+      if (quote) lines.push(`> ${quote}`);
+      if (parsed.data.reply_to) lines.push(`Reply chain: ${parsed.data.reply_to}`);
+      if (parsed.data.body) lines.push(`Body: ${parsed.data.body}`);
       break;
     }
     case "suggestion.accepted":
     case "suggestion.rejected": {
-      const artifactName = text("artifact_name");
-      const quote = asObject<DispatchAnchorPayload>(payload.anchor)?.quote;
-      const replacement = asObject<DispatchSuggestionPayload>(payload.suggestion)?.replace_with;
-      if (artifactName) lines.push(`Artifact: ${artifactName}`);
-      if (typeof quote === "string") lines.push(`> ${quote}`);
-      if (typeof quote === "string" && typeof replacement === "string") {
-        lines.push(`${quote} → ${replacement}`);
-      }
+      const parsed = CommentPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      const quote = parsed.data.anchor?.quote;
+      const replacement = parsed.data.suggestion?.replace_with;
+      if (parsed.data.artifact_name) lines.push(`Artifact: ${parsed.data.artifact_name}`);
+      if (quote) lines.push(`> ${quote}`);
+      if (quote && replacement) lines.push(`${quote} → ${replacement}`);
       break;
     }
     case "message.created": {
-      const body = text("body");
+      const parsed = MessagePayloadSchema.safeParse(event.payload);
+      const body = parsed.success ? parsed.data.body : undefined;
       if (body) lines.push(`Body: ${body}`);
       break;
     }
     case "child.status": {
-      const child = text("child_key");
-      const from = text("from");
-      const to = text("to");
+      const parsed = ChildStatusPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      const { child_key: child, from, to } = parsed.data;
       if (child && from && to) lines.push(`Child: ${child} ${from} → ${to}`);
       break;
     }
@@ -260,8 +230,9 @@ function renderDispatch(envelope: InboundEnvelope, sessionID: string): RenderInb
   } catch {
     return invalid();
   }
-  const event = asDispatchEvent(rawEvent);
-  if (event === null) return invalid();
+  const parsed = DispatchEventSchema.safeParse(rawEvent);
+  if (!parsed.success) return invalid();
+  const event = parsed.data;
   if (event.actor.kind === "session" && event.actor.id === sessionID) {
     return { skip: true, content: "", envelope };
   }

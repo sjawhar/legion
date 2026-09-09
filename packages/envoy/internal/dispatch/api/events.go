@@ -70,9 +70,9 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	sinceRaw := r.URL.Query().Get("since")
-	if sinceRaw == "" {
-		sinceRaw = r.Header.Get("Last-Event-ID")
+	sinceRaw := r.Header.Get("Last-Event-ID")
+	if strings.TrimSpace(sinceRaw) == "" {
+		sinceRaw = r.URL.Query().Get("since")
 	}
 	since, err := parseNonNegativeInt(sinceRaw, "since")
 	if err != nil {
