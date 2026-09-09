@@ -19,6 +19,7 @@ import { createLegionDaemonClient, LegionDaemonApiError } from "../src/legion/da
 import { installWorkerGhShim, workerGhEnvironment } from "../src/legion/gh-shim";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import { createLegionTool } from "../src/legion/tools";
+import { deleteWorkerCredentials, writeWorkerCredentials } from "../src/legion/worker-credentials";
 import { setJjIdentity } from "../src/legion/workspace-helpers";
 import type { CommandContext, PiApi, SessionContext, ToolCallEventResult } from "../src/pi-types";
 import { claimEnvoyRole } from "./envoy";
@@ -89,7 +90,7 @@ export default function legionExtension(pi: PiApi): void {
         }
         throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
       },
-      onRecovered: (sessionId, recovered) => {
+      onRecovered: async (sessionId, recovered) => {
         if (capability === undefined || sessionId !== capability.sessionID) {
           throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
         }
@@ -101,6 +102,17 @@ export default function legionExtension(pi: PiApi): void {
           throw new Error("Daemon recovered a capability for a different Legion role");
         }
         capability = { ...capability, secret: recovered.secret };
+        if (capability.kind === "phase-worker") {
+          await writeWorkerCredentials(
+            requiredEnvironment(process.env, "LEGION_STATE_DIR"),
+            capability.roleToken,
+            {
+              sessionId: capability.sessionID,
+              secret: capability.secret,
+              generation: generation(process.env),
+            }
+          );
+        }
       },
     });
   };
@@ -310,6 +322,11 @@ export default function legionExtension(pi: PiApi): void {
           roleToken: started.roleToken,
           secret: started.secret,
         };
+        await writeWorkerCredentials(
+          requiredEnvironment(process.env, "LEGION_STATE_DIR"),
+          started.roleToken,
+          { sessionId: sessionID, secret: started.secret, generation: generation(process.env) }
+        );
         await claimEnvoyRole(sessionID, started.roleToken, context);
         if (role === "architect") {
           registerArchitectTools();
@@ -432,11 +449,12 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async (_event, context) => {
     const sessionID = context.sessionManager.getSessionId();
-    if (
-      capability === undefined ||
-      capability.kind !== "root-architect" ||
-      capability.sessionID !== sessionID
-    ) {
+    if (capability === undefined || capability.sessionID !== sessionID) return;
+    if (capability.kind === "phase-worker") {
+      await deleteWorkerCredentials(
+        requiredEnvironment(process.env, "LEGION_STATE_DIR"),
+        capability.roleToken
+      );
       return;
     }
     try {

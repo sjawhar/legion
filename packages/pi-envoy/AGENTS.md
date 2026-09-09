@@ -18,7 +18,7 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 | Task | Location | Notes |
 | --- | --- | --- |
 | OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
-| Legion lifecycle modules | `src/legion/` | Classification, daemon client, gh shim, jj attribution, control directives, tools |
+| Legion lifecycle modules | `src/legion/` | Classification, daemon client, gh shim, worker credentials file, jj attribution, control directives, tools |
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
@@ -31,4 +31,10 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 - Keep direct NATS subscription lifecycle and Pi steering delivery adapter-local. Inbound messages deliver as `steer` so they interrupt an in-flight turn; `triggerTurn` still wakes idle sessions.
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
+- A phase worker's `LEGION_SESSION_ID`/`LEGION_WORKER_SECRET` never live in its process
+  environment; `legion.ts` writes them (plus `generation`) to
+  `${LEGION_STATE_DIR}/workers/${roleToken}.session.json`, mode `0600`, right after
+  `/worker/started` succeeds and again whenever `/worker-session` recovery reissues the secret,
+  then deletes it on `session_shutdown`. This is how the `legion handoff complete` daemon CLI
+  authenticates. Root architect and controller sessions never write this file.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.

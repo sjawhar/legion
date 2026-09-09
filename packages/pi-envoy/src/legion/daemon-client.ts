@@ -79,7 +79,10 @@ export class LegionDaemonApiError extends Error {
 
 export interface LegionSessionRecovery {
   readonly recoveryToken: (sessionId: string) => string;
-  readonly onRecovered?: (sessionId: string, session: WorkerSessionResponse) => void;
+  readonly onRecovered?: (
+    sessionId: string,
+    session: WorkerSessionResponse
+  ) => void | Promise<void>;
 }
 
 function isInvalidSessionSecret(error: unknown): error is LegionDaemonApiError {
@@ -152,7 +155,7 @@ export function createLegionDaemonClient(
         },
         LegionDaemonApi.WorkerSession.response
       );
-      recovery.onRecovered?.(capability.sessionId, recovered);
+      await recovery.onRecovered?.(capability.sessionId, recovered);
       return await postOnce(path, { ...body, secret: recovered.secret }, schema);
     }
   };

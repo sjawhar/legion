@@ -89,7 +89,9 @@ test("recovers an invalid Legion session secret once before retrying the origina
     }) as typeof fetch,
     {
       recoveryToken: () => "spawn-capability",
-      onRecovered: (sessionId, session) => recovered.push(`${sessionId}:${session.secret}`),
+      onRecovered: (sessionId, session) => {
+        recovered.push(`${sessionId}:${session.secret}`);
+      },
     }
   );
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { agentSubject, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
@@ -1063,6 +1063,207 @@ describe("Legion OMP extension", () => {
         path.join(stateDir, "worker-bin", "gh"),
       ].join("\n")
     );
+  });
+  test("writes worker credentials for `legion handoff complete` after worker/started", async () => {
+    const workspace = await createJjWorkspace();
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    const token = roleToken("omp", "owner/repo#43", "implementer");
+
+    await bootWorker({
+      role: "implementer",
+      workspace,
+      sessionId: "ses_handoff_creds",
+    });
+
+    const credentialsPath = path.join(stateDir, "workers", `${token}.session.json`);
+    const fileStat = await stat(credentialsPath);
+    expect(fileStat.mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await readFile(credentialsPath, "utf8"))).toEqual({
+      sessionId: "ses_handoff_creds",
+      secret: "worker-secret",
+      generation: 1,
+    });
+  });
+  test("rewrites worker credentials with the recovered secret", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const tree = "owner/repo#42";
+    const issue = "owner/repo#43";
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", issue, role);
+    const workspace = await createJjWorkspace();
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "boot-worker-recovery";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ISSUE = issue;
+    process.env.LEGION_ROLE = role;
+    process.env.LEGION_WORKSPACE = workspace;
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json({
+          roleToken: token,
+          secret: "stale-secret",
+          gitName: "Legion Tester",
+          gitEmail: "tester@example.test",
+        });
+      }
+      if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/grants") {
+        if ((body as { readonly secret?: unknown } | undefined)?.secret === "stale-secret") {
+          return Response.json({ error: "Invalid session secret" }, { status: 403 });
+        }
+        return Response.json({ grantId: "grant-recovered", expiresAt: "2099-01-01T00:00:00.000Z" });
+      }
+      if (url.pathname === "/legion/v1/worker-session") {
+        return Response.json({ tree, issue, role, secret: "recovered-secret" });
+      }
+      return Response.json({
+        session_id: "ses_worker_recovery",
+        machine_id: "machine",
+        dir: workspace,
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("worker lifecycle handlers were not registered");
+    }
+    const context = { ...sessionContext("ses_worker_recovery"), cwd: workspace };
+    await sessionStart({}, context);
+    await toolCall(
+      { toolName: "bash", toolCallId: "call-1", input: { command: "echo hi" } },
+      context
+    );
+
+    const credentialsPath = path.join(stateDir, "workers", `${token}.session.json`);
+    expect(JSON.parse(await readFile(credentialsPath, "utf8"))).toEqual({
+      sessionId: "ses_worker_recovery",
+      secret: "recovered-secret",
+      generation: 1,
+    });
+  });
+  test("removes worker credentials on session shutdown", async () => {
+    const workspace = await createJjWorkspace();
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    const token = roleToken("omp", "owner/repo#43", "implementer");
+
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "boot-handoff-shutdown";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_TREE = "owner/repo#42";
+    process.env.LEGION_ISSUE = "owner/repo#43";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_WORKSPACE = workspace;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json({
+          roleToken: token,
+          secret: "worker-secret",
+          gitName: "Legion Worker",
+          gitEmail: "worker@example.test",
+        });
+      }
+      if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
+      return Response.json({
+        session_id: "ses_handoff_shutdown",
+        machine_id: "machine",
+        dir: workspace,
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const sessionShutdown = fixture.handlers.get("session_shutdown");
+    if (sessionStart === undefined || sessionShutdown === undefined) {
+      throw new Error("worker lifecycle handlers were not registered");
+    }
+    const context = { ...sessionContext("ses_handoff_shutdown"), cwd: workspace };
+    await sessionStart({}, context);
+    const credentialsPath = path.join(stateDir, "workers", `${token}.session.json`);
+    await stat(credentialsPath);
+
+    await sessionShutdown({}, context);
+
+    await expect(stat(credentialsPath)).rejects.toThrow();
+  });
+  test("does not write worker credentials for the controller or root architect", async () => {
+    const tree = "owner/repo#42";
+    const architectToken = roleToken("omp", tree, "architect");
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-no-creds-root";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: architectToken },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      return Response.json({
+        session_id: "ses_no_creds_root",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [architectToken],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("root lifecycle handler was not registered");
+    await sessionStart({}, sessionContext("ses_no_creds_root"));
+    await expect(access(path.join(stateDir, "workers"))).rejects.toThrow();
+
+    delete process.env.LEGION_TREE;
+    delete process.env.LEGION_ROLE;
+    delete process.env.LEGION_ISSUE;
+    delete process.env.LEGION_BOOT_TOKEN;
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/state") return Response.json({ project: "omp" });
+      if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
+      return Response.json({
+        session_id: "ses_no_creds_controller",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const controllerFixture = createPi();
+    legionExtension(controllerFixture.pi);
+    const controllerSessionStart = controllerFixture.handlers.get("session_start");
+    if (controllerSessionStart === undefined) {
+      throw new Error("controller lifecycle handler was not registered");
+    }
+    await controllerSessionStart({}, sessionContext("ses_no_creds_controller"));
+    await expect(access(path.join(stateDir, "workers"))).rejects.toThrow();
   });
   test("blocks a booted worker's bash calls when the daemon refuses to mint a grant", async () => {
     const workspace = await createJjWorkspace();
