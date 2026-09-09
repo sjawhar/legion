@@ -2,17 +2,27 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"net/url"
 	"os"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func openTestStore(t *testing.T) *Store {
+func testDatabaseURL(t *testing.T) string {
 	t.Helper()
 	databaseURL := os.Getenv("DISPATCH_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres store tests")
 	}
-	store, err := Open(context.Background(), databaseURL)
+	return databaseURL
+}
+
+func openTestStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := Open(context.Background(), testDatabaseURL(t))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -20,9 +30,53 @@ func openTestStore(t *testing.T) *Store {
 	return store
 }
 
-func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
+func openEmptyTestStore(t *testing.T) *Store {
+	t.Helper()
 	ctx := context.Background()
-	store := openTestStore(t)
+	baseURL, err := url.Parse(testDatabaseURL(t))
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	adminURL := *baseURL
+	adminURL.Path = "/postgres"
+	admin, err := pgxpool.New(ctx, adminURL.String())
+	if err != nil {
+		t.Fatalf("open admin database: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	databaseName := "dispatch_test_" + randomDatabaseSuffix(t)
+	if _, err := admin.Exec(ctx, "create database "+databaseName); err != nil {
+		t.Fatalf("create isolated database: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
+			t.Errorf("drop isolated database: %v", err)
+		}
+	})
+
+	testURL := *baseURL
+	testURL.Path = "/" + databaseName
+	store, err := Open(ctx, testURL.String())
+	if err != nil {
+		t.Fatalf("open isolated database: %v", err)
+	}
+	t.Cleanup(store.Pool.Close)
+	return store
+}
+
+func randomDatabaseSuffix(t *testing.T) string {
+	t.Helper()
+	var bytes [8]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		t.Fatalf("random database suffix: %v", err)
+	}
+	return hex.EncodeToString(bytes[:])
+}
+
+func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("first migrate: %v", err)
 	}
@@ -47,31 +101,68 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 		"events",
 		"user_issue_state",
 	}
-	rows, err := store.Pool.Query(ctx, `
+	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
 		from pg_tables
 		where schemaname = current_schema()
-	`)
-	if err != nil {
-		t.Fatalf("list tables: %v", err)
+	`, expectedTables)
+
+	expectedIndexes := []string{
+		"issue_external_links_url",
+		"artifacts_one_primary",
+		"asks_open",
+		"refs_to",
+		"events_unpublished",
 	}
-	defer rows.Close()
-	tables := map[string]bool{}
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			t.Fatalf("scan table: %v", err)
-		}
-		tables[table] = true
+	assertDatabaseObjects(t, ctx, store.Pool, `
+		select indexname
+		from pg_indexes
+		where schemaname = current_schema()
+	`, expectedIndexes)
+
+	expectedConstraints := []string{
+		"users_pkey",
+		"projects_pkey",
+		"projects_key_check",
+		"issues_pkey",
+		"issues_project_key_fkey",
+		"issues_project_key_number_key",
+		"issues_parent_key_fkey",
+		"issue_external_links_pkey",
+		"issue_external_links_issue_key_fkey",
+		"artifacts_pkey",
+		"artifacts_issue_key_fkey",
+		"artifacts_issue_key_slug_key",
+		"artifacts_kind_check",
+		"artifacts_primary_is_doc",
+		"artifact_versions_pkey",
+		"artifact_versions_artifact_id_fkey",
+		"artifact_versions_artifact_id_number_key",
+		"doc_updates_pkey",
+		"doc_updates_artifact_id_fkey",
+		"doc_snapshots_pkey",
+		"doc_snapshots_artifact_id_fkey",
+		"doc_checkpoints_pkey",
+		"doc_checkpoints_artifact_id_fkey",
+		"asks_pkey",
+		"asks_issue_key_fkey",
+		"comments_pkey",
+		"comments_issue_key_fkey",
+		"comments_reply_to_fkey",
+		"messages_pkey",
+		"messages_issue_key_fkey",
+		"refs_pkey",
+		"events_pkey",
+		"events_issue_key_fkey",
+		"events_issue_key_seq_key",
+		"user_issue_state_pkey",
+		"user_issue_state_issue_key_fkey",
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate tables: %v", err)
-	}
-	for _, table := range expectedTables {
-		if !tables[table] {
-			t.Errorf("migration did not create %s", table)
-		}
-	}
+	assertDatabaseObjects(t, ctx, store.Pool, `
+		select conname
+		from pg_constraint
+		where connamespace = current_schema()::regnamespace
+	`, expectedConstraints)
 
 	var migrations int
 	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&migrations); err != nil {
@@ -79,6 +170,31 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	}
 	if migrations != 1 {
 		t.Errorf("recorded migrations: got %d, want 1", migrations)
+	}
+}
+
+func assertDatabaseObjects(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, expected []string) {
+	t.Helper()
+	rows, err := pool.Query(ctx, query)
+	if err != nil {
+		t.Fatalf("list database objects: %v", err)
+	}
+	defer rows.Close()
+	objects := map[string]bool{}
+	for rows.Next() {
+		var object string
+		if err := rows.Scan(&object); err != nil {
+			t.Fatalf("scan database object: %v", err)
+		}
+		objects[object] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate database objects: %v", err)
+	}
+	for _, object := range expected {
+		if !objects[object] {
+			t.Errorf("migration did not create %s", object)
+		}
 	}
 }
 

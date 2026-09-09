@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,19 +15,22 @@ func TestPgUserStoreRoundTrip(t *testing.T) {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := store.Pool.Exec(ctx, "truncate users"); err != nil {
-		t.Fatalf("truncate users: %v", err)
-	}
+	login := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-")) + "-" + randomDatabaseSuffix(t)
+	t.Cleanup(func() {
+		if _, err := store.Pool.Exec(ctx, "delete from users where login = $1", login); err != nil {
+			t.Errorf("delete test user: %v", err)
+		}
+	})
 
 	users := NewPgUserStore(store.Pool)
 	want := &auth.User{
-		Login: "sjawhar",
+		Login: login,
 		Tokens: auth.Tokens{
 			AccessToken:      "access",
 			RefreshToken:     "refresh",
 			AccessExpiresAt:  time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC).UnixMilli(),
 			RefreshExpiresAt: time.Date(2027, 3, 10, 12, 0, 0, 0, time.UTC).UnixMilli(),
-			GithubLogin:      "sjawhar",
+			GithubLogin:      login,
 		},
 	}
 	if err := users.Write(want); err != nil {
