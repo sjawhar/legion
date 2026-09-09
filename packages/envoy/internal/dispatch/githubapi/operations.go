@@ -100,6 +100,26 @@ func EditComment(ctx context.Context, client *github.Client, owner, repo string,
 	return nil
 }
 
+// IssueEditBody replaces an issue's body, leaving its title, labels, and
+// state untouched.
+func IssueEditBody(ctx context.Context, client *github.Client, owner, repo string, number int, body string) error {
+	_, _, err := client.Issues.Edit(ctx, owner, repo, number, &github.IssueRequest{Body: github.String(body)})
+	if err != nil {
+		return fmt.Errorf("edit issue body: %w", err)
+	}
+	return nil
+}
+
+// AddLabels adds labels to an existing issue without touching any label
+// already on it.
+func AddLabels(ctx context.Context, client *github.Client, owner, repo string, number int, labels []string) error {
+	_, _, err := client.Issues.AddLabelsToIssue(ctx, owner, repo, number, labels)
+	if err != nil {
+		return fmt.Errorf("add labels: %w", err)
+	}
+	return nil
+}
+
 // BuildRequestIDQuery builds the GitHub issue-search query used to find an
 // existing dispatch thread by its request id. It searches for the raw request
 // id token that core.BuildMetaMarker embeds in the issue body (the `requestId:

@@ -243,6 +243,30 @@ func openThread(ctx context.Context, client *github.Client, owner, name, request
 	return githubapi.IssueCreate(ctx, client, owner, name, input.Subject, body, []string{dispatchLabel})
 }
 
+// adoptThread turns a plain open issue into a dispatch thread on first
+// continuation: a thread marker is prefixed to the issue's existing body,
+// which is otherwise left untouched. The dispatch label is added separately
+// by the caller, unconditionally and after this returns, so a retry that
+// finds the marker already written (this call succeeded, a later step
+// failed) still gets the label applied.
+func adoptThread(ctx context.Context, client *github.Client, owner, name, repo string, number int, body string, origin *Origin) error {
+	id := requestID(fmt.Sprintf("%s|%d|adopt", repo, number))
+	marker, err := BuildMetaMarker(MetaMarker{RequestID: id, Urgency: UrgencyMed, Origin: origin})
+	if err != nil {
+		return err
+	}
+	return githubapi.IssueEditBody(ctx, client, owner, name, number, adoptedBody(marker, body))
+}
+
+// adoptedBody prefixes marker to body. An empty body (nothing to preserve)
+// gets no blank-line separator, just the marker and a trailing newline.
+func adoptedBody(marker, body string) string {
+	if body == "" {
+		return marker + "\n"
+	}
+	return marker + "\n\n" + body
+}
+
 // ContinueThread posts a follow-up turn on an existing open dispatch thread as
 // a comment carrying a dispatch:ask marker. The same request id mechanism as
 // CreateThread applies, searched across the thread's comments, so a retried
@@ -278,11 +302,24 @@ func ContinueThread(ctx context.Context, client *github.Client, input DispatchIn
 	if err != nil {
 		return DispatchResult{}, err
 	}
-	if issue.PullRequest || ParseMetaMarker(issue.Body) == nil {
+	if issue.PullRequest {
 		return DispatchResult{}, fmt.Errorf("#%d is not a dispatch thread", ref.IssueNumber)
 	}
 	if issue.State != "open" {
 		return DispatchResult{}, fmt.Errorf("#%d is closed; open a new thread", ref.IssueNumber)
+	}
+	if ParseMetaMarker(issue.Body) == nil {
+		if err := adoptThread(ctx, client, owner, name, repo, ref.IssueNumber, issue.Body, input.Origin); err != nil {
+			return DispatchResult{}, err
+		}
+	}
+	// Idempotent and unconditional: a thread (freshly adopted or already
+	// marked) always gets the label before the ask posts, so a retry after a
+	// label failure between the body edit and the label add still applies it
+	// — the marker alone is invisible; the label is what the dashboard's
+	// `label:dispatch-thread` search finds.
+	if err := githubapi.AddLabels(ctx, client, owner, name, ref.IssueNumber, []string{dispatchLabel}); err != nil {
+		return DispatchResult{}, err
 	}
 
 	requestID := ComputeFollowUpRequestID(repo, ref.IssueNumber, input.Context, input.Question, input.Ask)

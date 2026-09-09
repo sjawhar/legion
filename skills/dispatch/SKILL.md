@@ -154,7 +154,8 @@ dispatch({
 ```
 
 - `thread` replaces `subject`; `urgency`, `repo`, and `parent` are not accepted with it.
-  The thread must be open and be a dispatch thread; otherwise the tool says so
+  `thread` names an open issue in the repo; a plain work issue is adopted as a thread on
+  first use. The issue must be open and not a pull request, or the tool says so
   (`#N is not a dispatch thread`, `#N is closed; open a new thread`).
 - Same decision → same thread. A genuinely new decision → a new thread, even if it came
   up in the reply.
