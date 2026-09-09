@@ -10,9 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
+	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -304,6 +306,146 @@ func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
 		t.Fatalf("settled version authors = %#v, want only %v", version.Authors, editor)
 	}
 }
+func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	editor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	snapshotter := model.Actor{Kind: "user", ID: "alice"}
+	if err := service.ReplaceText(context.Background(), artifactID, "after", editor); err != nil {
+		t.Fatalf("edit before snapshot: %v", err)
+	}
+
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin snapshot transaction: %v", err)
+	}
+	version, wrote, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	if err != nil {
+		t.Fatalf("snapshot version: %v", err)
+	}
+	if !wrote {
+		t.Fatal("snapshot did not write dirty document")
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit snapshot transaction: %v", err)
+	}
+	service.CommitVersion(artifactID, version)
+	state := service.room(artifactID)
+	state.mu.Lock()
+	pending := len(state.pending)
+	state.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending authors after committed snapshot = %d, want 0", pending)
+	}
+
+	tx, err = service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin named version transaction: %v", err)
+	}
+	version, err = service.NamedVersion(WithTx(context.Background(), tx), artifactID, "checkpoint", snapshotter)
+	if err != nil {
+		t.Fatalf("named version: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit named version transaction: %v", err)
+	}
+	service.CommitVersion(artifactID, version)
+	state.mu.Lock()
+	pending = len(state.pending)
+	state.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending authors after committed named version = %d, want 0", pending)
+	}
+}
+
+func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "# First")
+	if err := service.ReplaceText(context.Background(), artifactID, "base", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("prepare document: %v", err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	service.srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+			<-release
+		}
+		return service.allowInject(ctx, info)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "insert", Markdown: "!", After: "end"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+		result <- err
+	}()
+	<-entered
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		content := doc.GetText("content")
+		transact(func(tx *crdt.Transaction) {
+			content.Insert(tx, content.Len(), " browser", nil)
+		})
+	}); err != nil {
+		t.Fatalf("apply concurrent browser update: %v", err)
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("apply operation: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, "base browser!")
+}
+
+func TestApplyReplaceResolvesAgainstDocumentInsideApply(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "# First")
+	if err := service.ReplaceText(context.Background(), artifactID, "base", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("prepare document: %v", err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	service.srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+			<-release
+		}
+		return service.allowInject(ctx, info)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- service.ApplyReplace(context.Background(), artifactID, model.Anchor{ArtifactID: artifactID, Quote: "base", To: 4}, "server", model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	}()
+	<-entered
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		content := doc.GetText("content")
+		transact(func(tx *crdt.Transaction) {
+			content.Insert(tx, content.Len(), " browser", nil)
+		})
+	}); err != nil {
+		t.Fatalf("apply concurrent browser update: %v", err)
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("apply replacement: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, "server browser")
+}
+
+func TestReplaceTextAcceptsUnchangedEmptyDocument(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "")
+	if err := service.ReplaceText(context.Background(), artifactID, "", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("replace unchanged empty document: %v", err)
+	}
+}
+
 func TestReresolveAnchorsClosesRowsBeforeUpdating(t *testing.T) {
 	service, artifactID := newTestService(t)
 	anchorJSON, err := json.Marshal(model.Anchor{ArtifactID: artifactID, Version: 1, Quote: "before", To: len("before")})
@@ -420,12 +562,134 @@ func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 	}
 }
 
+func TestIssueCloseEventClosesOpenDocumentConnection(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect live document: response=%#v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+
+	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close document issue: %v", err)
+	}
+	service.events.Publish(model.Event{IssueKey: "DOC-1", Type: "issue.closed"})
+	waitForRoomClosed(t, service, artifactID)
+	waitForNoLiveDocument(t, service, artifactID)
+	connection.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		if _, _, err := connection.ReadMessage(); err != nil {
+			break
+		}
+	}
+	if err := service.srv.Apply(context.Background(), artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {}); !errors.Is(err, ErrIssueClosed) {
+		t.Fatalf("server write after issue close = %v, want ErrIssueClosed", err)
+	}
+}
+
+func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{
+		Store:       database,
+		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadErr: errors.New("load failed")},
+		Events:      events.NewBroker(),
+		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("load failure = %v, want ErrServiceUnavailable", err)
+	}
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if connection != nil {
+		_ = connection.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("failed-room connection: response=%#v err=%v, want HTTP 503", response, err)
+	}
+}
+
+func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{
+		Store:       database,
+		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadUpdate: []byte{0xff}},
+		Events:      events.NewBroker(),
+		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("corrupt load = %v, want ErrServiceUnavailable", err)
+	}
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if connection != nil {
+		_ = connection.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("corrupt-room connection: response=%#v err=%v, want HTTP 503", response, err)
+	}
+}
+
+func TestAppendFailureClosesDocumentConnectionAndQuarantinesRoom(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{
+		Store:       database,
+		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), appendErr: errors.New("append failed")},
+		Events:      events.NewBroker(),
+		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Settle:      time.Hour,
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, "before")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect live document: response=%#v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+
+	if err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("replace text before persistence failure: %v", err)
+	}
+	waitForRoomFailure(t, service, artifactID)
+	waitForNoLiveDocument(t, service, artifactID)
+	connection.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		if _, _, err := connection.ReadMessage(); err != nil {
+			break
+		}
+	}
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("append failure = %v, want ErrServiceUnavailable", err)
+	}
+}
+
 func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
 	service, _ := newTestService(t)
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/room"
-	connection, response, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, nil)
 	if connection != nil {
 		_ = connection.Close()
 	}
@@ -435,6 +699,30 @@ func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
 	if response == nil || response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated websocket response = %#v, want HTTP 401", response)
 	}
+}
+
+type failingVersionedStore struct {
+	VersionedStore
+	loadErr    error
+	loadUpdate []byte
+	appendErr  error
+}
+
+func (s failingVersionedStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+	if s.loadErr != nil {
+		return persistence.LoadResult{}, s.loadErr
+	}
+	if s.loadUpdate != nil {
+		return persistence.LoadResult{Update: s.loadUpdate, Version: 1}, nil
+	}
+	return s.VersionedStore.Load(ctx, room)
+}
+
+func (s failingVersionedStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	if s.appendErr != nil {
+		return 0, s.appendErr
+	}
+	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
@@ -451,7 +739,42 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 		t.Fatalf("commit seed text: %v", err)
 	}
 }
+func waitForRoomClosed(t *testing.T, service *Service, artifactID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if service.roomClosed(artifactID) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("document room did not close after issue event")
+}
+func waitForRoomFailure(t *testing.T, service *Service, artifactID string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if service.roomFailure(artifactID) != nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("document room did not become unavailable after append failure")
+}
 
+
+
+func waitForNoLiveDocument(t *testing.T, service *Service, artifactID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if service.srv.GetDoc(artifactID) == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("document room remained resident after closure")
+}
 func waitForDocumentText(t *testing.T, service *Service, artifactID, want string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

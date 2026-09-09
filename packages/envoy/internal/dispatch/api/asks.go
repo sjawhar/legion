@@ -151,6 +151,9 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if snapshot != nil {
+		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
+	}
 	s.publish(events...)
 	writeJSON(w, http.StatusCreated, ask)
 }

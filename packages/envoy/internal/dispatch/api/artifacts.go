@@ -371,6 +371,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	s.deps.Docs.CommitVersion(artifact.ID, version)
 	s.publish(event)
 	writeJSON(w, http.StatusCreated, version)
 }

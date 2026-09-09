@@ -25,23 +25,35 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// ErrIssueClosed rejects a document mutation after its issue is closed.
-var ErrIssueClosed = errors.New("issue is closed")
+var (
+	// ErrIssueClosed rejects a document mutation after its issue is closed.
+	ErrIssueClosed = errors.New("issue is closed")
+	// ErrServiceUnavailable reports a room that could not load or persist durably.
+	ErrServiceUnavailable = errors.New("document service unavailable")
+)
 
 // Deps configures the live document service.
 type Deps struct {
-	Store      *store.Store
-	Events     *events.Broker
-	Identity   identity.Identity
-	AgentToken string
-	Settle     time.Duration
+	Store       *store.Store
+	Persistence VersionedStore
+	Events      *events.Broker
+	Identity    identity.Identity
+	AgentToken  string
+	Settle      time.Duration
+}
+
+// VersionedStore is Dispatch's transactional extension of ygo's durable room
+// store. SeedText needs the caller's artifact-creation transaction.
+type VersionedStore interface {
+	persistence.VersionedPersistence
+	AppendUpdateTx(context.Context, pgx.Tx, string, []byte) (persistence.Version, error)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
 type Service struct {
 	srv            *websocket.Server
 	store          *store.Store
-	persistence    *PgVersioned
+	persistence    VersionedStore
 	events         *events.Broker
 	identity       identity.Identity
 	agentToken     string
@@ -50,14 +62,24 @@ type Service struct {
 	nextConnection atomic.Uint64
 	stopping       atomic.Bool
 	settleWG       sync.WaitGroup
+	eventCancel    func()
+	eventWG        sync.WaitGroup
 }
 
 type roomState struct {
-	connected map[uint64]model.Actor
-	pending   map[string]model.Actor
-	settle    *time.Timer
-	gen       uint64
-	mu        sync.Mutex
+	connected       map[uint64]model.Actor
+	pending         map[string]model.Actor
+	pendingVersions map[int]versionPending
+	settle          *time.Timer
+	gen             uint64
+	failed          error
+	closed          bool
+	mu              sync.Mutex
+}
+
+type versionPending struct {
+	generation uint64
+	authors    map[string]model.Actor
 }
 
 type connectionState struct {
@@ -69,6 +91,44 @@ type connectionState struct {
 
 type connectionContextKey struct{}
 
+// servicePersistenceAdapter observes ygo's otherwise asynchronous persistence
+// callbacks. A failed update quarantines the room rather than allowing live
+// state that cannot survive an eviction.
+type servicePersistenceAdapter struct {
+	store   VersionedStore
+	service *Service
+}
+
+func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
+	result, err := a.store.Load(context.Background(), room)
+	if err != nil {
+		a.service.failRoom(room, err)
+		return nil, err
+	}
+	return result.Update, nil
+}
+
+func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
+	_, err := a.store.AppendUpdate(context.Background(), room, update)
+	if err != nil {
+		a.service.failRoom(room, err)
+	}
+	return err
+}
+
+func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
+	_, err := a.store.AppendUpdate(ctx, room, update)
+	if err != nil {
+		a.service.failRoom(room, err)
+	}
+	return err
+}
+
+func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
+	_, err := a.store.Compact(ctx, room, 500)
+	return err
+}
+
 // New constructs the ygo server used by Dispatch's document API and websocket
 // endpoint.
 func New(deps Deps) *Service {
@@ -79,15 +139,11 @@ func New(deps Deps) *Service {
 	if deps.Events == nil {
 		deps.Events = events.NewBroker()
 	}
-	persist := NewPgVersioned(deps.Store)
-	adapter := persistence.NewLegacyAdapter(persist)
-	adapter.KeepVersions = 500
-	srv := websocket.NewServerWithPersistence(adapter)
-	srv.HocuspocusFraming = true
-	srv.CompactEvery = 200
-
+	persist := deps.Persistence
+	if persist == nil {
+		persist = NewPgVersioned(deps.Store)
+	}
 	service := &Service{
-		srv:         srv,
 		store:       deps.Store,
 		persistence: persist,
 		events:      deps.Events,
@@ -95,14 +151,32 @@ func New(deps Deps) *Service {
 		agentToken:  deps.AgentToken,
 		settle:      settle,
 	}
+	adapter := &servicePersistenceAdapter{store: persist, service: service}
+	srv := websocket.NewServerWithPersistence(adapter)
+	srv.HocuspocusFraming = true
+	srv.CompactEvery = 200
+
+	service.srv = srv
 	srv.Authorize = service.authorize
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
+	eventStream, cancelEvents := deps.Events.Subscribe()
+	service.eventCancel = cancelEvents
+	service.eventWG.Add(1)
+	go service.watchIssueClosures(eventStream)
 	return service
 }
 
 // ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	room := r.PathValue("room")
+	if room == "" {
+		room = path.Base(r.URL.Path)
+	}
+	if err := s.roomFailure(room); err != nil {
+		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	connection := &connectionState{}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
 	s.srv.ServeHTTP(w, r.WithContext(ctx))
@@ -110,11 +184,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.removeConnection(connection.room, connection.id)
 	}
 }
-
 // Shutdown stops queued settlements, joins any already-running callbacks, and
 // flushes ygo's document persistence workers.
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.stopping.Store(true)
+	if s.eventCancel != nil {
+		s.eventCancel()
+	}
 	s.rooms.Range(func(_, value any) bool {
 		room := value.(*roomState)
 		room.mu.Lock()
@@ -125,6 +201,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return true
 	})
 	s.waitSettles(ctx)
+	s.waitEvents(ctx)
 	return s.srv.Shutdown(ctx)
 }
 
@@ -145,17 +222,28 @@ func (s *Service) SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown 
 // ReplaceText replaces the entire live Yjs text so connected clients receive
 // document uploads as a regular server-side transaction.
 func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) error {
-	s.recordActor(artifactID, actor)
-	if err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	var unchanged bool
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		content := doc.GetText("content")
 		length := content.Len()
+		if content.ToString() == markdown {
+			unchanged = true
+			return
+		}
+		s.recordActor(artifactID, actor)
 		transact(func(transaction *crdt.Transaction) {
 			if length > 0 {
 				content.Delete(transaction, 0, length)
 			}
-			content.Insert(transaction, 0, markdown, nil)
+			if markdown != "" {
+				content.Insert(transaction, 0, markdown, nil)
+			}
 		})
-	}); err != nil {
+	})
+	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("replace live document: %w", err)
 	}
 	return nil
@@ -164,19 +252,24 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 // Text returns the current Yjs text, loading and rendering persisted state when
 // the document room is not resident.
 func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
+	if err := s.roomFailure(artifactID); err != nil {
+		return "", err
+	}
 	if doc := s.srv.GetDoc(artifactID); doc != nil {
 		return doc.GetText("content").ToString(), nil
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err != nil {
-		return "", fmt.Errorf("load live document: %w", err)
+		s.failRoom(artifactID, err)
+		return "", s.roomFailure(artifactID)
 	}
 	if len(loaded.Update) == 0 {
 		return "", nil
 	}
 	doc := crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
-		return "", fmt.Errorf("decode live document: %w", err)
+		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
+		return "", s.roomFailure(artifactID)
 	}
 	return doc.GetText("content").ToString(), nil
 }
@@ -195,69 +288,102 @@ func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID str
 	if latest.markdown == markdown {
 		return latest.Version, false, nil
 	}
-	state := s.room(artifactID)
-	state.mu.Lock()
-	state.pending[actorKey(actor)] = actor
-	authors := actorSlice(state.pending)
-	state.mu.Unlock()
+	capture, authors := s.capturePendingAuthors(artifactID, actor)
 	version, err := writeVersion(ctx, tx, artifactID, markdown, false, nil, authors)
 	if err != nil {
 		return model.Version{}, false, err
 	}
+	s.rememberPendingVersion(artifactID, version, capture)
 	return version, true, nil
 }
 
-// ApplyOps resolves every requested operation before it changes the Yjs room,
-// so an ambiguous or missing later target cannot leave a partial edit behind.
+// CommitVersion clears authors consumed by a version only after its enclosing
+// transaction has committed.
+func (s *Service) CommitVersion(artifactID string, version model.Version) {
+	state := s.room(artifactID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	capture, ok := state.pendingVersions[version.Number]
+	if !ok {
+		return
+	}
+	delete(state.pendingVersions, version.Number)
+	if state.gen != capture.generation {
+		return
+	}
+	for key := range capture.authors {
+		delete(state.pending, key)
+	}
+}
+
+// ApplyOps resolves every requested operation against the document locked by
+// Server.Apply, then applies the complete plan in one transaction.
 func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
 	if len(ops) == 0 {
 		return 0, nil
 	}
-	current, err := s.Text(ctx, artifactID)
-	if err != nil {
-		return 0, err
-	}
-	for index, op := range ops {
-		current, err = applyOp(current, op)
+	var applyErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		content := doc.GetText("content")
+		mutations, err := resolveOperations(content.ToString(), ops)
 		if err != nil {
-			return 0, fmt.Errorf("operation %d: %w", index, err)
+			applyErr = err
+			return
 		}
+		s.recordActor(artifactID, actor)
+		transact(func(transaction *crdt.Transaction) {
+			for _, mutation := range mutations {
+				if mutation.to > mutation.from {
+					content.Delete(transaction, mutation.from, mutation.to-mutation.from)
+				}
+				if mutation.with != "" {
+					content.Insert(transaction, mutation.from, mutation.with, nil)
+				}
+			}
+		})
+	})
+	if applyErr != nil {
+		return 0, applyErr
 	}
-	s.recordActor(artifactID, actor)
-	if err := s.replaceLiveText(ctx, artifactID, current); err != nil {
-		return 0, err
+	if err != nil {
+		return 0, fmt.Errorf("apply live document operations: %w", err)
 	}
 	return len(ops), nil
 }
 
-// ApplyReplace resolves a stored anchor against current text and replaces it as
-// one server-side Yjs transaction.
+// ApplyReplace resolves a stored anchor against the document locked by
+// Server.Apply and replaces only its resolved range.
 func (s *Service) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, with string, actor model.Actor) error {
-	current, err := s.Text(ctx, artifactID)
+	var applyErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		content := doc.GetText("content")
+		resolved := text.Reresolve(content.ToString(), anchor)
+		if resolved.Orphaned {
+			applyErr = text.ErrTargetNotFound
+			return
+		}
+		s.recordActor(artifactID, actor)
+		transact(func(transaction *crdt.Transaction) {
+			if resolved.To > resolved.From {
+				content.Delete(transaction, resolved.From, resolved.To-resolved.From)
+			}
+			if with != "" {
+				content.Insert(transaction, resolved.From, with, nil)
+			}
+		})
+	})
+	if applyErr != nil {
+		return applyErr
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("apply live document replacement: %w", err)
 	}
-	resolved := text.Reresolve(current, anchor)
-	if resolved.Orphaned {
-		return text.ErrTargetNotFound
-	}
-	updated := replaceRange(current, resolved.From, resolved.To, with)
-	s.recordActor(artifactID, actor)
-	return s.replaceLiveText(ctx, artifactID, updated)
+	return nil
 }
 
 // NamedVersion records the live text as a deliberately named immutable version.
 func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error) {
-	state := s.room(artifactID)
-	state.mu.Lock()
-	state.pending[actorKey(actor)] = actor
-	generation := state.gen
-	pending := make(map[string]model.Actor, len(state.pending))
-	for key, pendingActor := range state.pending {
-		pending[key] = pendingActor
-	}
-	state.mu.Unlock()
-
+	capture, authors := s.capturePendingAuthors(artifactID, actor)
 	_, joinedTransaction := txFromContext(ctx)
 	var version model.Version
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
@@ -276,19 +402,18 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 		if err != nil {
 			return err
 		}
-		version, err = writeVersion(ctx, tx, artifactID, markdown, true, new(summary), actorSlice(pending))
+		version, err = writeVersion(ctx, tx, artifactID, markdown, true, new(summary), authors)
 		return err
 	})
-	if err == nil && !joinedTransaction {
-		state.mu.Lock()
-		if state.gen == generation {
-			for key := range pending {
-				delete(state.pending, key)
-			}
-		}
-		state.mu.Unlock()
+	if err != nil {
+		return model.Version{}, err
 	}
-	return version, err
+	if joinedTransaction {
+		s.rememberPendingVersion(artifactID, version, capture)
+	} else {
+		s.clearPending(capture, artifactID)
+	}
+	return version, nil
 }
 
 func (s *Service) CompactAll(ctx context.Context, keep int) error {
@@ -312,23 +437,6 @@ func (s *Service) CompactAll(ctx context.Context, keep int) error {
 	return nil
 }
 
-func (s *Service) replaceLiveText(ctx context.Context, artifactID, markdown string) error {
-	if err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		content := doc.GetText("content")
-		length := content.Len()
-		transact(func(transaction *crdt.Transaction) {
-			if length > 0 {
-				content.Delete(transaction, 0, length)
-			}
-			if markdown != "" {
-				content.Insert(transaction, 0, markdown, nil)
-			}
-		})
-	}); err != nil {
-		return fmt.Errorf("apply live document edit: %w", err)
-	}
-	return nil
-}
 
 func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) {
 	actor, err := s.requestActor(r)
@@ -338,6 +446,9 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
+	}
+	if s.roomClosed(room) || s.roomFailure(room) != nil {
+		return websocket.ConnectionConfig{}, false
 	}
 	open, err := s.issueOpen(r.Context(), room)
 	if err != nil {
@@ -380,6 +491,12 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 }
 
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
+	if err := s.roomFailure(info.Room); err != nil {
+		return err
+	}
+	if s.roomClosed(info.Room) {
+		return ErrIssueClosed
+	}
 	open, err := s.issueOpen(ctx, info.Room)
 	if err != nil {
 		return err
@@ -391,6 +508,12 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 }
 
 func (s *Service) onLoadDocument(_ context.Context, room string, doc *crdt.Doc) error {
+	if err := s.roomFailure(room); err != nil {
+		return err
+	}
+	if s.roomClosed(room) {
+		return ErrIssueClosed
+	}
 	doc.OnUpdate(func(_ []byte, _ any) {
 		s.recordConnectedActors(room)
 		s.scheduleSettle(room)
@@ -405,7 +528,7 @@ func (s *Service) scheduleSettle(room string) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if s.stopping.Load() {
+	if s.stopping.Load() || state.closed || state.failed != nil {
 		return
 	}
 	state.gen++
@@ -423,7 +546,7 @@ func (s *Service) scheduleSettle(room string) {
 func (s *Service) settleRoom(room string, generation uint64) {
 	state := s.room(room)
 	state.mu.Lock()
-	if s.stopping.Load() || state.gen != generation {
+	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
 		state.mu.Unlock()
 		return
 	}
@@ -504,6 +627,104 @@ func (s *Service) waitSettles(ctx context.Context) {
 	}
 }
 
+func (s *Service) waitEvents(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		s.eventWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+func (s *Service) watchIssueClosures(eventStream <-chan model.Event) {
+	defer s.eventWG.Done()
+	for event := range eventStream {
+		if event.Type == "issue.closed" {
+			s.closeIssueRooms(event.IssueKey)
+		}
+	}
+}
+
+func (s *Service) closeIssueRooms(issueKey string) {
+	rows, err := s.store.Pool.Query(context.Background(), `
+		select id::text from artifacts where issue_key = $1 and kind = 'doc'
+	`, issueKey)
+	if err != nil {
+		return
+	}
+	var rooms []string
+	for rows.Next() {
+		var room string
+		if err := rows.Scan(&room); err != nil {
+			rows.Close()
+			return
+		}
+		rooms = append(rooms, room)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return
+	}
+	rows.Close()
+	for _, room := range rooms {
+		s.closeIssueRoom(room)
+	}
+}
+
+func (s *Service) closeIssueRoom(room string) {
+	state := s.room(room)
+	state.mu.Lock()
+	if state.closed {
+		state.mu.Unlock()
+		return
+	}
+	state.closed = true
+	state.gen++
+	if state.settle != nil && state.settle.Stop() {
+		s.settleWG.Done()
+	}
+	state.mu.Unlock()
+	_ = s.srv.CloseRoom(room, true)
+}
+
+func (s *Service) failRoom(room string, cause error) {
+	state := s.room(room)
+	state.mu.Lock()
+	if state.failed != nil {
+		state.mu.Unlock()
+		return
+	}
+	state.failed = cause
+	state.gen++
+	if state.settle != nil && state.settle.Stop() {
+		s.settleWG.Done()
+	}
+	state.mu.Unlock()
+	go func() {
+		_ = s.srv.CloseRoom(room, true)
+	}()
+}
+
+func (s *Service) roomFailure(room string) error {
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.failed == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", ErrServiceUnavailable, state.failed)
+}
+
+func (s *Service) roomClosed(room string) bool {
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.closed
+}
+
 func (s *Service) reresolveAnchors(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error {
 	for _, target := range []struct {
 		table string
@@ -570,6 +791,7 @@ func (s *Service) room(name string) *roomState {
 	value, _ := s.rooms.LoadOrStore(name, &roomState{
 		connected: make(map[uint64]model.Actor),
 		pending:   make(map[string]model.Actor),
+		pendingVersions: make(map[int]versionPending),
 	})
 	return value.(*roomState)
 }
@@ -579,6 +801,37 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state.mu.Lock()
 	state.pending[actorKey(actor)] = actor
 	state.mu.Unlock()
+}
+
+func (s *Service) capturePendingAuthors(room string, actor model.Actor) (versionPending, []model.Actor) {
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	authors := make(map[string]model.Actor, len(state.pending)+1)
+	for key, pendingActor := range state.pending {
+		authors[key] = pendingActor
+	}
+	authors[actorKey(actor)] = actor
+	return versionPending{generation: state.gen, authors: authors}, actorSlice(authors)
+}
+
+func (s *Service) rememberPendingVersion(room string, version model.Version, capture versionPending) {
+	state := s.room(room)
+	state.mu.Lock()
+	state.pendingVersions[version.Number] = capture
+	state.mu.Unlock()
+}
+
+func (s *Service) clearPending(capture versionPending, room string) {
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.gen != capture.generation {
+		return
+	}
+	for key := range capture.authors {
+		delete(state.pending, key)
+	}
 }
 
 func (s *Service) recordConnectedActors(room string) {
@@ -650,32 +903,51 @@ func writeVersion(ctx context.Context, tx pgx.Tx, artifactID, markdown string, n
 	return version, nil
 }
 
-func applyOp(markdown string, op model.EditOp) (string, error) {
+type textMutation struct {
+	from int
+	to   int
+	with string
+}
+
+func resolveOperations(markdown string, ops []model.EditOp) ([]textMutation, error) {
+	mutations := make([]textMutation, 0, len(ops))
+	for index, op := range ops {
+		mutation, err := resolveOperation(markdown, op)
+		if err != nil {
+			return nil, fmt.Errorf("operation %d: %w", index, err)
+		}
+		mutations = append(mutations, mutation)
+		markdown = replaceRange(markdown, mutation.from, mutation.to, mutation.with)
+	}
+	return mutations, nil
+}
+
+func resolveOperation(markdown string, op model.EditOp) (textMutation, error) {
 	switch op.Op {
 	case "replace":
 		if op.Find == "" {
-			return "", invalidOp("find")
+			return textMutation{}, invalidOp("find")
 		}
 		from, to, err := text.Resolve(markdown, op.Find, op.Occurrence)
 		if err != nil {
-			return "", err
+			return textMutation{}, err
 		}
-		return replaceRange(markdown, from, to, op.With), nil
+		return textMutation{from: from, to: to, with: op.With}, nil
 	case "delete":
 		if op.Find == "" {
-			return "", invalidOp("find")
+			return textMutation{}, invalidOp("find")
 		}
 		from, to, err := text.Resolve(markdown, op.Find, op.Occurrence)
 		if err != nil {
-			return "", err
+			return textMutation{}, err
 		}
-		return replaceRange(markdown, from, to, ""), nil
+		return textMutation{from: from, to: to}, nil
 	case "insert":
 		if op.Markdown == "" {
-			return "", invalidOp("markdown")
+			return textMutation{}, invalidOp("markdown")
 		}
 		if (op.After == "" && op.Before == "") || (op.After != "" && op.Before != "") {
-			return "", invalidOp("after or before")
+			return textMutation{}, invalidOp("after or before")
 		}
 		anchor := op.After
 		after := anchor != ""
@@ -684,11 +956,11 @@ func applyOp(markdown string, op model.EditOp) (string, error) {
 		}
 		position, err := insertPosition(markdown, anchor, after, op.Occurrence)
 		if err != nil {
-			return "", err
+			return textMutation{}, err
 		}
-		return replaceRange(markdown, position, position, op.Markdown), nil
+		return textMutation{from: position, to: position, with: op.Markdown}, nil
 	default:
-		return "", invalidOp("op")
+		return textMutation{}, invalidOp("op")
 	}
 }
 
@@ -769,8 +1041,17 @@ func actorSlice(actors map[string]model.Actor) []model.Actor {
 	return result
 }
 
+// ErrInvalidOp identifies the malformed user-facing operation field.
+type ErrInvalidOp struct {
+	Field string
+}
+
+func (e *ErrInvalidOp) Error() string {
+	return fmt.Sprintf("invalid document operation field %q", e.Field)
+}
+
 func invalidOp(field string) error {
-	return fmt.Errorf("invalid document operation field %q", field)
+	return &ErrInvalidOp{Field: field}
 }
 
 func (s *Service) withTx(ctx context.Context, fn func(pgx.Tx) error) error {

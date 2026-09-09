@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -236,6 +238,84 @@ func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
 	}](t, textResponse)
 	if text.Markdown != "# Hello" || text.Version != nil {
 		t.Fatalf("primary document: got %#v, want markdown # Hello and null version", text)
+	}
+}
+
+func TestDocumentTextReportsUnavailableService(t *testing.T) {
+	database := openEmptyTestStore(t)
+	broker := events.NewBroker()
+	documentService := docs.New(docs.Deps{
+		Store:       database,
+		Persistence: failingLoadStore{VersionedStore: docs.NewPgVersioned(database)},
+		Events:      broker,
+	})
+	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+	deps, err := NewDeps(DepsInput{
+		Store: database,
+		Identity: identity.HeaderIdentity{
+			Header:        "X-Dispatch-User",
+			AllowedLogins: map[string]struct{}{"alice": {}},
+		},
+		Docs:   documentService,
+		Events: broker,
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, deps)
+
+	if response := dispatchRequest(t, mux, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	issueResponse := dispatchRequest(t, mux, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue", "spec": "before",
+	}, "alice")
+	if issueResponse.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", issueResponse.Code, issueResponse.Body.String())
+	}
+	issue := decodeBody[struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, issueResponse)
+
+	response := dispatchRequest(t, mux, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"DOC_SERVICE_UNAVAILABLE"`) {
+		t.Fatalf("unavailable document response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+type failingLoadStore struct {
+	docs.VersionedStore
+}
+
+func (failingLoadStore) Load(context.Context, string) (persistence.LoadResult, error) {
+	return persistence.LoadResult{}, errors.New("persistence unavailable")
+}
+
+func TestDocumentEditRejectsInvalidOperationField(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	issueResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue", "spec": "before",
+	}, "alice")
+	if issueResponse.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", issueResponse.Code, issueResponse.Body.String())
+	}
+	issue := decodeBody[struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, issueResponse)
+
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "with": "after"}},
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_OP"`) || !strings.Contains(response.Body.String(), "find") {
+		t.Fatalf("invalid edit response: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

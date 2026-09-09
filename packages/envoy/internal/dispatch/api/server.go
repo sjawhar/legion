@@ -179,12 +179,21 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	var invalidOp *docs.ErrInvalidOp
+	if errors.As(err, &invalidOp) {
+		writeError(w, "INVALID_OP", http.StatusBadRequest, invalidOp.Error())
+		return
+	}
 	if errors.Is(err, text.ErrTargetNotFound) {
 		writeError(w, "TARGET_NOT_FOUND", http.StatusNotFound, err.Error())
 		return
 	}
 	if errors.Is(err, docs.ErrIssueClosed) {
 		writeError(w, "ISSUE_CLOSED", http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, docs.ErrServiceUnavailable) {
+		writeError(w, "DOC_SERVICE_UNAVAILABLE", http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
 		return
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
