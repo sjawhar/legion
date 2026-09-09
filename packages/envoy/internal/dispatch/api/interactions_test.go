@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,6 +81,53 @@ func createInteractionIssue(t *testing.T, handler http.Handler, project, title, 
 
 func sessionActor() map[string]any {
 	return map[string]any{"kind": "session", "id": "session-0123456789abcdef"}
+}
+
+type firstReplaceGate struct {
+	docs.API
+	firstEntered  chan struct{}
+	releaseFirst  chan struct{}
+	secondEntered chan struct{}
+	first         sync.Once
+	second        sync.Once
+}
+
+func (g *firstReplaceGate) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, replacement string, actor model.Actor) error {
+	first := false
+	g.first.Do(func() {
+		first = true
+		close(g.firstEntered)
+	})
+	if first {
+		<-g.releaseFirst
+	} else {
+		g.second.Do(func() { close(g.secondEntered) })
+	}
+	return g.API.ApplyReplace(ctx, artifactID, anchor, replacement, actor)
+}
+
+func waitForSecondReplacementOrCommentLock(t *testing.T, database *store.Store, secondReplacement <-chan struct{}) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-secondReplacement:
+			return
+		default:
+		}
+		var waiting int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("inspect database locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("second accept did not reach document service or wait for the comment lock")
 }
 
 func TestAskWithoutOptionsEmitsEmptyOptionsArray(t *testing.T) {
@@ -503,6 +551,117 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	repeated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
 	if repeated.Code != http.StatusConflict || !strings.Contains(repeated.Body.String(), `"code":"ALREADY_ACTIONED"`) {
 		t.Fatalf("repeat accept: status=%d body=%s", repeated.Code, repeated.Body.String())
+	}
+}
+
+func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
+	var documentService *docs.Service
+	var gate *firstReplaceGate
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		gate = &firstReplaceGate{
+			API: documentService, firstEntered: make(chan struct{}), releaseFirst: make(chan struct{}), secondEntered: make(chan struct{}),
+		}
+		return gate
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Concurrent accepts", "foo")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Replace foo.", "anchor": map[string]any{"artifact": "spec", "quote": "foo"},
+		"suggestion": map[string]string{"replace_with": "foo2"}, "actor": sessionActor(),
+	})
+	commentID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, suggestion).ID
+
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/accept", map[string]any{}, "alice")
+	}()
+	select {
+	case <-gate.firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first acceptance did not reach the document replacement")
+	}
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/accept", map[string]any{}, "alice")
+	}()
+	waitForSecondReplacementOrCommentLock(t, database, gate.secondEntered)
+	close(gate.releaseFirst)
+
+	var success, conflict int
+	for range 2 {
+		select {
+		case response := <-responses:
+			switch response.Code {
+			case http.StatusOK:
+				success++
+			case http.StatusConflict:
+				if strings.Contains(response.Body.String(), `"code":"ALREADY_ACTIONED"`) {
+					conflict++
+				}
+			}
+		case <-time.After(time.Second):
+			t.Fatal("concurrent acceptance did not complete")
+		}
+	}
+	if success != 1 || conflict != 1 {
+		t.Fatalf("acceptance statuses = success:%d conflict:%d, want one each", success, conflict)
+	}
+	markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("read document after concurrent acceptance: %v", err)
+	}
+	if markdown != "foo2" {
+		t.Fatalf("document after concurrent acceptance = %q, want foo2", markdown)
+	}
+}
+
+func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Closed suggestion", "foo")
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Replace foo.", "anchor": map[string]any{"artifact": "spec", "quote": "foo"},
+		"suggestion": map[string]string{"replace_with": "foo2"}, "actor": sessionActor(),
+	})
+	commentID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, suggestion).ID
+
+	blocker, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin issue blocker: %v", err)
+	}
+	defer blocker.Rollback(context.Background())
+	if _, err := blocker.Exec(context.Background(), `select 1 from issues where key = $1 for update`, issue.Key); err != nil {
+		t.Fatalf("lock issue: %v", err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/accept", map[string]any{}, "alice")
+	}()
+	waitForSecondReplacementOrCommentLock(t, database, make(chan struct{}))
+	if _, err := blocker.Exec(context.Background(), `update issues set status = 'done', closed_at = now() where key = $1`, issue.Key); err != nil {
+		t.Fatalf("close locked issue: %v", err)
+	}
+	if err := blocker.Commit(context.Background()); err != nil {
+		t.Fatalf("commit closed issue: %v", err)
+	}
+	response := <-responses
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("accept suggestion after close: status=%d body=%s", response.Code, response.Body.String())
+	}
+	markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("read closed document: %v", err)
+	}
+	if markdown != "foo" {
+		t.Fatalf("closed suggestion changed document to %q, want foo", markdown)
 	}
 }
 

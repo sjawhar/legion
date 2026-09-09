@@ -215,34 +215,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	if !ok {
 		return
 	}
-	if action == "accept" || action == "reject" {
-		comment, err := s.loadCommentRow(r.Context(), s.deps.Store.Pool, `
-			select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
-			from comments where id = $1
-		`, r.PathValue("id"))
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if comment.Suggestion == nil {
-			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept and reject require a suggestion")
-			return
-		}
-		if comment.Suggestion.Accepted != nil {
-			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
-			return
-		}
-		if action == "accept" {
-			if comment.Anchor == nil {
-				writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
-				return
-			}
-			if err := s.deps.Docs.ApplyReplace(r.Context(), comment.Anchor.ArtifactID, *comment.Anchor, comment.Suggestion.ReplaceWith, actor); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-		}
-	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -279,6 +251,16 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		if comment.Suggestion.Accepted != nil {
 			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
 			return
+		}
+		if action == "accept" {
+			if comment.Anchor == nil {
+				writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
+				return
+			}
+			if err := s.deps.Docs.ApplyReplace(r.Context(), comment.Anchor.ArtifactID, *comment.Anchor, comment.Suggestion.ReplaceWith, actor); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
 		}
 		accepted := action == "accept"
 		if accepted {
