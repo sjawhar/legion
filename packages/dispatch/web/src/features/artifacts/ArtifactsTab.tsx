@@ -79,12 +79,42 @@ function formatBytes(bytes: number | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+export function BlobVersionComparison({
+  after,
+  before,
+}: {
+  after: Version;
+  before: Version;
+}): ReactNode {
+  const identical = before.size === after.size && before.sha256 === after.sha256;
+
+  return (
+    <section aria-label="Blob version comparison" className="space-y-2">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-xs font-medium text-slate-500">From · Version {before.number}</p>
+          <p className="mt-1 text-sm text-slate-700">{formatBytes(before.size)}</p>
+          <p className="mt-1 break-all text-xs text-slate-500">SHA-256 {before.sha256}</p>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-xs font-medium text-slate-500">To · Version {after.number}</p>
+          <p className="mt-1 text-sm text-slate-700">{formatBytes(after.size)}</p>
+          <p className="mt-1 break-all text-xs text-slate-500">SHA-256 {after.sha256}</p>
+        </div>
+      </div>
+      {identical ? <p className="text-sm text-slate-500">Identical blobs.</p> : null}
+    </section>
+  );
+}
+
 function isText(content: ArtifactVersionContent | undefined): content is ArtifactVersionText {
   return content !== undefined && "markdown" in content;
 }
 
 function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
   const queryClient = useQueryClient();
+  const { pathname } = useLocation();
+  const highlighted = pathname.match(/^\/issues\/[^/]+\/artifact\/([^/]+)$/)?.[1] === artifact.slug;
   const [showAllVersions, setShowAllVersions] = useState(false);
   const versions = [...artifact.versions].sort((left, right) => right.number - left.number);
   const namedVersions = versions.filter((version) => version.named);
@@ -120,10 +150,14 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
   });
   const latestVersion = versions[0];
   const referencedBy = detail.data?.referenced_by ?? [];
+  const beforeBlob = versions.find((version) => version.number === beforeVersion);
+  const afterBlob = versions.find((version) => version.number === afterVersion);
 
   return (
     <article
-      className="space-y-3 border-b border-slate-200 py-4 last:border-b-0"
+      className={`space-y-3 border-b border-slate-200 py-4 last:border-b-0 ${
+        highlighted ? "rounded-xl px-3 ring-2 ring-sky-400" : ""
+      }`}
       data-testid={`artifact-${artifact.slug}`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -262,8 +296,10 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
             ) : (
               <p className="text-sm text-slate-500">Loading versions to compare…</p>
             )
+          ) : beforeBlob !== undefined && afterBlob !== undefined ? (
+            <BlobVersionComparison after={afterBlob} before={beforeBlob} />
           ) : (
-            <p className="text-sm text-slate-500">Blobs are compared by size and SHA-256 above.</p>
+            <p className="text-sm text-slate-500">Select two versions to compare.</p>
           )}
         </section>
       ) : null}

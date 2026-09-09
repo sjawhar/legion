@@ -90,6 +90,16 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await openArtifacts(page, testInfo.project.name === "iphone");
   await expect(diagram.getByLabel("Referenced by")).toContainText("Comment");
   await expect(diagram.getByLabel("Referenced by")).toContainText("diagram.png");
+  const documentRequests: string[] = [];
+  page.on("websocket", (socket) => {
+    if (socket.url().includes("/ws/doc/")) {
+      documentRequests.push(socket.url());
+    }
+  });
+  await diagram.getByLabel("Referenced by").getByRole("link", { name: "diagram.png" }).click();
+  await expect(page).toHaveURL(`/issues/${issue.key}/artifact/diagram-png`);
+  await expect(page.getByTestId("artifact-diagram-png")).toHaveClass(/ring-2/);
+  expect(documentRequests).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath("artifacts-tab.png"), fullPage: true });
 
   if (testInfo.project.name === "iphone") {

@@ -386,7 +386,11 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
 
   const issueState = stateForIssue(state.data, issue.data.key);
   const activeTab: IssueTab =
-    versionRoute === undefined && !isSpecRoute && artifactRouteSlug === undefined ? tab : "spec";
+    artifactRouteSlug !== undefined && selectedArtifact.kind !== "doc"
+      ? "log"
+      : versionRoute === undefined && !isSpecRoute && artifactRouteSlug === undefined
+        ? tab
+        : "spec";
   const tabID = `issue-${activeTab}-tab`;
   const panelID = `issue-${activeTab}-panel`;
   return (

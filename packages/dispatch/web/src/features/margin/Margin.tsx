@@ -366,6 +366,19 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       selectItem(routeItemId);
     }
   }, [routeItemId, selectItem]);
+  useEffect(() => {
+    if (
+      routeArtifactSlug === undefined ||
+      visibleArtifact === undefined ||
+      visibleArtifact.kind === "doc"
+    ) {
+      return;
+    }
+    setTab("artifacts");
+    if (window.matchMedia("(max-width: 767px)").matches) {
+      setExpandedIssueKey(issueKey);
+    }
+  }, [issueKey, routeArtifactSlug, visibleArtifact]);
 
   useEffect(() => {
     if (routeItemId === undefined) {

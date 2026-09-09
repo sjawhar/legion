@@ -215,6 +215,8 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
       setBody((current) =>
         appendReference(current, `dispatch://${issueKey}/artifact/${artifact.slug}`)
       );
+      void queryClient.invalidateQueries({ queryKey: ["artifacts", issueKey] });
+      void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
     },
     onSettled: () => {
       setPendingUploads((count) => count - 1);
