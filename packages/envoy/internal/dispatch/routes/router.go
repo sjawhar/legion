@@ -265,10 +265,6 @@ func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) 
 		identity.WriteError(w, err)
 		return "", false
 	}
-	if _, allowed := r.ctx.AllowedLogins[login]; !allowed {
-		identity.WriteError(w, identity.ErrLoginNotAllowed)
-		return "", false
-	}
 	return login, true
 }
 

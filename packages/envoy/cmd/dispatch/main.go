@@ -118,7 +118,7 @@ func main() {
 
 	var requestIdentity identity.Identity
 	if boot.IdentityHeader == "" {
-		requestIdentity = identity.CookieIdentity{SigningKey: signingKey}
+		requestIdentity = identity.CookieIdentity{SigningKey: signingKey, AllowedLogins: boot.AllowedLogins}
 	} else {
 		slog.Warn("dispatch: trusting request identity header", "header", boot.IdentityHeader)
 		requestIdentity = identity.HeaderIdentity{

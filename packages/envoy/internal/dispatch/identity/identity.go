@@ -24,7 +24,8 @@ type Identity interface {
 
 // CookieIdentity resolves a signed Dispatch session cookie.
 type CookieIdentity struct {
-	SigningKey string
+	SigningKey    string
+	AllowedLogins map[string]struct{}
 }
 
 // Login returns the valid session login or ErrNoIdentity.
@@ -32,6 +33,9 @@ func (i CookieIdentity) Login(r *http.Request) (string, error) {
 	login := auth.SessionLogin(r, i.SigningKey)
 	if login == "" {
 		return "", ErrNoIdentity
+	}
+	if _, allowed := i.AllowedLogins[login]; !allowed {
+		return "", ErrLoginNotAllowed
 	}
 	return login, nil
 }

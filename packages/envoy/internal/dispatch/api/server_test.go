@@ -20,9 +20,11 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -1390,5 +1392,79 @@ func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
 	}
 	if references != 1 {
 		t.Fatalf("created document references = %d, want 1", references)
+	}
+}
+
+func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
+	database := openEmptyTestStore(t)
+	allowed := map[string]struct{}{"alice": {}}
+	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed}
+	broker := events.NewBroker()
+	documentService := docs.New(docs.Deps{
+		Store: database, Events: broker, Identity: cookieIdentity, Settle: time.Hour,
+	})
+	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+	deps, err := NewDeps(DepsInput{
+		Store: database, Identity: cookieIdentity, AgentToken: "agent-token",
+		RepoProjectsRaw: "owner/repo=TEST", Docs: documentService, Events: broker,
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	handler := http.NewServeMux()
+	Register(handler, deps)
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", "signing-key"))
+	if err != nil {
+		t.Fatalf("parse session cookie: %v", err)
+	}
+	request := func(method, target string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		var payload *bytes.Reader
+		if body == nil {
+			payload = bytes.NewReader(nil)
+		} else {
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("encode request: %v", err)
+			}
+			payload = bytes.NewReader(encoded)
+		}
+		req := httptest.NewRequest(method, target, payload)
+		req.AddCookie(cookie)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := request(http.MethodPost, "/api/v1/issues", map[string]string{"project": "TEST", "title": "Cookie issue"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key               string `json:"key"`
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, created)
+
+	delete(allowed, "alice")
+	for _, target := range []string{"/api/v1/issues/" + issue.Key, "/api/v1/events"} {
+		response := request(http.MethodGet, target, nil)
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"LOGIN_NOT_ALLOWED"`) {
+			t.Fatalf("revoked cookie %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
+	}
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, http.Header{"Cookie": []string{cookie.Name + "=" + cookie.Value}})
+	if connection != nil {
+		_ = connection.Close()
+	}
+	if err == nil || response == nil || (response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden) {
+		t.Fatalf("revoked cookie websocket: response=%#v err=%v, want rejected handshake", response, err)
 	}
 }

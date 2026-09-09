@@ -44,8 +44,9 @@ func TestHeaderIdentityRejectsMissingAndUnlistedLogins(t *testing.T) {
 	}
 }
 
-func TestCookieIdentityReturnsLoginOnlyForValidCookie(t *testing.T) {
-	identity := CookieIdentity{SigningKey: "signing-key"}
+func TestCookieIdentityReturnsLoginOnlyForAllowedValidCookie(t *testing.T) {
+	allowed := map[string]struct{}{"sjawhar": {}}
+	identity := CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed}
 	if _, err := identity.Login(httptest.NewRequest(http.MethodGet, "/", nil)); !errors.Is(err, ErrNoIdentity) {
 		t.Errorf("missing cookie error: got %v, want ErrNoIdentity", err)
 	}
@@ -63,6 +64,11 @@ func TestCookieIdentityReturnsLoginOnlyForValidCookie(t *testing.T) {
 	}
 	if login != "sjawhar" {
 		t.Errorf("login: got %q, want sjawhar", login)
+	}
+
+	delete(allowed, "sjawhar")
+	if _, err := identity.Login(req); !errors.Is(err, ErrLoginNotAllowed) {
+		t.Errorf("revoked cookie error: got %v, want ErrLoginNotAllowed", err)
 	}
 }
 

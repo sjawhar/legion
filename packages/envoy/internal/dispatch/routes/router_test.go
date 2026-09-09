@@ -175,12 +175,12 @@ func TestGitHubProxyUsesHeaderIdentity(t *testing.T) {
 	}
 }
 
-func TestCookieLoginRechecksAllowedLogins(t *testing.T) {
+func TestCookieIdentityRechecksAllowedLogins(t *testing.T) {
 	allowed := map[string]struct{}{"sjawhar": {}}
 	ctx, err := BuildAppContext(AppContextOptions{
 		SigningKey:    "signing-key",
 		Users:         &memoryUserStore{users: map[string]*auth.User{}},
-		Identity:      identity.CookieIdentity{SigningKey: "signing-key"},
+		Identity:      identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed},
 		AllowedLogins: allowed,
 	})
 	if err != nil {
