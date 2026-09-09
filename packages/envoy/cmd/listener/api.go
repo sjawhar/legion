@@ -454,6 +454,18 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 		var body struct {
 			SessionID string `json:"session_id"`
 			Role      string `json:"role"`
+			// A soft claim takes the role only when it is unheld, its holder is
+			// no longer live, or its holder is the claimant's declared
+			// predecessor; any other live holder answers 409 with its id. This
+			// is how a resumed or forked session recovers its own role without
+			// ever taking one from a peer. Default false: last-claim-wins.
+			Soft bool `json:"soft"`
+			// The session id this claimant is continuing (a /fork, /branch, or
+			// /handoff mints a new id in the same process). That predecessor is
+			// still heartbeating and therefore live, yet it is the same
+			// conversation, so a soft claim may take the role from it. Only
+			// honoured with soft; ignored otherwise.
+			PreviousSessionID string `json:"previous_session_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json")
@@ -493,7 +505,39 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			writeJSONError(w, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
 			return
 		}
-		item, err := d.registry.SetRole(body.SessionID, machineID, body.Role)
+		var supersedable []string
+		if body.Soft {
+			// The registry sees only interest rows; liveness is this registry's
+			// call. A holder whose session entry has aged out (5m TTL) is dead
+			// and may be superseded; so may the claimant's own predecessor,
+			// live or not; any other live holder is protected.
+			holder, err := d.registry.RoleHolder(body.Role)
+			if err != nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "read role holder: "+err.Error())
+				return
+			}
+			previous := strings.TrimSpace(body.PreviousSessionID)
+			if holder != "" && holder != body.SessionID {
+				if previous != "" && holder == previous {
+					supersedable = append(supersedable, holder)
+				} else if _, liveErr := d.sessions.Get(holder); errors.Is(liveErr, nats.ErrKeyNotFound) {
+					supersedable = append(supersedable, holder)
+				} else if liveErr != nil {
+					writeJSONError(w, http.StatusServiceUnavailable, "read role holder liveness: "+liveErr.Error())
+					return
+				}
+			}
+		}
+		item, err := d.registry.SetRole(body.SessionID, machineID, body.Role, body.Soft, supersedable...)
+		var held *store.ErrRoleHeld
+		if errors.As(err, &held) {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error":  err.Error(),
+				"role":   held.Role,
+				"holder": held.Holder,
+			})
+			return
+		}
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return

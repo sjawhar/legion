@@ -746,7 +746,7 @@ func TestSetRole_ClaimNewRole(t *testing.T) {
 
 	reg, _ := coldRegistry(t, conn)
 
-	got, err := reg.SetRole("ses_role_a", "m1", "legion-controller")
+	got, err := reg.SetRole("ses_role_a", "m1", "legion-controller", false)
 	if err != nil {
 		t.Fatalf("SetRole failed: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestSetRole_TransferRole(t *testing.T) {
 		t.Fatalf("failed to seed role bucket: %v", err)
 	}
 
-	got, err := reg.SetRole("ses_new", "m2", "legion-controller")
+	got, err := reg.SetRole("ses_new", "m2", "legion-controller", false)
 	if err != nil {
 		t.Fatalf("SetRole failed: %v", err)
 	}
@@ -843,7 +843,7 @@ func TestSetRole_Idempotent(t *testing.T) {
 		t.Fatalf("failed to seed role bucket: %v", err)
 	}
 
-	got, err := reg.SetRole("ses_same", "m1", "legion-controller")
+	got, err := reg.SetRole("ses_same", "m1", "legion-controller", false)
 	if err != nil {
 		t.Fatalf("SetRole failed: %v", err)
 	}
@@ -866,10 +866,10 @@ func TestRemove_ReleasesRoleClaimAfterSameSessionReplacement(t *testing.T) {
 	defer cleanup()
 
 	reg, _ := coldRegistry(t, conn)
-	if _, err := reg.SetRole("ses_role", "m1", "legion-controller"); err != nil {
+	if _, err := reg.SetRole("ses_role", "m1", "legion-controller", false); err != nil {
 		t.Fatalf("SetRole controller: %v", err)
 	}
-	if _, err := reg.SetRole("ses_role", "m1", "legion-reviewer"); err != nil {
+	if _, err := reg.SetRole("ses_role", "m1", "legion-reviewer", false); err != nil {
 		t.Fatalf("SetRole reviewer: %v", err)
 	}
 	if err := reg.Remove("ses_role", []string{"notifications.role.legion-controller"}); err != nil {
@@ -890,7 +890,7 @@ func TestSetRole_OldHolderMissing(t *testing.T) {
 		t.Fatalf("failed to seed role bucket: %v", err)
 	}
 
-	got, err := reg.SetRole("ses_fresh", "m1", "legion-controller")
+	got, err := reg.SetRole("ses_fresh", "m1", "legion-controller", false)
 	if err != nil {
 		t.Fatalf("SetRole failed: %v", err)
 	}
@@ -962,7 +962,7 @@ func TestReapReleasesRoleClaims(t *testing.T) {
 		sessionID = "ses_reap_role"
 		role      = "legion-controller"
 	)
-	if _, err := reg.SetRole(sessionID, "example-host", role); err != nil {
+	if _, err := reg.SetRole(sessionID, "example-host", role, false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
 	stale, err := reg.Get(sessionID)
@@ -1226,7 +1226,7 @@ func TestRemoveAllReleasesRoleClaims(t *testing.T) {
 		sessionID = "ses_remove_all_role"
 		role      = "legion-controller"
 	)
-	if _, err := reg.SetRole(sessionID, "example-host", role); err != nil {
+	if _, err := reg.SetRole(sessionID, "example-host", role, false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
 	if err := reg.Remove(sessionID, nil); err != nil {
@@ -1280,7 +1280,7 @@ func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
 		failPutAt: 1,
 		err:       errors.New("injected interest write failure"),
 	}
-	if _, err := reg.SetRole(newSession, "example-host", role); err == nil {
+	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed interest upsert")
 	}
 
@@ -1314,7 +1314,7 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 		failUpdateAt: 1,
 		err:          errors.New("injected role update failure"),
 	}
-	if _, err := reg.SetRole(newSession, "example-host", role); err == nil {
+	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed role update")
 	}
 
@@ -1337,7 +1337,7 @@ func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 		failCreateAt: 1,
 		err:          errors.New("injected role create failure"),
 	}
-	if _, err := reg.SetRole(sessionID, "example-host", role); err == nil {
+	if _, err := reg.SetRole(sessionID, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed role create")
 	}
 
@@ -1371,7 +1371,7 @@ func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
 		failPutAt: 2,
 		err:       errors.New("injected old-holder cleanup failure"),
 	}
-	if _, err := reg.SetRole(newSession, "example-host", role); err == nil {
+	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed old-holder cleanup")
 	}
 
@@ -1553,9 +1553,9 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 	var concurrent Interest
 	var concurrentErr error
 	racingKV.beforeFirstCreate = func() {
-		concurrent, concurrentErr = reg.SetRole(sessionID, "example-host", role)
+		concurrent, concurrentErr = reg.SetRole(sessionID, "example-host", role, false)
 	}
-	first, firstErr := reg.SetRole(sessionID, "example-host", role)
+	first, firstErr := reg.SetRole(sessionID, "example-host", role, false)
 
 	if concurrentErr != nil {
 		t.Fatalf("concurrent SetRole: %v", concurrentErr)
@@ -1567,6 +1567,111 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 	assertInterestTopics(t, first, roleTopic)
 	assertRoleHolder(t, reg, role, sessionID)
 	assertInterestTopicsForSession(t, reg, sessionID, roleTopic)
+}
+
+func TestSetRoleSoft_TakesUnheldAndOwnAndSupersedableRoles(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const role = "sre"
+
+	// Unheld: a soft claim takes it.
+	if _, err := reg.SetRole("ses_first", "m1", role, true); err != nil {
+		t.Fatalf("soft claim of unheld role: %v", err)
+	}
+	assertRoleHolder(t, reg, role, "ses_first")
+
+	// Own: a soft re-assert is a no-op success.
+	if _, err := reg.SetRole("ses_first", "m1", role, true); err != nil {
+		t.Fatalf("soft re-assert of own role: %v", err)
+	}
+	assertRoleHolder(t, reg, role, "ses_first")
+
+	// Supersedable: the caller vouches that ses_first is dead; the claim moves.
+	if _, err := reg.SetRole("ses_resumed", "m1", role, true, "ses_first"); err != nil {
+		t.Fatalf("soft claim over supersedable holder: %v", err)
+	}
+	assertRoleHolder(t, reg, role, "ses_resumed")
+	assertInterestTopicsForSession(t, reg, "ses_resumed", "notifications.role.sre")
+}
+
+func TestSetRoleSoft_RefusesLiveHolderAndLeavesClaimUntouched(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const role = "sre"
+	if _, err := reg.SetRole("ses_live", "m1", role, false); err != nil {
+		t.Fatalf("seed holder: %v", err)
+	}
+
+	_, err := reg.SetRole("ses_stale_transcript", "m1", role, true)
+	var held *ErrRoleHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("expected *ErrRoleHeld, got %v", err)
+	}
+	if held.Role != role || held.Holder != "ses_live" {
+		t.Fatalf("ErrRoleHeld = %+v, want role=%s holder=ses_live", held, role)
+	}
+	assertRoleHolder(t, reg, role, "ses_live")
+	// The refused claimant gained no role topic: nothing was written for it.
+	if _, err := reg.Get("ses_stale_transcript"); err == nil {
+		t.Fatal("refused soft claim left an interest row behind")
+	}
+
+	// A hard claim from the same session still wins: soft is opt-in per call.
+	if _, err := reg.SetRole("ses_stale_transcript", "m1", role, false); err != nil {
+		t.Fatalf("hard claim after refusal: %v", err)
+	}
+	assertRoleHolder(t, reg, role, "ses_stale_transcript")
+}
+
+func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
+	// Interleaving: role at A. B claims — its role-row CAS succeeds (row -> B)
+	// — and before B's cleanup of A runs, A re-claims (row -> A). B's cleanup
+	// must not delete A's fresh claim. The previous implementation released
+	// through the role row whenever its holder equalled the old session, which
+	// is exactly A here, so the role ended unheld with both calls succeeding.
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const role = "pr-queue"
+	if _, err := reg.SetRole("ses_a", "m1", role, false); err != nil {
+		t.Fatalf("seed A: %v", err)
+	}
+
+	// B's role-row Update is the CAS write; fire A's re-claim right after it
+	// succeeds and before B proceeds to old-holder cleanup.
+	racing := &afterUpdateKeyValue{KeyValue: reg.roleKV}
+	reg.roleKV = racing
+	racing.after = func() {
+		racing.after = nil
+		if _, err := reg.SetRole("ses_a", "m1", role, false); err != nil {
+			t.Fatalf("A re-claim during B's claim: %v", err)
+		}
+	}
+	if _, err := reg.SetRole("ses_b", "m1", role, false); err != nil {
+		t.Fatalf("B claim: %v", err)
+	}
+
+	// A claimed last: A holds the role and the row still exists.
+	assertRoleHolder(t, reg, role, "ses_a")
+}
+
+type afterUpdateKeyValue struct {
+	natsgo.KeyValue
+
+	after func()
+}
+
+func (kv *afterUpdateKeyValue) Update(key string, value []byte, last uint64) (uint64, error) {
+	revision, err := kv.KeyValue.Update(key, value, last)
+	if err == nil && kv.after != nil {
+		kv.after()
+	}
+	return revision, err
 }
 
 func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {

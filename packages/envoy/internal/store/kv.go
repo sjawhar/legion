@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -405,7 +407,32 @@ func (r *Registry) removeInterestTopics(sessionID string, topics []string) error
 	return nil
 }
 
-func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) {
+// ErrRoleHeld reports a soft claim that found the role held by another session.
+// The holder is carried on the error so callers can report who has it.
+type ErrRoleHeld struct {
+	Role   string
+	Holder string
+}
+
+func (e *ErrRoleHeld) Error() string {
+	return fmt.Sprintf("role %s is held by %s", e.Role, e.Holder)
+}
+
+// SetRole makes sessionID the holder of role. A hard claim (soft=false) is
+// last-claim-wins: it takes the role from whoever holds it. A soft claim
+// succeeds only if the role is unheld, already held by sessionID, or held by
+// a session listed in supersedable; any other holder returns *ErrRoleHeld
+// and leaves the claim untouched. Callers decide what "supersedable" means —
+// the listener passes the ids it has established are no longer live, so a
+// resumed session can recover a role its dead predecessor held without ever
+// taking one from a live peer.
+//
+// The role row is written with compare-and-swap against the revision read at
+// the top, so two concurrent claimants cannot both believe they won. Old-holder
+// cleanup removes the role topic from the previous holder's interest row only;
+// it never touches the role row itself, which by then may already name a
+// newer claimant.
+func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, supersedable ...string) (Interest, error) {
 	roleTopic := contracts.RoleTopicPrefix + role
 	entry, err := r.roleKV.Get(role)
 	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
@@ -415,6 +442,9 @@ func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) 
 	oldSessionID := ""
 	if err == nil {
 		oldSessionID = string(entry.Value())
+	}
+	if soft && oldSessionID != "" && oldSessionID != sessionID && !slices.Contains(supersedable, oldSessionID) {
+		return Interest{}, &ErrRoleHeld{Role: role, Holder: oldSessionID}
 	}
 
 	item, err := r.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{roleTopic})
@@ -438,11 +468,16 @@ func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) 
 		if holderErr != nil {
 			return Interest{}, errors.Join(err, holderErr)
 		}
+		// A soft claim that lost the CAS race lost to a concurrent claimant;
+		// report that as held rather than as a storage failure.
+		if soft && holder != "" {
+			return Interest{}, &ErrRoleHeld{Role: role, Holder: holder}
+		}
 		return Interest{}, err
 	}
 
 	if oldSessionID != "" && oldSessionID != sessionID {
-		if err := r.Remove(oldSessionID, []string{roleTopic}); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+		if err := r.removeInterestTopics(oldSessionID, []string{roleTopic}); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 			slog.Warn("registry role claim old holder cleanup failed",
 				slog.String("role", role),
 				slog.String("old_session_id", oldSessionID),

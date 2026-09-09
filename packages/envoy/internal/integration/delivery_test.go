@@ -455,10 +455,10 @@ func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
 	env.registerSession("ses_role_a", portA, nil)
 	env.registerSession("ses_role_b", portB, nil)
 
-	if _, err := env.registry.SetRole("ses_role_a", "test-machine", "legion-controller"); err != nil {
+	if _, err := env.registry.SetRole("ses_role_a", "test-machine", "legion-controller", false); err != nil {
 		t.Fatalf("SetRole for A failed: %v", err)
 	}
-	if _, err := env.registry.SetRole("ses_role_b", "test-machine", "legion-controller"); err != nil {
+	if _, err := env.registry.SetRole("ses_role_b", "test-machine", "legion-controller", false); err != nil {
 		t.Fatalf("SetRole for B failed: %v", err)
 	}
 

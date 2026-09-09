@@ -232,7 +232,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	if err := sessions.Put("ses_holder", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register holder: %v", err)
 	}
-	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer"); err != nil {
+	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
 	var state atomic.Pointer[listenerDeps]
@@ -324,7 +324,7 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 	if err := sessions.Put("ses_holder", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register holder: %v", err)
 	}
-	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer"); err != nil {
+	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
 	var state atomic.Pointer[listenerDeps]
@@ -359,6 +359,106 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 		}
 		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\"}\n" {
 			t.Fatalf("body = %q", body)
+		}
+	})
+}
+
+func TestRoleSetHandlerSoftClaim(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	for _, id := range []string{"ses_live", "ses_resumer", "ses_heir"} {
+		if err := sessions.Put(id, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	mux := http.NewServeMux()
+	registerV1Routes(mux, &state, "test-machine", logging.New("test"))
+	post := func(body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(body)))
+		return recorder
+	}
+
+	t.Run("live holder is refused with 409 naming the holder", func(t *testing.T) {
+		if rec := post(`{"session_id":"ses_live","role":"sre"}`); rec.Code != http.StatusOK {
+			t.Fatalf("seed hard claim: status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		rec := post(`{"session_id":"ses_resumer","role":"sre","soft":true}`)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+		}
+		var response struct {
+			Error  string `json:"error"`
+			Role   string `json:"role"`
+			Holder string `json:"holder"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+			t.Fatalf("decode 409 body: %v", err)
+		}
+		if response.Role != "sre" || response.Holder != "ses_live" || response.Error == "" {
+			t.Fatalf("409 body = %+v", response)
+		}
+		holder, err := registry.RoleHolder("sre")
+		if err != nil || holder != "ses_live" {
+			t.Fatalf("holder after refused soft claim = %q, %v; want ses_live", holder, err)
+		}
+	})
+
+	t.Run("dead holder is superseded", func(t *testing.T) {
+		// ses_live's session entry ages out (5m TTL in production); here it is
+		// deleted, which is what the listener observes either way.
+		if err := sessions.Delete("ses_live"); err != nil {
+			t.Fatalf("expire holder session: %v", err)
+		}
+		rec := post(`{"session_id":"ses_heir","role":"sre","soft":true}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		holder, err := registry.RoleHolder("sre")
+		if err != nil || holder != "ses_heir" {
+			t.Fatalf("holder after soft claim over dead holder = %q, %v; want ses_heir", holder, err)
+		}
+	})
+
+	t.Run("hard claim still takes a live holder's role", func(t *testing.T) {
+		rec := post(`{"session_id":"ses_resumer","role":"sre"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		holder, err := registry.RoleHolder("sre")
+		if err != nil || holder != "ses_resumer" {
+			t.Fatalf("holder after hard claim = %q, %v; want ses_resumer", holder, err)
+		}
+	})
+
+	t.Run("a live predecessor is superseded when the claimant declares it", func(t *testing.T) {
+		// ses_resumer holds the role and is still live (a fork's parent keeps
+		// heartbeating). The forked child names it as its predecessor.
+		if err := sessions.Put("ses_fork_child", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+			t.Fatalf("register child: %v", err)
+		}
+		rec := post(`{"session_id":"ses_fork_child","role":"sre","soft":true,"previous_session_id":"ses_resumer"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		holder, err := registry.RoleHolder("sre")
+		if err != nil || holder != "ses_fork_child" {
+			t.Fatalf("holder after child's soft claim = %q, %v; want ses_fork_child", holder, err)
+		}
+	})
+
+	t.Run("a live holder that is not the declared predecessor is still refused", func(t *testing.T) {
+		// ses_resumer now resumes its own transcript, which still records the
+		// role, but the live child holds it and ses_resumer continues nobody.
+		rec := post(`{"session_id":"ses_resumer","role":"sre","soft":true,"previous_session_id":"ses_heir"}`)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+		}
+		holder, err := registry.RoleHolder("sre")
+		if err != nil || holder != "ses_fork_child" {
+			t.Fatalf("holder after refused claim = %q, %v; want ses_fork_child", holder, err)
 		}
 	})
 }
@@ -565,7 +665,7 @@ func TestUnsubscribeAllReleasesRoleClaims(t *testing.T) {
 		sessionID = "ses_unsubscribe_role"
 		role      = "legion-controller"
 	)
-	if _, err := registry.SetRole(sessionID, "test-machine", role); err != nil {
+	if _, err := registry.SetRole(sessionID, "test-machine", role, false); err != nil {
 		t.Fatalf("SetRole: %v", err)
 	}
 
