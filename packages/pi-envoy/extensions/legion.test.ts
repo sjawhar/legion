@@ -62,6 +62,7 @@ type TestPi = {
     readonly discriminatedUnion: (key: string, options: readonly unknown[]) => unknown;
   };
   readonly sendMessage: PiApi["sendMessage"];
+  readonly appendEntry: PiApi["appendEntry"];
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
   readonly on: (
@@ -169,6 +170,7 @@ function createPi(): {
       discriminatedUnion: () => ({}),
     },
     sendMessage: (message) => sentMessages.push(message),
+    appendEntry: () => undefined,
     on: (eventName, handler) => {
       const eventHandlers = registeredHandlers.get(eventName);
       if (eventHandlers === undefined) registeredHandlers.set(eventName, [handler]);
@@ -545,7 +547,6 @@ describe("Legion OMP extension", () => {
           ompSessionFile: "/tmp/session.jsonl",
         },
       },
-      { path: "/v1/roles/set", body: { session_id: "ses_root", role: token } },
       {
         path: "/v1/interests/subscribe",
         body: {
@@ -558,6 +559,7 @@ describe("Legion OMP extension", () => {
           self_subscribed: true,
         },
       },
+      { path: "/v1/roles/set", body: { session_id: "ses_root", role: token } },
       {
         path: "/legion/v1/process/ready",
         body: { tree, sessionId: "ses_root", secret: "root-secret" },
@@ -613,7 +615,6 @@ describe("Legion OMP extension", () => {
         },
       },
       { path: "/legion/v1/state", body: undefined },
-      { path: "/v1/roles/set", body: { session_id: "ses_controller", role: token } },
       {
         path: "/v1/interests/subscribe",
         body: {
@@ -626,6 +627,7 @@ describe("Legion OMP extension", () => {
           self_subscribed: true,
         },
       },
+      { path: "/v1/roles/set", body: { session_id: "ses_controller", role: token } },
       {
         path: "/legion/v1/controller/ready",
         body: { secret: "controller-secret", sessionId: "ses_controller" },
@@ -642,8 +644,13 @@ describe("Legion OMP extension", () => {
           self_subscribed: true,
         },
       },
-      { path: "/legion/v1/state", body: undefined },
+      // The controller role was held by ses_controller in this same process;
+      // the rebind to ses_interactive re-claims it under the live id from
+      // memory — checking first that no other live session holds it — before
+      // the explicit claim command runs.
+      { path: `/v1/roles/${token}`, body: undefined },
       { path: "/v1/roles/set", body: { session_id: "ses_interactive", role: token } },
+      { path: "/legion/v1/state", body: undefined },
       {
         path: "/v1/interests/subscribe",
         body: {
@@ -656,6 +663,7 @@ describe("Legion OMP extension", () => {
           self_subscribed: true,
         },
       },
+      { path: "/v1/roles/set", body: { session_id: "ses_interactive", role: token } },
       {
         path: "/legion/v1/controller/ready",
         body: { secret: "controller-secret", sessionId: "ses_interactive" },
@@ -720,11 +728,6 @@ describe("Legion OMP extension", () => {
       { method: "GET", path: "/legion/v1/state", body: undefined },
       {
         method: "POST",
-        path: "/v1/roles/set",
-        body: { session_id: "ses_interactive", role: token },
-      },
-      {
-        method: "POST",
         path: "/v1/interests/subscribe",
         body: {
           session_id: "ses_interactive",
@@ -735,6 +738,11 @@ describe("Legion OMP extension", () => {
           driving: false,
           self_subscribed: true,
         },
+      },
+      {
+        method: "POST",
+        path: "/v1/roles/set",
+        body: { session_id: "ses_interactive", role: token },
       },
       {
         method: "POST",
@@ -786,8 +794,8 @@ describe("Legion OMP extension", () => {
     expect(requests.map((request) => request.path)).toEqual([
       "/v1/interests/subscribe",
       "/legion/v1/worker/started",
-      "/v1/roles/set",
       "/v1/interests/subscribe",
+      "/v1/roles/set",
       "/legion/v1/worker/ready",
     ]);
     expect(requests[1]).toEqual({

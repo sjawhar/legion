@@ -210,6 +210,8 @@ export interface PiApi {
       | { readonly type: string },
     options?: { readonly deliverAs: "steer"; readonly triggerTurn: boolean }
   ) => void;
+  /** Persist extension state in the session transcript; never sent to the model. */
+  readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
   readonly on: <Event extends keyof PiEventContract>(
