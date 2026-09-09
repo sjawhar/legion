@@ -30,6 +30,8 @@ export interface DaemonConfig {
   natsUrls: string[];
   ompInvocation: string;
   boardProjectIds: string[];
+  /** `owner/name` GitHub repositories the durable per-repo GitHub intake consumes; required, non-empty. */
+  repos: string[];
   appLogins: string[];
   admissionCap: number;
   workerBudget: number;
@@ -93,6 +95,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   nats_urls: null,
   omp_invocation: null,
   board_project_ids: null,
+  repos: null,
   app_logins: null,
   admission_cap: null,
   worker_budget: null,
@@ -197,6 +200,13 @@ function validateUrl(value: string, field: string): string {
     new URL(value);
   } catch {
     throw new Error(`${field} must be a valid URL`);
+  }
+  return value;
+}
+
+function validateRepoSlug(value: string, field: string): string {
+  if (!/^[^/]+\/[^/]+$/.test(value)) {
+    throw new Error(`${field} entries must be "owner/name" (got "${value}")`);
   }
   return value;
 }
@@ -373,6 +383,8 @@ export function loadConfigFromFile(
   }
   const boardProjectIds = readStringArray(config.board_project_ids, "board_project_ids");
   if (boardProjectIds !== undefined) fields.boardProjectIds = boardProjectIds;
+  const repos = readStringArray(config.repos, "repos");
+  if (repos !== undefined) fields.repos = repos.map((repo) => validateRepoSlug(repo, "repos"));
   const appLogins = readStringArray(config.app_logins, "app_logins");
   if (appLogins !== undefined) fields.appLogins = appLogins;
 
@@ -467,6 +479,14 @@ export function resolveDaemonConfig(
     parseCsv(env.LEGION_BOARD_PROJECT_IDS, "LEGION_BOARD_PROJECT_IDS"),
     []
   );
+  const repos = resolveValue(
+    opts.cliOverrides?.repos,
+    fileStringArray(fields, "repos"),
+    parseCsv(env.LEGION_REPOS, "LEGION_REPOS"),
+    []
+  );
+  if (repos.value.length === 0) throw new Error("repos is required");
+  for (const repo of repos.value) validateRepoSlug(repo, "LEGION_REPOS");
   const appLogins = resolveValue(
     opts.cliOverrides?.appLogins,
     fileStringArray(fields, "appLogins"),
@@ -562,6 +582,7 @@ export function resolveDaemonConfig(
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       boardProjectIds: boardProjectIds.value,
+      repos: repos.value,
       appLogins: appLogins.value,
       admissionCap: admissionCap.value,
       workerBudget: workerBudget.value,

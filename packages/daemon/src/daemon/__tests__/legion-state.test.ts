@@ -105,9 +105,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v12 state with a valid project and admission capacity", () => {
+  it("initializes empty v13 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 12,
+      version: 13,
       project: "omp",
       issues: {},
       trees: {},
@@ -387,6 +387,16 @@ describe("legion state", () => {
     });
     current.prs[prKey] = { ...current.prs[prKey], verdict: "red" };
     await writeFile(file, JSON.stringify(legacy), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v12 state to v13 (a version bump only, no field changes)", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v12-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const v12State = { ...current, version: 12 };
+    await writeFile(file, JSON.stringify(v12State), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
   });

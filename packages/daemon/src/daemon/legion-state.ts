@@ -20,6 +20,8 @@ export interface IssueNode {
   labels: string[];
   backlogMarker?: string;
   finalCommentRef?: string;
+  /** The GitHub payload's `updated_at` (or, for a sub_issue event, `parent_issue.updated_at`) from the last event applied to this issue — a freshness fence, mirroring `PrState.headUpdatedAt`, against an out-of-order redelivery. */
+  updatedAt?: number;
 }
 
 export interface HeldEvent {
@@ -93,8 +95,21 @@ export interface SpawnCapability {
   role: string;
 }
 
+export interface LegionEventPayload {
+  type: string;
+  [key: string]: unknown;
+}
+
+/** An effect a reducer derives from one event, dispatched best-effort after the reducer's mutation is durably saved (see `events.ts`). */
+export type Effect =
+  | { kind: "publish"; role: string; payload: LegionEventPayload }
+  | { kind: "controller"; payload: LegionEventPayload }
+  | { kind: "probe"; tree: IssueKey }
+  | { kind: "linger"; tree: IssueKey }
+  | { kind: "approval-status"; repo: string; pr: number; sha: string };
+
 export interface LegionState {
-  version: 12;
+  version: 13;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -143,6 +158,7 @@ const IssueNodeSchema = z
     labels: z.array(GateLabelSchema),
     backlogMarker: z.string().optional(),
     finalCommentRef: z.string().optional(),
+    updatedAt: z.number().optional(),
   })
   .strict();
 const HeldEventSchema = z
@@ -248,7 +264,7 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(12),
+    version: z.literal(13),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -289,7 +305,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 12,
+    version: 13,
     project,
     issues: {},
     trees: {},
@@ -481,6 +497,11 @@ function migrateV8State(state: unknown): unknown {
   return { ...rest, version: 12, ...(migratedPrs ? { prs: migratedPrs } : {}) };
 }
 
+function migrateV12State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 12) return state;
+  return { ...state, version: 13 };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -494,12 +515,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))));
+  const state = migrateV12State(
+    migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))))
+  );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 12) {
+  if (version !== 13) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

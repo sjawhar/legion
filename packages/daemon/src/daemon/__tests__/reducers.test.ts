@@ -432,6 +432,52 @@ describe("reduceGithubEvent", () => {
     expect(state.issues[child].parent).toBeUndefined();
   });
 
+  it("does not re-adopt a redelivered sub_issue_added that arrives after a newer sub_issue_removed", () => {
+    const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
+    const addedPayload = {
+      action: "sub_issue_added",
+      parent_issue: issue(1, { updated_at: "2026-01-01T00:00:01.000Z" }),
+      sub_issue: issue(2),
+    };
+
+    expect(effects(state, addedPayload)).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-adopted", child, remaining: 1 },
+      },
+    ]);
+    expect(state.issues[root].children).toEqual([child]);
+
+    expect(
+      effects(state, {
+        action: "sub_issue_removed",
+        parent_issue: issue(1, { updated_at: "2026-01-01T00:00:02.000Z" }),
+        sub_issue: issue(2),
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-removed", child, remaining: 0 },
+      },
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "children-complete" },
+      },
+    ]);
+    expect(state.issues[root].children).toEqual([]);
+
+    // Redelivery of the original sub_issue_added: its parent_issue.updated_at
+    // (t=1) is now older than the parent's last-applied event (t=2, from the
+    // removal above), so it is ignored instead of re-adopting the child.
+    expect(effects(state, addedPayload)).toEqual([]);
+    expect(state.issues[root].children).toEqual([]);
+    expect(state.issues[child].parent).toBeUndefined();
+  });
+
   it("routes a reopened removed child through controller triage instead of root resurrection", () => {
     const state = rootState();
     attachChild(state);

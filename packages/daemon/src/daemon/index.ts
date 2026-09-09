@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { type IssueKey, roleToken, roleTopic } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
-import { connect, StringCodec, type Subscription } from "nats";
 import {
   type CiFetchResult,
   type CommandRunner,
@@ -25,7 +24,9 @@ import {
 } from "./environment";
 import { type EventPump, type EventPumpDeps, startEventPump } from "./events";
 import { buildRoleEnv, TokenManager } from "./github-apps";
+import { acquireInstanceLock, type InstanceLock } from "./instance-lock";
 import { loadState, saveState } from "./legion-state";
+import { createNatsTransport, type NatsTransport } from "./nats-transport";
 import { daemonCredentialHelper, ProcessManager, type ProcessManagerDeps } from "./processes";
 import { runResync } from "./resync";
 
@@ -36,18 +37,11 @@ const OMP_AGENTS_CAPABILITY_PROBE = `export default function probeOmpAgents(pi) 
 }
 `;
 
-export interface NatsTransport {
-  subscribe(subject: string, callback: (subject: string, data: string) => void): () => void;
-  publish(subject: string, data: string): void;
-  request(subject: string, data: string): Promise<string>;
-  ready(): Promise<void>;
-  close(): Promise<void>;
-}
-
 interface DaemonDependencies {
   loadState: typeof loadState;
   saveState: typeof saveState;
   createNatsTransport(config: DaemonConfig): Promise<NatsTransport>;
+  acquireInstanceLock(stateDir: string): Promise<InstanceLock>;
   runner: CommandRunner;
   statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
   readProcessCmdline?: ProcessManagerDeps["readProcessCmdline"];
@@ -134,49 +128,9 @@ export function createCiStatusFetcher(
     });
 }
 
-async function createNatsTransport(config: DaemonConfig): Promise<NatsTransport> {
-  const connection = await connect({
-    servers: config.natsUrls,
-    name: `legion-daemon-${config.project}`,
-    reconnect: true,
-    maxReconnectAttempts: -1,
-    reconnectTimeWait: 2_000,
-  });
-  const codec = StringCodec();
-  const subscriptions = new Set<Subscription>();
-
-  return {
-    subscribe(subject, callback) {
-      const subscription = connection.subscribe(subject);
-      subscriptions.add(subscription);
-      void (async () => {
-        for await (const message of subscription) {
-          callback(message.subject, codec.decode(message.data));
-        }
-      })();
-      return () => {
-        subscriptions.delete(subscription);
-        subscription.unsubscribe();
-      };
-    },
-    publish(subject, data) {
-      connection.publish(subject, codec.encode(data));
-    },
-    async request(subject, data) {
-      const reply = await connection.request(subject, codec.encode(data), {
-        timeout: 10_000,
-      });
-      return codec.decode(reply.data);
-    },
-    ready() {
-      return connection.flush();
-    },
-    async close() {
-      for (const subscription of subscriptions) subscription.unsubscribe();
-      subscriptions.clear();
-      await connection.drain();
-    },
-  };
+/** An Envoy publish failure carrying the HTTP status, so callers can distinguish "no holder" (404) from other rejections. */
+export interface EnvoyPublishError extends Error {
+  status?: number;
 }
 
 async function publishToEnvoy(
@@ -190,7 +144,9 @@ async function publishToEnvoy(
     body: JSON.stringify({ topic, message: payloadJson, payload: payloadJson }),
   });
   if (!response.ok) {
-    throw new Error(`Envoy publish to ${topic} failed with status ${response.status}`);
+    const error = new Error(`Envoy publish to ${topic} failed with status ${response.status}`);
+    (error as EnvoyPublishError).status = response.status;
+    throw error;
   }
 }
 async function verifyOmpAgentsCapability(
@@ -300,6 +256,7 @@ function defaultDependencies(config: DaemonConfig): DaemonDependencies {
     loadState,
     saveState,
     createNatsTransport,
+    acquireInstanceLock,
     runner: defaultRunner,
     resolveDaemonEnvironment,
     statPrompt: stat,
@@ -327,6 +284,25 @@ export async function startDaemon(
 ): Promise<DaemonHandle> {
   const board = projectBoard(config.legionId);
   const deps = { ...defaultDependencies(config), ...options.deps };
+  // At most one daemon runs per project: two sharing a durable JetStream
+  // consumer would split its messages and race saves to the same state
+  // file. Released on clean shutdown (stop(), below) or on any startup
+  // failure past this point.
+  const instanceLock = await deps.acquireInstanceLock(config.stateDir);
+  try {
+    return await startDaemonLocked(config, deps, board, instanceLock);
+  } catch (error) {
+    await instanceLock.release();
+    throw error;
+  }
+}
+
+async function startDaemonLocked(
+  config: DaemonConfig,
+  deps: DaemonDependencies,
+  board: { owner: string; number: number },
+  instanceLock: InstanceLock
+): Promise<DaemonHandle> {
   const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
     run: deps.runner,
   });
@@ -439,14 +415,19 @@ export async function startDaemon(
   const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 
   const emitResync = async (): Promise<void> => {
-    const payload = await runResync({
-      state,
-      config,
-      fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
-      fetchCiStatusBatch,
-      applyEffects: eventPump.applyEffects,
-      now: deps.now,
-    });
+    // Serialized against durable GitHub messages: resync reads/writes the
+    // same PrState CI fields a durable checks settlement does, so the two
+    // must not interleave (see events.ts's queue doc comment).
+    const payload = await eventPump.runExclusive(() =>
+      runResync({
+        state,
+        config,
+        fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
+        fetchCiStatusBatch,
+        applyEffects: eventPump.applyEffects,
+        now: deps.now,
+      })
+    );
     console.log(
       `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems} ciFetchFailures=${payload.ciFetchFailures}${
         payload.ciFetchFailureDetails.length === 0
@@ -535,6 +516,14 @@ export async function startDaemon(
         failure ??= error;
         console.error(
           `[legion] NATS shutdown failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      try {
+        await instanceLock.release();
+      } catch (error) {
+        failure ??= error;
+        console.error(
+          `[legion] instance lock release failed: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }

@@ -9,24 +9,47 @@ import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
 import * as daemonIndex from "../index";
 import { newLegionState } from "../legion-state";
+import type { DurableMessageControl } from "../nats-transport";
 
 const { startDaemon } = daemonIndex;
 
 class FakeNats {
   readonly subscriptions: Array<{
     subject: string;
-    callback: (subject: string, data: string) => void;
+    callback: (subject: string, data: string, control: DurableMessageControl) => void;
   }> = [];
   readonly publications: Array<{ subject: string; data: string }> = [];
   closed = false;
   readyCalls = 0;
 
   subscribe(subject: string, callback: (subject: string, data: string) => void): () => void {
-    const subscription = { subject, callback };
+    const subscription = {
+      subject,
+      callback: (s: string, d: string) => callback(s, d),
+    };
     this.subscriptions.push(subscription);
     return () => {
       const index = this.subscriptions.indexOf(subscription);
       if (index >= 0) this.subscriptions.splice(index, 1);
+    };
+  }
+
+  consumeDurable(
+    _stream: string,
+    _durable: string,
+    filterSubjects: string[],
+    callback: (subject: string, data: string, control: DurableMessageControl) => void
+  ): () => void {
+    const registered = filterSubjects.map((subject) => {
+      const subscription = { subject, callback };
+      this.subscriptions.push(subscription);
+      return subscription;
+    });
+    return () => {
+      for (const subscription of registered) {
+        const index = this.subscriptions.indexOf(subscription);
+        if (index >= 0) this.subscriptions.splice(index, 1);
+      }
     };
   }
 
@@ -37,9 +60,16 @@ class FakeNats {
     return JSON.stringify({ type: "ack" });
   }
 
-  emit(subject: string, data: string): void {
+  emit(subject: string, data: string, ack: () => void = () => {}): void {
+    const control: DurableMessageControl = {
+      streamSequence: 1,
+      deliverySequence: 1,
+      ack,
+      nak: () => {},
+      term: () => {},
+    };
     for (const subscription of this.subscriptions) {
-      if (matches(subscription.subject, subject)) subscription.callback(subject, data);
+      if (matches(subscription.subject, subject)) subscription.callback(subject, data, control);
     }
   }
   async close(): Promise<void> {
@@ -157,6 +187,7 @@ function config(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
+    repos: ["acme/widgets"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 4,
     workerBudget: 6,
@@ -779,7 +810,7 @@ describe("startDaemon", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ project: "acme1" });
       expect(nats.subscriptions.map((subscription) => subscription.subject)).toEqual([
-        "notifications.github.>",
+        "notifications.github.acme.widgets.>",
         "notifications.slack.*.*.mention",
         "notifications.envoy.exceptions.notifications.role.>",
       ]);
@@ -1008,7 +1039,9 @@ describe("startDaemon", () => {
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
         readPluginManifest: async () => validLegionPluginManifest,
-        envoyPublish: async () => {},
+        envoyPublish: async () => {
+          throw new Error("listener down");
+        },
         fetchGitHubProjectItems: async () => ({
           items: [],
           excludedNullContentItems: 0,
@@ -1034,7 +1067,25 @@ describe("startDaemon", () => {
     });
 
     try {
-      nats.emit("notifications.github.acme.widgets.issue.1.comment", "not JSON");
+      // A well-formed envelope whose durable processing fails (the publish
+      // rejects) is nak'd for redelivery — a genuine, still-pending failure
+      // that surfaces through drain()/stop(), unlike a malformed envelope
+      // (which is termed and resolves normally; see events.test.ts's
+      // poison-message coverage).
+      nats.emit(
+        "notifications.github.acme.widgets.mention",
+        JSON.stringify({
+          event_id: "mention-1",
+          source: "github",
+          source_event_id: "mention-1",
+          topic: "notifications.github.acme.widgets.mention",
+          dedupe_key: "dedupe-mention-1",
+          issued_at: 1_000,
+          payload_summary: "mention",
+          payload: JSON.stringify({ text: "@legion please investigate" }),
+          trace_id: "trace-mention-1",
+        })
+      );
 
       await expect(daemon.stop()).rejects.toThrow();
       expect(nats.closed).toBe(true);
@@ -1044,6 +1095,53 @@ describe("startDaemon", () => {
     } finally {
       daemon.server.stop();
       await nats.close();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a second daemon for the same project's state directory while the first is running", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const daemonDeps = {
+      loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+      saveState: async () => {},
+      createNatsTransport: async () => new FakeNats(),
+      runner: async () => ({
+        stdout: "[]",
+        stderr: "LEGION_OMP_AGENTS=available\n",
+        exitCode: 0,
+      }),
+      resolveDaemonEnvironment: async () => daemonEnvironment,
+      statPrompt: async () => {},
+      envoyPublish: async () => {},
+      fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
+      tokenManager: {
+        getToken: async () => ({
+          token: "test-token",
+          expiresAt: "2026-08-25T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "1+legion-implement[bot]@users.noreply.github.com",
+          },
+        }),
+      },
+      setTimeout: () => 1 as never,
+      clearTimeout: () => {},
+      setInterval: () => 1 as never,
+      clearInterval: () => {},
+      onSignal: () => {},
+      exit: () => {},
+      now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+    };
+
+    const first = await startDaemon(daemonConfig, { deps: daemonDeps });
+    try {
+      await expect(startDaemon(daemonConfig, { deps: daemonDeps })).rejects.toThrow(
+        `Legion daemon already running for this project (pid ${process.pid}`
+      );
+    } finally {
+      first.server.stop();
+      await first.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });

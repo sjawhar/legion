@@ -16,17 +16,25 @@ import {
 
 const config = daemonConfig();
 
+// Each call gets a fresh event_id, matching a real Envoy delivery (every
+// notification gets a unique id): content-level duplicate/staleness
+// detection (classifySettlement) is what these tests actually exercise,
+// and it is unaffected by the event_id's value.
+let nextEventId = 0;
+
 function envelope(payload: Record<string, unknown>): string {
+  nextEventId += 1;
+  const eventId = `checks-${nextEventId}`;
   return JSON.stringify({
-    event_id: "checks-1",
+    event_id: eventId,
     source: "github",
-    source_event_id: "checks-1",
+    source_event_id: eventId,
     topic: "notifications.github.acme.widgets.pr.7.checks",
-    dedupe_key: "dedupe-checks-1",
+    dedupe_key: `dedupe-${eventId}`,
     issued_at: 0,
     payload_summary: "checks settled",
     payload: JSON.stringify(payload),
-    trace_id: "trace-checks-1",
+    trace_id: `trace-${eventId}`,
   });
 }
 

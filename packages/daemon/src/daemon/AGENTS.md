@@ -1,6 +1,8 @@
 # Daemon Module
 
-The daemon is Legion's durable coordinator. It consumes webhook envelopes from core NATS, persists `LegionState`, publishes derived role events through Envoy, and owns the tmux root-process lifecycle.
+The daemon is Legion's durable coordinator. It consumes webhook envelopes from core NATS and a durable per-repo JetStream consumer, persists `LegionState`, publishes derived role events through Envoy, and owns the tmux root-process lifecycle.
+
+**Operational contract:** the daemon must run under a supervisor that restarts it on a non-zero exit — tmux alone is not one, and a durable-lane failure after a reducer has mutated live state exits the process deliberately (see `events.ts`'s `fatal` hook) expecting exactly that restart. Exactly one daemon may run per project at a time: `instance-lock.ts` enforces this with a pidfile lock scoped to `state_dir`, so every daemon for a project must share the same `state_dir`.
 
 ## HTTP API
 
@@ -21,7 +23,7 @@ The localhost-only Legion API lives in `api.ts`.
 | --- | --- |
 | `index.ts` | Boots state, core-NATS intake, process manager, API, resync, linger expiry, and signal persistence. |
 | `config.ts` | Validates file and environment lifecycle configuration. |
-| `events.ts` | Routes raw webhook envelopes through pure reducers, executes effects, and persists unacknowledged role delivery for redelivery. |
+| `events.ts` | Routes raw webhook envelopes through pure reducers and executes effects; the core-NATS role lanes persist unacknowledged deliveries for redelivery, while the durable JetStream lane dispatches every effect and saves before acking, going fatal (not nak) on any failure past the reducer. |
 | `processes.ts` | Admission, tmux root/controller spawning, worker exception recovery, resurrection, and linger. |
 | `api.ts` | Localhost extension/controller write surface and session-bound credential grants. |
 | `legion-state.ts` | Strict versioned state schema and atomic persistence. |

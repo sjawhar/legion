@@ -6,19 +6,16 @@ import {
   roleToken,
 } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
-import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
+import type {
+  Effect,
+  IssueNode,
+  LegionEventPayload,
+  LegionState,
+  PrState,
+  TreeState,
+} from "./legion-state";
 
-export interface LegionEventPayload {
-  type: string;
-  [key: string]: unknown;
-}
-
-export type Effect =
-  | { kind: "publish"; role: string; payload: LegionEventPayload }
-  | { kind: "controller"; payload: LegionEventPayload }
-  | { kind: "probe"; tree: IssueKey }
-  | { kind: "linger"; tree: IssueKey }
-  | { kind: "approval-status"; repo: string; pr: number; sha: string };
+export type { Effect, LegionEventPayload } from "./legion-state";
 
 export interface EnvelopeJson {
   event_id: string;
@@ -698,6 +695,19 @@ function subIssue(
   const parent = parentKey ? state.issues[parentKey] : undefined;
   if (!parentKey || !childKey || !parent) return [];
 
+  const parentUpdatedAt = updatedAt(rawParent);
+  if (
+    parentUpdatedAt !== undefined &&
+    parent.updatedAt !== undefined &&
+    parentUpdatedAt < parent.updatedAt
+  ) {
+    console.debug(
+      `[legion] ignored stale sub_issue event for ${parentKey}: parent_issue.updated_at is older than the last applied event`
+    );
+    return [];
+  }
+  if (parentUpdatedAt !== undefined) parent.updatedAt = parentUpdatedAt;
+
   if (payload.action === "sub_issue_added") {
     // Never adopt a dispatch thread as a child (see isDispatchThread).
     if (isDispatchThread(rawChild.labels)) return [];
@@ -751,6 +761,19 @@ function issueEvent(
   const key = repo && number !== undefined ? keyFor(repo, number) : undefined;
   const node = key ? state.issues[key] : undefined;
   if (!key || !node) return [];
+
+  const issueUpdatedAt = updatedAt(raw);
+  if (
+    issueUpdatedAt !== undefined &&
+    node.updatedAt !== undefined &&
+    issueUpdatedAt < node.updatedAt
+  ) {
+    console.debug(
+      `[legion] ignored stale issue event for ${key}: issue.updated_at is older than the last applied event`
+    );
+    return [];
+  }
+  if (issueUpdatedAt !== undefined) node.updatedAt = issueUpdatedAt;
 
   if (payload.action === "labeled" || payload.action === "unlabeled") {
     const label = stringValue(asRecord(payload.label)?.name);

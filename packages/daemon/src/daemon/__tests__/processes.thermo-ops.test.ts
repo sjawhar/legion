@@ -17,6 +17,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "/opt/omp",
     boardProjectIds: [],
+    repos: ["sjawhar/legion"],
     appLogins: [],
     admissionCap: 1,
     workerBudget: 5,

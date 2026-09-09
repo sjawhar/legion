@@ -24,6 +24,7 @@ function config(): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x omp",
     boardProjectIds: [],
+    repos: ["acme/widgets"],
     appLogins: [],
     admissionCap: 1,
     workerBudget: 1,
@@ -48,6 +49,7 @@ it("refuses to start a human merge gate with no resolvable GitHub App login", as
         saveState: async () => {},
         createNatsTransport: async () => ({
           subscribe: () => () => {},
+          consumeDurable: () => () => {},
           publish: () => {},
           request: async () => JSON.stringify({ type: "ack" }),
           ready: async () => {},
