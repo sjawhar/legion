@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { cmdGh } from "../index";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { cmdCheckConfig, cmdGh } from "../index";
 
 describe("legion gh", () => {
   it("redeems the worker-extension grant only into the gh child environment", async () => {
@@ -52,6 +55,58 @@ describe("legion gh", () => {
         message: expect.stringContaining("worker extension"),
         code: 1,
       })
+    );
+  });
+});
+
+describe("legion start --check-config", () => {
+  it("validates github_apps.<role>.private_key_command without executing it", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
+    const marker = path.join(dir, "spawned");
+    const configPath = path.join(dir, "legion.yaml");
+    fs.writeFileSync(
+      configPath,
+      [
+        "project: acme/99",
+        "envoy_url: http://127.0.0.1:9020",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "gates:",
+        "  design: off",
+        "  merge: human",
+        "github_apps:",
+        "  implement:",
+        '    app_id: "1"',
+        `    private_key_command: "touch ${marker}; printf key"`,
+      ].join("\n")
+    );
+
+    await cmdCheckConfig(undefined, configPath);
+
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it("still rejects a github app with neither private_key nor private_key_command", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
+    const configPath = path.join(dir, "legion.yaml");
+    fs.writeFileSync(
+      configPath,
+      [
+        "project: acme/99",
+        "envoy_url: http://127.0.0.1:9020",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "gates:",
+        "  design: off",
+        "  merge: human",
+        "github_apps:",
+        "  implement:",
+        '    app_id: "1"',
+      ].join("\n")
+    );
+
+    await expect(cmdCheckConfig(undefined, configPath)).rejects.toThrow(
+      "github_apps.implement requires exactly one of private_key or private_key_command"
     );
   });
 });

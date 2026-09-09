@@ -44,7 +44,17 @@ export interface DaemonConfig {
 
 export interface LoadedConfigFile {
   fields: Record<string, unknown>;
-  warnings: string[];
+}
+
+export interface LoadConfigFileOptions {
+  /**
+   * When false, github_apps.<role>.private_key_command is validated for
+   * presence but never executed — the private key becomes the placeholder
+   * "(not executed)". Used by `legion start --check-config` so a config
+   * validation pass never runs an arbitrary shell command from the file.
+   * Defaults to true (the daemon always resolves real secrets).
+   */
+  resolveSecrets?: boolean;
 }
 
 export interface ResolveDaemonConfigOptions {
@@ -55,7 +65,6 @@ export interface ResolveDaemonConfigOptions {
 
 export interface ResolveDaemonConfigResult {
   config: DaemonConfig;
-  warnings: string[];
 }
 
 const CONFIG_ANY_KEY = Symbol("config-any-key");
@@ -74,12 +83,13 @@ const DEFAULT_MAX_RECURSION_DEPTH = 8;
 const DEFAULT_LINGER_HOURS = 72;
 const DEFAULT_MAX_FIX_ATTEMPTS = 3;
 const DEFAULT_RESYNC_INTERVAL_MS = 600_000;
-const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp";
+const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp";
 
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
   port: null,
   envoy_url: null,
+  dispatch_mcp_url: null,
   nats_urls: null,
   omp_invocation: null,
   board_project_ids: null,
@@ -195,17 +205,17 @@ function collectUnknownKeys(
   value: unknown,
   schema: ConfigSchema | null,
   pathParts: string[],
-  warnings: string[]
+  unknownKeys: string[]
 ): void {
   const parsed = UnknownRecordSchema.safeParse(value);
   if (!schema || !parsed.success) return;
   for (const [key, child] of Object.entries(parsed.data)) {
     const childSchema = Object.hasOwn(schema, key) ? schema[key] : schema[CONFIG_ANY_KEY];
     if (childSchema === undefined) {
-      warnings.push(`Unknown config key: ${[...pathParts, key].join(".")}`);
+      unknownKeys.push([...pathParts, key].join("."));
       continue;
     }
-    collectUnknownKeys(child, childSchema, [...pathParts, key], warnings);
+    collectUnknownKeys(child, childSchema, [...pathParts, key], unknownKeys);
   }
 }
 
@@ -228,7 +238,7 @@ function executePrivateKeyCommand(command: string, field: string): string {
   return privateKey;
 }
 
-function loadGitHubApps(value: unknown): GitHubAppsConfig | undefined {
+function loadGitHubApps(value: unknown, resolveSecrets: boolean): GitHubAppsConfig | undefined {
   if (value === undefined || value === null) return undefined;
   const parsedApps = UnknownRecordSchema.safeParse(value);
   if (!parsedApps.success) throw new Error("github_apps must be a mapping");
@@ -260,7 +270,9 @@ function loadGitHubApps(value: unknown): GitHubAppsConfig | undefined {
     if (inlineKey !== undefined && inlineKey !== "") {
       privateKey = inlineKey;
     } else if (command !== undefined && command !== "") {
-      privateKey = executePrivateKeyCommand(command, `github_apps.${role}.private_key_command`);
+      privateKey = resolveSecrets
+        ? executePrivateKeyCommand(command, `github_apps.${role}.private_key_command`)
+        : "(not executed)";
     } else {
       throw new Error(`github_apps.${role} requires a private key source`);
     }
@@ -315,7 +327,11 @@ function fileGitHubApps(fields: Record<string, unknown>): GitHubAppsConfig | und
   return parsed.success ? (parsed.data as GitHubAppsConfig) : undefined;
 }
 
-export function loadConfigFromFile(yamlText: string, configDir: string): LoadedConfigFile {
+export function loadConfigFromFile(
+  yamlText: string,
+  configDir: string,
+  options: LoadConfigFileOptions = {}
+): LoadedConfigFile {
   let parsed: unknown;
   try {
     parsed = parse(yamlText);
@@ -324,13 +340,16 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
       `Invalid YAML config: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-  if (parsed === undefined || parsed === null) return { fields: {}, warnings: [] };
+  if (parsed === undefined || parsed === null) return { fields: {} };
   const parsedRoot = UnknownRecordSchema.safeParse(parsed);
   if (!parsedRoot.success) throw new Error("Config file root must be a mapping");
   const config = parsedRoot.data;
 
-  const warnings: string[] = [];
-  collectUnknownKeys(config, CONFIG_SCHEMA, [], warnings);
+  const unknownKeys: string[] = [];
+  collectUnknownKeys(config, CONFIG_SCHEMA, [], unknownKeys);
+  if (unknownKeys.length > 0) {
+    throw new Error(unknownKeys.map((key) => `Unknown config key "${key}"`).join("; "));
+  }
   const fields: Record<string, unknown> = {};
 
   const project = readString(config.project, "project");
@@ -379,10 +398,10 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
   }
   const gates = parseGates(config.gates, "gates");
   if (gates !== undefined) fields.gates = gates;
-  const githubApps = loadGitHubApps(config.github_apps);
+  const githubApps = loadGitHubApps(config.github_apps, options.resolveSecrets ?? true);
   if (githubApps !== undefined) fields.githubApps = githubApps;
 
-  return { fields, warnings };
+  return { fields };
 }
 
 export function resolveDaemonConfig(
@@ -390,7 +409,6 @@ export function resolveDaemonConfig(
 ): ResolveDaemonConfigResult {
   const env = opts.env ?? {};
   const fields = opts.configFile?.fields ?? {};
-  const warnings = [...(opts.configFile?.warnings ?? [])];
 
   const legionId = resolveValue(
     opts.cliOverrides?.legionId,
@@ -512,6 +530,9 @@ export function resolveDaemonConfig(
   } as const);
   const parsedGates = parseGates(gates.value, "gates");
   if (!parsedGates) throw new Error("gates must be configured");
+  if (parsedGates.design !== "off" && boardProjectIds.value.length === 0) {
+    throw new Error("board_project_ids is required when the design gate is on");
+  }
   const githubApps = resolveValue(
     opts.cliOverrides?.githubApps,
     fileGitHubApps(fields),
@@ -552,7 +573,6 @@ export function resolveDaemonConfig(
       githubApps: githubApps.value,
       stateDir: stateDir.value,
     },
-    warnings,
   };
 }
 

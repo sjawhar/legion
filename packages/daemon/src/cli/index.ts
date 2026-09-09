@@ -12,6 +12,7 @@ import {
 import { defineCommand, runMain } from "citty";
 import {
   type DaemonConfig,
+  type LoadConfigFileOptions,
   type LoadedConfigFile,
   loadConfigFromFile,
   resolveDaemonConfig,
@@ -152,20 +153,33 @@ function parseHandoffData(raw: string): Record<string, unknown> {
 
 function loadStartConfig(
   project: string | undefined,
-  configPath: string | undefined
+  configPath: string | undefined,
+  options: LoadConfigFileOptions = {}
 ): DaemonConfig {
   let configFile: LoadedConfigFile | undefined;
   if (configPath) {
     const absolutePath = fs.realpathSync(configPath);
-    configFile = loadConfigFromFile(fs.readFileSync(absolutePath, "utf8"), fs.realpathSync("."));
+    configFile = loadConfigFromFile(
+      fs.readFileSync(absolutePath, "utf8"),
+      fs.realpathSync("."),
+      options
+    );
   } else if (fs.existsSync("legion.yaml")) {
-    configFile = loadConfigFromFile(fs.readFileSync("legion.yaml", "utf8"), process.cwd());
+    configFile = loadConfigFromFile(fs.readFileSync("legion.yaml", "utf8"), process.cwd(), options);
   }
   return resolveDaemonConfig({
     env: process.env,
     configFile,
     cliOverrides: project ? { legionId: project } : undefined,
   }).config;
+}
+
+export async function cmdCheckConfig(
+  project: string | undefined,
+  configPath: string | undefined
+): Promise<void> {
+  const config = loadStartConfig(project, configPath, { resolveSecrets: false });
+  console.log(`Config OK: project=${config.project}`);
 }
 
 async function cmdStart(
@@ -335,9 +349,19 @@ const startCommand = defineCommand({
   args: {
     project: { type: "positional", description: "GitHub project owner/number" },
     config: { type: "string", description: "Path to legion.yaml" },
+    checkConfig: {
+      type: "boolean",
+      default: false,
+      description: "Load and validate config, then exit without starting the daemon",
+    },
   },
-  run: ({ args }) =>
-    runCli(() => cmdStart(args.project as string | undefined, args.config as string | undefined)),
+  run: ({ args }) => {
+    const project = args.project as string | undefined;
+    const configPath = args.config as string | undefined;
+    return runCli(() =>
+      args.checkConfig ? cmdCheckConfig(project, configPath) : cmdStart(project, configPath)
+    );
+  },
 });
 
 const stopCommand = defineCommand({
