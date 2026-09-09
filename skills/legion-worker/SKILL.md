@@ -24,10 +24,12 @@ Your role token is not the issue key spelled out literally. The daemon encodes i
 `legion-<project>-<encoded-owner>__<encoded-repo>-<number>-<role>`, escaping `_`, `.`, and
 `-` within the owner and repo names (`_u`, `_d`, `_h`) so `__` is always the one safe
 separator. For example, project `acme`, issue `sjawhar/legion#41`, role `architect` encodes
-to `legion-acme-sjawhar__legion-41-architect`. Never hand-format one for another role: the
-daemon's boot response already gives you your own token, and the `roleToken` helper in
-`@legion/contracts` computes any other one exactly the way the daemon does — reuse a token
-you've already been given before recomputing it.
+to `legion-acme-sjawhar__legion-41-architect`. Never hand-format one for another role: your
+own role topic and your tree's architect's topic are stated at the end of your system
+prompt (a "Legion addressing" line the daemon appends), a sibling role's topic is yours
+with the trailing `-<role>` replaced, and the `roleToken` helper in `@legion/contracts`
+computes any other one exactly the way the daemon does — prefer a topic you've already
+been given before recomputing one.
 
 If the handshake fails (a rejected boot token, or a bootstrap failure after your role
 registered), the extension logs it and exits the process outright — it does not retry, and
@@ -165,10 +167,9 @@ The provisioned issue workspace configures `credential.helper` with the daemon's
 credential command, so `jj -R "$LEGION_WORKSPACE" git push` authenticates transparently
 through the same session capability. Never handle a token.
 
-Then create the pull request with the `github` tool's `pr_create` operation. The credential
-helper and `legion gh` provide the GitHub identity; never export, fetch, or replace a
-token. Other phases advance the existing branch rather than creating a replacement
-bookmark or PR.
+Then open the pull request with `legion gh -- pr create`. The credential helper and
+`legion gh` provide the GitHub identity; never export, fetch, or replace a token. Other
+phases advance the existing branch rather than creating a replacement bookmark or PR.
 
 ## PR body and merge-queue discipline
 

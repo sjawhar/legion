@@ -54,12 +54,44 @@ async function persistedTranscript(
   return { sessionFile, agentId };
 }
 
+// An architect delegates code work, but its prompt requires `legion handoff
+// write/complete` and `legion gh --` to report its own phase and touch GitHub.
+// Allow bash only for a single `legion ...` invocation: no chaining outside a
+// quoted argument. This is a conservative character scan, not a shell parser --
+// it rejects some legitimate quoting it can't reason about (nested quotes,
+// escapes) rather than risk letting a chained command through.
+function isSingleLegionCommand(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const trimmed = command.trim();
+  if (trimmed.length === 0) return false;
+  let quote: '"' | "'" | undefined;
+  for (const char of trimmed) {
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "\n" || char === ";" || char === "&" || char === "|") return false;
+  }
+  if (quote !== undefined) return false;
+  return trimmed.split(/\s+/, 1)[0] === "legion";
+}
+
 // Read by the daemon's startup probe (packages/daemon/src/daemon/index.ts,
 // verifyLegionPluginLoaded) to prove this extension actually loaded from an
 // ambient installed-plugin discovery -- not just that a manifest file exists,
 // which stays true even when the plugin is disabled or unregistered in OMP's
 // own plugin registry.
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
+
+/** Code-mutation tools blocked for an architect session (root or sub-architect) and a reviewer
+ * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`). */
+const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
+/** The merger verifies and reports only: no code mutation, and no further Legion spawns. */
+const MERGER_BLOCKED_TOOLS = [...CODE_MUTATION_TOOLS, "task"];
 
 export default function legionExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -366,35 +398,32 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
     const sessionID = context.sessionManager.getSessionId();
+    const active = capability?.sessionID === sessionID ? capability : undefined;
+    // `role === "architect"` covers both kinds: the root architect and a sub-architect (a
+    // phase worker with role "architect") both delegate all code work to phase workers.
     if (
-      capability !== undefined &&
-      capability.kind === "root-architect" &&
-      capability.sessionID === sessionID &&
-      ["edit", "write", "bash", "apply_patch"].includes(toolCall.toolName)
+      active?.role === "architect" &&
+      (CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
+        (toolCall.toolName === "bash" && !isSingleLegionCommand(toolCall.input.command)))
     ) {
       return { block: true, reason: "the architect delegates all code work to phase workers" };
     }
-    if (
-      capability !== undefined &&
-      capability.kind === "phase-worker" &&
-      capability.sessionID === sessionID
-    ) {
-      if (
-        capability.role === "reviewer" &&
-        ["edit", "write", "apply_patch"].includes(toolCall.toolName)
-      ) {
-        return { block: true, reason: "the reviewer does not modify the branch" };
+    // Only a phase-worker session (never the root or sub-architect kinds above) is further
+    // restricted by role below.
+    if (active?.kind === "phase-worker") {
+      if (active.role === "reviewer" && CODE_MUTATION_TOOLS.includes(toolCall.toolName)) {
+        return {
+          block: true,
+          reason: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
+        };
       }
-      if (
-        capability.role === "merger" &&
-        ["edit", "write", "apply_patch", "task"].includes(toolCall.toolName)
-      ) {
+      if (active.role === "merger" && MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)) {
         return { block: true, reason: "the merger only verifies and reports" };
       }
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
       return undefined;
-    if (capability === undefined || capability.sessionID !== sessionID) {
+    if (active === undefined) {
       // A worker (root or phase) whose own boot handshake has not completed
       // yet has no capability to mint a grant with. The controller is
       // exempt: the daemon also sets LEGION_ROLE=controller on its process,
@@ -409,10 +438,10 @@ export default function legionExtension(pi: PiApi): void {
     }
     try {
       const grant = await roleDaemon().grant({
-        tree: capability.tree,
-        issue: capability.issue,
+        tree: active.tree,
+        issue: active.issue,
         sessionId: sessionID,
-        secret: capability.secret,
+        secret: active.secret,
       });
       const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
       const workerBin = await installWorkerGhShim(stateDir);

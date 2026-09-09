@@ -13,6 +13,7 @@ import {
 import type { DaemonConfig } from "../config";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import {
+  addressingFragment,
   type ControlDirective,
   type ExceptionInfo,
   ProcessManager,
@@ -442,7 +443,7 @@ describe("ProcessManager", () => {
         "PATH=/full/bin:/usr/bin",
         "-e",
         "DISPATCH_MCP_URL=http://127.0.0.1:18766/mcp",
-        `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-architect-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)"`,
+        `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-architect-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
@@ -677,7 +678,7 @@ describe("ProcessManager", () => {
     const controllerSocketPath = path.join(stateDir, "workers", "controller.sock");
     const windows = commands.filter((command) => command[1] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
-      `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)"`,
+      `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       `cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
     ]);
     expect(windows.map((command) => command.includes(`PATH=${panePath}`))).toEqual([true, true]);
@@ -1263,7 +1264,7 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "42-architect-edb483d7.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
+      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`
     );
   });
 
@@ -1294,7 +1295,7 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "42-architect-edb483d7.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
+      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`
     );
   });
 
@@ -2416,7 +2417,7 @@ describe("ProcessManager", () => {
       "tester.md"
     );
     expect(windowCommand.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-tester-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${promptPath})"`
+      `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-tester-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${promptPath})" --append-system-prompt '${addressingFragment("omp", root, root, "tester").replaceAll("'", "'\\''")}'`
     );
     const claim = managedState.roles[roleToken("omp", root, "tester")];
     if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");
@@ -2428,6 +2429,60 @@ describe("ProcessManager", () => {
       tmuxPaneId: "%201",
       socketPath: path.join(stateDir, "workers", "42-tester-edb483d7.sock"),
     });
+  });
+
+  it("appends a second --append-system-prompt naming the launched process's own role topic and its tree's architect topic", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          return { stdout: "@99 %201 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnWorker(root, root, "implementer", "implement #41");
+
+    const workerLaunch = commands.find(
+      (command) => command[0] === "tmux" && command[1] === "new-window"
+    );
+    if (!workerLaunch) throw new Error("worker spawn did not open a tmux window");
+    const workerArgv = workerLaunch.at(-1) ?? "";
+    expect(workerArgv).toContain(roleTopic(roleToken("omp", root, "implementer")));
+    expect(workerArgv).toContain(roleTopic(roleToken("omp", root, "architect")));
+
+    const { manager: rootProcesses, commands: rootCommands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+    });
+    await rootProcesses.spawnRoot(root);
+
+    const rootLaunch = rootCommands.find(
+      (command) => command[0] === "tmux" && command[1] === "new-window"
+    );
+    if (!rootLaunch) throw new Error("root spawn did not open a tmux window");
+    const rootArgv = rootLaunch.at(-1) ?? "";
+    expect(rootArgv).toContain(roleTopic(roleToken("omp", root, "architect")));
   });
 
   it("splits a second worker on the same issue into the window the first worker just opened", async () => {

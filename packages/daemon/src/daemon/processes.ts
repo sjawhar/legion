@@ -138,6 +138,24 @@ function workerSocketBasename(issue: IssueKey, role: LegionRole): string {
   return `${parsed.number}-${role}-${hash}`;
 }
 
+/** Builds the second `--append-system-prompt` fragment every root and phase-worker process gets,
+ * so the model can address the architect (and derive a sibling's topic) without hand-encoding a
+ * `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built token silently misses. */
+export function addressingFragment(
+  project: string,
+  treeKey: IssueKey,
+  issue: IssueKey,
+  role: LegionRole
+): string {
+  const ownTopic = roleTopic(roleToken(project, issue, role));
+  const architectTopic = roleTopic(roleToken(project, treeKey, "architect"));
+  return (
+    `Legion addressing: your role topic is \`${ownTopic}\`; your tree's architect is ` +
+    `\`${architectTopic}\`; a sibling role on your issue is your topic with the trailing ` +
+    "`-<role>` replaced."
+  );
+}
+
 function shellPath(value: string): string {
   return /[^A-Za-z0-9_./:-]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
 }
@@ -939,11 +957,18 @@ export class ProcessManager {
       PATH: this.deps.panePath,
       DISPATCH_MCP_URL: this.deps.config.dispatchMcpUrl,
     });
+    const addressingPrompt = addressingFragment(
+      this.deps.state.project,
+      tree.root,
+      tree.root,
+      "architect"
+    );
     const locator = await this.launchShimmedProcess(
       tree.root,
       "architect",
       workspace.workspaceDir,
       promptPath,
+      addressingPrompt,
       env,
       priorSessionFile,
       "resurrecting"
@@ -1057,13 +1082,14 @@ export class ProcessManager {
     role: LegionRole,
     workspaceDir: string,
     promptPath: string,
+    addressingPrompt: string,
     envPairs: string[],
     resumeSessionFile: string | undefined,
     logVerb: string
   ): Promise<WorkerLocator> {
     await (this.deps.statPrompt ?? stat)(promptPath);
     const resumeArgument = await this.computeResumeArgument(issue, resumeSessionFile, logVerb);
-    const innerCommand = `${this.deps.ompInvocation}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
+    const innerCommand = `${this.deps.ompInvocation}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
     const socketPath = await this.prepareSocket(workerSocketBasename(issue, role));
     const shellCommand = this.shimmedShellCommand(workspaceDir, socketPath, innerCommand);
 
@@ -1134,11 +1160,13 @@ export class ProcessManager {
         PATH: this.deps.panePath,
         DISPATCH_MCP_URL: this.deps.config.dispatchMcpUrl,
       });
+      const addressingPrompt = addressingFragment(this.deps.state.project, treeKey, issue, role);
       const locator = await this.launchShimmedProcess(
         issue,
         role,
         workspace.workspaceDir,
         promptPath,
+        addressingPrompt,
         env,
         resumeSessionFile,
         "respawning"

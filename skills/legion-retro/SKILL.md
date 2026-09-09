@@ -19,7 +19,7 @@ retrospective's durable output.
 3. Run this retro: commit durable learnings to `docs/solutions/` and post the issue comment.
    Retro writes **no `.legion` file**, so it never re-dirties the cleaned handoff tree.
 4. Sami approves the final reviewed head.
-5. The merger squash-merges and pushes nothing.
+5. The merger verifies the approved head, publishes `READY`, and pushes nothing; the merge queue merges.
 
 Do not start retro before step 2, skip it because the change seems mechanical, or merge before
 steps 3 and 4. The design gate is not a substitute for this final merge gate.
