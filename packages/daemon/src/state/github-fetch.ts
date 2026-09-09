@@ -24,6 +24,7 @@ interface GitHubProjectItemNode {
     | {
         __typename: "Issue" | "PullRequest" | "DraftIssue";
         number?: number;
+        updatedAt?: string;
         title?: string;
         url?: string;
         repository?: {
@@ -104,6 +105,7 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
             __typename
             ... on Issue {
               number
+              updatedAt
               title
               url
               repository { nameWithOwner }
@@ -162,6 +164,7 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
             __typename
             ... on Issue {
               number
+              updatedAt
               title
               url
               repository { nameWithOwner }
@@ -209,6 +212,8 @@ function nodeToProjectItem(node: GitHubProjectItemNode): Record<string, unknown>
   if (typename === "Issue" || typename === "PullRequest") {
     itemContent.type = typename;
     itemContent.number = content.number;
+    // Snake-cased to match the webhook payload shape `ingress()`/`issueEvent()` expect (`raw.updated_at`).
+    itemContent.updated_at = content.updatedAt;
     itemContent.title = content.title;
     itemContent.url = content.url;
     itemContent.repository = content.repository?.nameWithOwner;

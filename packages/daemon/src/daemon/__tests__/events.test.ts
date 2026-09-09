@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "bun:test";
 import { controllerToken, formatIssueKey, type IssueKey, roleTopic } from "@legion/contracts";
 import { overseerCatchup } from "../catchup";
-import { type EventPumpDeps, startEventPump, type UndeliverableInfo } from "../events";
+import {
+  type EventPumpDeps,
+  startEventPump,
+  truncateTermReason,
+  type UndeliverableInfo,
+} from "../events";
 import type { LegionState } from "../legion-state";
 import {
   checkPr,
@@ -1518,6 +1523,10 @@ describe("core-NATS event pump", () => {
       await expect(pump.drain()).rejects.toThrow();
       expect(acks).toEqual([]);
       expect(state.controllerHeldEvents).toEqual([]);
+      // publishRoleDirect no longer logs its own copy of the failure —
+      // only processDurableMessage's catch does, so this fires once, not
+      // twice, for the exact same underlying rejection.
+      expect(errorLog).toHaveBeenCalledTimes(1);
     } finally {
       errorLog.mockRestore();
       pump.stop();
@@ -1621,5 +1630,30 @@ describe("core-NATS event pump", () => {
       log.mockRestore();
       pump.stop();
     }
+  });
+});
+
+describe("truncateTermReason", () => {
+  it("leaves a reason under the byte cap untouched", () => {
+    const reason = "tmux new-window failed";
+    expect(truncateTermReason(reason)).toBe(reason);
+  });
+
+  it("caps the total UTF-8 byte length at 1024, including the appended ellipsis", () => {
+    const reason = "x".repeat(2_000);
+    const truncated = truncateTermReason(reason);
+    expect(new TextEncoder().encode(truncated).length).toBe(1_024);
+    expect(truncated.endsWith("…")).toBe(true);
+    expect(truncated).toBe(`${"x".repeat(1_021)}…`);
+  });
+
+  it("caps the byte length even when trimming crosses a multi-byte character boundary", () => {
+    // "é" is 2 UTF-8 bytes; a naive character-count truncation (1024 chars
+    // + a 3-byte ellipsis) would overshoot 1024 bytes here.
+    const reason = "é".repeat(2_000);
+    const truncated = truncateTermReason(reason);
+    const bytes = new TextEncoder().encode(truncated).length;
+    expect(bytes).toBeLessThanOrEqual(1_024);
+    expect(truncated.endsWith("…")).toBe(true);
   });
 });

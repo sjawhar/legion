@@ -62,6 +62,7 @@ function boardIssue(item: Record<string, unknown>):
       number: number;
       open: boolean;
       erroring: boolean;
+      updatedAt?: string;
     }
   | undefined {
   const content = record(item.content);
@@ -80,12 +81,14 @@ function boardIssue(item: Record<string, unknown>):
 
   const projectStatus = item.status;
   const status = typeof projectStatus === "string" ? projectStatus.toLowerCase() : "";
+  const updatedAt = typeof content.updated_at === "string" ? content.updated_at : undefined;
   return {
     issue: formatIssueKey(owner, repo, number),
     repository,
     number,
     open: status !== "done" && status !== "closed",
     erroring: status.includes("error") || status.includes("failed"),
+    ...(updatedAt !== undefined ? { updatedAt } : {}),
   };
 }
 
@@ -101,7 +104,7 @@ function boardLabels(item: Record<string, unknown>): Set<string> | undefined {
 }
 
 function labeledBoardIssue(
-  board: { issue: IssueKey; repository: string; number: number },
+  board: { issue: IssueKey; repository: string; number: number; updatedAt?: string },
   action: "labeled" | "unlabeled",
   label: string,
   now: number
@@ -111,7 +114,7 @@ function labeledBoardIssue(
     issued_at: now,
     payload: {
       action,
-      issue: { number: board.number },
+      issue: { number: board.number, updated_at: board.updatedAt },
       label: { name: label },
       repository: { full_name: board.repository },
     },

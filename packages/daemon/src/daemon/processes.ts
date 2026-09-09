@@ -23,6 +23,24 @@ const MAX_LAUNCH_FAILURES = 3;
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../pi-envoy");
 const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, "../cli/index.ts");
 
+/**
+ * Wraps a `saveState` rejection that occurs after `spawnTree` has already
+ * succeeded (generation/locator/launchFailures already reset to reflect a
+ * real, running tmux window). Distinguishes this from a genuine launch
+ * failure so `startRoot` never rolls back or requeues on it — that spawn
+ * is not the problem, and doing so would orphan the window it just
+ * created. Left to propagate instead, so a caller running this inside a
+ * durable transaction (the linger effect's promotion, via
+ * `advancePromotionSweep`/`startRoot`) fails and goes fatal, consistent
+ * with every other durable effect whose post-mutation save fails.
+ */
+class SpawnPersistenceFailure extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "SpawnPersistenceFailure";
+  }
+}
+
 type Redelivery = { topic: string; payload: string; eventId: string };
 
 export type ControlDirective =
@@ -159,6 +177,25 @@ export class ProcessManager {
   async reconcileAdmission(): Promise<void> {
     const admission = this.deps.state.admission;
     admission.cap = this.deps.config.admissionCap;
+
+    // An "active" tree with no recorded locator never finished spawning
+    // before the daemon last stopped: advancePromotionSweep persists the
+    // promotion before startRoot/spawnRoot ever records a locator, so a
+    // crash in that exact window leaves this on disk. Demote it back to
+    // queued so the promotion loop below re-spawns it, instead of leaving
+    // it silently consuming a slot with nothing running forever.
+    for (const issue of [...admission.active]) {
+      const tree = this.deps.state.trees[issue];
+      if (tree?.status !== "active" || tree.locator) continue;
+      const activeIndex = admission.active.indexOf(issue);
+      if (activeIndex !== -1) admission.active.splice(activeIndex, 1);
+      tree.status = "queued";
+      if (!admission.queue.includes(issue)) admission.queue.push(issue);
+      console.error(
+        `[legion] demoted ${issue} from active to queued at boot: no recorded locator (a prior spawn never completed before the daemon stopped)`
+      );
+    }
+
     let queued = admission.queue.length;
     while (admission.active.length < admission.cap && queued > 0) {
       await this.beginPromotionSweep();
@@ -265,10 +302,6 @@ export class ProcessManager {
     tree.generation += 1;
     try {
       await this.spawnTree(tree, resume, resumeSessionFile);
-      tree.launchFailures = 0;
-      this.settlePromotionSpawn(issue);
-      if (this.promotionSweep?.inFlight === 0) this.promotionSweep = undefined;
-      await this.deps.saveState();
     } catch (error) {
       tree.generation = priorGeneration;
       if (priorLocator) tree.locator = priorLocator;
@@ -296,6 +329,20 @@ export class ProcessManager {
       else await this.beginPromotionSweep(issue);
       await this.deps.saveState();
       throw error;
+    }
+
+    // The spawn itself succeeded — a real tmux window is running. A save
+    // failure past this point is not a launch failure: rolling back
+    // generation/locator/launchFailures here would orphan that window
+    // (untracked, indistinguishable from a leaked stale process). Propagate
+    // it distinctly instead (see `SpawnPersistenceFailure`).
+    tree.launchFailures = 0;
+    this.settlePromotionSpawn(issue);
+    if (this.promotionSweep?.inFlight === 0) this.promotionSweep = undefined;
+    try {
+      await this.deps.saveState();
+    } catch (error) {
+      throw new SpawnPersistenceFailure(error);
     }
   }
 
@@ -527,6 +574,7 @@ export class ProcessManager {
 
   private startRoot(issue: IssueKey): Promise<void> {
     return this.spawnRoot(issue).catch((error) => {
+      if (error instanceof SpawnPersistenceFailure) throw error;
       console.error(`[legion] failed to spawn ${issue}:`, error);
     });
   }

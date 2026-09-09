@@ -31,7 +31,18 @@ const GITHUB_STREAM = "ENVOY_NOTIFICATIONS";
 const DURABLE_NAK_DELAY_MS = 30_000;
 
 /** Bounds a JetStream `term` reason so an oversized reducer/parse error never fails the term frame itself. */
-const MAX_TERM_REASON_LENGTH = 1_024;
+const MAX_TERM_REASON_BYTES = 1_024;
+const TERM_REASON_ELLIPSIS = "…";
+const textEncoder = new TextEncoder();
+
+/** Truncates `reason` so its UTF-8 byte length, including the appended ellipsis, never exceeds `MAX_TERM_REASON_BYTES`. */
+export function truncateTermReason(reason: string): string {
+  if (textEncoder.encode(reason).length <= MAX_TERM_REASON_BYTES) return reason;
+  const budget = MAX_TERM_REASON_BYTES - textEncoder.encode(TERM_REASON_ELLIPSIS).length;
+  let truncated = reason.slice(0, budget);
+  while (textEncoder.encode(truncated).length > budget) truncated = truncated.slice(0, -1);
+  return `${truncated}${TERM_REASON_ELLIPSIS}`;
+}
 
 /** Logs a poison durable message (never redeliverable) and terminates it so JetStream never retries it. */
 function poisonMessage(
@@ -40,8 +51,7 @@ function poisonMessage(
   reason: string,
   eventId?: string
 ): void {
-  const truncatedReason =
-    reason.length > MAX_TERM_REASON_LENGTH ? `${reason.slice(0, MAX_TERM_REASON_LENGTH)}…` : reason;
+  const truncatedReason = truncateTermReason(reason);
   console.error(
     `[legion] poison durable message on ${subject} (stream_seq=${control.streamSequence} delivery_seq=${control.deliverySequence}${eventId ? ` event_id=${eventId}` : ""}): ${truncatedReason}`
   );
@@ -479,26 +489,12 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    * rejection (including a 404 no holder) so the durable message naks and
    * retries: unlike a reducer-derived effect, a mention has no persisted
    * state to fall back on if it's lost — this is the only durability
-   * mechanism it gets.
+   * mechanism it gets. Failure logging happens once, in
+   * `processDurableMessage`'s catch (which already distinguishes a
+   * no-holder 404 from every other failure) — not here.
    */
-  const publishRoleDirect = async (
-    role: string,
-    payloadJson: string,
-    eventId: string
-  ): Promise<void> => {
-    try {
-      await deps.envoyPublish(roleTopic(role), payloadJson);
-    } catch (error) {
-      if (isNoHolderError(error)) {
-        console.error(`legion: no holder for ${role}, leaving ${eventId} for redelivery`);
-      } else {
-        console.error(
-          `[legion] durable publish to ${role} failed; leaving event un-acked for redelivery: ${error}`
-        );
-      }
-      throw error;
-    }
-  };
+  const publishRoleDirect = (role: string, payloadJson: string): Promise<void> =>
+    deps.envoyPublish(roleTopic(role), payloadJson);
 
   const notifyUndeliverable = async (
     role: string,
@@ -709,8 +705,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       // holder): there is nothing else that will ever re-derive it.
       await publishRoleDirect(
         controllerToken(deps.state.project),
-        typeof envelope.payload === "string" ? envelope.payload : "{}",
-        envelope.event_id
+        typeof envelope.payload === "string" ? envelope.payload : "{}"
       );
     } else {
       const rawPayload = recordPayload(envelope);

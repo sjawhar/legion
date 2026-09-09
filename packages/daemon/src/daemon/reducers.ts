@@ -6,16 +6,20 @@ import {
   roleToken,
 } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
-import type {
-  Effect,
-  IssueNode,
-  LegionEventPayload,
-  LegionState,
-  PrState,
-  TreeState,
-} from "./legion-state";
+import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
 
-export type { Effect, LegionEventPayload } from "./legion-state";
+export interface LegionEventPayload {
+  type: string;
+  [key: string]: unknown;
+}
+
+/** An effect a reducer derives from one event. For a durable GitHub event, every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). */
+export type Effect =
+  | { kind: "publish"; role: string; payload: LegionEventPayload }
+  | { kind: "controller"; payload: LegionEventPayload }
+  | { kind: "probe"; tree: IssueKey }
+  | { kind: "linger"; tree: IssueKey }
+  | { kind: "approval-status"; repo: string; pr: number; sha: string };
 
 export interface EnvelopeJson {
   event_id: string;
@@ -588,6 +592,17 @@ function updatedAt(raw: JsonRecord): number | undefined {
   return Number.isNaN(timestamp) ? undefined : timestamp;
 }
 
+/**
+ * True when `incoming` is strictly older than `applied`, the fence's
+ * last-recorded observation — an out-of-order redelivery (or, for a PR's
+ * `headUpdatedAt`/a board resync snapshot, an older read) that must not
+ * overwrite state a newer event already established. Undefined on either
+ * side means there is no fence to apply, so it is never stale.
+ */
+function isStale(incoming: number | undefined, applied: number | undefined): boolean {
+  return incoming !== undefined && applied !== undefined && incoming < applied;
+}
+
 function registerPr(
   state: LegionState,
   repo: string,
@@ -618,6 +633,40 @@ function registerPr(
   };
   state.prs[prKey] = pr;
   if (branch) state.prByBranch[`${repo}@${branch}`] = prKey;
+  return pr;
+}
+
+/**
+ * Registers a new `PrState` for an `opened` event or a `synchronize` that
+ * finds no existing record — or returns `undefined` without registering
+ * anything for a redelivery or stale observation: an existing record at
+ * the same or an older clock (`registerPr` would wipe the CI/review state
+ * a settlement already established on it — `opened` fires exactly once
+ * per PR, so a later delivery at the same clock is that same event
+ * redelivered, not a new observation), or a clock older than this PR's
+ * close tombstone (an older `opened`/`synchronize` resurrecting a PR this
+ * state already recorded as closed). Clears the tombstone on success.
+ */
+function registerPrFenced(
+  state: LegionState,
+  repo: string,
+  number: number,
+  branch: string | undefined,
+  sha: string | undefined,
+  headUpdatedAt: number | undefined
+): PrState | undefined {
+  const prKey = `${repo}#${number}`;
+  const existing = state.prs[prKey];
+  if (
+    headUpdatedAt !== undefined &&
+    existing?.headUpdatedAt !== undefined &&
+    headUpdatedAt <= existing.headUpdatedAt
+  ) {
+    return undefined;
+  }
+  if (isStale(headUpdatedAt, state.prTombstones[prKey])) return undefined;
+  const pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
+  if (pr) delete state.prTombstones[prKey];
   return pr;
 }
 
@@ -661,11 +710,7 @@ function ingress(
 
   const existing = state.issues[key];
   const rawUpdatedAt = updatedAt(raw);
-  if (
-    rawUpdatedAt !== undefined &&
-    existing?.updatedAt !== undefined &&
-    rawUpdatedAt < existing.updatedAt
-  ) {
+  if (isStale(rawUpdatedAt, existing?.updatedAt)) {
     console.debug(
       `[legion] ignored stale ingress event for ${key}: issue.updated_at is older than the last applied event`
     );
@@ -702,8 +747,7 @@ function ingress(
 function subIssue(
   state: LegionState,
   payload: JsonRecord,
-  envelope: EnvelopeJson,
-  requireTimestamp: boolean
+  envelope: EnvelopeJson
 ): Effect[] | undefined {
   const rawParent = asRecord(payload.parent_issue);
   const rawChild = asRecord(payload.sub_issue);
@@ -718,16 +762,12 @@ function subIssue(
   if (!parentKey || !childKey || !parent) return [];
 
   const parentUpdatedAt = updatedAt(rawParent);
-  if (requireTimestamp && parentUpdatedAt === undefined) {
+  if (parentUpdatedAt === undefined) {
     throw new Error(
       `sub_issue event for ${parentKey} is missing a parseable parent_issue.updated_at (GitHub always sends one; payload is malformed)`
     );
   }
-  if (
-    parentUpdatedAt !== undefined &&
-    parent.updatedAt !== undefined &&
-    parentUpdatedAt < parent.updatedAt
-  ) {
+  if (isStale(parentUpdatedAt, parent.updatedAt)) {
     console.debug(
       `[legion] ignored stale sub_issue event for ${parentKey}: parent_issue.updated_at is older than the last applied event`
     );
@@ -780,8 +820,7 @@ function subIssue(
 function issueEvent(
   state: LegionState,
   payload: JsonRecord,
-  envelope: EnvelopeJson,
-  requireTimestamp: boolean
+  envelope: EnvelopeJson
 ): Effect[] | undefined {
   const raw = asRecord(payload.issue);
   if (!raw || payload.comment !== undefined || raw.pull_request !== undefined) return undefined;
@@ -792,16 +831,12 @@ function issueEvent(
   if (!key || !node) return [];
 
   const issueUpdatedAt = updatedAt(raw);
-  if (requireTimestamp && issueUpdatedAt === undefined) {
+  if (issueUpdatedAt === undefined) {
     throw new Error(
       `issue event for ${key} is missing a parseable updated_at (GitHub always sends one; payload is malformed)`
     );
   }
-  if (
-    issueUpdatedAt !== undefined &&
-    node.updatedAt !== undefined &&
-    issueUpdatedAt < node.updatedAt
-  ) {
+  if (isStale(issueUpdatedAt, node.updatedAt)) {
     console.debug(
       `[legion] ignored stale issue event for ${key}: issue.updated_at is older than the last applied event`
     );
@@ -995,17 +1030,10 @@ function pullRequest(
   const branch = stringValue(payload.head_ref);
   const sha = stringValue(payload.head_sha);
   const headUpdatedAt = updatedAt(payload);
-  const tombstonedAt = state.prTombstones[prKey];
 
   if (payload.action === "opened") {
-    const existing = state.prs[prKey];
-    const priorClock = existing?.headUpdatedAt ?? tombstonedAt;
-    if (headUpdatedAt !== undefined && priorClock !== undefined && headUpdatedAt < priorClock) {
-      return [];
-    }
-    const pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
+    const pr = registerPrFenced(state, repo, number, branch, sha, headUpdatedAt);
     if (!pr) return [];
-    delete state.prTombstones[prKey];
     return routeActive(
       state,
       pr.key,
@@ -1016,21 +1044,11 @@ function pullRequest(
 
   let pr: PrState | undefined = state.prs[prKey];
   if (!pr && payload.action === "synchronize") {
-    if (headUpdatedAt !== undefined && tombstonedAt !== undefined && headUpdatedAt < tombstonedAt) {
-      return [];
-    }
-    pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
-    if (pr) delete state.prTombstones[prKey];
+    pr = registerPrFenced(state, repo, number, branch, sha, headUpdatedAt);
   }
   if (!pr) return [];
   if (payload.action === "synchronize") {
-    if (
-      headUpdatedAt !== undefined &&
-      pr.headUpdatedAt !== undefined &&
-      headUpdatedAt < pr.headUpdatedAt
-    ) {
-      return [];
-    }
+    if (isStale(headUpdatedAt, pr.headUpdatedAt)) return [];
     if (!sha) return [];
     if (pr.headSha === sha) {
       if (
@@ -1069,20 +1087,14 @@ export function reduceGithubEvent(
   if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/issue-")) return [];
   // Only pullRequest understands Envoy's normalized GitHub envelopes. The issue, issue-comment,
   // review, and projects_v2_item reducers still require raw GitHub nesting and ignore Envoy payloads.
-  // "resync" is the daemon's own sentinel topic for reducer input it
-  // reconstructs from a GitHub board/CI read, not an external webhook (see
-  // resync.ts's labeledBoardIssue/openedBoardIssue) — GitHub's updated_at
-  // contract on issue/sub_issue events applies only to real webhook
-  // deliveries, so those reducers relax their timestamp requirement here.
-  const isWebhookSourced = topic !== "resync";
   return collapseClosedTreeWakes(
     ingress(state, payload, config) ??
-      subIssue(state, payload, envelope, isWebhookSourced) ??
+      subIssue(state, payload, envelope) ??
       issueComment(state, payload, envelope, config) ??
       reviewComment(state, payload, envelope, config) ??
       review(state, payload, envelope) ??
       pullRequest(state, payload, envelope) ??
-      issueEvent(state, payload, envelope, isWebhookSourced) ??
+      issueEvent(state, payload, envelope) ??
       []
   );
 }

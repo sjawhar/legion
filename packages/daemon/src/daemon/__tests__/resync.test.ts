@@ -15,6 +15,7 @@ function boardIssue(overrides: Record<string, unknown> = {}): Record<string, unk
       number: 42,
       title: "Resync this Legion tree",
       repository: "sjawhar/legion",
+      updated_at: "2026-08-24T00:00:00.000Z",
     },
     status: "Todo",
     labels: [],
@@ -270,7 +271,7 @@ describe("runResync", () => {
           issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
           payload: {
             action: "labeled",
-            issue: { number: 42 },
+            issue: { number: 42, updated_at: "2026-08-24T00:00:00.000Z" },
             label: { name: "human-approved" },
             repository: { full_name: "sjawhar/legion" },
           },
@@ -283,7 +284,7 @@ describe("runResync", () => {
           issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
           payload: {
             action: "unlabeled",
-            issue: { number: 42 },
+            issue: { number: 42, updated_at: "2026-08-24T00:00:00.000Z" },
             label: { name: "needs-approval" },
             repository: { full_name: "sjawhar/legion" },
           },

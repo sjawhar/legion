@@ -729,6 +729,44 @@ describe("ProcessManager", () => {
     expect(state.trees[child]?.status).toBe("active");
   });
 
+  it("demotes a persisted active tree with no recorded locator back to queued and re-spawns it", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    // Simulates a crash between advancePromotionSweep's persist() (which
+    // marks a promoted tree "active") and startRoot ever recording a
+    // locator: on disk, the tree is active but nothing is running.
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.admission.active.push(root);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@77\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      await processes.reconcileAdmission();
+
+      expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
+      expect(state.trees[root]).toMatchObject({
+        status: "active",
+        locator: { tmuxSession: "legion-omp", tmuxWindowId: "@77" },
+      });
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(`demoted ${root}`));
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("leaves launch-failed trees queued when reconciling admission capacity", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
@@ -869,6 +907,38 @@ describe("ProcessManager", () => {
         }),
       },
     ]);
+  });
+
+  it("propagates a saveState failure after a successful spawn without rolling back the launch or requeuing it as a failure", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.admission.active.push(root);
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@42\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+      saveState: async () => {
+        throw new Error("disk full");
+      },
+    });
+
+    // The spawn itself (tmux window, locator, generation) already
+    // succeeded before this save runs — only persisting that fact failed.
+    // Treating this like a launch failure would roll back the tracked
+    // locator and requeue the tree while a real, now-untracked tmux window
+    // keeps running: an orphan. It must propagate distinctly instead.
+    await expect(processes.spawnRoot(root)).rejects.toThrow("disk full");
+
+    expect(state.trees[root]).toMatchObject({
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@42" },
+    });
+    expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
   });
 
   it("clears a launch-failed tree's counter when controller admission retries it", async () => {
@@ -1092,6 +1162,46 @@ describe("ProcessManager", () => {
       status: "active",
       locator: { tmuxSession: "legion-omp", tmuxWindowId: "@99" },
     });
+  });
+
+  it("propagates a promoted spawn's persistence failure out of beginLinger instead of swallowing it in startRoot", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.admission.active.push(root);
+    state.admission.queue.push(child);
+    let saveCalls = 0;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@99\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+      saveState: async () => {
+        saveCalls += 1;
+        // The first save (child promoted into active, spliced from queue)
+        // must succeed; the second — spawnRoot's own save after its
+        // successful spawn — is the one under test.
+        if (saveCalls === 2) throw new Error("disk full");
+      },
+    });
+
+    // A SpawnPersistenceFailure must never be treated as a launch failure
+    // by startRoot (which would roll back the just-created tmux window
+    // and requeue child) — it must propagate all the way out of
+    // beginLinger, so the durable transaction dispatching this linger
+    // effect fails and goes fatal, exactly like any other durable effect
+    // whose post-mutation save fails.
+    await expect(processes.beginLinger(root)).rejects.toThrow("disk full");
+
+    expect(state.trees[child]).toMatchObject({
+      status: "active",
+      launchFailures: 0,
+      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@99" },
+    });
+    expect(state.admission.active).toEqual([child]);
+    expect(state.admission.queue).toEqual([]);
   });
 
   it("requests control directives on the sanitized tree generation topic", async () => {

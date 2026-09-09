@@ -421,25 +421,35 @@ describe("reduceGithubEvent", () => {
     }
   });
 
-  it("does not require updated_at on a resync-sourced issue or sub_issue event", () => {
+  it("fences a real webhook against a newer resync-sourced snapshot (resync carries GitHub's updated_at too)", () => {
     const state = rootState();
-    // "resync" is the daemon's own sentinel topic for reducer input it
-    // reconstructs from a board/CI read, not an external webhook — GitHub's
-    // updated_at contract does not apply to it (see reduceGithubEvent).
-    expect(() =>
-      effects(state, { action: "reopened", issue: issue(1, { updated_at: undefined }) }, "resync")
-    ).not.toThrow();
-    expect(() =>
+    const architect = roleToken(state.project, root, "architect");
+
+    // A resync-sourced label reconciliation carries GitHub's real
+    // updated_at now, so it advances the fence exactly like a webhook would.
+    expect(
       effects(
         state,
         {
-          action: "sub_issue_added",
-          parent_issue: issue(1, { updated_at: undefined }),
-          sub_issue: issue(2),
+          action: "labeled",
+          issue: issue(1, { updated_at: "2026-01-01T00:00:02.000Z" }),
+          label: { name: "human-approved" },
         },
         "resync"
       )
-    ).not.toThrow();
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
+    expect(state.issues[root].updatedAt).toBe(Date.parse("2026-01-01T00:00:02.000Z"));
+
+    // A delayed, older real webhook redelivering after that resync snapshot
+    // must not reverse it.
+    expect(
+      effects(state, {
+        action: "unlabeled",
+        issue: issue(1, { updated_at: "2026-01-01T00:00:01.000Z" }),
+        label: { name: "human-approved" },
+      })
+    ).toEqual([]);
+    expect(state.issues[root].labels).toEqual(["human-approved"]);
   });
 
   it("does not let an issue action it ignores make itself the freshness authority", () => {
@@ -1368,6 +1378,42 @@ describe("reduceGithubEvent", () => {
     // The existing PR record must survive untouched — a stale "opened"
     // redelivery must not reset it via registerPr.
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({ headSha: "old-sha" });
+  });
+
+  it("ignores an opened redelivery at the exact same clock as the existing PR record, without wiping its CI/review state", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, {
+      headSha: "settled-head",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+      verdict: "green",
+      ciSettledAt: 5,
+      reviewDecision: "approved",
+    });
+
+    // "opened" fires exactly once per PR; a second delivery at the same
+    // clock is a redelivery (the crash-after-save-before-ack window), not
+    // a distinct later observation, and must not re-register the PR —
+    // registerPr would wipe the verdict/review a settlement already
+    // established.
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "opened",
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "settled-head",
+        url: "pr-url",
+        updated_at: "2026-09-07T03:00:00Z",
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      headSha: "settled-head",
+      verdict: "green",
+      ciSettledAt: 5,
+      reviewDecision: "approved",
+    });
   });
 
   it("does not retain a review decision when the delivered review is pinned to a stale head", () => {
