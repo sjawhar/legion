@@ -61,6 +61,7 @@ test("DocView maps rendered heading, bold, and link text to Markdown source offs
     { from: 2, markdown: "# Heading", selector: "h1", text: "Heading", to: 9 },
     { from: 2, markdown: "**bold**", selector: "strong", text: "bold", to: 6 },
     { from: 1, markdown: "[link](https://example.com)", selector: "a", text: "link", to: 5 },
+    { from: 1, markdown: "`code`", selector: "code", text: "code", to: 5 },
   ];
 
   for (const testCase of cases) {
@@ -130,6 +131,35 @@ test("DocView maps a selection beginning after Markdown inline syntax", () => {
 
   expect(selection).toMatchObject({ from: 10, quote: "link", to: 14 });
 });
+
+test("DocView rejects a selection spanning Markdown syntax between inline nodes", () => {
+  const { container } = render(
+    <DocView markdown="**bold** [link](https://example.com)" onSelectionChange={() => {}} />
+  );
+  const article = container.querySelector("article");
+  const bold = container.querySelector("strong");
+  const link = container.querySelector("a");
+  if (
+    article === null ||
+    bold?.firstChild === null ||
+    bold?.firstChild === undefined ||
+    link?.firstChild === null ||
+    link?.firstChild === undefined
+  ) {
+    throw new Error("Expected inline Markdown text in DocView.");
+  }
+  const range = document.createRange();
+  range.setStart(bold.firstChild, 0);
+  range.setEnd(link.firstChild, link.textContent.length);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+
+  fireEvent.mouseUp(article);
+
+  expect(container.querySelector("[role=status]")?.textContent).toContain("cannot be anchored");
+});
+
 test("DocView replaces an earlier historical highlight before marking the current anchor", () => {
   const markdown = "First **second**";
   const { container, rerender } = render(
@@ -144,4 +174,16 @@ test("DocView replaces an earlier historical highlight before marking the curren
 
   expect(container.querySelectorAll(".dispatch-anchor-history")).toHaveLength(1);
   expect(container.querySelector(".dispatch-anchor-history")?.textContent).toBe("second");
+});
+
+test("DocView clears and remaps a historical anchor when Markdown changes", () => {
+  const highlight = { from: 0, to: 6 };
+  const { container, rerender } = render(<DocView highlight={highlight} markdown="First" />);
+
+  expect(container.querySelector(".dispatch-anchor-history")?.textContent).toBe("First");
+
+  rerender(<DocView highlight={highlight} markdown="Second" />);
+
+  expect(container.querySelectorAll(".dispatch-anchor-history")).toHaveLength(1);
+  expect(container.querySelector(".dispatch-anchor-history")?.textContent).toBe("Second");
 });

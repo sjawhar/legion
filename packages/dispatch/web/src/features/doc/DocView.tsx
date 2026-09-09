@@ -2,8 +2,16 @@ import { renderMermaidSVG } from "beautiful-mermaid";
 import DOMPurify from "dompurify";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
-import rehypeSanitize from "rehype-sanitize";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+
+const sanitizeSchema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    "*": [...(defaultSchema.attributes?.["*"] ?? []), "dataDispatchSegments"],
+  },
+};
 
 interface MermaidDiagramProps {
   source: string;
@@ -75,6 +83,7 @@ function MermaidDiagram({ source }: MermaidDiagramProps): ReactNode {
 
 interface MarkdownNode {
   children?: unknown;
+  data?: { hProperties?: Record<string, unknown> };
   position?: { end?: { offset?: unknown }; start?: { offset?: unknown } };
   type?: unknown;
   value?: unknown;
@@ -99,13 +108,32 @@ function sourceTextSegments(node: unknown): SourceTextSegment[] {
     if (current === undefined) {
       return;
     }
-    if (current.type === "text" && typeof current.value === "string") {
+    if (
+      (current.type === "text" || current.type === "inlineCode") &&
+      typeof current.value === "string"
+    ) {
       const renderedFrom = renderedOffset;
       renderedOffset += current.value.length;
-      const from = current.position?.start?.offset;
-      const to = current.position?.end?.offset;
-      if (typeof from === "number" && typeof to === "number") {
-        segments.push({ from, renderedFrom, renderedTo: renderedOffset, to });
+      const sourceFrom = current.position?.start?.offset;
+      const sourceTo = current.position?.end?.offset;
+      const delimiterWidth =
+        current.type === "inlineCode" &&
+        typeof sourceFrom === "number" &&
+        typeof sourceTo === "number"
+          ? (sourceTo - sourceFrom - current.value.length) / 2
+          : 0;
+      if (
+        typeof sourceFrom === "number" &&
+        Number.isInteger(delimiterWidth) &&
+        delimiterWidth >= 0
+      ) {
+        const from = sourceFrom + delimiterWidth;
+        segments.push({
+          from,
+          renderedFrom,
+          renderedTo: renderedOffset,
+          to: from + current.value.length,
+        });
       }
       return;
     }
@@ -119,9 +147,35 @@ function sourceTextSegments(node: unknown): SourceTextSegment[] {
   return segments;
 }
 
-function markdownSourceSegments(node: unknown): Record<string, string> {
-  const segments = sourceTextSegments(node);
-  return segments.length === 0 ? {} : { "data-dispatch-segments": JSON.stringify(segments) };
+const mappedBlockTypes: Record<string, true> = {
+  blockquote: true,
+  heading: true,
+  listItem: true,
+  paragraph: true,
+};
+
+function annotateSourceSegments(value: unknown): void {
+  const current = markdownNode(value);
+  if (current === undefined) {
+    return;
+  }
+  if (typeof current.type === "string" && mappedBlockTypes[current.type] === true) {
+    const segments = sourceTextSegments(current);
+    if (segments.length > 0) {
+      current.data ??= {};
+      current.data.hProperties ??= {};
+      current.data.hProperties.dataDispatchSegments = JSON.stringify(segments);
+    }
+  }
+  if (Array.isArray(current.children)) {
+    for (const child of current.children) {
+      annotateSourceSegments(child);
+    }
+  }
+}
+
+function remarkSourceSegments() {
+  return (tree: unknown) => annotateSourceSegments(tree);
 }
 
 function closestMappedBlock(root: HTMLElement, node: Node): HTMLElement | undefined {
@@ -189,6 +243,17 @@ function sourceOffset(
   return segment === undefined ? undefined : segment.from + renderedOffset - segment.renderedFrom;
 }
 
+function sourceRangeHasGap(
+  segments: SourceTextSegment[],
+  renderedFrom: number,
+  renderedTo: number
+): boolean {
+  const selected = segments.filter(
+    (segment) => segment.renderedFrom < renderedTo && segment.renderedTo > renderedFrom
+  );
+  return selected.some((segment, index) => index > 0 && selected[index - 1]?.to !== segment.from);
+}
+
 function selectedRange(root: HTMLElement): DocViewSelection | undefined {
   const selection = window.getSelection();
   if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) {
@@ -205,9 +270,17 @@ function selectedRange(root: HTMLElement): DocViewSelection | undefined {
   if (from === undefined || to === undefined || from === to) {
     return undefined;
   }
-  const absoluteFrom = sourceOffset(sourceSegments(startBlock), Math.min(from, to), "from");
-  const absoluteTo = sourceOffset(sourceSegments(startBlock), Math.max(from, to), "to");
-  if (absoluteFrom === undefined || absoluteTo === undefined || absoluteFrom === absoluteTo) {
+  const renderedFrom = Math.min(from, to);
+  const renderedTo = Math.max(from, to);
+  const segments = sourceSegments(startBlock);
+  const absoluteFrom = sourceOffset(segments, renderedFrom, "from");
+  const absoluteTo = sourceOffset(segments, renderedTo, "to");
+  if (
+    absoluteFrom === undefined ||
+    absoluteTo === undefined ||
+    absoluteFrom === absoluteTo ||
+    sourceRangeHasGap(segments, renderedFrom, renderedTo)
+  ) {
     return undefined;
   }
   const rect = range.getBoundingClientRect();
@@ -266,13 +339,6 @@ function highlightRange(root: HTMLElement, highlight: DocViewHighlight): void {
 }
 
 const components: Components = {
-  blockquote({ children, node, ...props }) {
-    return (
-      <blockquote {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </blockquote>
-    );
-  },
   code({ children, className, node: _node, ...props }) {
     const source = String(children).replace(/\n$/, "");
     if (className?.split(" ").includes("language-mermaid")) {
@@ -282,62 +348,6 @@ const components: Components = {
       <code className={className} {...props}>
         {children}
       </code>
-    );
-  },
-  h1({ children, node, ...props }) {
-    return (
-      <h1 {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </h1>
-    );
-  },
-  h2({ children, node, ...props }) {
-    return (
-      <h2 {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </h2>
-    );
-  },
-  h3({ children, node, ...props }) {
-    return (
-      <h3 {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </h3>
-    );
-  },
-  h4({ children, node, ...props }) {
-    return (
-      <h4 {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </h4>
-    );
-  },
-  h5({ children, node, ...props }) {
-    return (
-      <h5 {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </h5>
-    );
-  },
-  h6({ children, node, ...props }) {
-    return (
-      <h6 {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </h6>
-    );
-  },
-  li({ children, node, ...props }) {
-    return (
-      <li {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </li>
-    );
-  },
-  p({ children, node, ...props }) {
-    return (
-      <p {...markdownSourceSegments(node)} {...props}>
-        {children}
-      </p>
     );
   },
 };
@@ -363,17 +373,22 @@ interface DocViewProps {
 export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps): ReactNode {
   const root = useRef<HTMLElement>(null);
   const [selectionUnsupported, setSelectionUnsupported] = useState(false);
+  const highlightedMarkdown = useRef(markdown);
   useEffect(() => {
     const article = root.current;
     if (article === null) {
       return;
     }
-    clearHistoricalHighlights(article);
+    const markdownChanged = highlightedMarkdown.current !== markdown;
+    highlightedMarkdown.current = markdown;
+    if (markdownChanged || highlight !== undefined) {
+      clearHistoricalHighlights(article);
+    }
     if (highlight !== undefined) {
       highlightRange(article, highlight);
     }
     return () => clearHistoricalHighlights(article);
-  }, [highlight]);
+  }, [highlight, markdown]);
 
   const reportSelection = () => {
     if (root.current === null || onSelectionChange === undefined) {
@@ -405,8 +420,8 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
       >
         <Markdown
           components={components}
-          rehypePlugins={[rehypeSanitize]}
-          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}
+          remarkPlugins={[remarkGfm, remarkSourceSegments]}
         >
           {markdown}
         </Markdown>
