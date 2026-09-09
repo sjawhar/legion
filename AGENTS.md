@@ -75,6 +75,7 @@ legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-
 | Envoy event routing    | `packages/envoy/`                              | See @packages/envoy/AGENTS.md                  |
 | Shared event contracts | `packages/contracts/`                          | See @packages/contracts/AGENTS.md               |
 | Envoy OMP adapter      | `packages/pi-envoy/`                          | See @packages/pi-envoy/AGENTS.md          |
+| Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
 
 ## Conventions
 

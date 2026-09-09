@@ -1,5 +1,7 @@
 # Dispatch threads are conversations
 
+**Superseded by** 2026-09-09-dispatch-native-workspace-design.md
+
 **Date:** 2026-09-05
 **Status:** draft, awaiting review
 **Supersedes:** one decision in `docs/plans/2026-09-04-dispatch-everywhere-design.md` (see Reversal).

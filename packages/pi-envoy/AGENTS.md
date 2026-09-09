@@ -13,6 +13,18 @@ this extension receives a receipt-backed request on its direct agent subject ins
 to a role subject itself. The agent pump replies after it accepts the envelope, so the listener can
 turn a claimed-but-deaf holder into a `delivery_failed` exception after two seconds.
 
+## Native Dispatch tools
+
+`dispatch_issue`, `dispatch_ask`, `dispatch_comment`, `dispatch_suggest`,
+`dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
+`dispatch_artifact`, and `dispatch_read` register only when the shared
+configuration resolves a URL and bearer token. Set
+`dispatch.enabled: true`, `dispatch.serverUrl`, and `dispatch.token` in
+`~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`; `DISPATCH_URL`
+and `DISPATCH_TOKEN` override those settings. A successful mutation returns
+`details.topic`, and the `tool_result` hook subscribes to that exact retained
+Dispatch issue topic.
+
 ## Where to look
 
 | Task | Location | Notes |

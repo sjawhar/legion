@@ -17,8 +17,8 @@ integration to deliver Envoy traffic into a live session, including idle session
   `dispatch_artifact`, and `dispatch_read`. The native Dispatch tools are offered only when
   `dispatch.enabled` resolves a server URL and bearer token in envoy.json or when `DISPATCH_URL`
   and `DISPATCH_TOKEN` provide them. Each call fills the target repo from the session's working
-  directory, stamps it with the Claude session id, and subscribes the session to mutation topics
-  so replies arrive back through Envoy.
+  directory, stamps it with the Claude session id, and subscribes each successful mutation's
+  `details.topic` so its Dispatch events arrive back through Envoy.
 - The MCP server is also the session's topic consumer. Envoy pushes nothing to a session that
   consumes NATS itself, and the monitor listens only on `notifications.agent.<session-id>`, so
   for every topic the session follows — a Dispatch mutation or anything passed to

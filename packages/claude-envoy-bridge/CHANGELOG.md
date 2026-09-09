@@ -2,6 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- Replaced the single Dispatch tool with the nine native `dispatch_*` tools defined by the shared contract.
+- Added the nine native Dispatch tools and automatic subscriptions to each mutation result's issue topic.

@@ -25,9 +25,9 @@ This package exposes:
 The native `dispatch_*` tools create and read Dispatch issues, asks, comments, documents, and
 artifacts. They are present when `dispatch.enabled` resolves a server URL and bearer token from
 envoy.json (`~/.config/opencode/envoy.json`, merged with `<repo>/.opencode/envoy.json`) or the
-`DISPATCH_URL` and `DISPATCH_TOKEN` environment variables. Each call fills the target repo from
-the session working directory, stamps it with the OpenCode session id and title, and stores its
-result details as tool metadata so mutations auto-subscribe the session to their Dispatch topic.
+`DISPATCH_URL` and `DISPATCH_TOKEN` environment variables. Each call fills the target issue from
+the session working directory, stamps it with the OpenCode session id and title, and stores
+`details.topic` as tool metadata so a successful mutation subscribes to that exact Dispatch topic.
 
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 

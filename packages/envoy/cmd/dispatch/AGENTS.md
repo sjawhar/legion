@@ -12,33 +12,34 @@ store contains users, native issues, artifacts, document updates, and the event
 outbox.
 
 `DISPATCH_REPO_PROJECTS` optionally maps external repositories to native issue
-projects. Unless `DISPATCH_NATS_DISABLED=1`, Dispatch connects through
-`bus.Connect`, ensures its notification stream subject, and runs the outbox.
-When disabled, database and SSE paths remain available and `/healthz` reports
-`nats: null`.
+projects. `DISPATCH_NATS_DISABLED=1` leaves database and SSE paths available
+and makes `/healthz` report `nats: null`. Otherwise Dispatch reads `natsUrls`
+from shared `envoy.json`, connects through `bus.Connect`, and runs the outbox.
+Host adapters can override their configured Dispatch base URL with
+`DISPATCH_URL`; the server reads `dispatch.serverUrl` from shared `envoy.json`.
 
-Documents use a Yjs `Y.Text` named `content`. `GET /ws/doc/{artifactId}` uses
+Documents use a Yjs `Y.Text` named `content`. `GET /ws/doc/{room}` uses
 Hocuspocus framing. Server-side edits use the document service, persist updates,
 and create settled or named versions.
-
 ## Identity
 
 `internal/dispatch/identity` is the human identity boundary. Handlers resolve
 users through `Identity.Login` and write identity errors with
 `identity.WriteError`.
 
-- `DISPATCH_IDENTITY=cookie` is the default. OAuth requires
-  `DISPATCH_ALLOWED_LOGINS`, and the callback rejects an unlisted GitHub login
-  before storing its token or issuing a cookie.
-- `DISPATCH_IDENTITY=header:<Header-Name>` trusts a proxy-provided header only
-  for an allowlisted login. It logs a warning and is rejected with
-  `DISPATCH_APP_CLIENT_ID` unless `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
+- `DISPATCH_IDENTITY=cookie` is the default. Cookie identity requires
+  `DISPATCH_ALLOWED_LOGINS`; GitHub OAuth accepts only those logins before
+  storing a token pair and issuing a cookie.
+- `DISPATCH_IDENTITY=header:<Header-Name>` accepts only allowlisted logins from
+  a trusted proxy header. When GitHub OAuth credentials are configured, it also
+  requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
+- GitHub OAuth credentials come from `DISPATCH_APP_CLIENT_ID` and
+  `DISPATCH_APP_CLIENT_SECRET`, or the Dispatch app credentials file.
 - Agents authenticate with `Authorization: Bearer $DISPATCH_AGENT_TOKEN` and a
   `session` actor. Bearer callers cannot act as users.
 
 The GitHub proxy needs the resolved user's stored GitHub token. Without one it
 returns `503 GITHUB_TOKEN_UNAVAILABLE`.
-
 ## Routes
 
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
@@ -77,7 +78,7 @@ the table says human only.
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. |
-| `/ws/doc/{artifactId}` | GET | user or bearer | Join the Hocuspocus document room. |
+| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. |
 
 ## Checks
 

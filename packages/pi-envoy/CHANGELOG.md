@@ -2,4 +2,6 @@
 
 ## [Unreleased]
 
-- Register Dispatch's nine native tools from the shared specifications and subscribe to issue topics returned in structured tool results.
+### Added
+
+- Added the nine native Dispatch tools and automatic subscriptions to each mutation result's issue topic.

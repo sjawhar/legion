@@ -28,17 +28,23 @@ optional directory and title filters.
 
 ## Dispatch native tools
 
-`dispatch-http.ts` sends the native Dispatch JSON API with the configured bearer token; it URL-encodes
-issue references as one path segment and uploads artifacts as multipart form data. `dispatch-execute.ts`
-validates each shared `dispatch_*` schema, derives the caller's session origin and Legion issue
-reference, and returns the typed tool-result details that host adapters use for subscriptions.
+`dispatch-http.ts` sends the native Dispatch JSON API with the configured bearer
+token. `dispatch-execute.ts` validates the shared `dispatch_*` schema, derives
+the caller's session origin and Legion issue reference, executes the operation,
+and returns typed tool-result details. Mutations return
+`details.topic = notifications.dispatch.issue.<KEY>.>`; host adapters subscribe
+only to that returned topic.
 
-`resolveDispatchConfig` enables Dispatch only when both its URL and bearer token resolve. Configure
-`dispatch.token` with `dispatch.serverUrl` in `envoy.json`, or override them with `DISPATCH_TOKEN` and
-`DISPATCH_URL`. Invalid configuration, malformed URLs, and empty tokens leave Dispatch disabled and
-name the failing source in the returned `error`.
-
+`resolveDispatchConfig` enables Dispatch only when both its URL and bearer token
+resolve. Set `dispatch.enabled: true`, `dispatch.serverUrl`, and
+`dispatch.token` in `envoy.json`, or override the URL and token with
+`DISPATCH_URL` and `DISPATCH_TOKEN`. Invalid configuration, malformed URLs, and
+empty tokens leave Dispatch disabled and name the failing source in `error`.
 ## Tool contract
 
-`tool-contract.ts` is the single source for host tool names, schemas, and topic guidance. Hosts
-must use it directly and should not create aliases or duplicate tool descriptions.
+`@legion/contracts` `src/dispatch-tools.ts` is the single source for the nine
+native Dispatch tool names, descriptions, schemas, and subscription behavior:
+`dispatch_issue`, `dispatch_ask`, `dispatch_comment`, `dispatch_suggest`,
+`dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
+`dispatch_artifact`, and `dispatch_read`. Hosts build their schema from those
+specifications and do not add aliases or host-specific descriptions.

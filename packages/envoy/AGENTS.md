@@ -4,14 +4,17 @@ Go-based cross-machine event transport and delivery subsystem.
 
 ## Overview
 
-Envoy owns transport, routing, and delivery:
+Envoy owns transport, routing, delivery, and the native Dispatch event path:
 
-- ingests Slack/GitHub/Ghost Wispr/agent events
+- ingests Slack, GitHub, Ghost Wispr, and agent events
 - publishes ordinary notifications through JetStream and role lanes through core NATS
 - resolves target OpenCode sessions
-- delivers by hot `prompt_async` (ordinary events stay in JetStream for retry if session is unavailable)
+- delivers by hot `prompt_async` (ordinary events stay in JetStream for retry if a session is unavailable)
+- runs the Dispatch server, which persists native issues, documents, and events in Postgres and
+  publishes retained `notifications.dispatch.issue.<KEY>.<type>` envelopes
 
-It does not own Legion workflow policy. The daemon/controller decides what to do; Envoy moves events to the right session.
+It does not own Legion workflow policy. The daemon/controller decides what to do; Envoy moves
+events to the right session.
 
 ## Where to look
 
@@ -25,6 +28,7 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
+| Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 ## Critical conventions
