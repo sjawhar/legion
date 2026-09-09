@@ -70,6 +70,10 @@ interface UploadArtifactResponse {
   version: Version;
 }
 
+function normalizeAsk(ask: Ask): Ask {
+  return Array.isArray(ask.options) ? ask : { ...ask, options: [] };
+}
+
 function pathSegment(value: string): string {
   return encodeURIComponent(value);
 }
@@ -160,20 +164,21 @@ export class DispatchApiClient {
     );
   }
 
-  getInbox(project?: string): Promise<Ask[]> {
-    return this.json<Ask[]>(pathWithQuery("/api/v1/inbox", { project }));
+  async getInbox(project?: string): Promise<Ask[]> {
+    const asks = await this.json<Ask[]>(pathWithQuery("/api/v1/inbox", { project }));
+    return asks.map(normalizeAsk);
   }
 
-  createAsk(key: string, input: CreateAskInput): Promise<Ask> {
-    return this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input);
+  async createAsk(key: string, input: CreateAskInput): Promise<Ask> {
+    return normalizeAsk(await this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input));
   }
 
-  answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
-    return this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input);
+  async answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
+    return normalizeAsk(await this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input));
   }
 
-  getAsk(id: string): Promise<Ask> {
-    return this.json<Ask>(`/api/v1/asks/${pathSegment(id)}`);
+  async getAsk(id: string): Promise<Ask> {
+    return normalizeAsk(await this.json<Ask>(`/api/v1/asks/${pathSegment(id)}`));
   }
 
   listComments(key: string, artifact?: string): Promise<Comment[]> {

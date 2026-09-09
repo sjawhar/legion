@@ -45,6 +45,29 @@ test("API client does not invoke its default fetch as a client method", async ()
   }
 });
 
+test("API client normalizes server asks with null options", async () => {
+  const stub = stubFetch(() =>
+    Response.json([
+      {
+        anchor: null,
+        answer: null,
+        author: { id: "agent", kind: "session" },
+        created_at: "2026-09-09T00:00:00Z",
+        custom: true,
+        id: "ask-1",
+        issue_key: "CORE-1",
+        multiple: false,
+        options: null,
+        question: "Which path?",
+        state: "open",
+        urgency: "med",
+      },
+    ])
+  );
+
+  expect((await createApiClient(stub.fetch).getInbox())[0]?.options).toEqual([]);
+});
+
 test("API client sends the documented method and JSON body for mutations", async () => {
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
@@ -110,7 +133,9 @@ test("API client exposes response status and server error code on failure", asyn
 });
 
 test("API client reaches every remaining documented endpoint", async () => {
-  const stub = stubFetch();
+  const stub = stubFetch((request) =>
+    request.path.startsWith("/api/v1/inbox") ? Response.json([]) : Response.json({})
+  );
   const api = createApiClient(stub.fetch);
 
   await api.getProjects();

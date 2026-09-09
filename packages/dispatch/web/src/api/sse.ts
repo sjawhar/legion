@@ -64,6 +64,8 @@ export function applyEventInvalidations(queryClient: QueryInvalidator, event: Ev
     if (id !== undefined) {
       queryClient.invalidateQueries({ queryKey: ["artifact", id] });
     }
+    queryClient.invalidateQueries({ queryKey: ["comments", event.issue_key] });
+    queryClient.invalidateQueries({ queryKey: ["inbox"] });
     return;
   }
 

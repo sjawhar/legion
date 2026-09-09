@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type {
   AuthenticatedUser,
+  Comment,
   Event,
   ExternalLink,
   Issue,
@@ -12,6 +13,7 @@ import type {
   UserState,
 } from "../../api/types";
 import { DocEditor } from "../doc/DocEditor";
+import { DocView } from "../doc/DocView";
 import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
 import { LogTab } from "./LogTab";
@@ -268,8 +270,89 @@ function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }):
   );
 }
 
+function historicalHighlight(
+  markdown: string,
+  highlight: { from: number; to: number } | undefined,
+  anchor: Comment["anchor"] | undefined
+): { from: number; to: number } | undefined {
+  if (highlight === undefined || anchor === null || anchor === undefined) {
+    return highlight;
+  }
+  if (markdown.slice(highlight.from, highlight.to) === anchor.quote) {
+    return highlight;
+  }
+  const from = markdown.indexOf(anchor.quote);
+  return from === -1 || markdown.indexOf(anchor.quote, from + 1) !== -1
+    ? highlight
+    : { from, to: from + anchor.quote.length };
+}
+
+function ArtifactVersionView({
+  artifactId,
+  from,
+  issueKey,
+  to,
+  version,
+}: {
+  artifactId: string;
+  from: number | undefined;
+  issueKey: string;
+  to: number | undefined;
+  version: number;
+}): ReactNode {
+  const content = useQuery({
+    queryKey: ["artifact", artifactId, "version", version],
+    queryFn: () => api.getArtifactVersion(artifactId, version),
+  });
+  const comments = useQuery({
+    queryKey: ["comments", issueKey, artifactId],
+    queryFn: () => api.listComments(issueKey, artifactId),
+  });
+
+  if (content.isPending) {
+    return <p className="text-slate-500">Loading version…</p>;
+  }
+  if (content.isError || content.data === undefined || !("markdown" in content.data)) {
+    return <p className="text-rose-700">Could not load this document version.</p>;
+  }
+  const anchor = comments.data?.find(
+    (comment) =>
+      comment.anchor?.artifact_id === artifactId &&
+      comment.anchor.version === version &&
+      comment.anchor.from === from &&
+      comment.anchor.to === to
+  )?.anchor;
+  const highlight = historicalHighlight(
+    content.data.markdown,
+    from === undefined || to === undefined ? undefined : { from, to },
+    anchor
+  );
+  return (
+    <section aria-label={`Document version ${version}`} className="space-y-3">
+      <h2 className="text-lg font-semibold text-slate-900">Version {version}</h2>
+      <DocView highlight={highlight} markdown={content.data.markdown} />
+    </section>
+  );
+}
+
 export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
-  const { key } = useParams();
+  const { key, "*": nestedPath } = useParams();
+  const { search } = useLocation();
+  const versionMatch = nestedPath?.match(/^artifacts\/([^/]+)\/versions\/(\d+)$/);
+  const versionRoute =
+    versionMatch === null || versionMatch === undefined
+      ? undefined
+      : {
+          artifactId: versionMatch[1],
+          version: Number(versionMatch[2]),
+        };
+  const query = new URLSearchParams(search);
+  const from = Number(query.get("from"));
+  const to = Number(query.get("to"));
+  const highlight =
+    Number.isInteger(from) && Number.isInteger(to) && from >= 0 && to > from
+      ? { from, to }
+      : undefined;
   const [tab, setTab] = useState<IssueTab>("log");
   const issue = useQuery({
     enabled: key !== undefined,
@@ -293,8 +376,9 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
   }
 
   const issueState = stateForIssue(state.data, issue.data.key);
-  const tabID = `issue-${tab}-tab`;
-  const panelID = `issue-${tab}-panel`;
+  const activeTab: IssueTab = versionRoute === undefined ? tab : "spec";
+  const tabID = `issue-${activeTab}-tab`;
+  const panelID = `issue-${activeTab}-panel`;
   return (
     <section>
       <IssueHeader issue={issue.data} state={issueState} />
@@ -302,9 +386,9 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
       <div className="mb-4 flex gap-2 border-b border-slate-200" role="tablist">
         <button
           aria-controls="issue-spec-panel"
-          aria-selected={tab === "spec"}
+          aria-selected={activeTab === "spec"}
           className={
-            tab === "spec"
+            activeTab === "spec"
               ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
               : "px-3 py-2 text-sm text-slate-600"
           }
@@ -317,9 +401,9 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
         </button>
         <button
           aria-controls="issue-log-panel"
-          aria-selected={tab === "log"}
+          aria-selected={activeTab === "log"}
           className={
-            tab === "log"
+            activeTab === "log"
               ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
               : "px-3 py-2 text-sm text-slate-600"
           }
@@ -332,9 +416,9 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
         </button>
         <button
           aria-controls="issue-children-panel"
-          aria-selected={tab === "children"}
+          aria-selected={activeTab === "children"}
           className={
-            tab === "children"
+            activeTab === "children"
               ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
               : "px-3 py-2 text-sm text-slate-600"
           }
@@ -347,13 +431,23 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
         </button>
       </div>
       <div aria-labelledby={tabID} id={panelID} role="tabpanel">
-        {tab === "spec" ? (
-          <DocEditor
-            artifact={primaryArtifact}
-            isClosed={issue.data.closed_at !== null}
-            user={user}
-          />
-        ) : tab === "log" ? (
+        {activeTab === "spec" ? (
+          versionRoute === undefined ? (
+            <DocEditor
+              artifact={primaryArtifact}
+              isClosed={issue.data.closed_at !== null}
+              user={user}
+            />
+          ) : (
+            <ArtifactVersionView
+              artifactId={versionRoute.artifactId}
+              from={highlight?.from}
+              issueKey={issue.data.key}
+              to={highlight?.to}
+              version={versionRoute.version}
+            />
+          )
+        ) : activeTab === "log" ? (
           <LogTab issueKey={issue.data.key} state={state.data} />
         ) : (
           <ChildrenTab issue={issue.data} />

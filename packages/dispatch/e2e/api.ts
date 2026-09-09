@@ -3,7 +3,9 @@ import type {
   Artifact,
   ArtifactVersionText,
   Ask,
+  Comment,
   CreateAskInput,
+  CreateCommentInput,
   CreateMessageInput,
   EditArtifactInput,
   Event,
@@ -108,6 +110,32 @@ export function createAsk(
   return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
 }
 
+export function createComment(
+  issue: string,
+  input: CreateCommentInput,
+  options: ApiOptions = {}
+): Promise<Comment> {
+  return request<Comment>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/comments`,
+    "POST",
+    input,
+    options
+  );
+}
+
+export function listComments(
+  issue: string,
+  artifact: string,
+  options: ApiOptions = {}
+): Promise<Comment[]> {
+  return request<Comment[]>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/comments?artifact=${encodeURIComponent(artifact)}`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
 export function getAsk(id: string, options: ApiOptions = {}): Promise<Ask> {
   return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
@@ -145,6 +173,10 @@ export function editArtifact(
     input,
     options
   );
+}
+
+export function acceptComment(id: string, options: ApiOptions = {}): Promise<Comment> {
+  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/accept`, "POST", {}, options);
 }
 
 export function createMessage(

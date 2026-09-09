@@ -9,7 +9,10 @@ import * as Y from "yjs";
 
 import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
+import { useMargin } from "../margin/Margin";
+import { anchorDecorationExtension, setActiveAnchorIds, setAnchorDecorations } from "./anchors";
 import { DocView } from "./DocView";
+import { selectionToAnchor } from "./text-offsets";
 import { VersionDiff } from "./VersionDiff";
 
 interface DocEditorProps {
@@ -49,8 +52,37 @@ export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNo
   const userLoginRef = useRef(user.login);
   const viewRef = useRef<EditorView | null>(null);
   const readOnlyRef = useRef<Compartment | null>(null);
+  const decoratedAnchorKey = useRef<string | undefined>(undefined);
+  const awaitingAnchorDocument = useRef(false);
   isClosedRef.current = isClosed;
   userLoginRef.current = user.login;
+  const { anchors, hoveredItemId, selectItem, selectedItemId, setHoveredItemId, setSelection } =
+    useMargin();
+  const anchorHover = useRef<(id: string | undefined) => void>(() => {});
+  const anchorSelect = useRef<(id: string) => void>(() => {});
+  const selectionHandler = useRef<(view: EditorView) => void>(() => {});
+  anchorHover.current = setHoveredItemId;
+  anchorSelect.current = selectItem;
+  selectionHandler.current = (view) => {
+    const { from, to } = selectionToAnchor(view);
+    if (from === to) {
+      setSelection(undefined);
+      return;
+    }
+    const rect = view.coordsAtPos(to) ?? view.coordsAtPos(from);
+    if (rect === null) {
+      return;
+    }
+    setSelection({
+      artifact: artifact.id,
+      artifactId: artifact.id,
+      canSuggest: true,
+      from,
+      quote: view.state.sliceDoc(from, to),
+      rect: { bottom: rect.bottom, left: rect.left, right: rect.right, top: rect.top },
+      to,
+    });
+  };
   const queryClient = useQueryClient();
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [content, setContent] = useState("");
@@ -147,6 +179,15 @@ export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNo
           EditorView.lineWrapping,
           EditorView.theme({ "&": { minHeight: "24rem" } }),
           yCollab(ytext, awareness),
+          anchorDecorationExtension({
+            onHover: (id) => anchorHover.current(id),
+            onSelect: (id) => anchorSelect.current(id),
+          }),
+          EditorView.updateListener.of((update) => {
+            if (update.selectionSet && update.view.hasFocus) {
+              selectionHandler.current(update.view);
+            }
+          }),
           readOnly.of(editorAccess(isClosedRef.current)),
         ],
       }),
@@ -197,6 +238,51 @@ export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNo
 
     view.dispatch({ effects: readOnly.reconfigure(editorAccess(isClosed)) });
   }, [isClosed]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (view === null) {
+      return;
+    }
+    const documentLength = content.length;
+    const decorationAnchors = anchors.filter(({ anchor }) => anchor.artifact_id === artifact.id);
+    const decorationKey = decorationAnchors
+      .map(({ anchor, id }) => `${id}:${anchor.from}:${anchor.to}:${anchor.orphaned}`)
+      .join("|");
+    if (decorationKey === decoratedAnchorKey.current && !awaitingAnchorDocument.current) {
+      return;
+    }
+    if (
+      decorationAnchors.some(
+        ({ anchor }) => !anchor.orphaned && (anchor.from < 0 || anchor.to > documentLength)
+      )
+    ) {
+      awaitingAnchorDocument.current = true;
+      return;
+    }
+
+    view.dispatch({
+      effects: setAnchorDecorations.of(
+        decorationAnchors.map(({ anchor, id }) => ({ anchor, id, selected: false }))
+      ),
+    });
+    decoratedAnchorKey.current = decorationKey;
+    awaitingAnchorDocument.current = false;
+  }, [anchors, artifact.id, content]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (view === null) {
+      return;
+    }
+    view.dispatch({
+      effects: setActiveAnchorIds.of(
+        [hoveredItemId, selectedItemId].filter(
+          (itemId): itemId is string => itemId !== undefined && itemId !== null
+        )
+      ),
+    });
+  }, [hoveredItemId, selectedItemId]);
 
   const selectVersion = (value: string) => {
     setSelectedVersion(value === "" ? null : Number(value));
@@ -299,7 +385,21 @@ export function DocEditor({ artifact, isClosed, user }: DocEditorProps): ReactNo
           </div>
         )
       ) : mode === "preview" ? (
-        <DocView markdown={liveMarkdown} />
+        <DocView
+          markdown={liveMarkdown}
+          onSelectionChange={(next) => {
+            setSelection(
+              next === undefined
+                ? undefined
+                : {
+                    ...next,
+                    artifact: artifact.id,
+                    artifactId: artifact.id,
+                    canSuggest: false,
+                  }
+            );
+          }}
+        />
       ) : null}
     </section>
   );

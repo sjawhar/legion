@@ -43,7 +43,7 @@ test("ask events refresh the issue, its asks, selected ask, and the inbox", () =
   ]);
 });
 
-test("artifact versions refresh the issue and the artifact collection", () => {
+test("artifact versions refresh the document and its anchored margin items", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -60,6 +60,8 @@ test("artifact versions refresh the issue and the artifact collection", () => {
     ["issues"],
     ["artifacts", "CORE-1"],
     ["artifact", "artifact-1"],
+    ["comments", "CORE-1"],
+    ["inbox"],
   ]);
 });
 
