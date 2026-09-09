@@ -82,13 +82,8 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	issueKey := r.PathValue("key")
-	var status string
-	if err := tx.QueryRow(r.Context(), `select status from issues where key = $1 for update`, issueKey).Scan(&status); err != nil {
+	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
 		s.writeHandlerError(w, err)
-		return
-	}
-	if status == "closed" {
-		writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 		return
 	}
 	if input.ReplyTo != nil {
@@ -229,6 +224,10 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	defer tx.Rollback(r.Context())
 	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.requireOpenIssue(r.Context(), tx, comment.IssueKey); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

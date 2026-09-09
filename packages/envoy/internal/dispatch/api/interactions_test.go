@@ -202,7 +202,7 @@ func TestClosedIssueAsksCannotBeAnsweredOrShown(t *testing.T) {
 	ask := decodeBody[struct {
 		ID string `json:"id"`
 	}](t, created)
-	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "closed"}, "alice")
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
 	if closed.Code != http.StatusOK {
 		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
 	}
@@ -609,5 +609,109 @@ func TestCommentReplyMustBelongToItsIssue(t *testing.T) {
 	invalid := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+second.Key+"/comments", map[string]string{"body": "Wrong issue", "reply_to": firstComment.ID}, "alice")
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("cross-issue reply: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestDoneIssueRejectsEveryMutation(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Done issue", "before")
+	ask := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Open ask", "actor": sessionActor(),
+	})
+	askID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, ask).ID
+	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Open comment", "actor": sessionActor(),
+	})
+	commentID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, comment).ID
+	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Replace before.", "anchor": map[string]any{"artifact": "spec", "quote": "before"},
+		"suggestion": map[string]string{"replace_with": "after"}, "actor": sessionActor(),
+	})
+	suggestionID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, suggestion).ID
+	secondSuggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Reject this.", "suggestion": map[string]string{"replace_with": "ignored"}, "actor": sessionActor(),
+	})
+	secondSuggestionID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, secondSuggestion).ID
+	document := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "notes.md",
+	}, "notes.md", "text/markdown", []byte("notes"), "alice")
+	documentID := decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, document).Artifact.ID
+
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	var closedIssue struct {
+		Status   string     `json:"status"`
+		ClosedAt *time.Time `json:"closed_at"`
+	}
+	if closed.Code != http.StatusOK {
+		t.Fatalf("set done: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	closedIssue = decodeBody[struct {
+		Status   string     `json:"status"`
+		ClosedAt *time.Time `json:"closed_at"`
+	}](t, closed)
+	if closedIssue.Status != "done" || closedIssue.ClosedAt == nil {
+		t.Fatalf("done issue = %#v, want status done with closed_at", closedIssue)
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if !strings.Contains(events.Body.String(), `"type":"issue.closed"`) {
+		t.Fatalf("done event log = %s, want issue.closed", events.Body.String())
+	}
+
+	assertClosed := func(name string, response *httptest.ResponseRecorder) {
+		t.Helper()
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
+			t.Fatalf("%s after done: status=%d body=%s", name, response.Code, response.Body.String())
+		}
+	}
+	assertClosed("issue title", dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Nope"}, "alice"))
+	assertClosed("ask", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Later ask", "actor": sessionActor(),
+	}))
+	assertClosed("ask answer", dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{}, "alice"))
+	assertClosed("comment", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Later comment", "actor": sessionActor(),
+	}))
+	assertClosed("comment resolution", sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/resolve", map[string]any{
+		"actor": sessionActor(),
+	}))
+	assertClosed("suggestion acceptance", dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+suggestionID+"/accept", map[string]any{}, "alice"))
+	assertClosed("suggestion rejection", dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+secondSuggestionID+"/reject", map[string]any{}, "alice"))
+	assertClosed("message", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Later message", "actor": sessionActor(),
+	}))
+	assertClosed("upload", multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "later.md",
+	}, "later.md", "text/markdown", []byte("later"), "alice"))
+	assertClosed("primary selection", dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+documentID+"/primary", map[string]any{}, "alice"))
+	assertClosed("document edit", sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
+	}))
+	assertClosed("named version", sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]any{
+		"summary": "checkpoint", "actor": sessionActor(),
+	}))
+
+	reopened := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "todo"}, "alice")
+	if reopened.Code != http.StatusOK || strings.Contains(reopened.Body.String(), `"closed_at":`) && !strings.Contains(reopened.Body.String(), `"closed_at":null`) {
+		t.Fatalf("reopen done issue: status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	if created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Reopened ask", "actor": sessionActor(),
+	}); created.Code != http.StatusCreated {
+		t.Fatalf("ask after reopen: status=%d body=%s", created.Code, created.Body.String())
+	}
+	if invalid := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "closed"}, "alice"); invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_STATUS"`) {
+		t.Fatalf("closed is not a valid lifecycle status: status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 }

@@ -104,7 +104,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	issueKey := r.PathValue("key")
-	if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for update`, issueKey).Scan(new(string)); err != nil {
+	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -348,6 +348,10 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if artifact.Kind != "doc" {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
@@ -399,12 +403,61 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	applied, err := s.deps.Docs.ApplyOps(r.Context(), artifact.ID, input.Ops, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": nil})
+	if applied == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": nil})
+		return
+	}
+	tx, err = s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	version, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, input.Summary, actor)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, model.Event{
+		IssueKey: artifact.IssueKey,
+		Type:     "artifact.version",
+		Actor:    actor,
+		Payload:  map[string]any{"artifact_id": artifact.ID, "name": artifact.Name, "version": version},
+	})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.deps.Docs.CommitVersion(artifact.ID, version)
+	s.publish(event)
+	writeJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
 }
 
 func (s *server) setPrimaryArtifact(w http.ResponseWriter, r *http.Request) {
@@ -440,7 +493,7 @@ func (s *server) setPrimaryArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "PRIMARY_NOT_DOC", http.StatusBadRequest, "only documents can be primary")
 		return
 	}
-	if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for update`, artifact.IssueKey).Scan(new(string)); err != nil {
+	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

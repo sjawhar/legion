@@ -39,13 +39,8 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	issueKey := r.PathValue("key")
-	var status string
-	if err := tx.QueryRow(r.Context(), `select status from issues where key = $1 for update`, issueKey).Scan(&status); err != nil {
+	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
 		s.writeHandlerError(w, err)
-		return
-	}
-	if status == "closed" {
-		writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 		return
 	}
 	author, err := json.Marshal(actor)

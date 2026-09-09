@@ -73,13 +73,8 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	issueKey := r.PathValue("key")
-	var status string
-	if err := tx.QueryRow(r.Context(), `select status from issues where key = $1 for update`, issueKey).Scan(&status); err != nil {
+	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
 		s.writeHandlerError(w, err)
-		return
-	}
-	if status == "closed" {
-		writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 		return
 	}
 	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, actor)
@@ -192,13 +187,8 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ASK_CLOSED", http.StatusConflict, "ask is already answered")
 		return
 	}
-	var issueOpen bool
-	if err := tx.QueryRow(r.Context(), `select closed_at is null from issues where key = $1 for update`, ask.IssueKey).Scan(&issueOpen); err != nil {
+	if err := s.requireOpenIssue(r.Context(), tx, ask.IssueKey); err != nil {
 		s.writeHandlerError(w, err)
-		return
-	}
-	if !issueOpen {
-		writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 		return
 	}
 	if !ask.Multiple && len(input.Selected) > 1 {

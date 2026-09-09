@@ -329,6 +329,18 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	return tx, nil
 }
 
+// requireOpenIssue locks an issue row and rejects mutations after completion.
+func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) error {
+	var open bool
+	if err := tx.QueryRow(ctx, `select closed_at is null from issues where key = $1 for update`, key).Scan(&open); err != nil {
+		return err
+	}
+	if !open {
+		return errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
+	}
+	return nil
+}
+
 func jsonActor(actor model.Actor) ([]byte, error) { return encodeJSON(actor) }
 
 func externalRef(ref string) (repo string, number string, err error) {

@@ -268,6 +268,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "status must not be blank")
 		return
 	}
+	if input.Status != nil && !model.IsIssueStatus(strings.TrimSpace(*input.Status)) {
+		writeError(w, "INVALID_STATUS", http.StatusBadRequest, "status is not in the Legion lifecycle")
+		return
+	}
 	if input.Route != nil && *input.Route != "" {
 		if _, err := model.ParseRoute(*input.Route); err != nil {
 			writeError(w, "ROUTE_INVALID", http.StatusBadRequest, "invalid route")
@@ -291,6 +295,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if before.ClosedAt != nil && (input.Status == nil || strings.TrimSpace(*input.Status) == "done") {
+		writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
+		return
+	}
 	changed := false
 	if input.Title != nil {
 		if _, err := tx.Exec(r.Context(), `update issues set title = $2, updated_at = now() where key = $1`, key, strings.TrimSpace(*input.Title)); err != nil {
@@ -303,7 +311,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		status := strings.TrimSpace(*input.Status)
 		if _, err := tx.Exec(r.Context(), `
 			update issues
-			set status = $2, closed_at = case when $2 = 'closed' then now() else null end, updated_at = now()
+			set status = $2, closed_at = case when $2 = 'done' then now() else null end, updated_at = now()
 			where key = $1
 		`, key, status); err != nil {
 			s.writeHandlerError(w, err)
@@ -365,7 +373,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	events := []model.Event{}
 	eventType := "issue.updated"
-	if input.Status != nil && before.Status != after.Status && after.Status == "closed" {
+	if input.Status != nil && before.Status != after.Status && after.Status == "done" {
 		eventType = "issue.closed"
 	}
 	after.LastSeq++

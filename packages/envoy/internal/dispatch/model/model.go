@@ -211,6 +211,25 @@ type Route struct {
 	ID   string
 }
 
+// IssueStatuses is the canonical Legion issue lifecycle.
+var IssueStatuses = map[string]struct{}{
+	"triage":       {},
+	"icebox":       {},
+	"backlog":      {},
+	"todo":         {},
+	"in_progress":  {},
+	"testing":      {},
+	"needs_review": {},
+	"retro":        {},
+	"done":         {},
+}
+
+// IsIssueStatus reports whether status belongs to the Legion lifecycle.
+func IsIssueStatus(status string) bool {
+	_, ok := IssueStatuses[status]
+	return ok
+}
+
 var (
 	roleRoutePattern    = regexp.MustCompile(`^role:([a-z0-9-]+)$`)
 	sessionRoutePattern = regexp.MustCompile(`^session:([0-9a-f-]{16,})$`)
