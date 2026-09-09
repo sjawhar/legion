@@ -178,6 +178,28 @@ function remarkSourceSegments() {
   return (tree: unknown) => annotateSourceSegments(tree);
 }
 
+// A Range boundary on an element node points between two children (`offset` is a child
+// index), not at a text position - e.g. a drag that starts before the first glyph or ends
+// past the last glyph of a block, or a native "Select All", resolves there. Descend such a
+// boundary into the equivalent leaf position (a text node, or an empty element) so both block
+// lookup and offset computation see a point that actually lives inside the selected block.
+function resolveBoundary(node: Node, offset: number): { node: Node; offset: number } {
+  let current = node;
+  let currentOffset = offset;
+  while (current.nodeType === Node.ELEMENT_NODE && current.childNodes.length > 0) {
+    if (currentOffset < current.childNodes.length) {
+      current = current.childNodes[currentOffset] as Node;
+      currentOffset = 0;
+    } else {
+      const last = current.childNodes[current.childNodes.length - 1] as Node;
+      currentOffset =
+        last.nodeType === Node.TEXT_NODE ? (last as Text).data.length : last.childNodes.length;
+      current = last;
+    }
+  }
+  return { node: current, offset: currentOffset };
+}
+
 function closestMappedBlock(root: HTMLElement, node: Node): HTMLElement | undefined {
   const element = node instanceof HTMLElement ? node : node.parentElement;
   const block = element?.closest<HTMLElement>("[data-dispatch-segments]");
@@ -271,13 +293,15 @@ function selectedRange(root: HTMLElement, markdown: string): DocViewSelection | 
     return undefined;
   }
   const range = selection.getRangeAt(0);
-  const startBlock = closestMappedBlock(root, range.startContainer);
-  const endBlock = closestMappedBlock(root, range.endContainer);
+  const start = resolveBoundary(range.startContainer, range.startOffset);
+  const end = resolveBoundary(range.endContainer, range.endOffset);
+  const startBlock = closestMappedBlock(root, start.node);
+  const endBlock = closestMappedBlock(root, end.node);
   if (startBlock === undefined || startBlock !== endBlock) {
     return undefined;
   }
-  const from = rangeOffset(startBlock, range.startContainer, range.startOffset);
-  const to = rangeOffset(startBlock, range.endContainer, range.endOffset);
+  const from = rangeOffset(startBlock, start.node, start.offset);
+  const to = rangeOffset(startBlock, end.node, end.offset);
   if (from === undefined || to === undefined || from === to) {
     return undefined;
   }

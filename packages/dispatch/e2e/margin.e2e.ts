@@ -219,3 +219,69 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await alice.close();
   }
 });
+
+test("margin anchors a whole-paragraph selection made in the rendered preview", async ({
+  browser,
+}) => {
+  await createProject({ key: "PREV", name: "Preview" });
+  const issue = await createIssue({
+    project: "PREV",
+    spec: initialMarkdown,
+    title: "Preview selection",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Spec" }).click();
+    await page.getByRole("button", { exact: true, name: "Preview" }).click();
+    const paragraph = page.getByRole("article").locator("p").first();
+    await expect(paragraph).toContainText(initialMarkdown);
+
+    // A drag that overshoots the first or last glyph of a block - or a native "Select All" -
+    // resolves its Range boundaries onto the block's parent element (an offset into its
+    // children) rather than into the text node itself. Native multi-click timing is unreliable
+    // across Chromium builds, so drive that exact boundary shape directly and let the app's own
+    // mouseup handler read it, the same way a real overshoot selection would arrive.
+    await page.evaluate(() => {
+      const article = document.querySelector("article");
+      if (article === null) {
+        throw new Error("Expected an article element in the rendered document.");
+      }
+      const range = document.createRange();
+      range.selectNodeContents(article);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      article.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+
+    await page.getByRole("button", { exact: true, name: "Comment" }).click();
+    const commentComposer = page.getByRole("form", { name: "Comment composer" });
+    await commentComposer.getByLabel("Comment").fill("anchors the whole paragraph");
+    await commentComposer.getByRole("button", { exact: true, name: "Comment" }).click();
+    await expect
+      .poll(async () =>
+        (await listComments(issue.key, artifactId)).find(
+          ({ body }) => body === "anchors the whole paragraph"
+        )
+      )
+      .toBeDefined();
+    const comment = (await listComments(issue.key, artifactId)).find(
+      ({ body }) => body === "anchors the whole paragraph"
+    );
+    if (comment === undefined) {
+      throw new Error("The preview-mode anchored comment was not created.");
+    }
+    expect(comment.anchor).toMatchObject({
+      from: 0,
+      quote: initialMarkdown,
+      to: initialMarkdown.length,
+      version: 1,
+    });
+  } finally {
+    await alice.close();
+  }
+});
