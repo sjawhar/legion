@@ -176,7 +176,7 @@ test("a failed answer post keeps the half-filled form, shows the error, and lets
   await form.locator('input[value="E2E_SUBMITTER"]').check();
   await form.locator('input[name="custom-enabled"]').check();
   const custom = form.locator('textarea[name="custom"]');
-  await custom.fill("use the org-level secret");
+  await custom.fill("use the **org-level** secret");
 
   dashboard.failNextComment();
   await form.locator("button[type=submit]").click();
@@ -184,7 +184,7 @@ test("a failed answer post keeps the half-filled form, shows the error, and lets
   // Same form, same choice and text: nothing was torn down while the post was in flight.
   await expect(form.locator('input[value="E2E_SUBMITTER"]')).toBeChecked();
   await expect(form.locator('input[name="custom-enabled"]')).toBeChecked();
-  await expect(custom).toHaveValue("use the org-level secret");
+  await expect(custom).toHaveValue("use the **org-level** secret");
   await expect(form.locator("button[type=submit]")).toBeEnabled();
   // The optimistic answer was withdrawn: the question is still waiting.
   await expect(page.locator('#turn-103 .ask-history[data-ask-id="F1"] .ask-waiting')).toBeVisible();
@@ -192,8 +192,14 @@ test("a failed answer post keeps the half-filled form, shows the error, and lets
 
   await form.locator("button[type=submit]").click();
   await expect(form).toHaveCount(0);
-  await expect(page.locator('#turn-103 .ask-history[data-ask-id="F1"] .answer-pill')).toHaveText(
-    "use the org-level secret"
+  // Free text typed into "Other (specify)" is not one of F1's option labels
+  // (E2E_SUBMITTER_EMAIL / E2E_SUBMITTER), so it renders as sanitized
+  // markdown prose, not a monospace pill.
+  const answerText = page.locator('#turn-103 .ask-history[data-ask-id="F1"] .answer-text');
+  await expect(answerText).toContainText("use the org-level secret");
+  await expect(answerText.locator("strong")).toHaveText("org-level");
+  await expect(page.locator('#turn-103 .ask-history[data-ask-id="F1"] .answer-pill')).toHaveCount(
+    0
   );
   expect(dashboard.posted.at(-1)?.body).toContain('forAsk: "F1"');
 });

@@ -906,7 +906,8 @@ select {
 }
 
 .opening-body code,
-.comment-body code {
+.comment-body code,
+.answer-text code {
   background: var(--line-soft);
   padding: 0.05rem 0.35rem;
   border-radius: 4px;
@@ -915,7 +916,8 @@ select {
 }
 
 .opening-body a,
-.comment-body a {
+.comment-body a,
+.answer-text a {
   color: var(--link);
   text-decoration-color: rgba(10, 111, 222, 0.4);
   text-underline-offset: 2px;
@@ -1116,6 +1118,16 @@ a.gh-ref {
   padding: 0.1rem 0.45rem;
   border-radius: var(--radius-pill);
   background: var(--line-soft);
+}
+.answer-text {
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.answer-text p:first-child {
+  margin-top: 0;
+}
+.answer-text p:last-child {
+  margin-bottom: 0;
 }
 .answer-empty {
   color: var(--fg-mute);

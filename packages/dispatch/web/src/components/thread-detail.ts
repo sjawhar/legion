@@ -52,9 +52,20 @@ export const EMPTY_WRITE_STATE: ThreadWriteState = {
   addressedPending: false,
 };
 
-function renderAnswerValues(values: readonly string[]): string {
+function renderAnswerValues(values: readonly string[], ask?: ThreadAsk): string {
   if (values.length === 0) return `<em class="answer-empty">no answer</em>`;
-  return values.map((value) => `<span class="answer-pill">${escapeHtml(value)}</span>`).join(" ");
+  return values
+    .map((value) => {
+      if (ask?.question.options?.some((option) => option.label === value))
+        return `<span class="answer-pill">${escapeHtml(value)}</span>`;
+      // A value that trims to nothing (a hand-authored marker, never the
+      // dashboard's own trimmed form submission) has no prose to show.
+      const prose = renderMarkdownLite(value);
+      return prose
+        ? `<div class="answer-text">${prose}</div>`
+        : `<em class="answer-empty">no answer</em>`;
+    })
+    .join(" ");
 }
 
 // Beneath a question: its answer; or that it is still waiting (linking down to
@@ -66,7 +77,7 @@ function renderAskAnswer(
   input: ThreadDetailInput
 ): string {
   if (resolved) {
-    return `<div class="ask-answer">${renderAnswerValues(resolved.values)}<span class="ask-answer-meta"> — ${escapeHtml(resolved.answer.authorLogin)} · ${escapeHtml(timeAgo(resolved.answer.createdAt))}</span></div>`;
+    return `<div class="ask-answer">${renderAnswerValues(resolved.values, ask)}<span class="ask-answer-meta"> — ${escapeHtml(resolved.answer.authorLogin)} · ${escapeHtml(timeAgo(resolved.answer.createdAt))}</span></div>`;
   }
   if (input.issue.state !== "OPEN") return `<em class="ask-waiting">never answered</em>`;
   if (input.openAsks.includes(ask)) {
@@ -143,10 +154,20 @@ function renderTurnCard(
 // An answer comment that is not the one shown beneath a question: it named
 // no ask on the thread, or a different answer to the same ask is the one the
 // question shows. It stays at its own position so nothing on GitHub is hidden.
-function renderStandaloneAnswer(comment: Comment, answer: ThreadAnswer, tag: string): string {
+// `ask` is the one ask this answer unambiguously settles; when it settles
+// several at once (a legacy answer spanning multiple body asks) or none (a
+// ghost answer naming an ask no longer on the thread), there is no single
+// ask's option list to check a value against, so every value renders as
+// prose.
+function renderStandaloneAnswer(
+  comment: Comment,
+  answer: ThreadAnswer,
+  tag: string,
+  ask?: ThreadAsk
+): string {
   return `<article class="comment comment-answer" data-comment-id="${comment.id}">
     <header><strong>${escapeHtml(comment.authorLogin)}</strong><span>${escapeHtml(timeAgo(comment.createdAt))}</span><span class="comment-tag">${tag}</span></header>
-    <div class="comment-body">${renderAnswerValues(answer.answers.flat())}</div>
+    <div class="comment-body">${renderAnswerValues(answer.answers.flat(), ask)}</div>
   </article>`;
 }
 
@@ -178,7 +199,11 @@ function renderComment(comment: Comment, input: ThreadDetailInput): string {
     const shown = targets.some(
       (ask) => answerFor(ask, input.answers)?.answer.commentId === comment.id
     );
-    return shown ? "" : renderStandaloneAnswer(comment, answer, "later answer");
+    if (shown) return "";
+    // Only a single settled target's option list is safe to check a value
+    // against; a legacy answer spanning several body asks renders as prose.
+    const target = targets.length === 1 ? targets[0] : undefined;
+    return renderStandaloneAnswer(comment, answer, "later answer", target);
   }
   return `<article class="comment" data-comment-id="${comment.id}">
     <header><strong>${escapeHtml(comment.authorLogin)}</strong><span>${escapeHtml(timeAgo(comment.createdAt))}</span></header>
