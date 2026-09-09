@@ -150,7 +150,45 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/valid dispatch/);
   });
 
-  test("rejects a legacy singular artifact dispatch reference", async () => {
+  test("reads a named artifact version from a singular dispatch URI", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/versions/3") {
+        return response({ markdown: "Version three" });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { ref: "dispatch://DSP-42/artifact/spec@v3" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).resolves.toEqual({ text: "Version three", details: { issue: "DSP-42" } });
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/artifact-42/versions/3",
+      "/api/v1/issues/DSP-42/comments?artifact=artifact-42",
+    ]);
+  });
+
+  test("rejects a plural artifact Dispatch URI", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
     }) as unknown as typeof fetch;
@@ -158,7 +196,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_doc_read",
-        args: { ref: "dispatch://DSP-42/artifact/spec" },
+        args: { ref: "dispatch://DSP-42/artifacts/spec" },
         cwd: "/workspace",
         host: "omp",
         config,

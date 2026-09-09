@@ -77,10 +77,12 @@ function optionalNumber(args: Record<string, unknown>, name: string): number | u
 }
 
 function parseDispatchRef(ref: string): ParsedDispatchRef | null {
-  const match = ref.match(/^dispatch:\/\/([^/]+)(?:\/(?:spec|artifacts\/([^/@]+)(?:@v(\d+))?))?$/);
+  const match = ref.match(
+    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(?:spec|artifact\/([^/@]+)(?:@v(\d+))?|ask\/[^/]+|comment\/[^/]+))?$/
+  );
   if (!match) return null;
   const [, issue, artifact, version] = match;
-  if (!issue) return null;
+  if (!issue || (version !== undefined && Number(version) < 1)) return null;
   return {
     issue,
     ...(artifact === undefined ? {} : { artifact }),
