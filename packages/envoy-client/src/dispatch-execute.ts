@@ -102,23 +102,27 @@ async function resolveIssueArguments(
   exec: ExecFn
 ): Promise<{ args: Record<string, unknown>; ref: ParsedDispatchRef | null }> {
   if (tool === "dispatch_issue") return { args, ref: null };
-  const ref = typeof args.ref === "string" ? parseDispatchRef(args.ref) : null;
-  if (args.issue !== undefined || ref !== null) {
+  const refArgument = args["ref"];
+  const ref = typeof refArgument === "string" ? parseDispatchRef(refArgument) : null;
+  const issueArgument = args["issue"];
+  const artifactArgument = args["artifact"];
+  const versionArgument = args["version"];
+  if (issueArgument !== undefined || ref !== null) {
     return {
       args: {
         ...args,
-        ...(args.issue === undefined ? { issue: ref?.issue } : {}),
-        ...(args.artifact === undefined && ref?.artifact !== undefined
+        ...(issueArgument === undefined && ref?.issue !== undefined ? { issue: ref.issue } : {}),
+        ...(artifactArgument === undefined && ref?.artifact !== undefined
           ? { artifact: ref.artifact }
           : {}),
-        ...(args.version === undefined && ref?.version !== undefined
+        ...(versionArgument === undefined && ref?.version !== undefined
           ? { version: ref.version }
           : {}),
       },
       ref,
     };
   }
-  const legionIssue = env.LEGION_ISSUE;
+  const legionIssue = env["LEGION_ISSUE"];
   if (!legionIssue) throw new Error("issue is required; supply issue or set LEGION_ISSUE");
   const repo = await resolveCwdRepo(cwd, exec);
   if (!repo) throw new Error("issue is required; LEGION_ISSUE needs a GitHub repository in cwd");
@@ -228,18 +232,15 @@ export async function executeDispatchTool(
 
   switch (input.tool) {
     case "dispatch_issue": {
+      const parent = optionalString(args, "parent");
+      const external = optionalString(args, "external");
+      const spec = optionalString(args, "spec");
       const created = await client.issue({
         project: stringArg(args, "project"),
         title: stringArg(args, "title"),
-        ...(optionalString(args, "parent") === undefined
-          ? {}
-          : { parent: optionalString(args, "parent") }),
-        ...(optionalString(args, "external") === undefined
-          ? {}
-          : { external: optionalString(args, "external") }),
-        ...(optionalString(args, "spec") === undefined
-          ? {}
-          : { spec: optionalString(args, "spec") }),
+        ...(parent === undefined ? {} : { parent }),
+        ...(external === undefined ? {} : { external }),
+        ...(spec === undefined ? {} : { spec }),
         actor,
       });
       return {
@@ -248,23 +249,22 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_ask": {
-      const anchorArgs = asObject(args.anchor);
+      const anchorArgs = asObject(args["anchor"]);
       const resolved = anchorArgs
         ? await resolveArtifact(client, issue(), stringArg(anchorArgs, "artifact"))
         : undefined;
+      const options = args["options"];
+      const multiple = optionalBoolean(args, "multiple");
+      const custom = optionalBoolean(args, "custom");
+      const urgency = optionalString(args, "urgency") as AskInput["urgency"] | undefined;
+      const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const ask = await client.ask(issue(), {
         question: stringArg(args, "question"),
-        ...(Array.isArray(args.options) ? { options: args.options as AskInput["options"] } : {}),
-        ...(optionalBoolean(args, "multiple") === undefined
-          ? {}
-          : { multiple: optionalBoolean(args, "multiple") }),
-        ...(optionalBoolean(args, "custom") === undefined
-          ? {}
-          : { custom: optionalBoolean(args, "custom") }),
-        ...(optionalString(args, "urgency") === undefined
-          ? {}
-          : { urgency: optionalString(args, "urgency") as AskInput["urgency"] }),
-        ...(anchorArgs && resolved ? { anchor: anchor(resolved.artifact, anchorArgs) } : {}),
+        ...(Array.isArray(options) ? { options: options as NonNullable<AskInput["options"]> } : {}),
+        ...(multiple === undefined ? {} : { multiple }),
+        ...(custom === undefined ? {} : { custom }),
+        ...(urgency === undefined ? {} : { urgency }),
+        ...(anchored === undefined ? {} : { anchor: anchored }),
         actor,
       });
       return {
@@ -281,12 +281,11 @@ export async function executeDispatchTool(
         ? await resolveArtifact(client, issue(), artifactReference)
         : undefined;
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
+      const replyTo = optionalString(args, "reply_to");
       const comment = await client.comment(issue(), {
         body: stringArg(args, "body"),
         ...(anchored === undefined ? {} : { anchor: anchored }),
-        ...(optionalString(args, "reply_to") === undefined
-          ? {}
-          : { reply_to: optionalString(args, "reply_to") }),
+        ...(replyTo === undefined ? {} : { reply_to: replyTo }),
         actor,
       });
       return {
@@ -328,11 +327,11 @@ export async function executeDispatchTool(
     }
     case "dispatch_doc_edit": {
       const resolved = await resolveArtifact(client, issue(), stringArg(args, "artifact"));
+      const ops = args["ops"] as EditOperation[];
+      const summary = optionalString(args, "summary");
       const edited = await client.docEdit(resolved.artifact.id, {
-        ops: args.ops as EditOperation[],
-        ...(optionalString(args, "summary") === undefined
-          ? {}
-          : { summary: optionalString(args, "summary") }),
+        ops,
+        ...(summary === undefined ? {} : { summary }),
         actor,
       });
       return {
@@ -360,15 +359,13 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_artifact": {
+      const primary = optionalBoolean(args, "primary");
+      const summary = optionalString(args, "summary");
       const result = await client.artifact(issue(), {
         name: stringArg(args, "name"),
         file: Bun.file(stringArg(args, "path")),
-        ...(optionalBoolean(args, "primary") === undefined
-          ? {}
-          : { primary: optionalBoolean(args, "primary") }),
-        ...(optionalString(args, "summary") === undefined
-          ? {}
-          : { summary: optionalString(args, "summary") }),
+        ...(primary === undefined ? {} : { primary }),
+        ...(summary === undefined ? {} : { summary }),
         actor,
       });
       return {
