@@ -68,7 +68,7 @@ func newTestRouter(t *testing.T, users auth.UserStore, allowed map[string]struct
 			AllowedLogins: allowed,
 		},
 		AllowedLogins: allowed,
-		App: &auth.AppConfig{ClientID: "client-id", ClientSecret: "client-secret"},
+		App:           &auth.AppConfig{ClientID: "client-id", ClientSecret: "client-secret"},
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
@@ -169,5 +169,17 @@ func TestGitHubProxyUsesHeaderIdentity(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Errorf("proxy status: got %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestBuildAppContextRejectsMalformedRepoProjectMapping(t *testing.T) {
+	_, err := BuildAppContext(AppContextOptions{
+		SigningKey:   "signing-key",
+		Users:        &memoryUserStore{users: map[string]*auth.User{}},
+		Identity:     identity.HeaderIdentity{Header: "X-Dispatch-User"},
+		RepoProjects: "not-a-repo-project-mapping",
+	})
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
+		t.Fatalf("error: got %v, want malformed DISPATCH_REPO_PROJECTS rejection", err)
 	}
 }

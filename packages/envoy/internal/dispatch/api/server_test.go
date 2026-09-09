@@ -1,0 +1,637 @@
+package api
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"net/textproto"
+	"net/url"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+)
+
+func openEmptyTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	baseURL, err := url.Parse(os.Getenv("DISPATCH_TEST_DATABASE_URL"))
+	if err != nil || baseURL.String() == "" {
+		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres API tests")
+	}
+	adminURL := *baseURL
+	adminURL.Path = "/postgres"
+	admin, err := pgxpool.New(context.Background(), adminURL.String())
+	if err != nil {
+		t.Fatalf("open test database admin pool: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		t.Fatalf("random database name: %v", err)
+	}
+	databaseName := "dispatch_api_test_" + hex.EncodeToString(suffix[:])
+	if _, err := admin.Exec(context.Background(), "create database "+databaseName); err != nil {
+		t.Fatalf("create isolated database: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
+			t.Errorf("drop isolated database: %v", err)
+		}
+	})
+
+	testURL := *baseURL
+	testURL.Path = "/" + databaseName
+	database, err := store.Open(context.Background(), testURL.String())
+	if err != nil {
+		t.Fatalf("open isolated database: %v", err)
+	}
+	t.Cleanup(database.Pool.Close)
+	if err := database.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate isolated database: %v", err)
+	}
+	return database
+}
+
+func newTestHandler(t *testing.T) http.Handler {
+	t.Helper()
+	database := openEmptyTestStore(t)
+	deps, err := NewDeps(DepsInput{
+		Store: database,
+		Identity: identity.HeaderIdentity{
+			Header:        "X-Dispatch-User",
+			AllowedLogins: map[string]struct{}{"alice": {}, "bob": {}},
+		},
+		AgentToken:      "agent-token",
+		RepoProjectsRaw: "owner/repo=TEST",
+		Docs:            docs.NewNoopAPI(database),
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, deps)
+	return mux
+}
+
+func dispatchRequest(t *testing.T, handler http.Handler, method, target string, body any, login string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader *bytes.Reader
+	if body == nil {
+		reader = bytes.NewReader(nil)
+	} else {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("encode request body: %v", err)
+		}
+		reader = bytes.NewReader(data)
+	}
+	request := httptest.NewRequest(method, target, reader)
+	request.Header.Set("Content-Type", "application/json")
+	if login != "" {
+		request.Header.Set("X-Dispatch-User", login)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func multipartRequest(t *testing.T, handler http.Handler, target string, fields map[string]string, filename, contentType string, content []byte, login string) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatalf("write multipart field: %v", err)
+		}
+	}
+	header := textproto.MIMEHeader{}
+	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
+	header.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		t.Fatalf("create multipart file part: %v", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("finish multipart request: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, target, &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	if login != "" {
+		request.Header.Set("X-Dispatch-User", login)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
+	t.Helper()
+	var value T
+	if err := json.NewDecoder(response.Body).Decode(&value); err != nil {
+		t.Fatalf("decode response body %q: %v", response.Body.String(), err)
+	}
+	return value
+}
+
+func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
+	handler := newTestHandler(t)
+	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice")
+	if project.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", project.Code, project.Body.String())
+	}
+
+	issueResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "First issue", "spec": "# Hello",
+	}, "alice")
+	if issueResponse.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", issueResponse.Code, issueResponse.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key               string `json:"key"`
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+		LastSeq           int    `json:"last_seq"`
+	}](t, issueResponse)
+	if issue.Key != "TEST-1" {
+		t.Fatalf("issue key: got %q, want TEST-1", issue.Key)
+	}
+	if issue.PrimaryArtifactID == "" {
+		t.Fatal("created issue has no primary artifact")
+	}
+	if issue.LastSeq != 1 {
+		t.Fatalf("created issue event sequence: got %d, want 1", issue.LastSeq)
+	}
+
+	textResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	if textResponse.Code != http.StatusOK {
+		t.Fatalf("read primary document: status=%d body=%s", textResponse.Code, textResponse.Body.String())
+	}
+	text := decodeBody[struct {
+		Markdown string `json:"markdown"`
+		Version  *int   `json:"version"`
+	}](t, textResponse)
+	if text.Markdown != "# Hello" || text.Version != nil {
+		t.Fatalf("primary document: got %#v, want markdown # Hello and null version", text)
+	}
+}
+
+func TestEventNotifyRules(t *testing.T) {
+	broker := events.NewBroker()
+	user := model.Actor{Kind: "user", ID: "alice"}
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	for _, test := range []struct {
+		name  string
+		event model.Event
+		want  bool
+	}{
+		{name: "user message", event: model.Event{Type: "message.created", Actor: user}, want: true},
+		{name: "session message", event: model.Event{Type: "message.created", Actor: session}, want: false},
+		{name: "user title change", event: model.Event{Type: "issue.updated", Actor: user}, want: true},
+		{name: "session ask", event: model.Event{Type: "ask.opened", Actor: session}, want: false},
+		{name: "user named version", event: model.Event{Type: "artifact.version", Actor: user, Payload: map[string]any{"version": model.Version{Named: true}}}, want: true},
+		{name: "session named version", event: model.Event{Type: "artifact.version", Actor: session, Payload: map[string]any{"version": model.Version{Named: true}}}, want: false},
+		{name: "child status", event: model.Event{Type: "child.status", Actor: session}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := broker.Notify(test.event); got != test.want {
+				t.Fatalf("Notify(%+v) = %t, want %t", test.event, got, test.want)
+			}
+		})
+	}
+}
+
+func TestExternalIssueResolutionAndAutoCreation(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	for number := 1; number <= 2; number++ {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": "TEST", "title": "ordinary issue",
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create issue %d: status=%d body=%s", number, response.Code, response.Body.String())
+		}
+	}
+	unlinked := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/resolve?ref=owner/repo%237", nil, "alice")
+	if unlinked.Code != http.StatusNotFound {
+		t.Fatalf("resolve unlinked external issue: status=%d body=%s", unlinked.Code, unlinked.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"external": "owner/repo#7",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("auto-create external issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key           string `json:"key"`
+		ExternalLinks []struct {
+			URL string `json:"url"`
+		} `json:"external_links"`
+	}](t, created)
+	if issue.Key != "TEST-3" {
+		t.Fatalf("external issue key: got %q, want TEST-3", issue.Key)
+	}
+	if len(issue.ExternalLinks) != 1 || issue.ExternalLinks[0].URL != "https://github.com/owner/repo/issues/7" {
+		t.Fatalf("external links: got %#v", issue.ExternalLinks)
+	}
+}
+
+func TestArtifactVersionsAndPrimaryDocument(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	issueResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue", "spec": "# Initial",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key               string `json:"key"`
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, issueResponse)
+	if issueResponse.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", issueResponse.Code, issueResponse.Body.String())
+	}
+
+	first := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "a.png"}, "a.png", "image/png", []byte("first image"), "alice")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("upload first image: status=%d body=%s", first.Code, first.Body.String())
+	}
+	image := decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, first)
+	blob := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+image.Artifact.ID+"/versions/1", nil, "alice")
+	checksum := sha256.Sum256([]byte("first image"))
+	if blob.Code != http.StatusOK || blob.Body.String() != "first image" || blob.Header().Get("Content-Type") != "image/png" || blob.Header().Get("ETag") != hex.EncodeToString(checksum[:]) {
+		t.Fatalf("stream first blob: status=%d headers=%v body=%s", blob.Code, blob.Header(), blob.Body.String())
+	}
+
+	second := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "a.png"}, "a.png", "image/png", []byte("second image"), "alice")
+	if second.Code != http.StatusCreated {
+		t.Fatalf("upload second image: status=%d body=%s", second.Code, second.Body.String())
+	}
+	version := decodeBody[struct {
+		Version struct {
+			Number int `json:"number"`
+		} `json:"version"`
+	}](t, second)
+	if version.Version.Number != 2 {
+		t.Fatalf("second image version: got %d, want 2", version.Version.Number)
+	}
+	notDocument := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "a.png", "primary": "true"}, "a.png", "image/png", []byte("image"), "alice")
+	if notDocument.Code != http.StatusBadRequest || !strings.Contains(notDocument.Body.String(), `"code":"PRIMARY_NOT_DOC"`) {
+		t.Fatalf("image as primary: status=%d body=%s", notDocument.Code, notDocument.Body.String())
+	}
+
+	notes := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "notes.md", "text/markdown", []byte("# Notes"), "alice")
+	if notes.Code != http.StatusCreated {
+		t.Fatalf("upload document: status=%d body=%s", notes.Code, notes.Body.String())
+	}
+	uploaded := decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, notes)
+	replacement := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "notes.md", "text/markdown", []byte("# Revised"), "alice")
+	if replacement.Code != http.StatusCreated {
+		t.Fatalf("replace document: status=%d body=%s", replacement.Code, replacement.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+uploaded.Artifact.ID+"/text", nil, "alice")
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"# Revised"`) {
+		t.Fatalf("read replaced document: status=%d body=%s", text.Code, text.Body.String())
+	}
+
+	primary := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+uploaded.Artifact.ID+"/primary", map[string]any{}, "alice")
+	if primary.Code != http.StatusOK {
+		t.Fatalf("select notes as primary: status=%d body=%s", primary.Code, primary.Body.String())
+	}
+	changed := decodeBody[struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, primary)
+	if changed.PrimaryArtifactID != uploaded.Artifact.ID {
+		t.Fatalf("primary artifact: got %q, want %q", changed.PrimaryArtifactID, uploaded.Artifact.ID)
+	}
+	if changed.PrimaryArtifactID == issue.PrimaryArtifactID {
+		t.Fatal("previous primary artifact remained selected")
+	}
+}
+
+func agentRequest(t *testing.T, handler http.Handler, method, target string, body any, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode agent request body: %v", err)
+	}
+	request := httptest.NewRequest(method, target, bytes.NewReader(data))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func TestIssueRouteVersionEventsAndChildStatus(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	parentResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Parent",
+	}, "alice")
+	parent := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, parentResponse)
+	childResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Child", "parent": parent.Key,
+	}, "alice")
+	child := decodeBody[struct {
+		Key               string `json:"key"`
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, childResponse)
+	if childResponse.Code != http.StatusCreated {
+		t.Fatalf("create child: status=%d body=%s", childResponse.Code, childResponse.Body.String())
+	}
+	updated := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]string{
+		"route": "role:legion-controller-x",
+	}, "alice")
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"route":"role:legion-controller-x"`) {
+		t.Fatalf("set valid route: status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	invalid := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]string{
+		"route": "bogus",
+	}, "alice")
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"ROUTE_INVALID"`) {
+		t.Fatalf("reject invalid route: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	status := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]string{
+		"status": "in_progress",
+	}, "alice")
+	if status.Code != http.StatusOK {
+		t.Fatalf("change child status: status=%d body=%s", status.Code, status.Body.String())
+	}
+
+	named := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+child.PrimaryArtifactID+"/versions", map[string]string{
+		"summary": "checkpoint",
+	}, "alice")
+	if named.Code != http.StatusCreated || !strings.Contains(named.Body.String(), `"named":true`) {
+		t.Fatalf("create user named version: status=%d body=%s", named.Code, named.Body.String())
+	}
+	sessionVersion := agentRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+child.PrimaryArtifactID+"/versions", map[string]any{
+		"summary": "agent checkpoint",
+		"actor":   map[string]string{"kind": "session", "id": "abcdef0123456789"},
+	}, "agent-token")
+	if sessionVersion.Code != http.StatusCreated {
+		t.Fatalf("create session named version: status=%d body=%s", sessionVersion.Code, sessionVersion.Body.String())
+	}
+
+	childEvents := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+child.Key+"/events", nil, "alice")
+	var childLog []struct {
+		Seq    int    `json:"seq"`
+		Type   string `json:"type"`
+		Notify bool   `json:"notify"`
+	}
+	if err := json.NewDecoder(childEvents.Body).Decode(&childLog); err != nil {
+		t.Fatalf("decode child events: %v", err)
+	}
+	if len(childLog) != 5 {
+		t.Fatalf("child events: got %#v, want five events", childLog)
+	}
+	for index, event := range childLog {
+		if event.Seq != index+1 {
+			t.Fatalf("child event %d sequence: got %d, want %d", index, event.Seq, index+1)
+		}
+	}
+	if !childLog[3].Notify || childLog[4].Notify {
+		t.Fatalf("named version notifications: got user=%t session=%t", childLog[3].Notify, childLog[4].Notify)
+	}
+
+	parentEvents := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+parent.Key+"/events", nil, "alice")
+	var parentLog []struct {
+		Type   string `json:"type"`
+		Notify bool   `json:"notify"`
+	}
+	if err := json.NewDecoder(parentEvents.Body).Decode(&parentLog); err != nil {
+		t.Fatalf("decode parent events: %v", err)
+	}
+	if len(parentLog) != 2 || parentLog[1].Type != "child.status" || !parentLog[1].Notify {
+		t.Fatalf("parent events: got %#v, want child.status notification", parentLog)
+	}
+}
+
+func TestActorAuthenticationRules(t *testing.T) {
+	handler := newTestHandler(t)
+	unauthenticated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "")
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("header-less project creation: status=%d body=%s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+	noActor := agentRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "agent-token")
+	if noActor.Code != http.StatusBadRequest || !strings.Contains(noActor.Body.String(), `"code":"ACTOR_KIND"`) {
+		t.Fatalf("bearer without actor: status=%d body=%s", noActor.Code, noActor.Body.String())
+	}
+	userActor := agentRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+		"key": "TEST", "name": "Test project", "actor": map[string]string{"kind": "user", "id": "alice"},
+	}, "agent-token")
+	if userActor.Code != http.StatusBadRequest || !strings.Contains(userActor.Body.String(), `"code":"ACTOR_KIND"`) {
+		t.Fatalf("bearer user actor: status=%d body=%s", userActor.Code, userActor.Body.String())
+	}
+	wrongToken := agentRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+		"key": "TEST", "name": "Test project", "actor": map[string]string{"kind": "session", "id": "abcdef0123456789"},
+	}, "wrong-token")
+	if wrongToken.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong bearer: status=%d body=%s", wrongToken.Code, wrongToken.Body.String())
+	}
+}
+
+func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
+	if err != nil {
+		t.Fatalf("construct SSE request: %v", err)
+	}
+	request.Header.Set("X-Dispatch-User", "alice")
+	responseChannel := make(chan *http.Response, 1)
+	errorChannel := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			errorChannel <- err
+			return
+		}
+		responseChannel <- response
+	}()
+	var stream *http.Response
+	select {
+	case err := <-errorChannel:
+		t.Fatalf("connect SSE: %v", err)
+	case stream = <-responseChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE endpoint did not establish a stream")
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
+	}
+	scanner := bufio.NewScanner(stream.Body)
+	replayed := readSSEFrame(t, scanner)
+	if replayed[1] != "event: issue.created" || !strings.Contains(replayed[2], `"issue_key":"TEST-1"`) {
+		t.Fatalf("replayed SSE frame: %#v", replayed)
+	}
+
+	updated := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed",
+	}, "alice")
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update issue during SSE: status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	live := readSSEFrame(t, scanner)
+	if live[1] != "event: issue.updated" || !strings.Contains(live[2], `"title":"Renamed"`) {
+		t.Fatalf("live SSE frame: %#v", live)
+	}
+	stream.Body.Close()
+	resumeRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events", nil)
+	if err != nil {
+		t.Fatalf("construct resumed SSE request: %v", err)
+	}
+	resumeRequest.Header.Set("X-Dispatch-User", "alice")
+	resumeRequest.Header.Set("Last-Event-ID", "1")
+	resumed, err := http.DefaultClient.Do(resumeRequest)
+	if err != nil {
+		t.Fatalf("resume SSE: %v", err)
+	}
+	defer resumed.Body.Close()
+	resumedFrame := readSSEFrame(t, bufio.NewScanner(resumed.Body))
+	if resumedFrame[0] != "id: 2" || resumedFrame[1] != "event: issue.updated" {
+		t.Fatalf("Last-Event-ID replay: %#v", resumedFrame)
+	}
+}
+
+func readSSEFrame(t *testing.T, scanner *bufio.Scanner) []string {
+	t.Helper()
+	frame := []string{}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			return frame
+		}
+		frame = append(frame, line)
+	}
+	t.Fatalf("read SSE frame: %v", scanner.Err())
+	return nil
+}
+
+func TestPerUserIssueStateIsIsolated(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	saved := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
+		"pinned": true, "last_read_seq": 1, "dismissed": []string{"ask-1"},
+	}, "alice")
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save Alice state: status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	alice := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "alice")
+	if !strings.Contains(alice.Body.String(), `"TEST-1":{"pinned":true,"last_read_seq":1,"dismissed":["ask-1"]}`) {
+		t.Fatalf("Alice state: status=%d body=%s", alice.Code, alice.Body.String())
+	}
+	bob := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "bob")
+	if bob.Code != http.StatusOK || strings.Contains(bob.Body.String(), issue.Key) {
+		t.Fatalf("Bob state leaked Alice pin: status=%d body=%s", bob.Code, bob.Body.String())
+	}
+}
+
+func TestMessageMutationAppendsAndPublishesEvent(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	message := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]string{
+		"body": "please review",
+	}, "alice")
+	if message.Code != http.StatusCreated {
+		t.Fatalf("create message: status=%d body=%s", message.Code, message.Body.String())
+	}
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if !strings.Contains(log.Body.String(), `"type":"message.created"`) || !strings.Contains(log.Body.String(), `"notify":true`) {
+		t.Fatalf("message event: status=%d body=%s", log.Code, log.Body.String())
+	}
+}
+
+func TestResolveIssueRejectsMalformedNativeKey(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/resolve?ref=TEST-not-a-number", nil, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_ISSUE_REF"`) {
+		t.Fatalf("resolve malformed key: status=%d body=%s", response.Code, response.Body.String())
+	}
+}

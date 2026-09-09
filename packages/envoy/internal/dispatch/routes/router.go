@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -38,6 +39,7 @@ type AppContext struct {
 	AgentToken    string
 	RepoProjects  string
 	HTTPClient    auth.HTTPClient
+	apiDeps       api.Deps
 	app           *auth.AppConfig // nil ⇒ not configured
 	appSource     string          // "env" | "file:<path>" | "" — for diagnostic logs
 	appMu         sync.RWMutex
@@ -70,6 +72,15 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
 	}
+	apiDeps, err := api.NewDeps(api.DepsInput{
+		Store:           opts.Store,
+		Identity:        opts.Identity,
+		AgentToken:      opts.AgentToken,
+		RepoProjectsRaw: opts.RepoProjects,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("BuildAppContext: %w", err)
+	}
 	return &AppContext{
 		SigningKey:    opts.SigningKey,
 		WebDistDir:    opts.WebDistDir,
@@ -79,6 +90,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Store:         opts.Store,
 		AgentToken:    opts.AgentToken,
 		RepoProjects:  opts.RepoProjects,
+		apiDeps:       apiDeps,
 		app:           opts.App,
 		appSource:     opts.AppSource,
 	}, nil
@@ -115,6 +127,7 @@ func New(ctx *AppContext) http.Handler {
 	mux.HandleFunc("/api/github/rest/", r.apiGithubRest)
 	mux.HandleFunc("/api/github/graphql", r.apiGithubGraphql)
 	mux.HandleFunc("GET /healthz", r.healthz)
+	api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	return mux
 }
