@@ -6,19 +6,31 @@ networking. The listener serves `127.0.0.1:9020` for local OpenCode session
 registration and webhook ingress; Dispatch serves `127.0.0.1:8766` by default
 for the SPA, GitHub OAuth, and the native Dispatch API.
 
-For a phone check over the tailnet, use Tailscale Serve to terminate HTTPS
-without exposing Dispatch beyond Tailscale:
+## Host configuration lives in `compose/.env`
+
+Docker Compose reads `compose/.env` next to the compose files on every
+`docker compose` invocation, so the host's Dispatch settings belong there — not
+in a shell session. A `docker compose up` run by anyone (or any agent) then
+reproduces the same deployment; exported variables only override it.
+`compose/.env` holds secrets and is git-ignored; `compose/dispatch.env.example`
+is the template:
 
 ```bash
-tailscale serve --https=443 http://127.0.0.1:8766
+cp compose/dispatch.env.example compose/.env
+$EDITOR compose/.env
 ```
 
-If Tailscale Serve is unavailable, bind directly to the host's Tailscale IPv4
-address instead of every interface:
+For browser access over the tailnet, bind Dispatch to the host's Tailscale
+IPv4 address and allow the plain-HTTP session cookie. The tailnet link is
+already encrypted; nothing else on the host can reach that address:
 
-```bash
-export DISPATCH_LISTEN_HOST="$(tailscale ip -4)"
 ```
+DISPATCH_LISTEN_HOST=100.x.y.z        # tailscale ip -4
+DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
+```
+
+Never bind `0.0.0.0`: that exposes the OAuth endpoints and session cookies on
+every interface.
 
 ## Layout
 
@@ -66,16 +78,17 @@ docker compose -f compose/dispatch.compose.yml up -d
 
 ## Dispatch configuration
 
-Set the secrets before first startup. Both values are opaque random strings:
+Generate the secrets once and record them in `compose/.env`; both are opaque
+random strings:
 
 ```bash
-export DISPATCH_PG_PASSWORD="$(openssl rand -hex 32)"
-export DISPATCH_AGENT_TOKEN="$(openssl rand -hex 32)"
-export DISPATCH_ALLOWED_LOGINS="<github-login>"
-export DISPATCH_BACKUP_BUCKET="<private-s3-bucket>"
-export S3_REGION="<bucket-region>"
-deploy/scripts/up-dispatch.sh
-curl http://127.0.0.1:8766/healthz
+cd packages/envoy/deploy
+cp compose/dispatch.env.example compose/.env
+sed -i "s|^DISPATCH_PG_PASSWORD=.*|DISPATCH_PG_PASSWORD=$(openssl rand -hex 32)|" compose/.env
+sed -i "s|^DISPATCH_AGENT_TOKEN=.*|DISPATCH_AGENT_TOKEN=$(openssl rand -hex 32)|" compose/.env
+$EDITOR compose/.env          # logins, bucket, region, listen host
+scripts/up-dispatch.sh
+curl "http://$(tailscale ip -4):8766/healthz"
 ```
 
 The mounted `~/.config/opencode/envoy.json` supplies `natsUrls` and
@@ -101,10 +114,11 @@ available. Host adapters use the same file or the `DISPATCH_URL` and
 | `DISPATCH_URL` | no | Host-adapter override for the Dispatch base URL; use with `DISPATCH_TOKEN`. |
 | `DISPATCH_TOKEN` | host adapters | Bearer token paired with `DISPATCH_URL`. |
 | `DISPATCH_APP_CLIENT_ID` / `DISPATCH_APP_CLIENT_SECRET` | OAuth | GitHub OAuth credentials. The GitHub proxy needs a stored user token. |
-| `DISPATCH_INSECURE_COOKIE` | HTTP only | Set only for local HTTP development; use Tailscale Serve for tailnet browser access. |
+| `DISPATCH_INSECURE_COOKIE` | HTTP | Set to `1` whenever browsers reach Dispatch over `http://` (the tailnet deployment); leave unset behind an HTTPS terminator. |
 
 The service derives `DATABASE_URL` from the configured password and Postgres
 port. The database data and Dispatch signing material are named volumes.
+
 ## Backups and restore
 
 The digest-pinned `eeshugerman/postgres-backup-s3` worker runs daily, retains
