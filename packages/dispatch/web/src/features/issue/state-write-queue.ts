@@ -9,7 +9,11 @@ export type DismissedStateOperation =
 export interface IssueStateWriteWorker {
   fetchState: (issueKey: string) => Promise<UserIssueState>;
   onDrained: (issueKey: string, state: UserIssueState) => void;
-  onError: (issueKey: string, state: UserIssueState | undefined) => void;
+  onError: (
+    issueKey: string,
+    operations: DismissedStateOperation[],
+    state: UserIssueState | undefined
+  ) => void;
   putState: (issueKey: string, dismissed: string[]) => Promise<UserIssueState>;
 }
 
@@ -122,9 +126,10 @@ export class IssueStateWriteQueue {
     state: UserIssueState | undefined
   ): void {
     this.pending.delete(issueKey);
+    const operations = queued.operations.map((operation) => operation.operation);
     for (const operation of queued.operations) {
       operation.reject(error);
     }
-    queued.worker.onError(issueKey, state);
+    queued.worker.onError(issueKey, operations, state);
   }
 }

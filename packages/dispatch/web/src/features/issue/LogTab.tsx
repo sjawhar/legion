@@ -12,6 +12,12 @@ import {
 
 const stateWrites = new IssueStateWriteQueue();
 
+interface FailedStateOperations {
+  authoritativeState: UserIssueState | undefined;
+  issueKey: string;
+  operations: DismissedStateOperation[];
+}
+
 function eventDescription(event: Event): string {
   if (event.type === "ask.answered") {
     const question = event.payload.question;
@@ -71,7 +77,8 @@ export function LogTab({
   state: UserState | undefined;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const [saveErrorIssueKey, setSaveErrorIssueKey] = useState<string>();
+  const [failedOps, setFailedOps] = useState<FailedStateOperations>();
+  const [retryingFailedOps, setRetryingFailedOps] = useState(false);
   const log = useInfiniteQuery({
     initialPageParam: null as number | null,
     queryKey: ["events", issueKey],
@@ -92,6 +99,7 @@ export function LogTab({
     [events, issueState.dismissed, issueState.last_read_seq]
   );
   const visibleEventCount = items.filter((item) => item.kind === "event").length;
+  const hasFailedOps = failedOps?.issueKey === issueKey;
 
   useEffect(() => {
     lastRead.current = issueState.last_read_seq;
@@ -174,12 +182,63 @@ export function LogTab({
     };
   }, [issueKey, queryClient, visibleEventCount]);
 
+  const applyOptimisticOperations = (operations: DismissedStateOperation[]) => {
+    queryClient.setQueryData<UserState>(["user-state"], (current) => {
+      let next = eventState(current, issueKey);
+      for (const operation of operations) {
+        next = {
+          ...next,
+          dismissed: applyDismissedStateOperation(next.dismissed, operation),
+        };
+      }
+      return { ...current, [issueKey]: next };
+    });
+  };
+
+  const enqueueDismissedOperations = (operations: DismissedStateOperation[]) => {
+    for (const operation of operations) {
+      void stateWrites
+        .enqueue(issueKey, operation, {
+          fetchState: async (key) => eventState(await api.getMyState(), key),
+          onDrained: (key, next) => {
+            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+              ...current,
+              [key]: next,
+            }));
+            setFailedOps((current) => (current?.issueKey === key ? undefined : current));
+            setRetryingFailedOps(false);
+          },
+          onError: (key, failedOperations, next) => {
+            if (next === undefined) {
+              void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+            } else {
+              queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+                ...current,
+                [key]: next,
+              }));
+            }
+            setFailedOps({
+              authoritativeState: next,
+              issueKey: key,
+              operations: failedOperations,
+            });
+            setRetryingFailedOps(false);
+          },
+          putState: (key, dismissed) => api.putIssueState(key, { dismissed }),
+        })
+        .catch(() => {});
+    }
+  };
+
   const updateDismissed = (
     operation: DismissedStateOperation | ((dismissed: string[]) => DismissedStateOperation)
   ) => {
-    setSaveErrorIssueKey(undefined);
+    if (hasFailedOps) {
+      return;
+    }
     let nextOperation: DismissedStateOperation | undefined;
     queryClient.setQueryData<UserState>(["user-state"], (current) => {
+      const issueState = eventState(current, issueKey);
       nextOperation = typeof operation === "function" ? operation(issueState.dismissed) : operation;
       return {
         ...current,
@@ -189,32 +248,34 @@ export function LogTab({
         },
       };
     });
-    if (nextOperation === undefined) {
+    if (nextOperation !== undefined) {
+      enqueueDismissedOperations([nextOperation]);
+    }
+  };
+
+  const retryFailedOperations = () => {
+    if (failedOps === undefined || failedOps.issueKey !== issueKey || retryingFailedOps) {
       return;
     }
-    void stateWrites
-      .enqueue(issueKey, nextOperation, {
-        fetchState: async (key) => eventState(await api.getMyState(), key),
-        onDrained: (key, next) => {
-          queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-            ...current,
-            [key]: next,
-          }));
-        },
-        onError: (key, next) => {
-          if (next === undefined) {
-            void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-          } else {
-            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-              ...current,
-              [key]: next,
-            }));
-          }
-          setSaveErrorIssueKey(key);
-        },
-        putState: (key, dismissed) => api.putIssueState(key, { dismissed }),
-      })
-      .catch(() => {});
+    setRetryingFailedOps(true);
+    applyOptimisticOperations(failedOps.operations);
+    enqueueDismissedOperations(failedOps.operations);
+  };
+
+  const dismissFailedOperations = () => {
+    if (failedOps === undefined || failedOps.issueKey !== issueKey || retryingFailedOps) {
+      return;
+    }
+    const authoritativeState = failedOps.authoritativeState;
+    if (authoritativeState === undefined) {
+      void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+    } else {
+      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+        ...current,
+        [issueKey]: authoritativeState,
+      }));
+    }
+    setFailedOps(undefined);
   };
 
   if (log.isPending) {
@@ -226,10 +287,26 @@ export function LogTab({
 
   return (
     <section aria-label="Issue log" className="space-y-3">
-      {saveErrorIssueKey === issueKey ? (
-        <p className="text-sm text-rose-700" role="alert">
-          Couldn't save pin/dismiss — retry
-        </p>
+      {hasFailedOps ? (
+        <div className="flex items-center gap-3 text-sm text-rose-700" role="alert">
+          <p>Couldn't save pin/dismiss — retry</p>
+          <button
+            className="font-medium underline disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={retryingFailedOps}
+            onClick={retryFailedOperations}
+            type="button"
+          >
+            Retry
+          </button>
+          <button
+            className="underline disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={retryingFailedOps}
+            onClick={dismissFailedOperations}
+            type="button"
+          >
+            Dismiss
+          </button>
+        </div>
       ) : null}
       {items.map((item) => {
         if (item.kind === "new-divider") {
@@ -246,6 +323,7 @@ export function LogTab({
         }
         return (
           <LogEvent
+            disabled={hasFailedOps}
             event={item.event}
             folded={item.folded}
             key={item.event.id}
@@ -282,6 +360,7 @@ export function LogTab({
 }
 
 function LogEvent({
+  disabled,
   event,
   folded,
   onDismiss,
@@ -289,6 +368,7 @@ function LogEvent({
   pinned,
   register,
 }: {
+  disabled: boolean;
   event: Event;
   folded: boolean;
   onDismiss: () => void;
@@ -312,11 +392,17 @@ function LogEvent({
           </p>
         </div>
         <div className="flex gap-2">
-          <button className="text-sm text-sky-700 hover:text-sky-900" onClick={onPin} type="button">
+          <button
+            className="text-sm text-sky-700 hover:text-sky-900"
+            disabled={disabled}
+            onClick={onPin}
+            type="button"
+          >
             {pinned ? "Unpin" : "Pin"}
           </button>
           <button
             className="text-sm text-slate-500 hover:text-slate-800"
+            disabled={disabled}
             onClick={onDismiss}
             type="button"
           >

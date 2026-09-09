@@ -70,7 +70,7 @@ test("retries a failed operation from fetched state and keeps an operation queue
   const worker: IssueStateWriteWorker = {
     fetchState: async () => fetched[fetchCount++] ?? issueState([]),
     onDrained: (_issueKey, state) => published.push(state),
-    onError: (_issueKey, state) => errors.push(state),
+    onError: (_issueKey, _operations, state) => errors.push(state),
     putState: async (_issueKey, dismissed) => {
       const attempt = writes.push(dismissed);
       if (attempt === 2) {
@@ -117,7 +117,7 @@ test("a second failed write rejects queued operations, restores fetched state, a
   const worker: IssueStateWriteWorker = {
     fetchState: async () => fetched[fetchCount++] ?? issueState([]),
     onDrained: (_issueKey, state) => published.push(state),
-    onError: (_issueKey, state) => errors.push(state),
+    onError: (_issueKey, _operations, state) => errors.push(state),
     putState: async (_issueKey, dismissed) => {
       const attempt = writes.push(dismissed);
       if (attempt === 2) {
