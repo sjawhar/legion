@@ -1,13 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as os from "node:os";
+import { logger } from "../log";
 
 // Suppress console.error during tests
 const originalError = console.error;
+const originalDispatchToken = process.env.DISPATCH_TOKEN;
 beforeEach(() => {
   console.error = mock(() => {});
+  process.env.DISPATCH_TOKEN ??= "test-token";
 });
 afterEach(() => {
   console.error = originalError;
+  if (originalDispatchToken === undefined) delete process.env.DISPATCH_TOKEN;
+  else process.env.DISPATCH_TOKEN = originalDispatchToken;
 });
 
 describe("envoy plugin init", () => {
@@ -66,6 +71,62 @@ describe("envoy plugin init", () => {
       expect(elapsed).toBeLessThan(6000);
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  });
+});
+
+describe("Dispatch tool gating", () => {
+  it("keeps Envoy available and logs once when Dispatch is unconfigured", async () => {
+    const previous = { ...process.env };
+    delete process.env.DISPATCH_URL;
+    delete process.env.DISPATCH_TOKEN;
+    delete process.env.DISPATCH_MCP_URL;
+    process.env.HOME = "/nonexistent-home-for-dispatch-gating";
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381"),
+      } as never);
+
+      expect(Object.keys(hooks.tool).filter((name) => name.startsWith("dispatch_"))).toEqual([]);
+      expect(hooks.tool.envoy_list).toBeDefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "envoy: dispatch tools disabled — no Dispatch URL configured"
+      );
+      hooks.dispose();
+    } finally {
+      warn.mockRestore();
+      process.env = previous;
+    }
+  });
+
+  it("keeps Envoy available and logs the missing bearer token once", async () => {
+    const previous = { ...process.env };
+    process.env.DISPATCH_URL = "http://127.0.0.1:8766";
+    delete process.env.DISPATCH_TOKEN;
+    delete process.env.DISPATCH_MCP_URL;
+    process.env.HOME = "/nonexistent-home-for-dispatch-gating";
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381"),
+      } as never);
+
+      expect(Object.keys(hooks.tool).filter((name) => name.startsWith("dispatch_"))).toEqual([]);
+      expect(hooks.tool.envoy_list).toBeDefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "envoy: dispatch tools disabled — dispatch.token must be a non-empty bearer token"
+      );
+      hooks.dispose();
+    } finally {
+      warn.mockRestore();
+      process.env = previous;
     }
   });
 });
@@ -226,7 +287,7 @@ describe("session title", () => {
   });
 });
 
-describe("heartbeat refreshes all busy sessions (fix 1a)", () => {
+describe("heartbeat refreshes all busy sessions", () => {
   it("re-subscribes every session that has been busy, not just the most recent", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     const originalHb = process.env.ENVOY_HEARTBEAT_MS;
@@ -297,7 +358,7 @@ describe("heartbeat refreshes all busy sessions (fix 1a)", () => {
   });
 });
 
-describe("prunes deleted sessions from the heartbeat (fix 2)", () => {
+describe("prunes deleted sessions from the heartbeat", () => {
   it("stops re-subscribing a session after session.deleted", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     const originalHb = process.env.ENVOY_HEARTBEAT_MS;
@@ -367,7 +428,7 @@ describe("prunes deleted sessions from the heartbeat (fix 2)", () => {
   });
 });
 
-describe("invalid ENVOY_HEARTBEAT_MS falls back to the default (fix 6)", () => {
+describe("invalid ENVOY_HEARTBEAT_MS falls back to the default", () => {
   it("does not hammer subscribe when the env value is negative", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     const originalHb = process.env.ENVOY_HEARTBEAT_MS;
@@ -421,8 +482,8 @@ describe("invalid ENVOY_HEARTBEAT_MS falls back to the default (fix 6)", () => {
   });
 });
 
-describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#4)", () => {
-  async function runHook(tool: string, output: string): Promise<string[][]> {
+describe("tool.execute.after auto-subscribes native Dispatch mutations", () => {
+  async function runHook(toolName: string, metadata: unknown): Promise<string[][]> {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
     const subscribed: string[][] = [];
@@ -448,8 +509,8 @@ describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#
       const after = hooks["tool.execute.after"];
       expect(after).toBeDefined();
       await after?.(
-        { tool, sessionID: "ses_dispatch", callID: "call_1", args: {} },
-        { title: "Dispatch", output, metadata: {} }
+        { tool: toolName, sessionID: "ses_dispatch", callID: "call_1", args: {} },
+        { title: "Dispatch", output: "Opened ask ask-742", metadata }
       );
       return subscribed;
     } finally {
@@ -458,26 +519,23 @@ describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#
     }
   }
 
-  it("subscribes the calling session to the new thread's GitHub topic", async () => {
-    const output = JSON.stringify({
-      thread: 742,
-      url: "https://github.com/sjawhar/legion/issues/742",
+  it("subscribes the calling session to a native Dispatch mutation topic", async () => {
+    const subscribed = await runHook("dispatch_ask", {
+      issue: "DSP-742",
+      topic: "notifications.dispatch.issue.DSP-742.>",
+      ask: "ask-742",
     });
-    const subscribed = await runHook("dispatch", output);
-    // `>` needs at least one more token, so the client registers the thread's own
-    // subject beside the wildcard: lifecycle events and comments both arrive.
+    // `>` needs at least one more token, so the client registers the issue's
+    // own subject beside the wildcard: lifecycle events and replies both arrive.
     expect(subscribed).toContainEqual([
       "ses_dispatch",
-      "notifications.github.sjawhar.legion.issue.742",
-      "notifications.github.sjawhar.legion.issue.742.>",
+      "notifications.dispatch.issue.DSP-742",
+      "notifications.dispatch.issue.DSP-742.>",
     ]);
   });
 
-  it("does not subscribe for unrelated tools", async () => {
-    const output = JSON.stringify({
-      url: "https://github.com/sjawhar/legion/issues/9",
-    });
-    const subscribed = await runHook("envoy_subscribe", output);
+  it("does not subscribe when a tool result carries no Dispatch topic", async () => {
+    const subscribed = await runHook("envoy_subscribe", {});
     expect(subscribed.length).toBe(0);
   });
 });
@@ -541,18 +599,9 @@ describe("claims report whether this process drives the session", () => {
   });
 });
 
-// Serve-restart recovery must not hijack sessions that a LIVE process still
-// serves. Because opencode session state is on shared disk and every `oc -s`
-// launch is its own process, a new process in a shared directory re-pointed
-// every sibling session's route at itself (observed: 231 sessions claimed by one
-// process in a single burst, then refreshed every 2 minutes). Envoy then
-// delivers there, and that process starts its own model loop on a session
-// another process owns — two loops, one transcript.
-//
-// A process may therefore claim ONLY sessions it has actually run. Keeping
-// idle-but-owned sessions reachable is the daemon's job (it knows the serve port
-// and the session IDs it dispatched), not something a stranger process may
-// arrange by adopting routes.
+// Serve-restart recovery claims only sessions this process has actually run.
+// The daemon keeps idle-but-owned sessions reachable; a stranger process must
+// not adopt sibling routes from shared on-disk session state.
 describe("a process claims only sessions it has run", () => {
   const runReadopt = async (siblingPortAlive: boolean) => {
     const originalEnvoyUrl = process.env.ENVOY_URL;

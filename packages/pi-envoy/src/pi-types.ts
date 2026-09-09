@@ -138,10 +138,22 @@ export interface RegisteredTool {
 export interface ZodProperty {
   readonly optional: () => ZodProperty;
   readonly describe: (description: string) => ZodProperty;
+  readonly min?: (value: number) => ZodProperty;
+  readonly max?: (value: number) => ZodProperty;
 }
 
 export interface ZodNumberProperty extends ZodProperty {
   readonly int: () => ZodProperty;
+}
+
+export interface PiZod {
+  readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
+  readonly string: () => ZodProperty;
+  readonly number: () => ZodNumberProperty;
+  readonly boolean?: () => ZodProperty;
+  readonly array: (item: unknown) => ZodProperty;
+  readonly enum: (values: readonly string[]) => ZodProperty;
+  readonly unknown: () => ZodProperty;
 }
 
 export interface MessageRenderOptions {
@@ -190,14 +202,7 @@ export type MessageRenderer = (
 export type { ExtensionAgentsApi };
 
 export interface PiApi {
-  readonly zod: {
-    readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
-    readonly string: () => ZodProperty;
-    readonly number: () => ZodNumberProperty;
-    readonly array: (item: unknown) => ZodProperty;
-    readonly enum: (values: readonly string[]) => ZodProperty;
-    readonly unknown: () => ZodProperty;
-  };
+  readonly zod: PiZod;
   readonly agents?: ExtensionAgentsApi;
   readonly sendMessage: (
     message:

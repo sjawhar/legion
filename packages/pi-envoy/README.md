@@ -77,28 +77,47 @@ and restores the committed file before tagging. Packing with the committed sourc
 manifest is refused by `scripts/prepack.sh`, because such a tarball would point OMP at
 extension files it does not contain.
 
-## Dispatch
+## Native Dispatch tools
 
-Every OMP session — Legion sessions included — gets a native `dispatch` tool from this
-extension when `dispatch.enabled` is true in the shared envoy.json
-(`~/.config/opencode/envoy.json`, shallow-merged with `<cwd>/.opencode/envoy.json`) or
-`DISPATCH_MCP_URL` names a service endpoint explicitly. The service URL comes from
-`dispatch.serverUrl` (default `http://localhost:8766`). Dispatch is how any agent — an
-interactive session or a headless Legion role — raises a durable question to the human
-and keeps the conversation on one GitHub issue: `subject` opens a thread, `thread: N`
-continues one. Each call reads the session's id and title from OMP, resolves the cwd's
-GitHub repo, mints a GitHub token with `gh auth token` in the session cwd, and makes one
-stateless request to the dispatch service, which writes the issue or comment. The
-`dispatch` skill (shipped in `skills/`) says when and how to ask. Replies route back to the
-asking session, which is auto-subscribed to the thread's GitHub topic on every successful
-call; a Legion role's session survives kill/resume because Legion resurrection resumes the
-same OMP session file. Lifecycle and scope decisions go through `envoy_publish` to the owning
-architect's role topic — Dispatch is for durable questions to the human, not for coordination
-between roles.
+The extension registers `dispatch_issue`, `dispatch_ask`, `dispatch_comment`,
+`dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
+`dispatch_doc_read`, `dispatch_artifact`, and `dispatch_read` when Dispatch
+configuration resolves both a base URL and bearer token.
 
-The tool's model-facing schema is the shared contract's zod shape
-(`@legion/envoy-client/dispatch-contract`) serialised to JSON Schema, so OMP shows the model
-the same arguments and descriptions as every other host.
+Configure the shared `envoy.json` with:
 
-An invalid envoy.json disables the tool and the session is told why on start; a machine
-without dispatch configured has no `dispatch` tool at all.
+```json
+{
+  "dispatch": {
+    "enabled": true,
+    "serverUrl": "https://dispatch.example",
+    "token": "<agent-bearer-token>"
+  }
+}
+```
+
+The user file is `~/.config/opencode/envoy.json`; a
+`<cwd>/.opencode/envoy.json` file shallow-merges over it. `DISPATCH_URL` and
+`DISPATCH_TOKEN` override the file values for one process. Invalid configuration,
+an invalid URL, or an empty token leaves the nine tools unavailable and reports
+the source of the error.
+
+Native tools operate on a Dispatch issue: a native `KEY` or an external
+`owner/repo#n` reference. A Legion session may omit `issue` when
+`LEGION_ISSUE` identifies its root issue and its working directory resolves to a
+repository. `dispatch_doc_read` and `dispatch_read` also accept
+`dispatch://` references.
+
+Every mutation result carries `details.topic` as
+`notifications.dispatch.issue.<KEY>.>`. The extension's `tool_result` hook
+subscribes to that exact topic, then registers the session so retained issue
+events arrive as Pi steering. `dispatch_doc_read` and `dispatch_read` return
+issue details without a subscription topic.
+
+The shared contract supplies the model-facing schemas and descriptions. The
+`dispatch` skill describes when to use each operation for issues, asks, review
+feedback, documents, artifacts, and status reads.
+
+Lifecycle and scope decisions between Legion roles go through `envoy_publish` to the owning
+architect's role topic; Dispatch is for durable questions to the human and the shared
+document, not for coordination between roles.

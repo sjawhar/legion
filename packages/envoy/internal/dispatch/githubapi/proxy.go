@@ -125,11 +125,10 @@ func refreshAndStore(ctx context.Context, cfg *ProxyConfig, tokens *auth.Tokens)
 	if err != nil {
 		return nil, err
 	}
-	// Persist the refreshed pair onto the user's existing record so the rest
-	// of it (the addressed map) survives the refresh. A missing record means
-	// the user logged out under a live cookie; resurrecting them here would
-	// undo that, so refuse instead.
-	user, err := cfg.Users.Read(cfg.Login)
+	// Persist the refreshed pair onto the existing user record. A missing
+	// record means the user logged out under a live identity; resurrecting it
+	// here would undo that, so refuse instead.
+	user, err := cfg.Users.Read(ctx, cfg.Login)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +136,7 @@ func refreshAndStore(ctx context.Context, cfg *ProxyConfig, tokens *auth.Tokens)
 		return nil, fmt.Errorf("refresh tokens: no user record for %q (logged out?)", cfg.Login)
 	}
 	user.Tokens = *refreshed
-	if err := cfg.Users.Write(user); err != nil {
+	if err := cfg.Users.Write(ctx, user); err != nil {
 		return nil, err
 	}
 	cfg.Tokens = refreshed

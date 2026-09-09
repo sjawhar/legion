@@ -8,3 +8,6 @@ deploy/compose/nats/nats-*.conf
 # Locally-built binaries (do not commit — 10MB+)
 /mcp
 /dispatch
+
+# Host deployment settings (secrets) — see deploy/README.md
+deploy/compose/.env

@@ -128,25 +128,9 @@ func VerifySessionCookie(value, signingKey string) string {
 	return login
 }
 
-// RequireSession extracts the dsession cookie. Returns login on success, or
-// writes a 401 response and returns "" on failure.
-func RequireSession(w http.ResponseWriter, r *http.Request, signingKey string) string {
-	cookie, err := r.Cookie(sessionCookieName)
-	if err != nil || cookie.Value == "" {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-		return ""
-	}
-	login := VerifySessionCookie(cookie.Value, signingKey)
-	if login == "" {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-		return ""
-	}
-	return login
-}
-
-// SessionLogin is RequireSession without the 401 side-effect. Returns ""
-// when no valid session is present; callers handle the empty case
-// themselves.
+// SessionLogin returns the valid session login or an empty string when the
+// request has no valid session. Identity implementations map the empty result
+// to the shared authorization error response.
 func SessionLogin(r *http.Request, signingKey string) string {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {

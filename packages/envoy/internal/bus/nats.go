@@ -19,6 +19,7 @@ const Stream = "ENVOY_NOTIFICATIONS"
 
 var streamSubjects = []string{
 	"notifications.agent.>",
+	"notifications.dispatch.>",
 	"notifications.github.>",
 	"notifications.slack.>",
 	"notifications.ghostwispr.>",
@@ -332,6 +333,13 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 
 func (c *Client) JS() nats.JetStreamContext {
 	return c.js
+}
+
+// Connected reports whether the client currently has a live NATS connection.
+func (c *Client) Connected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
 }
 
 // onClosed is wired as the ClosedCB callback. It launches recovery in a

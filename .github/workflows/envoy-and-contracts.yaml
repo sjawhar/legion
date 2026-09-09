@@ -170,8 +170,24 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch == 'true'
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/envoy/go.mod
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - name: Lint dispatch dashboard
@@ -187,7 +203,13 @@ jobs:
         run: bun run build:web
         working-directory: packages/dispatch
       - name: Install Playwright Chromium
-        run: bunx playwright install --with-deps chromium
+        # The runner image preconfigures Google's chrome-stable apt source, whose
+        # index intermittently fails `apt-get update` with a hash-sum mismatch and
+        # takes `--with-deps` down with it. Chrome is already installed there; the
+        # source only serves upgrades, so drop it before installing our deps.
+        run: |
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          bunx playwright install --with-deps chromium
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
         run: bun run e2e
@@ -227,6 +249,19 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -244,7 +279,7 @@ jobs:
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy
       - name: Build envoy services
-        run: go build ./cmd/listener
+        run: go build ./cmd/dispatch ./cmd/listener
         working-directory: packages/envoy
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/

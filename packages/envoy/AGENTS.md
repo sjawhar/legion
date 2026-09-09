@@ -4,14 +4,17 @@ Go-based cross-machine event transport and delivery subsystem.
 
 ## Overview
 
-Envoy owns transport, routing, and delivery:
+Envoy owns transport, routing, delivery, and the native Dispatch event path:
 
-- ingests Slack/GitHub/Ghost Wispr/agent events
+- ingests Slack, GitHub, Ghost Wispr, and agent events
 - publishes ordinary notifications through JetStream and role lanes through core NATS
 - resolves target OpenCode sessions
-- delivers by hot `prompt_async` (ordinary events stay in JetStream for retry if session is unavailable)
+- delivers by hot `prompt_async` (ordinary events stay in JetStream for retry if a session is unavailable)
+- runs the Dispatch server, which persists native issues, documents, and events in Postgres and
+  publishes retained `notifications.dispatch.issue.<KEY>.<type>` envelopes
 
-It does not own Legion workflow policy. The daemon/controller decides what to do; Envoy moves events to the right session.
+It does not own Legion workflow policy. The daemon/controller decides what to do; Envoy moves
+events to the right session.
 
 ## Where to look
 
@@ -25,6 +28,7 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
+| Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 ## Critical conventions
@@ -35,7 +39,6 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 - Ghost Wispr only publishes `session_started`, `session_ended`, and `summary_ready`; other verified events should return 200, log the skip, and not publish.
 - `ENVOY_GHOSTWISPR_SIGNING_SECRET` is optional for trusted Ghost Wispr deployments; when unset, skip signature verification explicitly rather than half-verifying missing headers.
 - GitHub mention routing is additive: matching comments publish to both `.comment` and `.mention` topics.
-- GitHub issue and issue-comment payloads are content-aware only for dispatch markers: parse them with `internal/dispatch/core` and expose a nonempty `origin.sessionId` as `dispatch_session`.
 - Slack topics must use the real Slack `team_id`, not a workspace slug.
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.
 - Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject. The agent pump returns an empty receipt after accepting the envelope; no receipt within two seconds is `delivery_failed` and emits an exception. Do not add durable role consumers or retry transit for role messages.
@@ -82,6 +85,9 @@ caller must provide a field.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
   `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended
   per-PR default receives lifecycle plus child events.
+- Dispatch issue events use `notifications.dispatch.issue.<KEY>.<type>`. They are
+  retained in JetStream; an issue route also publishes the same envelope to its
+  `notifications.role.<role>` or `notifications.agent.<session_id>` subject.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,
   rather than subscribed to by role holders.

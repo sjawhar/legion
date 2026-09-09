@@ -71,21 +71,179 @@ export function replyWith(envelope: DeliveryEnvelope): string | undefined {
   return `envoy_send(session_id="${envelope.source_session}", message="...")`;
 }
 
-function isOwnDispatchEchoPayload(payload: unknown, sessionID: string): boolean {
-  if (typeof payload !== "object" || payload === null || !("dispatch_session" in payload)) {
-    return false;
-  }
-  return payload.dispatch_session === sessionID;
+// Dispatch event payloads follow the wire contract: issue.* carries the Issue,
+// ask.* the Ask, message.created the Message, comment.*/suggestion.* the Comment
+// plus artifact_name, artifact.created {artifact}, artifact.version
+// {artifact_id, name, version, diff?}, and child.status {child_key, from, to}.
+// Bus frames are untrusted, so each schema below declares exactly the fields
+// this renderer prints and a frame that disagrees renders without them.
+const DispatchEventSchema = z.object({
+  issue_key: z.string(),
+  type: z.string(),
+  actor: z.object({ kind: z.string(), id: z.string().optional() }).passthrough(),
+  payload: z.object({}).passthrough(),
+});
+
+type DispatchEvent = z.infer<typeof DispatchEventSchema>;
+
+const IssuePayloadSchema = z.object({
+  title: z.string().optional(),
+  status: z.string().optional(),
+  route: z.string().nullish(),
+});
+
+const ArtifactCreatedPayloadSchema = z.object({
+  artifact: z.object({ name: z.string().optional() }).optional(),
+});
+
+const ArtifactVersionPayloadSchema = z.object({
+  name: z.string().optional(),
+  version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
+  diff: z.string().optional(),
+});
+
+const AskPayloadSchema = z.object({
+  // A nil Go slice marshals to null, so every list here is nullable.
+  question: z.string().optional(),
+  options: z.array(z.object({ label: z.string().optional() })).nullish(),
+  answer: z
+    .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
+    .nullish(),
+});
+
+const CommentPayloadSchema = z.object({
+  artifact_name: z.string().optional(),
+  body: z.string().optional(),
+  reply_to: z.string().nullish(),
+  anchor: z.object({ quote: z.string().optional() }).nullish(),
+  suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
+});
+
+const MessagePayloadSchema = z.object({ body: z.string().optional() });
+
+const ChildStatusPayloadSchema = z.object({
+  child_key: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+});
+
+function dispatchActorLabel(actor: DispatchEvent["actor"]): string {
+  return `${actor.kind} ${actor.id ?? "unknown"}`;
 }
 
-export function isOwnDispatchEcho(envelope: DeliveryEnvelope, sessionID: string): boolean {
-  if (envelope.source !== "github" || envelope.payload === undefined) return false;
+function dispatchBody(event: DispatchEvent): string[] {
+  const lines: string[] = [];
 
-  try {
-    return isOwnDispatchEchoPayload(JSON.parse(envelope.payload), sessionID);
-  } catch {
-    return false;
+  switch (event.type) {
+    case "issue.created":
+    case "issue.updated":
+    case "issue.closed": {
+      const parsed = IssuePayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      if (parsed.data.title) lines.push(`Title: ${parsed.data.title}`);
+      if (parsed.data.status) lines.push(`Status: ${parsed.data.status}`);
+      if (parsed.data.route) lines.push(`Route: ${parsed.data.route}`);
+      break;
+    }
+    case "artifact.created": {
+      const parsed = ArtifactCreatedPayloadSchema.safeParse(event.payload);
+      const name = parsed.success ? parsed.data.artifact?.name : undefined;
+      if (name) lines.push(`Artifact: ${name}`);
+      break;
+    }
+    case "artifact.version": {
+      const parsed = ArtifactVersionPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      const version = parsed.data.version;
+      if (parsed.data.name) lines.push(`Artifact: ${parsed.data.name}`);
+      if (version?.number !== undefined) lines.push(`Version: ${version.number}`);
+      if (version?.summary) lines.push(`Summary: ${version.summary}`);
+      if (parsed.data.diff) lines.push("Diff:", parsed.data.diff);
+      break;
+    }
+    case "ask.opened":
+    case "ask.answered": {
+      const parsed = AskPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      if (parsed.data.question) lines.push(`Question: ${parsed.data.question}`);
+      if (event.type === "ask.opened") {
+        const options = (parsed.data.options ?? [])
+          .map((option) => option.label)
+          .filter((label): label is string => label !== undefined);
+        if (options.length > 0) lines.push(`Options: ${options.join(", ")}`);
+        break;
+      }
+      const answer = parsed.data.answer;
+      lines.push(`Selected: ${answer?.selected?.join(", ") || "none"}`);
+      if (answer?.text) lines.push(`Text: ${answer.text}`);
+      break;
+    }
+    case "comment.created":
+    case "comment.resolved": {
+      const parsed = CommentPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      const quote = parsed.data.anchor?.quote;
+      if (parsed.data.artifact_name) lines.push(`Artifact: ${parsed.data.artifact_name}`);
+      if (quote) lines.push(`> ${quote}`);
+      if (parsed.data.reply_to) lines.push(`Reply chain: ${parsed.data.reply_to}`);
+      if (parsed.data.body) lines.push(`Body: ${parsed.data.body}`);
+      break;
+    }
+    case "suggestion.accepted":
+    case "suggestion.rejected": {
+      const parsed = CommentPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      const quote = parsed.data.anchor?.quote;
+      const replacement = parsed.data.suggestion?.replace_with;
+      if (parsed.data.artifact_name) lines.push(`Artifact: ${parsed.data.artifact_name}`);
+      if (quote) lines.push(`> ${quote}`);
+      if (quote && replacement) lines.push(`${quote} → ${replacement}`);
+      break;
+    }
+    case "message.created": {
+      const parsed = MessagePayloadSchema.safeParse(event.payload);
+      const body = parsed.success ? parsed.data.body : undefined;
+      if (body) lines.push(`Body: ${body}`);
+      break;
+    }
+    case "child.status": {
+      const parsed = ChildStatusPayloadSchema.safeParse(event.payload);
+      if (!parsed.success) break;
+      const { child_key: child, from, to } = parsed.data;
+      if (child && from && to) lines.push(`Child: ${child} ${from} → ${to}`);
+      break;
+    }
   }
+  return lines;
+}
+
+function renderDispatch(envelope: InboundEnvelope, sessionID: string): RenderInboundResult {
+  const invalid = (): RenderInboundResult => ({
+    skip: false,
+    content: "dispatch: invalid event",
+    envelope,
+  });
+  if (envelope.payload === undefined) return invalid();
+  let rawEvent: unknown;
+  try {
+    rawEvent = JSON.parse(envelope.payload);
+  } catch {
+    return invalid();
+  }
+  const parsed = DispatchEventSchema.safeParse(rawEvent);
+  if (!parsed.success) return invalid();
+  const event = parsed.data;
+  if (event.actor.kind === "session" && event.actor.id === sessionID) {
+    return { skip: true, content: "", envelope };
+  }
+  return {
+    skip: false,
+    content: [
+      `dispatch ${event.issue_key} · ${event.type} · by ${dispatchActorLabel(event.actor)}`,
+      ...dispatchBody(event),
+    ].join("\n"),
+    envelope,
+  };
 }
 
 export function inboundTimestamp(milliseconds: number | undefined): string {
@@ -129,6 +287,11 @@ export function renderInbound(
     const data = tolerant.data as Partial<InboundEnvelope>;
     envelope = { ...data, source: data.source ?? "unknown" };
   }
+  if (envelope.source === "dispatch") {
+    const renderedDispatch = renderDispatch(envelope, sessionID);
+    if (renderedDispatch !== null) return renderedDispatch;
+  }
+
   let parsedPayload: unknown;
   if (
     envelope.payload !== undefined &&
@@ -139,9 +302,6 @@ export function renderInbound(
     } catch {
       parsedPayload = envelope.payload;
     }
-  }
-  if (envelope.source === "github" && isOwnDispatchEchoPayload(parsedPayload, sessionID)) {
-    return { skip: true, content: "", envelope };
   }
 
   const payloadSummary = envelope.payload_summary ?? "unknown";

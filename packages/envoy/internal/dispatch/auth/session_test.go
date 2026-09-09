@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -67,29 +65,5 @@ func TestVerifySessionCookieExpired(t *testing.T) {
 	value := signedCookie("sjawhar", expired, "signing-key")
 	if VerifySessionCookie(value, "signing-key") != "" {
 		t.Errorf("expired cookie should not verify")
-	}
-}
-
-func TestRequireSessionMissingCookie(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "http://localhost/auth/whoami", nil)
-	w := httptest.NewRecorder()
-	login := RequireSession(w, req, "signing-key")
-	if login != "" {
-		t.Errorf("expected empty login, got %q", login)
-	}
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", w.Code)
-	}
-}
-
-func TestRequireSessionValidCookie(t *testing.T) {
-	t.Setenv("DISPATCH_INSECURE_COOKIE", "1")
-	cookie := cookieValue(t, IssueSessionCookie("sjawhar", "signing-key"))
-	req := httptest.NewRequest(http.MethodGet, "http://localhost/auth/whoami", nil)
-	req.AddCookie(&http.Cookie{Name: "dsession", Value: cookie})
-	w := httptest.NewRecorder()
-	login := RequireSession(w, req, "signing-key")
-	if login != "sjawhar" {
-		t.Errorf("got login %q, want sjawhar", login)
 	}
 }

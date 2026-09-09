@@ -13,25 +13,20 @@
       "bun": "./src/defaults.ts",
       "default": "./dist/defaults.js"
     },
-    "./dispatch-call": {
-      "types": "./src/dispatch-call.ts",
-      "bun": "./src/dispatch-call.ts",
-      "default": "./dist/dispatch-call.js"
-    },
-    "./dispatch-client": {
-      "types": "./src/dispatch-client.ts",
-      "bun": "./src/dispatch-client.ts",
-      "default": "./dist/dispatch-client.js"
-    },
     "./dispatch-config": {
       "types": "./src/dispatch-config.ts",
       "bun": "./src/dispatch-config.ts",
       "default": "./dist/dispatch-config.js"
     },
-    "./dispatch-contract": {
-      "types": "./src/dispatch-contract.ts",
-      "bun": "./src/dispatch-contract.ts",
-      "default": "./dist/dispatch-contract.js"
+    "./dispatch-execute": {
+      "types": "./src/dispatch-execute.ts",
+      "bun": "./src/dispatch-execute.ts",
+      "default": "./dist/dispatch-execute.js"
+    },
+    "./dispatch-http": {
+      "types": "./src/dispatch-http.ts",
+      "bun": "./src/dispatch-http.ts",
+      "default": "./dist/dispatch-http.js"
     },
     "./dispatch-cwd": {
       "types": "./src/dispatch-cwd.ts",
@@ -65,7 +60,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-call.ts src/dispatch-client.ts src/dispatch-config.ts src/dispatch-contract.ts src/dispatch-cwd.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-http.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"

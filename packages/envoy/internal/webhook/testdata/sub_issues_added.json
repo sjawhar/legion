@@ -56,9 +56,7 @@
       "node_id": "MDQ6VXNlcjEyMzQ1Njc4",
       "type": "Bot"
     },
-    "labels": [
-      {"id": 9876543211, "node_id": "LA_kwDORFy7ds8AAAAClskbqq", "name": "dispatch-thread", "color": "00aaff", "default": false}
-    ],
+    "labels": [],
     "state": "open",
     "locked": false,
     "assignee": null,

@@ -1,6 +1,5 @@
 import { expect, spyOn, test } from "bun:test"
-import { mkdtemp, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { dispatchToolSpecs, zodSchemaApi } from "@legion/contracts"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import type { Server } from "bun"
 import { z } from "zod"
@@ -15,58 +14,84 @@ function loadServer(instance: string): Promise<typeof EnvoyMcpServer> {
 }
 
 const ObjectJsonSchema = z.object({
-  required: z.array(z.string()),
+  required: z.array(z.string()).optional(),
   properties: z.record(z.string(), z.unknown()),
 })
 
-const ServicePost = z.object({
-  params: z.object({
-    arguments: z.object({
-      thread: z.string(),
-      origin: z.record(z.string(), z.unknown()),
-    }),
+const AskPost = z.object({
+  question: z.string(),
+  actor: z.object({
+    kind: z.literal("session"),
+    id: z.string(),
+    origin: z.object({ host: z.literal("claude"), cwd: z.string() }),
   }),
 })
 
-test("exposes the shared Envoy contract plus dispatch when dispatch is enabled", async () => {
+const dispatchToolNames = [
+  "dispatch_issue",
+  "dispatch_ask",
+  "dispatch_comment",
+  "dispatch_suggest",
+  "dispatch_message",
+  "dispatch_doc_edit",
+  "dispatch_doc_read",
+  "dispatch_artifact",
+  "dispatch_read",
+] as const
+
+const requiredDispatchFields: Readonly<Record<(typeof dispatchToolNames)[number], readonly string[]>> = {
+  dispatch_issue: ["project", "title"],
+  dispatch_ask: ["issue", "question"],
+  dispatch_comment: ["issue", "body"],
+  dispatch_suggest: ["issue", "artifact", "quote", "replace_with"],
+  dispatch_message: ["issue", "body"],
+  dispatch_doc_edit: ["issue", "artifact", "ops"],
+  dispatch_doc_read: [],
+  dispatch_artifact: ["issue", "name", "path"],
+  dispatch_read: [],
+}
+
+test("exposes every shared Dispatch tool with its required JSON Schema fields when Dispatch is enabled", async () => {
   // given
-  const previous = process.env["DISPATCH_MCP_URL"]
-  process.env["DISPATCH_MCP_URL"] = "http://127.0.0.1:1/mcp"
+  const previous = { ...process.env }
+  process.env["DISPATCH_URL"] = "http://127.0.0.1:1"
+  process.env["DISPATCH_TOKEN"] = "test-token"
+  delete process.env["DISPATCH_MCP_URL"]
+  const stderr = captureStderr()
   try {
     const module = await loadServer("dispatch-enabled")
     const definitions = module.envoyMcpToolDefinitions
+    const dispatchDefinitions = definitions.filter((definition) =>
+      dispatchToolNames.includes(definition.name as (typeof dispatchToolNames)[number]),
+    )
 
     // then
-    expect(definitions.map((definition) => definition.name)).toEqual([
-      ...envoyToolSpecs.filter((spec) => spec.name !== "envoy_inbox").map(({ name }) => name),
-      "dispatch",
-    ])
+    expect(dispatchDefinitions.map((definition) => definition.name)).toEqual([...dispatchToolNames])
+    expect(dispatchDefinitions.map((definition) => definition.name)).toEqual(
+      dispatchToolSpecs.map((spec) => spec.name),
+    )
     expect(definitions.map((definition) => definition.name)).not.toContain("envoy_inbox")
-    const dispatch = definitions.find((definition) => definition.name === "dispatch")
-    const schema = ObjectJsonSchema.parse(dispatch?.inputSchema)
-    expect(schema.required).toEqual(["context", "question"])
-    expect(Object.keys(schema.properties).sort()).toEqual([
-      "ask",
-      "context",
-      "parent",
-      "question",
-      "repo",
-      "subject",
-      "thread",
-      "urgency",
-    ])
+    for (const definition of dispatchDefinitions) {
+      const schema = ObjectJsonSchema.parse(definition.inputSchema)
+      expect(schema.required ?? []).toEqual([
+        ...requiredDispatchFields[definition.name as (typeof dispatchToolNames)[number]],
+      ])
+    }
+    expect(stderr.lines).toEqual([])
   } finally {
-    if (previous === undefined) delete process.env["DISPATCH_MCP_URL"]
-    else process.env["DISPATCH_MCP_URL"] = previous
+    process.env = previous
+    stderr.restore()
   }
 })
 
-test("omits dispatch when it is not enabled", async () => {
+test("omits all Dispatch tools when Dispatch is not enabled", async () => {
   // given
-  const previousUrl = process.env["DISPATCH_MCP_URL"]
-  const previousHome = process.env["HOME"]
+  const previous = { ...process.env }
+  delete process.env["DISPATCH_URL"]
+  delete process.env["DISPATCH_TOKEN"]
   delete process.env["DISPATCH_MCP_URL"]
   process.env["HOME"] = "/nonexistent-home-for-dispatch-gating"
+  const stderr = captureStderr()
   try {
     const module = await loadServer("dispatch-disabled")
 
@@ -74,10 +99,36 @@ test("omits dispatch when it is not enabled", async () => {
     expect(module.envoyMcpToolDefinitions.map((definition) => definition.name)).toEqual(
       envoyToolSpecs.filter((spec) => spec.name !== "envoy_inbox").map(({ name }) => name),
     )
+    expect(stderr.lines).toEqual([
+      "envoy-mcp: Dispatch tools disabled — no Dispatch URL configured\n",
+    ])
   } finally {
-    if (previousUrl !== undefined) process.env["DISPATCH_MCP_URL"] = previousUrl
-    if (previousHome === undefined) delete process.env["HOME"]
-    else process.env["HOME"] = previousHome
+    stderr.restore()
+    process.env = previous
+  }
+})
+
+test("omits Dispatch tools and logs the missing bearer token once", async () => {
+  // given
+  const previous = { ...process.env }
+  process.env["DISPATCH_URL"] = "http://127.0.0.1:8766"
+  delete process.env["DISPATCH_TOKEN"]
+  delete process.env["DISPATCH_MCP_URL"]
+  process.env["HOME"] = "/nonexistent-home-for-dispatch-gating"
+  const stderr = captureStderr()
+  try {
+    const module = await loadServer("dispatch-token-disabled")
+
+    // then
+    expect(module.envoyMcpToolDefinitions.map((definition) => definition.name)).toEqual(
+      envoyToolSpecs.filter((spec) => spec.name !== "envoy_inbox").map(({ name }) => name),
+    )
+    expect(stderr.lines).toEqual([
+      "envoy-mcp: Dispatch tools disabled — dispatch.token must be a non-empty bearer token\n",
+    ])
+  } finally {
+    stderr.restore()
+    process.env = previous
   }
 })
 
@@ -191,7 +242,7 @@ test("rejects an invalid urgency with the shared field validation error", async 
     const module = await loadServer("shared-metadata-validation")
     const spec = envoyToolSpecs.find((candidate) => candidate.name === "envoy_send")
     if (spec === undefined) throw new Error("envoy_send specification is missing")
-    const parsed = z.object(spec.arguments(z) as unknown as z.ZodRawShape).safeParse({
+    const parsed = z.object(spec.arguments(zodSchemaApi(z)) as unknown as z.ZodRawShape).safeParse({
       session_id: "ses_target",
       message: "hello",
       urgency: "urgent",
@@ -244,75 +295,79 @@ test("returns the role holder through envoy_role_get", async () => {
   }
 })
 
-test("dispatch posts one stateless call stamped with the Claude session id and host, then subscribes to the thread", async () => {
+test("dispatch_ask sends the native ask request with the Claude session origin and follows its topic", async () => {
   // given
   const posts: Array<{ body: unknown; headers: Record<string, string> }> = []
   const envoy = fakeEnvoy()
   const service = Bun.serve({
     port: 0,
     fetch: async (request) => {
+      if (new URL(request.url).pathname !== "/api/v1/issues/DSP-3/asks") {
+        return new Response(null, { status: 404 })
+      }
       posts.push({ body: await request.json(), headers: Object.fromEntries(request.headers) })
       return Response.json({
-        jsonrpc: "2.0",
-        id: 1,
-        result: {
-          content: [
-            {
-              type: "text",
-              text: '{"thread":3,"url":"https://github.com/acme-org/example-repo/issues/3"}',
-            },
-          ],
-        },
+        id: "ask-3",
+        issue_key: "DSP-3",
+        author: { kind: "session", id: "ses_claude" },
+        question: "Should the branch merge?",
+        options: [],
+        multiple: false,
+        custom: true,
+        urgency: "med",
+        anchor: null,
+        state: "open",
+        answer: null,
+        created_at: "2026-09-09T00:00:00Z",
       })
     },
   })
-  const ghDir = await mkdtemp(`${tmpdir()}/fake-gh-`)
-  await writeFile(`${ghDir}/gh`, "#!/bin/sh\necho test-token\n", { mode: 0o755 })
   const previous = { ...process.env }
   process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
-  // ENVOY_SESSION_ID outranks CLAUDE_CODE_SESSION_ID; a runner exporting it must not leak in.
   delete process.env["ENVOY_SESSION_ID"]
-  // No broker: the registry call still happens and the gap is reported, never a tool error.
   delete process.env["ENVOY_NATS_URL"]
-  process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
+  process.env["DISPATCH_URL"] = `http://127.0.0.1:${service.port}`
+  process.env["DISPATCH_TOKEN"] = "test-token"
+  delete process.env["DISPATCH_MCP_URL"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
-  process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
   const stderr: string[] = []
   const stderrSpy = spyOn(process.stderr, "write").mockImplementation((chunk) => {
     stderr.push(String(chunk))
     return true
   })
   try {
-    const module = await loadServer("dispatch-call")
+    const module = await loadServer("dispatch-ask")
 
     // when
-    const result = await module.executeEnvoyTool("dispatch", {
-      thread: "acme-org/example-repo#3",
-      context: "c",
-      question: "q",
+    const result = await module.executeEnvoyTool("dispatch_ask", {
+      issue: "DSP-3",
+      question: "Should the branch merge?",
     })
 
     // then
-    expect(result).toEqual({ thread: 3, url: "https://github.com/acme-org/example-repo/issues/3" })
+    expect(result).toEqual({
+      text: "Opened ask ask-3: Should the branch merge?",
+      details: {
+        issue: "DSP-3",
+        topic: "notifications.dispatch.issue.DSP-3.>",
+        ask: "ask-3",
+      },
+    })
     expect(posts).toHaveLength(1)
     expect(posts[0]?.headers["authorization"]).toBe("Bearer test-token")
-    expect(posts[0]?.headers["mcp-session-id"]).toBeUndefined()
-    const { arguments: args } = ServicePost.parse(posts[0]?.body).params
-    expect(args.thread).toBe("acme-org/example-repo#3")
-    expect(args.origin).toMatchObject({
-      host: "claude",
-      sessionId: "ses_claude",
-      cwd: process.cwd(),
+    expect(AskPost.parse(posts[0]?.body)).toEqual({
+      question: "Should the branch merge?",
+      actor: {
+        kind: "session",
+        id: "ses_claude",
+        origin: { host: "claude", cwd: process.cwd() },
+      },
     })
-    expect("sessionTitle" in args.origin).toBe(false)
     expect(envoy.subscribes).toEqual([
       {
         session_id: "ses_claude",
         dir: process.cwd(),
-        topics: [
-          "notifications.github.acme-org.example-repo.issue.3",
-          "notifications.github.acme-org.example-repo.issue.3.>",
-        ],
+        topics: ["notifications.dispatch.issue.DSP-3", "notifications.dispatch.issue.DSP-3.>"],
       },
     ])
     expect(stderr).toEqual([
@@ -326,40 +381,34 @@ test("dispatch posts one stateless call stamped with the Claude session id and h
   }
 })
 
-test("a dispatch the service rejects subscribes to nothing", async () => {
+test("a rejected native Dispatch ask follows no topic", async () => {
   // given
   const envoy = fakeEnvoy()
   const service = Bun.serve({
     port: 0,
     fetch: async () =>
-      Response.json({
-        jsonrpc: "2.0",
-        id: 1,
-        result: {
-          isError: true,
-          content: [{ type: "text", text: "#3 is closed; open a new thread" }],
-        },
-      }),
+      Response.json(
+        { error: "DSP-3 is closed; open a new issue", code: "ISSUE_CLOSED" },
+        { status: 409 },
+      ),
   })
-  const ghDir = await mkdtemp(`${tmpdir()}/fake-gh-`)
-  await writeFile(`${ghDir}/gh`, "#!/bin/sh\necho test-token\n", { mode: 0o755 })
   const previous = { ...process.env }
   process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
   delete process.env["ENVOY_SESSION_ID"]
-  process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
+  process.env["DISPATCH_URL"] = `http://127.0.0.1:${service.port}`
+  process.env["DISPATCH_TOKEN"] = "test-token"
+  delete process.env["DISPATCH_MCP_URL"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
-  process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
   try {
     const module = await loadServer("dispatch-rejected")
 
     // when / then
     await expect(
-      module.executeEnvoyTool("dispatch", {
-        thread: "acme-org/example-repo#3",
-        context: "c",
-        question: "q",
+      module.executeEnvoyTool("dispatch_ask", {
+        issue: "DSP-3",
+        question: "Should the branch merge?",
       }),
-    ).rejects.toThrow("#3 is closed; open a new thread")
+    ).rejects.toThrow("DSP-3 is closed; open a new issue")
     expect(envoy.subscribes).toEqual([])
   } finally {
     service.stop(true)
@@ -368,46 +417,53 @@ test("a dispatch the service rejects subscribes to nothing", async () => {
   }
 })
 
-test("a failed auto-subscribe does not fail the dispatch", async () => {
+test("a failed auto-subscribe does not fail a native Dispatch ask", async () => {
   // given
   const envoy = fakeEnvoy(503)
   const service = Bun.serve({
     port: 0,
     fetch: async () =>
       Response.json({
-        jsonrpc: "2.0",
-        id: 1,
-        result: {
-          content: [
-            {
-              type: "text",
-              text: '{"thread":3,"url":"https://github.com/acme-org/example-repo/issues/3"}',
-            },
-          ],
-        },
+        id: "ask-3",
+        issue_key: "DSP-3",
+        author: { kind: "session", id: "ses_claude" },
+        question: "Should the branch merge?",
+        options: [],
+        multiple: false,
+        custom: true,
+        urgency: "med",
+        anchor: null,
+        state: "open",
+        answer: null,
+        created_at: "2026-09-09T00:00:00Z",
       }),
   })
-  const ghDir = await mkdtemp(`${tmpdir()}/fake-gh-`)
-  await writeFile(`${ghDir}/gh`, "#!/bin/sh\necho test-token\n", { mode: 0o755 })
   const previous = { ...process.env }
   process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
   delete process.env["ENVOY_SESSION_ID"]
   delete process.env["ENVOY_NATS_URL"]
-  process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
+  process.env["DISPATCH_URL"] = `http://127.0.0.1:${service.port}`
+  process.env["DISPATCH_TOKEN"] = "test-token"
+  delete process.env["DISPATCH_MCP_URL"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
-  process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
   try {
     const module = await loadServer("dispatch-subscribe-fails")
 
     // when
-    const result = await module.executeEnvoyTool("dispatch", {
-      thread: "acme-org/example-repo#3",
-      context: "c",
-      question: "q",
+    const result = await module.executeEnvoyTool("dispatch_ask", {
+      issue: "DSP-3",
+      question: "Should the branch merge?",
     })
 
     // then
-    expect(result).toEqual({ thread: 3, url: "https://github.com/acme-org/example-repo/issues/3" })
+    expect(result).toEqual({
+      text: "Opened ask ask-3: Should the branch merge?",
+      details: {
+        issue: "DSP-3",
+        topic: "notifications.dispatch.issue.DSP-3.>",
+        ask: "ask-3",
+      },
+    })
     expect(envoy.subscribes).toHaveLength(2)
   } finally {
     service.stop(true)
@@ -481,50 +537,57 @@ const INBOX = "notifications.agent.ses_claude"
 const envelope = (dedupeKey: string): string =>
   JSON.stringify({ dedupe_key: dedupeKey, payload_summary: "Sami answered: option A" })
 
-test("a manual subscription fails without a reachable NATS forwarder while dispatch stays best-effort", async () => {
+test("a manual subscription fails without a reachable NATS forwarder while a native Dispatch ask stays best-effort", async () => {
   // given
   const envoy = fakeEnvoy()
   const service = Bun.serve({
     port: 0,
     fetch: async () =>
       Response.json({
-        jsonrpc: "2.0",
-        id: 1,
-        result: {
-          content: [
-            {
-              type: "text",
-              text: '{"thread":3,"url":"https://github.com/acme-org/example-repo/issues/3"}',
-            },
-          ],
-        },
+        id: "ask-3",
+        issue_key: "DSP-3",
+        author: { kind: "session", id: "ses_claude" },
+        question: "Should the branch merge?",
+        options: [],
+        multiple: false,
+        custom: true,
+        urgency: "med",
+        anchor: null,
+        state: "open",
+        answer: null,
+        created_at: "2026-09-09T00:00:00Z",
       }),
   })
-  const ghDir = await mkdtemp(`${tmpdir()}/fake-gh-`)
-  await writeFile(`${ghDir}/gh`, "#!/bin/sh\necho test-token\n", { mode: 0o755 })
   const previous = { ...process.env }
   process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
   delete process.env["ENVOY_SESSION_ID"]
   process.env["ENVOY_NATS_URL"] = "nats://127.0.0.1:1"
-  process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
+  process.env["DISPATCH_URL"] = `http://127.0.0.1:${service.port}`
+  process.env["DISPATCH_TOKEN"] = "test-token"
+  delete process.env["DISPATCH_MCP_URL"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
-  process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
   const stderr = captureStderr()
   try {
     const module = await loadServer("broker-unreachable")
 
     // when
-    const result = await module.executeEnvoyTool("dispatch", {
-      thread: "acme-org/example-repo#3",
-      context: "c",
-      question: "q",
+    const result = await module.executeEnvoyTool("dispatch_ask", {
+      issue: "DSP-3",
+      question: "Should the branch merge?",
     })
     await expect(module.executeEnvoyTool("envoy_subscribe", { topics: [THREAD] })).rejects.toThrow(
       "ENVOY_NATS_URL",
     )
 
-    // then: dispatch recorded its best-effort interest; manual subscription did not.
-    expect(result).toEqual({ thread: 3, url: "https://github.com/acme-org/example-repo/issues/3" })
+    // then: Dispatch recorded its best-effort interest; manual subscription did not.
+    expect(result).toEqual({
+      text: "Opened ask ask-3: Should the branch merge?",
+      details: {
+        issue: "DSP-3",
+        topic: "notifications.dispatch.issue.DSP-3.>",
+        ask: "ask-3",
+      },
+    })
     expect(envoy.subscribes).toHaveLength(1)
     expect(stderr.lines).toHaveLength(2)
     for (const line of stderr.lines) {
@@ -549,6 +612,8 @@ test("envoy_subscribe follows its topics on the broker and envoy_unsubscribe sto
   delete process.env["ENVOY_SESSION_ID"]
   process.env["ENVOY_NATS_URL"] = nats.url
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
+  process.env["DISPATCH_URL"] = "http://127.0.0.1:1"
+  process.env["DISPATCH_TOKEN"] = "test-token"
   const stderr = captureStderr()
   try {
     const module = await loadServer("subscribe-follows")
@@ -600,6 +665,8 @@ test("a broker connection nats.js gave up on is replaced by the next envoy_subsc
   delete process.env["ENVOY_SESSION_ID"]
   process.env["ENVOY_NATS_URL"] = nats.url
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
+  process.env["DISPATCH_URL"] = "http://127.0.0.1:1"
+  process.env["DISPATCH_TOKEN"] = "test-token"
   const other = "notifications.github.acme-org.example-repo.issue.4.>"
   const otherBase = "notifications.github.acme-org.example-repo.issue.4"
   const stderr = captureStderr()
@@ -654,6 +721,8 @@ test("closes a replacement connection when shutdown races a manual subscription"
   delete process.env["ENVOY_SESSION_ID"]
   process.env["ENVOY_NATS_URL"] = nats.url
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
+  process.env["DISPATCH_URL"] = "http://127.0.0.1:1"
+  process.env["DISPATCH_TOKEN"] = "test-token"
   const other = "notifications.github.acme-org.example-repo.issue.4.>"
   const stderr = captureStderr()
   try {

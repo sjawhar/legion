@@ -1,19 +1,10 @@
-// Command dispatch is the Go port of the Dispatch HTTP server.
-//
-// Routes:
-//
-//	/auth/*           — web-flow OAuth (start/callback/logout/whoami)
-//	/api/events       — SSE stream of NATS-forwarded GitHub events
-//	/api/github/*     — reverse proxy to GitHub REST + GraphQL (per-user token)
-//	/api/installations— enumerate the user's Envoy App installations + repos
-//	/api/view         — GET/PATCH per-user addressed-threads map
-//	/mcp              — MCP Streamable HTTP endpoint (per-request bearer auth)
-//	/healthz          — liveness check
-//	everything else   — SPA from packages/dispatch/web/dist (SPA fallback)
+// Command dispatch serves the Dispatch dashboard, GitHub OAuth flow, and
+// per-user GitHub REST and GraphQL proxy.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,12 +16,15 @@ import (
 	"syscall"
 	"time"
 
-	natsclient "github.com/nats-io/nats.go"
-
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
-	"github.com/sjawhar/envoy/internal/dispatch/nats"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 const (
@@ -38,12 +32,57 @@ const (
 	shutdownTimout    = 5 * time.Second
 )
 
+type bootConfig struct {
+	DatabaseURL    string
+	AgentToken     string
+	RepoProjects   string
+	IdentityHeader string
+	AllowedLogins  map[string]struct{}
+	NATSDisabled   bool
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	cfg, err := config.Load(config.LoadOptions{})
+	boot, err := resolveBootConfig(os.Getenv)
 	if err != nil {
-		slog.Error("dispatch: load config", "error", err)
+		slog.Error("dispatch: resolve boot config", "error", err)
+		os.Exit(1)
+	}
+
+	envoyConfig, err := config.Load(config.LoadOptions{})
+	if err != nil {
+		slog.Error("dispatch: load envoy config", "error", err)
+		os.Exit(1)
+	}
+	serverURL := ""
+	if envoyConfig.Dispatch != nil {
+		serverURL = envoyConfig.Dispatch.ServerURL
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	var natsClient *bus.Client
+	if boot.NATSDisabled {
+		slog.Info("dispatch: NATS publisher disabled")
+	} else {
+		natsClient, err = bus.Connect(envoyConfig.NatsURLs)
+		if err != nil {
+			slog.Error("dispatch: connect NATS", "error", err)
+			os.Exit(1)
+		}
+		defer natsClient.Close()
+	}
+
+	database, err := store.Open(ctx, boot.DatabaseURL)
+	if err != nil {
+		slog.Error("dispatch: open database", "error", err)
+		os.Exit(1)
+	}
+	defer database.Pool.Close()
+	if err := database.Migrate(ctx); err != nil {
+		slog.Error("dispatch: migrate database", "error", err)
 		os.Exit(1)
 	}
 
@@ -57,16 +96,6 @@ func main() {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	nc, err := nats.Connect(cfg.NatsURLs)
-	if err != nil {
-		slog.Error("dispatch: connect nats", "error", err)
-		os.Exit(1)
-	}
-	defer nc.Close()
 
 	signingKey, err := auth.LoadSigningKey(filepath.Join(dataDir, "signing-key"))
 	if err != nil {
@@ -85,30 +114,60 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource)
 	}
 
-	users, err := openUserStore(nc, dataDir)
-	if err != nil {
-		slog.Error("dispatch: open user store", "error", err)
-		os.Exit(1)
+	users := store.NewPgUserStore(database.Pool)
+
+	var requestIdentity identity.Identity
+	if boot.IdentityHeader == "" {
+		requestIdentity = identity.CookieIdentity{SigningKey: signingKey, AllowedLogins: boot.AllowedLogins}
+	} else {
+		slog.Warn("dispatch: trusting request identity header", "header", boot.IdentityHeader)
+		requestIdentity = identity.HeaderIdentity{
+			Header:        boot.IdentityHeader,
+			AllowedLogins: boot.AllowedLogins,
+		}
 	}
+
+	broker := events.NewBroker()
+	documentService := docs.New(docs.Deps{
+		Store:      database,
+		Events:     broker,
+		Identity:   requestIdentity,
+		AgentToken: boot.AgentToken,
+		ServerURL:  serverURL,
+	})
 
 	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
 		SigningKey: signingKey,
 		WebDistDir: webDistDir,
 		Users:      users,
-		App:        appCfg,
-		AppSource:  appSource,
+		Identity:   requestIdentity,
+
+		AllowedLogins: boot.AllowedLogins,
+		Store:         database,
+		AgentToken:    boot.AgentToken,
+		RepoProjects:  boot.RepoProjects,
+		ServerURL:     serverURL,
+		Docs:          documentService,
+		Events:        broker,
+		App:           appCfg,
+		AppSource:     appSource,
 	})
+
 	if err != nil {
 		slog.Error("dispatch: build app context", "error", err)
 		os.Exit(1)
 	}
 
-	if _, err := nats.SubscribeGithub(ctx, nc, appCtx.Hub); err != nil {
-		slog.Error("dispatch: subscribe github", "error", err)
-		os.Exit(1)
+	if natsClient != nil {
+		go outbox.Run(ctx, outbox.Deps{
+			Store:     database,
+			Publisher: natsClient,
+			Broker:    broker,
+			Docs:      documentService,
+		})
 	}
 
-	handler := routes.New(appCtx)
+	handler := dispatchHandler(routes.New(appCtx), database, natsClient)
 	listenAddr, err := listenAddress()
 	if err != nil {
 		slog.Error("dispatch: resolve listen address", "error", err)
@@ -133,6 +192,9 @@ func main() {
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("dispatch: shutdown", "error", err)
+	}
+	if err := documentService.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("dispatch: shutdown document service", "error", err)
 	}
 }
 
@@ -207,33 +269,48 @@ func loadAppCredentials(dataDir string) (*auth.AppConfig, string, error) {
 	return cfg, "file:" + path, nil
 }
 
-// openUserStore picks the file-backed or NATS-KV-backed implementation
-// based on DISPATCH_USER_STORE:
-//
-//	unset / "file"   → FileUserStore in ~/.local/share/dispatch/users
-//	"kv"             → KVUserStore on the dispatch_users JetStream KV bucket
-//	                   (DISPATCH_USER_STORE_REPLICAS controls the replica
-//	                   count on first creation; default 1)
-//
-// Production deployments (Fargate, k8s) set DISPATCH_USER_STORE=kv so user
-// records survive container restarts and replicas share state.
-func openUserStore(nc *natsclient.Conn, dataDir string) (auth.UserStore, error) {
-	kind := strings.ToLower(strings.TrimSpace(os.Getenv("DISPATCH_USER_STORE")))
-	if kind == "" || kind == "file" {
-		return &auth.FileUserStore{Dir: filepath.Join(dataDir, "users")}, nil
+func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
+	boot := bootConfig{
+		DatabaseURL:   strings.TrimSpace(getenv("DATABASE_URL")),
+		AgentToken:    strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
+		RepoProjects:  strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
+		AllowedLogins: parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
+		NATSDisabled:  getenv("DISPATCH_NATS_DISABLED") == "1",
 	}
-	if kind != "kv" {
-		return nil, fmt.Errorf("DISPATCH_USER_STORE=%q (expected file or kv)", kind)
+	if boot.DatabaseURL == "" {
+		return bootConfig{}, errors.New("DATABASE_URL required")
 	}
-	replicas := 1
-	if raw := os.Getenv("DISPATCH_USER_STORE_REPLICAS"); raw != "" {
-		n, err := parsePositiveInt(raw)
-		if err != nil {
-			return nil, fmt.Errorf("DISPATCH_USER_STORE_REPLICAS: %w", err)
+	if boot.AgentToken == "" {
+		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
+	}
+
+	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
+	case mode == "" || mode == "cookie":
+		if len(boot.AllowedLogins) == 0 {
+			return bootConfig{}, errors.New("DISPATCH_ALLOWED_LOGINS required in cookie identity mode")
 		}
-		replicas = n
+	case strings.HasPrefix(mode, "header:"):
+		boot.IdentityHeader = strings.TrimSpace(strings.TrimPrefix(mode, "header:"))
+		if boot.IdentityHeader == "" {
+			return bootConfig{}, errors.New("DISPATCH_IDENTITY header name required")
+		}
+		if getenv("DISPATCH_APP_CLIENT_ID") != "" && getenv("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
+			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required with OAuth and header identity")
+		}
+	default:
+		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)
 	}
-	return auth.OpenKVUserStore(nc, replicas)
+	return boot, nil
+}
+
+func parseAllowedLogins(raw string) map[string]struct{} {
+	logins := map[string]struct{}{}
+	for _, login := range strings.Split(raw, ",") {
+		if login = strings.TrimSpace(login); login != "" {
+			logins[login] = struct{}{}
+		}
+	}
+	return logins
 }
 
 func parsePositiveInt(raw string) (int, error) {
@@ -248,6 +325,39 @@ func parsePositiveInt(raw string) (int, error) {
 		return 0, fmt.Errorf("not a positive integer: %q", raw)
 	}
 	return n, nil
+}
+
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient))
+	mux.Handle("/", handler)
+	return mux
+}
+
+func healthzHandler(database *store.Store, natsClient *bus.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		databaseOK := database != nil && database.Pool != nil
+		if databaseOK {
+			databaseOK = database.Pool.Ping(req.Context()) == nil
+		}
+		var natsOK *bool
+		if natsClient != nil {
+			connected := natsClient.Connected()
+			natsOK = &connected
+		}
+		ok := databaseOK && (natsOK == nil || *natsOK)
+		status := http.StatusOK
+		if !ok {
+			status = http.StatusServiceUnavailable
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(struct {
+			OK   bool  `json:"ok"`
+			DB   bool  `json:"db"`
+			NATS *bool `json:"nats"`
+		}{OK: ok, DB: databaseOK, NATS: natsOK})
+	}
 }
 
 // listenAddress builds the listen address from DISPATCH_LISTEN_HOST and

@@ -1,29 +1,8 @@
-// Package routes assembles the http.ServeMux for the Dispatch HTTP server.
+// Package routes assembles the Dispatch HTTP server routes.
 //
-// The dashboard is multi-user (one record per GitHub login on disk under
-// ~/.local/share/dispatch/users/<login>.json). Repo discovery is
-// owner-scoped: a user's SSE stream and dashboard queries are limited to the
-// GitHub accounts (users/orgs) their Envoy App installations cover, not a
-// manually maintained repo list.
-//
-// Auth is GitHub Apps web flow:
-//
-//	GET  /auth/start          → redirect to github.com/login/oauth/authorize
-//	GET  /auth/callback       → exchange ?code= for tokens, persist, set cookie
-//	POST /auth/logout         → drop user record + clear cookie
-//	GET  /auth/whoami         → return current login (or 401)
-//
-// Per-user view:
-//
-//	GET   /api/view                  → { addressed: {…} }
-//	PATCH /api/view                  → replace addressed
-//	GET   /api/installations         → user's Envoy App installations
-//	GET   /api/installations/{id}/repositories → repos in one installation
-//
-// The Envoy App's credentials (client_id, client_secret, …) live in
-// ~/.local/share/dispatch/app.json. If that file is missing, all auth/proxy
-// routes return 503; the dashboard's login button surfaces the message so
-// the operator knows to drop the file in place.
+// Authenticated humans identify through either a signed cookie or a trusted
+// proxy header. GitHub OAuth stores each allowed user's refreshable token pair
+// so the GitHub REST and GraphQL proxy can act on their behalf.
 package routes
 
 import (
@@ -35,49 +14,57 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
-	"github.com/sjawhar/envoy/internal/dispatch/mcp"
-	"github.com/sjawhar/envoy/internal/dispatch/sse"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
-
-// threadKeyShape validates the "<owner>/<repo>#<number>" form used as the
-// composite key for per-user thread state (currently just the addressed
-// map). Loose validation — GitHub's own repo-name rules are more complex,
-// but anything matching the obvious shape will round-trip safely.
-var threadKeyShape = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[1-9][0-9]*$`)
 
 // AppContext holds shared dependencies for the HTTP handlers. All fields are
 // read-only after BuildAppContext returns; per-request state lives on
 // *router.
 type AppContext struct {
-	SigningKey string
-	WebDistDir string
-	Users      auth.UserStore
-	HTTPClient auth.HTTPClient
-	Hub        *sse.Hub
-	MCPServer  *mcp.Server
-	app        *auth.AppConfig // nil ⇒ not configured
-	appSource  string          // "env" | "file:<path>" | "" — for diagnostic logs
-	appMu      sync.RWMutex
+	SigningKey    string
+	WebDistDir    string
+	Users         auth.UserStore
+	Identity      identity.Identity
+	AllowedLogins map[string]struct{}
+	Store         *store.Store
+	AgentToken    string
+	RepoProjects  string
+	HTTPClient    auth.HTTPClient
+	apiDeps       api.Deps
+	app           *auth.AppConfig // nil ⇒ not configured
+	appSource     string          // "env" | "file:<path>" | "" — for diagnostic logs
+	appMu         sync.RWMutex
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey string
-	WebDistDir string
-	Users      auth.UserStore
-	App        *auth.AppConfig
-	AppSource  string
+	SigningKey    string
+	WebDistDir    string
+	Users         auth.UserStore
+	Identity      identity.Identity
+	AllowedLogins map[string]struct{}
+	Store         *store.Store
+	AgentToken    string
+	RepoProjects  string
+	ServerURL     string
+	Docs          docs.API
+	Events        *events.Broker
+	App           *auth.AppConfig
+	AppSource     string
 }
 
 // BuildAppContext bundles the shared HTTP-handler state.
@@ -88,14 +75,33 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.Users == nil {
 		return nil, fmt.Errorf("BuildAppContext: Users store required")
 	}
+	if opts.Identity == nil {
+		return nil, fmt.Errorf("BuildAppContext: Identity required")
+	}
+	apiDeps, err := api.NewDeps(api.DepsInput{
+		Store:           opts.Store,
+		Identity:        opts.Identity,
+		AgentToken:      opts.AgentToken,
+		RepoProjectsRaw: opts.RepoProjects,
+		ServerURL:       opts.ServerURL,
+		Docs:            opts.Docs,
+		Events:          opts.Events,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("BuildAppContext: %w", err)
+	}
 	return &AppContext{
-		SigningKey: opts.SigningKey,
-		WebDistDir: opts.WebDistDir,
-		Users:      opts.Users,
-		Hub:        sse.New(),
-		MCPServer:  mcp.New(),
-		app:        opts.App,
-		appSource:  opts.AppSource,
+		SigningKey:    opts.SigningKey,
+		WebDistDir:    opts.WebDistDir,
+		Users:         opts.Users,
+		Identity:      opts.Identity,
+		AllowedLogins: opts.AllowedLogins,
+		Store:         opts.Store,
+		AgentToken:    opts.AgentToken,
+		RepoProjects:  opts.RepoProjects,
+		apiDeps:       apiDeps,
+		app:           opts.App,
+		appSource:     opts.AppSource,
 	}, nil
 }
 
@@ -107,38 +113,34 @@ func (ctx *AppContext) App() *auth.AppConfig {
 	return ctx.app
 }
 
+const (
+	pendingStateTTL  = 10 * time.Minute
+	maxPendingStates = 1000
+)
+
 type router struct {
-	ctx *AppContext
-	// pendingStates holds opaque state tokens emitted by /auth/start. The
-	// callback validates and consumes them. Bounded because tokens are
-	// removed on consume or implicitly when the process restarts.
-	pendingStates sync.Map // map[string]pendingState
+	ctx           *AppContext
+	pendingMu     sync.Mutex
+	pendingStates map[string]pendingState
 }
 
 type pendingState struct {
-	next string // optional `?next=` redirect target, sanitized
+	next      string
+	expiresAt time.Time
 }
 
 // New returns an http.Handler that serves all dispatch routes.
 func New(ctx *AppContext) http.Handler {
-	r := &router{ctx: ctx}
+	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/start", r.authStart)
 	mux.HandleFunc("GET /auth/callback", r.authCallback)
 	mux.HandleFunc("POST /auth/logout", r.authLogout)
 	mux.HandleFunc("GET /auth/whoami", r.authWhoami)
-	mux.HandleFunc("GET /api/events", r.apiEvents)
 	mux.HandleFunc("/api/github/rest/", r.apiGithubRest)
 	mux.HandleFunc("/api/github/graphql", r.apiGithubGraphql)
-	mux.HandleFunc("GET /api/installations", r.apiInstallations)
-	mux.HandleFunc("GET /api/installations/{id}/repositories", r.apiInstallationRepos)
-	mux.HandleFunc("GET /api/view", r.apiViewGet)
-	mux.HandleFunc("PATCH /api/view", r.apiViewPatch)
-	mux.Handle("/mcp", ctx.MCPServer.Handler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
-	})
+	mux.HandleFunc("GET /healthz", r.healthz)
+	api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	return mux
 }
@@ -157,7 +159,10 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	next := sanitizeNext(req.URL.Query().Get("next"))
-	r.pendingStates.Store(state, pendingState{next: next})
+	if !r.putPendingState(state, next) {
+		writeError(w, http.StatusTooManyRequests, "too many pending sign-in attempts")
+		return
+	}
 	redirectURI := callbackURL(req)
 	target := auth.BuildAuthorizeURL(app.ClientID, redirectURI, state)
 	http.Redirect(w, req, target, http.StatusFound)
@@ -174,26 +179,23 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rawPending, ok := r.pendingStates.LoadAndDelete(state)
+	pending, ok := r.takePendingState(state)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
 		return
 	}
-	pending := rawPending.(pendingState)
 	tokens, err := auth.ExchangeCode(req.Context(), app.ClientID, app.ClientSecret, code, callbackURL(req), r.ctx.HTTPClient)
 	if err != nil {
 		slog.Warn("dispatch: oauth code exchange failed", "error", err)
 		writeError(w, http.StatusBadGateway, "code exchange failed: "+err.Error())
 		return
 	}
-	// Preserve any existing addressed-thread state on re-auth; first-time
-	// users get an empty map.
-	existing, _ := r.ctx.Users.Read(tokens.GithubLogin)
-	user := &auth.User{Login: tokens.GithubLogin, Tokens: *tokens}
-	if existing != nil {
-		user.Addressed = existing.Addressed
+	if _, allowed := r.ctx.AllowedLogins[tokens.GithubLogin]; !allowed {
+		identity.WriteError(w, identity.ErrLoginNotAllowed)
+		return
 	}
-	if err := r.ctx.Users.Write(user); err != nil {
+	user := &auth.User{Login: tokens.GithubLogin, Tokens: *tokens}
+	if err := r.ctx.Users.Write(req.Context(), user); err != nil {
 		slog.Error("dispatch: persist user failed", "login", user.Login, "error", err)
 		writeError(w, http.StatusInternalServerError, "persist user")
 		return
@@ -203,120 +205,23 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
-	login := auth.SessionLogin(req, r.ctx.SigningKey)
-	if login != "" {
-		if err := r.ctx.Users.Remove(login); err != nil {
-			slog.Warn("dispatch: remove user failed", "login", login, "error", err)
-		}
+	login, ok := r.login(w, req)
+	if !ok {
+		return
+	}
+	if err := r.ctx.Users.Remove(req.Context(), login); err != nil {
+		slog.Warn("dispatch: remove user failed", "login", login, "error", err)
 	}
 	w.Header().Set("Set-Cookie", auth.ClearSessionCookie())
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
-	login := auth.RequireSession(w, req, r.ctx.SigningKey)
-	if login == "" {
+	login, ok := r.login(w, req)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"login": login})
-}
-
-// ───── view (addressed threads) ─────────────────────────────────────────────
-
-func (r *router) apiViewGet(w http.ResponseWriter, req *http.Request) {
-	user := r.requireUser(w, req)
-	if user == nil {
-		return
-	}
-	writeJSON(w, http.StatusOK, viewPayload(user))
-}
-
-func (r *router) apiViewPatch(w http.ResponseWriter, req *http.Request) {
-	user := r.requireUser(w, req)
-	if user == nil {
-		return
-	}
-	var body struct {
-		Addressed *map[string]string `json:"addressed,omitempty"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-	if body.Addressed != nil {
-		// Validate each entry's key shape so we don't end up with garbage in
-		// the on-disk record. ISO timestamps are accepted verbatim; mismatches
-		// just look like "never reached this updatedAt" to the sidebar filter.
-		next := map[string]string{}
-		for key, ts := range *body.Addressed {
-			if !threadKeyShape.MatchString(key) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid thread key %q (expected <owner>/<repo>#<n>)", key))
-				return
-			}
-			next[key] = ts
-		}
-		user.Addressed = next
-	}
-	if err := r.ctx.Users.Write(user); err != nil {
-		slog.Error("dispatch: persist user view failed", "login", user.Login, "error", err)
-		writeError(w, http.StatusInternalServerError, "persist view")
-		return
-	}
-	writeJSON(w, http.StatusOK, viewPayload(user))
-}
-
-func viewPayload(user *auth.User) map[string]any {
-	return map[string]any{
-		"login":     user.Login,
-		"addressed": user.Addressed,
-	}
-}
-
-// ───── installations ────────────────────────────────────────────────────────
-
-func (r *router) apiInstallations(w http.ResponseWriter, req *http.Request) {
-	r.proxyGithubPath(w, req, githubapi.InstallationsPath)
-}
-
-func (r *router) apiInstallationRepos(w http.ResponseWriter, req *http.Request) {
-	id := req.PathValue("id")
-	if id == "" {
-		writeError(w, http.StatusBadRequest, "missing installation id")
-		return
-	}
-	r.proxyGithubPath(w, req, githubapi.InstallationsPath+"/"+url.PathEscape(id)+"/repositories")
-}
-
-func (r *router) proxyGithubPath(w http.ResponseWriter, req *http.Request, path string) {
-	cfg, ok := r.buildProxyConfig(w, req)
-	if !ok {
-		return
-	}
-	target := "https://api.github.com" + path
-	if req.URL.RawQuery != "" {
-		target += "?" + req.URL.RawQuery
-	}
-	githubapi.ForwardRequest(w, req, cfg, target)
-}
-
-// ───── events + github proxy ────────────────────────────────────────────────
-
-func (r *router) apiEvents(w http.ResponseWriter, req *http.Request) {
-	user := r.requireUser(w, req)
-	if user == nil {
-		return
-	}
-	cfg, ok := r.proxyConfigForUser(w, user)
-	if !ok {
-		return
-	}
-	owners, err := githubapi.InstallationOwners(req.Context(), cfg)
-	if err != nil {
-		slog.Warn("dispatch: installation owners lookup failed", "login", user.Login, "error", err)
-		writeError(w, http.StatusBadGateway, "could not determine your GitHub App installations")
-		return
-	}
-	sse.HandlerFor(r.ctx.Hub, user.Login, owners)(w, req)
 }
 
 func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
@@ -335,24 +240,32 @@ func (r *router) apiGithubGraphql(w http.ResponseWriter, req *http.Request) {
 	githubapi.ProxyGraphQL(w, req, cfg)
 }
 
-// requireUser resolves the session cookie to a User record, writing 401 to
-// the response if the session is invalid or the user file is missing.
+// requireUser resolves the request identity to its stored GitHub token pair.
 func (r *router) requireUser(w http.ResponseWriter, req *http.Request) *auth.User {
-	login := auth.RequireSession(w, req, r.ctx.SigningKey)
-	if login == "" {
+	login, ok := r.login(w, req)
+	if !ok {
 		return nil
 	}
-	user, err := r.ctx.Users.Read(login)
+	user, err := r.ctx.Users.Read(req.Context(), login)
 	if err != nil {
 		slog.Warn("dispatch: read user failed", "login", login, "error", err)
-		writeJSON(w, http.StatusUnauthorized, map[string]bool{"needs_reauth": true})
+		writeError(w, http.StatusInternalServerError, "read user")
 		return nil
 	}
 	if user == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]bool{"needs_reauth": true})
+		writeCodeError(w, http.StatusServiceUnavailable, "github token unavailable", "GITHUB_TOKEN_UNAVAILABLE")
 		return nil
 	}
 	return user
+}
+
+func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) {
+	login, err := r.ctx.Identity.Login(req)
+	if err != nil {
+		identity.WriteError(w, err)
+		return "", false
+	}
+	return login, true
 }
 
 func (r *router) buildProxyConfig(w http.ResponseWriter, req *http.Request) (*githubapi.ProxyConfig, bool) {
@@ -380,6 +293,18 @@ func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*gi
 		ClientSecret: app.ClientSecret,
 		HTTPClient:   r.ctx.HTTPClient,
 	}, true
+}
+
+func (r *router) healthz(w http.ResponseWriter, req *http.Request) {
+	databaseOK := r.ctx.Store != nil && r.ctx.Store.Pool != nil
+	if databaseOK {
+		databaseOK = r.ctx.Store.Pool.Ping(req.Context()) == nil
+	}
+	status := http.StatusOK
+	if !databaseOK {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]any{"ok": databaseOK, "db": databaseOK, "nats": nil})
 }
 
 // ───── static ───────────────────────────────────────────────────────────────
@@ -411,6 +336,10 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
 	if _, err := os.Stat(indexPath); err != nil {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
+		return
+	}
+	if normalized != "/issues" && !strings.HasPrefix(normalized, "/issues/") {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	serveFile(w, req, indexPath)
@@ -462,6 +391,33 @@ func sanitizeNext(raw string) string {
 	return raw
 }
 
+func (r *router) putPendingState(token, next string) bool {
+	now := time.Now()
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	for token, pending := range r.pendingStates {
+		if !pending.expiresAt.After(now) {
+			delete(r.pendingStates, token)
+		}
+	}
+	if len(r.pendingStates) >= maxPendingStates {
+		return false
+	}
+	r.pendingStates[token] = pendingState{next: next, expiresAt: now.Add(pendingStateTTL)}
+	return true
+}
+
+func (r *router) takePendingState(token string) (pendingState, bool) {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	pending, ok := r.pendingStates[token]
+	if !ok {
+		return pendingState{}, false
+	}
+	delete(r.pendingStates, token)
+	return pending, pending.expiresAt.After(time.Now())
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -472,6 +428,10 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func writeCodeError(w http.ResponseWriter, status int, message, code string) {
+	writeJSON(w, status, map[string]string{"error": message, "code": code})
 }
 
 func randomToken() (string, error) {

@@ -217,7 +217,7 @@ test("forwards and renders a future-source envelope", async () => {
   )
 })
 
-test("records and skips a dispatch echo for the originating session", async () => {
+test("forwards a GitHub envelope after native dispatch removes the echo filter", async () => {
   const nats = new FakeNats()
   const forwarder = createThreadForwarder(nats, "ses_claude")
   forwarder.follow(THREAD)
@@ -225,19 +225,19 @@ test("records and skips a dispatch echo for the originating session", async () =
     source: "github",
     dedupe_key: "github.dispatch.1",
     payload_summary: "Keep the conversation open?",
-    payload: JSON.stringify({ dispatch_session: "ses_claude" }),
+    payload: JSON.stringify({}),
   })
   const laterCopy = JSON.stringify({
     dedupe_key: "github.dispatch.1",
     payload_summary: "Keep the conversation open?",
-    payload: JSON.stringify({ dispatch_session: "ses_other" }),
+    payload: JSON.stringify({}),
   })
 
   nats.emit(COMMENT, echo)
   nats.emit(COMMENT, laterCopy)
   await settled()
 
-  expect(nats.published).toEqual([])
+  expect(nats.published.map((entry) => decode(entry.data))).toEqual([echo])
 })
 
 test("forwards a non-GitHub message that names this dispatch session", async () => {
@@ -248,7 +248,7 @@ test("forwards a non-GitHub message that names this dispatch session", async () 
     dedupe_key: "agent.dispatch.1",
     source: "agent",
     payload_summary: "An agent replied.",
-    payload: JSON.stringify({ dispatch_session: "ses_claude" }),
+    payload: JSON.stringify({}),
   })
 
   nats.emit(COMMENT, message)

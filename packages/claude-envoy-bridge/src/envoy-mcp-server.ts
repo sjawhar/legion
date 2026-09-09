@@ -1,12 +1,7 @@
+import { dispatchToolSpecs, zodSchemaApi } from "@legion/contracts"
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
-import { executeDispatch } from "@legion/envoy-client/dispatch-call"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
-import {
-  DISPATCH_TOOL_DESCRIPTION,
-  DISPATCH_TOOL_JSON_SCHEMA,
-  DISPATCH_TOOL_NAME,
-  parseDispatchCall,
-} from "@legion/envoy-client/dispatch-contract"
+import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
@@ -34,7 +29,7 @@ import { createThreadForwarder, type ThreadForwarder } from "./thread-forwarder"
 // The shared tool contract builds argument shapes on the caller's Zod so each host registers
 // schemas its runtime recognises; this bridge validates and emits JSON Schema with its own.
 function argumentsSchema(spec: ToolSpec): z.ZodObject<z.ZodRawShape> {
-  return z.object(spec.arguments(z) as z.ZodRawShape)
+  return z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape)
 }
 
 function parseArguments<Operation extends EnvoyToolOperation>(
@@ -44,20 +39,21 @@ function parseArguments<Operation extends EnvoyToolOperation>(
   return argumentsSchema(spec).parse(input) as ToolArgumentsByOperation[Operation]
 }
 
-// Claude Code has no native tool API, so dispatch is a tool of this MCP
-// server; it runs with the session identity the monitor uses, which is what
-// the thread records (Claude exposes no title). Present only where dispatch
-// is enabled; an invalid envoy.json is reported on stderr and the tool omitted.
+// Claude Code has no native tool API, so its MCP server exposes every native
+// Dispatch operation when the shared configuration resolves. Claude exposes no
+// session title; the monitor session identity is attached to each request.
 const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() })
-if (dispatchConfig.error !== null) {
-  process.stderr.write(`envoy-mcp: dispatch tool disabled — ${dispatchConfig.error}\n`)
+if (!dispatchConfig.enabled) {
+  process.stderr.write(
+    `envoy-mcp: Dispatch tools disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}\n`,
+  )
 }
 
-const dispatchToolDefinition = {
-  name: DISPATCH_TOOL_NAME,
-  description: DISPATCH_TOOL_DESCRIPTION,
-  inputSchema: DISPATCH_TOOL_JSON_SCHEMA,
-}
+const dispatchToolDefinitions = dispatchToolSpecs.map((spec) => ({
+  name: spec.name,
+  description: spec.description,
+  inputSchema: z.toJSONSchema(z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape)),
+}))
 
 export const envoyMcpToolDefinitions = [
   ...envoyToolSpecs
@@ -67,7 +63,7 @@ export const envoyMcpToolDefinitions = [
       description: spec.description,
       inputSchema: z.toJSONSchema(argumentsSchema(spec)),
     })),
-  ...(dispatchConfig.url === null ? [] : [dispatchToolDefinition]),
+  ...(dispatchConfig.enabled ? dispatchToolDefinitions : []),
 ]
 
 class UnsupportedEnvoyToolError extends Error {
@@ -204,27 +200,30 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     baseUrl: envoyDefaultsFromEnvironment(process.env).envoyUrl,
     fetch: globalThis.fetch,
   })
-  if (name === DISPATCH_TOOL_NAME) {
-    if (dispatchConfig.url === null) throw new UnsupportedEnvoyToolError(name)
-    const result = await executeDispatch({
-      call: parseDispatchCall(input),
+  const dispatchSpec = dispatchToolSpecs.find((candidate) => candidate.name === name)
+  if (dispatchSpec !== undefined) {
+    if (!dispatchConfig.enabled) throw new UnsupportedEnvoyToolError(name)
+    const result = await executeDispatchTool({
+      tool: dispatchSpec.name,
+      args: input as Record<string, unknown>,
       cwd: process.cwd(),
       host: "claude",
       sessionId,
-      serviceUrl: dispatchConfig.url,
+      config: dispatchConfig,
+      env: process.env,
     })
-    // The human answers on the GitHub issue. The registry interest tells Envoy
-    // this session is listening; the forwarder is what actually carries the
-    // thread's envelopes to the session's agent subject, where the monitor
-    // renders them. The thread exists either way, so a failure on this leg is
-    // reported on stderr, not surfaced as a failed dispatch.
-    const topic = dispatchSubscriptionTopic(name, JSON.stringify(result))
+    // The registry interest tells Envoy this session is listening; the
+    // forwarder carries matching envelopes to its agent subject. A forwarding
+    // failure is logged because the Dispatch operation itself succeeded.
+    const topic = dispatchSubscriptionTopic(result.details)
     if (topic !== null) {
       try {
         await subscribeAndFollow(client, sessionId, [topic])
       } catch (error) {
+        const issue =
+          typeof result.details["issue"] === "string" ? result.details["issue"] : "the issue"
         process.stderr.write(
-          `envoy-mcp: dispatch opened ${result.url} but subscribing ${sessionId} to ${topic} failed — ${messageFor(error)}\n`,
+          `envoy-mcp: ${name} completed for ${issue} but subscribing ${sessionId} to ${topic} failed — ${messageFor(error)}\n`,
         )
       }
     }
@@ -316,7 +315,7 @@ export async function runEnvoyMcpServer(): Promise<void> {
     {
       capabilities: { tools: {} },
       instructions:
-        "Use Envoy tools for cross-session messaging and topic subscriptions, and dispatch to raise or continue a durable question thread for the human. Envoy messages arrive as native Claude Code peer messages.",
+        "Use Envoy tools for cross-session messaging and topic subscriptions, and the native Dispatch tools to create issues, ask questions, comment, edit documents, upload artifacts, and read Dispatch state. Envoy messages arrive as native Claude Code peer messages.",
     },
   )
 

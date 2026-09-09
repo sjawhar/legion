@@ -1,22 +1,19 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject } from "@legion/contracts";
+import { agentSubject, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
-import { executeDispatch } from "@legion/envoy-client/dispatch-call";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
-import {
-  DISPATCH_ARGUMENTS,
-  DISPATCH_TOOL_DESCRIPTION,
-  DISPATCH_TOOL_NAME,
-  DISPATCH_URGENCIES,
-  parseDispatchCall,
-} from "@legion/envoy-client/dispatch-contract";
+import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { machineID } from "@legion/envoy-client/machine";
-import { envoyToolSpecs, type ToolSpec } from "@legion/envoy-client/tool-contract";
+import {
+  envoyToolSpecs,
+  type ToolSpec,
+  toMessageMetadata,
+} from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
-import { tool } from "@opencode-ai/plugin/tool";
+import { type ToolDefinition, tool } from "@opencode-ai/plugin/tool";
 import { logger } from "./log";
 import { resolvePort } from "./port";
 
@@ -47,40 +44,16 @@ const roleSetSpec = toolSpec("envoy_role_set");
 const whoamiSpec = toolSpec("envoy_whoami");
 const sessionsSpec = toolSpec("envoy_sessions");
 
-// The dispatch tool's LLM-facing schema, built with OpenCode's own zod
-// (`tool.schema`): OpenCode converts plugin schemas with that instance, and a
-// schema from another zod build loses its checks and descriptions on the way.
-// It mirrors `dispatchToolShape` from the contract field for field — the test
-// suite compares the two as JSON Schema so they cannot drift apart.
-const dispatchQuestionOption = tool.schema.strictObject({
-  label: tool.schema.string().min(1),
-  description: tool.schema.string().optional(),
-});
-const dispatchQuestion = tool.schema.strictObject({
-  question: tool.schema.string().min(1),
-  header: tool.schema.string().optional(),
-  options: tool.schema.array(dispatchQuestionOption).optional(),
-  multiple: tool.schema.boolean().optional(),
-  custom: tool.schema.boolean().optional(),
-});
-const dispatchArgs = {
-  subject: tool.schema.string().describe(DISPATCH_ARGUMENTS.subject).optional(),
-  thread: tool.schema.string().describe(DISPATCH_ARGUMENTS.thread).optional(),
-  context: tool.schema.string().describe(DISPATCH_ARGUMENTS.context),
-  question: tool.schema.string().describe(DISPATCH_ARGUMENTS.question),
-  ask: tool.schema.array(dispatchQuestion).describe(DISPATCH_ARGUMENTS.ask).optional(),
-  urgency: tool.schema.enum(DISPATCH_URGENCIES).describe(DISPATCH_ARGUMENTS.urgency).optional(),
-  repo: tool.schema.string().describe(DISPATCH_ARGUMENTS.repo).optional(),
-  parent: tool.schema.string().describe(DISPATCH_ARGUMENTS.parent).optional(),
-};
-
 export default async (input: { serverUrl: URL }) => {
   const cwd = process.cwd();
-  // One loader for the shared envoy.json contract. An invalid file refuses to
-  // load rather than run with dispatch silently off.
+  // Dispatch configuration never prevents Envoy from loading. Disabled native
+  // tools are visible in the host log, including normal unconfigured installs.
   const dispatchConfig = resolveDispatchConfig(process.env, { cwd });
-  if (dispatchConfig.error !== null) throw new Error(`[envoy-plugin] ${dispatchConfig.error}`);
-  const dispatchServiceUrl = dispatchConfig.url;
+  if (!dispatchConfig.enabled) {
+    logger.warn(
+      `envoy: dispatch tools disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}`
+    );
+  }
   const envoyDefaults = envoyDefaultsFromEnvironment(process.env);
   const envoy = createEnvoyClient({ baseUrl: envoyDefaults.envoyUrl, fetch: globalThis.fetch });
   let activeSessionID: string | null = null;
@@ -195,32 +168,32 @@ export default async (input: { serverUrl: URL }) => {
     clearInterval(heartbeatInterval);
   });
 
-  // The dispatch tool is present iff envoy.json (or DISPATCH_MCP_URL) names a
-  // service. The plugin adds only what it alone knows — that this is OpenCode,
-  // and which session is asking.
-  const dispatchTool =
-    dispatchServiceUrl === null
-      ? {}
-      : {
-          [DISPATCH_TOOL_NAME]: tool({
-            description: DISPATCH_TOOL_DESCRIPTION,
-            args: dispatchArgs,
-            async execute(args, ctx) {
-              ctx.metadata({ title: "Dispatch" });
-              // Validate before the title lookup: an invalid call costs no request.
-              const call = parseDispatchCall(args);
-              const result = await executeDispatch({
-                call,
-                cwd: ctx.directory,
-                host: "opencode",
-                sessionId: ctx.sessionID,
-                sessionTitle: (await fetchTitle(ctx.sessionID)) ?? undefined,
-                serviceUrl: dispatchServiceUrl,
-              });
-              return JSON.stringify(result);
-            },
-          }),
-        };
+  // Native Dispatch tools are present only when the shared configuration has
+  // both a server URL and bearer token. Each tool returns its details as
+  // OpenCode metadata so the post-execution hook can subscribe to its topic.
+  const dispatchTools: Record<string, ToolDefinition> = {};
+  if (dispatchConfig.enabled) {
+    for (const spec of dispatchToolSpecs) {
+      dispatchTools[spec.name] = tool({
+        description: spec.description,
+        args: spec.arguments(zodSchemaApi(tool.schema)) as never,
+        async execute(args, ctx) {
+          ctx.metadata({ title: "Dispatch" });
+          const result = await executeDispatchTool({
+            tool: spec.name,
+            args: args as Record<string, unknown>,
+            cwd: ctx.directory,
+            host: "opencode",
+            sessionId: ctx.sessionID,
+            sessionTitle: (await fetchTitle(ctx.sessionID)) ?? undefined,
+            config: dispatchConfig,
+            env: process.env,
+          });
+          return { title: "Dispatch", output: result.text, metadata: result.details };
+        },
+      });
+    }
+  }
 
   return {
     config: (cfg: { skills?: { paths?: string[] } } & Record<string, unknown>) => {
@@ -300,11 +273,10 @@ export default async (input: { serverUrl: URL }) => {
       input: { tool: string; sessionID: string; callID: string; args: unknown },
       output: { title: string; output: string; metadata: unknown }
     ) => {
-      // When this session opens or continues a Dispatch thread via the native
-      // dispatch tool, auto-subscribe it to the thread's GitHub topic so the
-      // human's reply is delivered back through Envoy. Best-effort — a subscribe
-      // failure must never surface to the model or fail the tool call.
-      const topic = dispatchSubscriptionTopic(input.tool, output.output);
+      // Native Dispatch tools return `DispatchToolResult.details` in OpenCode
+      // output metadata, so only mutations with a Dispatch topic are followed.
+      // Best-effort — a subscribe failure must never surface to the model.
+      const topic = dispatchSubscriptionTopic(output.metadata);
       if (!topic) return;
       try {
         await envoy.subscribe({
@@ -326,17 +298,17 @@ export default async (input: { serverUrl: URL }) => {
       clearInterval(heartbeatInterval);
     },
     tool: {
-      ...dispatchTool,
+      ...dispatchTools,
       envoy_subscribe: tool({
         description: subscribeSpec.description,
-        args: { topics: tool.schema.array(tool.schema.string()) },
+        args: subscribeSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy subscribe" });
           return JSON.stringify(
             await envoy.subscribe({
               sessionID: ctx.sessionID,
               directory: ctx.directory,
-              topics: args.topics,
+              topics: args.topics as string[],
               port: currentPort() ?? 0,
               title: activeSessionTitle ?? "",
               driving: true,
@@ -346,16 +318,19 @@ export default async (input: { serverUrl: URL }) => {
       }),
       envoy_unsubscribe: tool({
         description: unsubscribeSpec.description,
-        args: { topics: tool.schema.array(tool.schema.string()).optional() },
+        args: unsubscribeSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy unsubscribe" });
-          await envoy.unsubscribe({ sessionID: ctx.sessionID, topics: args.topics ?? [] });
+          await envoy.unsubscribe({
+            sessionID: ctx.sessionID,
+            topics: (args.topics as string[] | undefined) ?? [],
+          });
           return "ok";
         },
       }),
       envoy_list: tool({
         description: listSpec.description,
-        args: {},
+        args: listSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(_args, ctx) {
           ctx.metadata({ title: "Envoy list" });
           return JSON.stringify(await envoy.getInterest(ctx.sessionID));
@@ -363,43 +338,47 @@ export default async (input: { serverUrl: URL }) => {
       }),
       envoy_send: tool({
         description: sendSpec.description,
-        args: { session_id: tool.schema.string(), message: tool.schema.string() },
+        args: sendSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy send" });
           return JSON.stringify(
             await envoy.send({
               sourceSessionID: ctx.sessionID,
-              targetSessionID: args.session_id,
-              message: args.message,
+              targetSessionID: args.session_id as string,
+              message: args.message as string,
+              ...toMessageMetadata(args as never),
             })
           );
         },
       }),
       envoy_publish: tool({
         description: publishSpec.description,
-        args: { topic: tool.schema.string(), message: tool.schema.string() },
+        args: publishSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy publish" });
           return JSON.stringify(
             await envoy.publish({
               sourceSessionID: ctx.sessionID,
-              topic: args.topic,
-              message: args.message,
+              topic: args.topic as string,
+              message: args.message as string,
+              ...toMessageMetadata(args as never),
             })
           );
         },
       }),
       envoy_role_set: tool({
         description: roleSetSpec.description,
-        args: { role: tool.schema.string() },
+        args: roleSetSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(args, ctx) {
           ctx.metadata({ title: "Set Envoy role" });
-          return JSON.stringify(await envoy.setRole({ sessionID: ctx.sessionID, role: args.role }));
+          return JSON.stringify(
+            await envoy.setRole({ sessionID: ctx.sessionID, role: args.role as string })
+          );
         },
       }),
       envoy_whoami: tool({
         description: whoamiSpec.description,
-        args: {},
+        args: whoamiSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(_args, ctx) {
           ctx.metadata({ title: "Envoy whoami" });
           const sessionID = ctx.sessionID;
@@ -418,14 +397,16 @@ export default async (input: { serverUrl: URL }) => {
       }),
       envoy_sessions: tool({
         description: sessionsSpec.description,
-        args: { machine: tool.schema.string().optional() },
+        args: sessionsSpec.arguments(zodSchemaApi(tool.schema)) as never,
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy sessions" });
-          const sessions = await envoy.listSessions();
+          const sessions = await envoy.listSessions({
+            ...(args.dir === undefined ? {} : { directory: args.dir as string }),
+            ...(args.title === undefined ? {} : { title: args.title as string }),
+          });
+          const machine = args.machine as string | undefined;
           return JSON.stringify(
-            args.machine
-              ? sessions.filter((session) => session.machine_id === args.machine)
-              : sessions,
+            machine ? sessions.filter((session) => session.machine_id === machine) : sessions,
             null,
             2
           );

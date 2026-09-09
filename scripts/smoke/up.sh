@@ -638,7 +638,7 @@ main() {
     ENVOY_NATS_URL="$nats_url" \
     ENVOY_URL="http://127.0.0.1:${listener_port}" \
     LEGION_DAEMON_PORT="$daemon_port" \
-    DISPATCH_MCP_URL="http://127.0.0.1:${dispatch_port}/mcp" \
+    DISPATCH_URL="http://127.0.0.1:${dispatch_port}" \
     LEGION_STATE_DIR="${smoke_dir}/daemon" \
     XDG_DATA_HOME="${smoke_dir}/xdg-data" \
     XDG_STATE_HOME="${smoke_dir}/xdg-state" \

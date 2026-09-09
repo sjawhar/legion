@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16
+    network_mode: host
+    command:
+      ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=${DISPATCH_PG_PORT:-55432}"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}
+      POSTGRES_DB: dispatch
+    volumes:
+      - dispatch-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p ${DISPATCH_PG_PORT:-55432} -U postgres"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   dispatch:
     image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
     build:
@@ -7,6 +25,9 @@ services:
     network_mode: host
     entrypoint: ["/usr/local/bin/envoy-dispatch"]
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://${DISPATCH_LISTEN_HOST:-127.0.0.1}:${DISPATCH_PORT:-8766}/healthz"]
       interval: 10s
@@ -15,18 +36,47 @@ services:
       start_period: 5s
     environment:
       HOME: /home/envoy
+      DATABASE_URL: postgres://postgres:${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}@127.0.0.1:${DISPATCH_PG_PORT:-55432}/dispatch?sslmode=disable
       DISPATCH_LISTEN_HOST: ${DISPATCH_LISTEN_HOST:-127.0.0.1}
       DISPATCH_PORT: ${DISPATCH_PORT:-8766}
       DISPATCH_APP_CLIENT_ID: ${DISPATCH_APP_CLIENT_ID:-}
       DISPATCH_APP_CLIENT_SECRET: ${DISPATCH_APP_CLIENT_SECRET:-}
+      DISPATCH_AGENT_TOKEN: ${DISPATCH_AGENT_TOKEN:?set DISPATCH_AGENT_TOKEN}
+      DISPATCH_ALLOWED_LOGINS: ${DISPATCH_ALLOWED_LOGINS:?set DISPATCH_ALLOWED_LOGINS}
+      DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}
+      DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}
+      DISPATCH_NATS_DISABLED: ${DISPATCH_NATS_DISABLED:-}
+      DISPATCH_REPO_PROJECTS: ${DISPATCH_REPO_PROJECTS:-}
       # Session cookies are Secure by default; set this when serving the
       # OAuth dashboard over plain HTTP (local/tailnet use).
       DISPATCH_INSECURE_COOKIE: ${DISPATCH_INSECURE_COOKIE:-}
     volumes:
       # NATS URLs and the dispatch block come from the shared envoy.json.
       - ~/.config/opencode/envoy.json:/home/envoy/.config/opencode/envoy.json:ro
-      # Signing key, file user store, and optional app.json credentials.
+      # Signing key and optional app.json credentials.
       - dispatch-data:/home/envoy/.local/share/dispatch
+
+  pg-backup:
+    image: eeshugerman/postgres-backup-s3@sha256:cfcaa57732c13d0724312a2eea1ad3e385f5ed049de3c626d1ef28ecc13cdddb
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: "30"
+      S3_REGION: ${S3_REGION:?set S3_REGION}
+      S3_BUCKET: ${DISPATCH_BACKUP_BUCKET:?set DISPATCH_BACKUP_BUCKET}
+      S3_PREFIX: dispatch
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "${DISPATCH_PG_PORT:-55432}"
+      POSTGRES_DATABASE: dispatch
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
 
 volumes:
   dispatch-data:
+  dispatch-pg:

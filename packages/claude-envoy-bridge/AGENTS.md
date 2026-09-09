@@ -17,7 +17,7 @@ CLI uses Envoy's local Go listener HTTP API for outbound direct messages.
 | Claude plugin manifest | `.claude-plugin/plugin.json` | Declares the Monitor manifest and the MCP server (`.mcp.json` → `bin/envoy-mcp.ts`). |
 | Monitor declaration | `monitors/monitors.json` | Starts `bin/envoy-monitor.ts` for every session. |
 | Inbound transport | `src/envoy-monitor.ts` | NATS subscriptions and Monitor event output. |
-| MCP server + dispatch tool | `src/envoy-mcp-server.ts` | Runs with the monitor's session id; every followed topic is forwarded onto the agent subject. |
+| MCP server + Dispatch tools | `src/envoy-mcp-server.ts` | Runs with the monitor's session id; every followed topic is forwarded onto the agent subject. |
 | Topic forwarder | `src/thread-forwarder.ts` | NATS subscribe → republish on `notifications.agent.<session-id>`, deduped by event id. |
 | Outbound transport | `src/envoy-client.ts` | Envoy listener HTTP client. |
 | Send CLI parsing | `src/send-arguments.ts` | Validates destination and message arguments. |
@@ -30,7 +30,7 @@ CLI uses Envoy's local Go listener HTTP API for outbound direct messages.
   self-subscribed with port zero, refreshes it every heartbeat, and deregisters it at shutdown.
   The MCP server records registry interests for topics the session follows and forwards them onto
   that agent subject. Manual `envoy_subscribe` establishes the NATS forwarding leg before recording
-  its interest; dispatch auto-subscription remains best-effort when a broker is unavailable.
+  its interest; Dispatch auto-subscription remains best-effort when a broker is unavailable.
 - The monitor uses `CLAUDE_CODE_SESSION_ID` for its direct route. Set `ENVOY_SESSION_ID` only
   to explicitly override that identity for controlled QA; without either identity, the monitor
   exits with an error rather than subscribing to a made-up route.

@@ -12,7 +12,6 @@
 // delivery for the rest, and shutdown never hangs on a dead broker.
 
 import { agentSubject } from "@legion/contracts"
-import { isOwnDispatchEcho } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { expandSubscriptionTopics } from "@legion/envoy-client/transport"
 import { z } from "zod"
@@ -65,16 +64,11 @@ interface Following {
 const DedupeIdentity = z.object({
   dedupe_key: z.string().min(1).optional(),
   event_id: z.string().min(1).optional(),
-  source: z.string().optional(),
-  payload: z.string().optional(),
 })
 
 const decoder = new TextDecoder()
 
-function deliveryIdentity(
-  data: Uint8Array,
-  sessionId: string,
-): { readonly key: string; readonly dispatchEcho: boolean } | undefined {
+function deliveryIdentity(data: Uint8Array): { readonly key: string } | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(decoder.decode(data))
@@ -85,17 +79,7 @@ function deliveryIdentity(
   if (!identity.success) return undefined
   const key = identity.data.dedupe_key ?? identity.data.event_id
   if (key === undefined) return undefined
-
-  return {
-    key,
-    dispatchEcho:
-      identity.data.source === undefined
-        ? false
-        : isOwnDispatchEcho(
-            { source: identity.data.source, payload: identity.data.payload },
-            sessionId,
-          ),
-  }
+  return { key }
 }
 
 /** The seen-set bound pi-envoy uses; the oldest key is evicted first. */
@@ -129,7 +113,7 @@ export function createThreadForwarder(
     try {
       for await (const message of subscription) {
         try {
-          const identity = deliveryIdentity(message.data, sessionId)
+          const identity = deliveryIdentity(message.data)
           if (identity === undefined) {
             process.stderr.write(
               `envoy-mcp: dropped a message on ${message.subject}: no dedupe_key or event_id\n`,
@@ -144,7 +128,7 @@ export function createThreadForwarder(
           // inbox would relay the same envelope back and forth.
           if (seen.has(identity.key)) continue
           remember(identity.key)
-          if (identity.dispatchEcho || message.subject === inbox) continue
+          if (message.subject === inbox) continue
           connection.publish(inbox, message.data)
         } catch (error) {
           // One message that cannot be republished must not end the topic's delivery.
