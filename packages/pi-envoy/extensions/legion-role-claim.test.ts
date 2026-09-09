@@ -18,28 +18,24 @@ mock.module("nats", () => ({
     decode: (data: Uint8Array) => new TextDecoder().decode(data),
   }),
 }));
-
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
 }));
-
-// OMP loads each manifest entry under a distinct mtime query, so the Legion
-// entry's local Envoy import must not share module-scoped state with Envoy's entry.
+// Distinct mtime queries force distinct module instances, exercising the
+// cross-module role-claim bridge documented in envoy.ts.
 const { default: envoyExtension } = await import("./envoy.ts?envoy-entry");
 const { default: legionExtension } = await import("./legion.ts?legion-entry");
-
 type Context = {
   readonly cwd: string;
   readonly sessionManager: {
     readonly getSessionId: () => string;
     readonly getSessionFile: () => string | undefined;
+    readonly ensureOnDisk: () => Promise<void>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: { readonly notify: (message: string, level: "warning") => void };
 };
-
 type Handler = (event: unknown, context: Context) => Promise<unknown>;
-
 const originalFetch = globalThis.fetch;
 const originalEnvironment = {
   ENVOY_NATS_URL: process.env.ENVOY_NATS_URL,
@@ -47,11 +43,11 @@ const originalEnvironment = {
   LEGION_BOOT_TOKEN: process.env.LEGION_BOOT_TOKEN,
   LEGION_DAEMON_URL: process.env.LEGION_DAEMON_URL,
   LEGION_GENERATION: process.env.LEGION_GENERATION,
-  LEGION_PROJECT: process.env.LEGION_PROJECT,
+  LEGION_ISSUE: process.env.LEGION_ISSUE,
+  LEGION_ROLE: process.env.LEGION_ROLE,
   LEGION_TREE: process.env.LEGION_TREE,
   LEGION_STATE_DIR: process.env.LEGION_STATE_DIR,
 } as const;
-
 afterEach(() => {
   globalThis.fetch = originalFetch;
   for (const [key, value] of Object.entries(originalEnvironment)) {
@@ -59,7 +55,6 @@ afterEach(() => {
     else process.env[key] = value;
   }
 });
-
 test("keeps a Legion role claimant fresh regardless of extension initialization order", async () => {
   const handlers = new Map<string, Handler[]>();
   const intervals: (() => void)[] = [];
@@ -73,9 +68,10 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   process.env.LEGION_DAEMON_URL = "http://daemon.test";
   process.env.LEGION_GENERATION = "3";
   process.env.LEGION_BOOT_TOKEN = "claim-heartbeat";
-  process.env.LEGION_PROJECT = "omp";
   process.env.LEGION_STATE_DIR = "/tmp/legion-state";
   process.env.LEGION_TREE = tree;
+  process.env.LEGION_ROLE = "architect";
+  process.env.LEGION_ISSUE = tree;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(input.toString());
     if (url.pathname === "/legion/v1/process/started") {
@@ -92,19 +88,22 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
       };
       registrations.push(body);
       if (registrations.length === 3) heartbeatRegistration.resolve();
-      return Response.json({ session_id: body.session_id, machine_id: "test", dir: "/tmp", topics: body.topics });
+      return Response.json({
+        session_id: body.session_id,
+        machine_id: "test",
+        dir: "/tmp",
+        topics: body.topics,
+      });
     }
     return Response.json({ session_id: sessionID, machine_id: "test", dir: "/tmp", topics: [] });
   }) as typeof fetch;
   const activeTools = ["read", "task", "hub"];
-  const property = (): ZodNumberProperty => ({ optional: property, describe: property, int: property });
+  const property = (): ZodNumberProperty => ({
+    optional: property,
+    describe: property,
+    int: property,
+  });
   const createPi = () => ({
-    agents: {
-      list: () => [],
-      get: () => undefined,
-      ensureLive: async (agentId: string) => ({ id: agentId }),
-      prompt: async () => undefined,
-    },
     zod: {
       object: (shape: unknown) => shape,
       string: property,
@@ -135,20 +134,22 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     sessionManager: {
       getSessionId: () => sessionID,
       getSessionFile: () => "/tmp/legion-root.jsonl",
+      ensureOnDisk: async () => undefined,
     },
     setInterval: (callback) => intervals.push(callback),
     ui: { notify: () => undefined },
   };
 
-  legionExtension(legionPi);
+  // Legion initializes before Envoy — the opposite of load order in the
+  // manifest — to prove claimEnvoyRole's bridge waits rather than binding to
+  // a claim function that was never set.
+  legionExtension(legionPi as never);
   envoyExtension(envoyPi as never);
   const sessionStart = handlers.get("session_start")?.[0];
-  const beforeAgentStart = handlers.get("before_agent_start")?.[0];
-  if (sessionStart === undefined || beforeAgentStart === undefined) {
+  if (sessionStart === undefined) {
     throw new Error("Legion lifecycle handlers were not registered");
   }
   await sessionStart({}, context);
-  await beforeAgentStart({ prompt: "Start the root architect" }, context);
 
   expect(intervals).toHaveLength(1);
   // Establishing the role claimant registers before the role is applied, then

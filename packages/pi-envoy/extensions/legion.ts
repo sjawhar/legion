@@ -1,22 +1,12 @@
 import path from "node:path";
-import {
-  controllerToken,
-  formatIssueKey,
-  type IssueKey,
-  isLegionRole,
-  type LegionRole,
-  parseIssueKey,
-  roleToken,
-} from "@legion/contracts";
+import { controllerToken, type LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { messageFor } from "@legion/envoy-client/errors";
-import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
 import { logger } from "@oh-my-pi/pi-utils";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import {
+  classifySession,
   generation,
-  isRootSession,
-  positiveIntegerEnvironment,
   requiredControllerCapability,
   requiredEnvironment,
 } from "../src/legion/classify";
@@ -25,152 +15,119 @@ import {
   type LegionControlDirective,
   parseControlDirective,
 } from "../src/legion/control";
-import { createLegionDaemonClient } from "../src/legion/daemon-client";
+import { createLegionDaemonClient, LegionDaemonApiError } from "../src/legion/daemon-client";
 import { installWorkerGhShim, workerGhEnvironment } from "../src/legion/gh-shim";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
-import { legionSpawnBlockPattern, parseWorkerSpawn, workerAgentId } from "../src/legion/spawn";
 import { createLegionTool } from "../src/legion/tools";
-import {
-  acquireWorkerBudget,
-  addPendingLegionSpawn,
-  ensureWorkerBudgetPermit,
-  type PendingLegionSpawn,
-  pendingLegionSpawns,
-  pendingLegionSpawnsByToken,
-  type RootBootstrap,
-  registerWorkerBudgetPermit,
-  releasePendingLegionSpawn,
-  releaseWorkerBudgetPermit,
-  rootBootstraps,
-  transferPendingLegionSpawn,
-  type WorkerSession,
-  workerSessions,
-} from "../src/legion/worker-budget";
-import { runWorkspaceCommand, setJjIdentity } from "../src/legion/workspace-helpers";
+import { setJjIdentity } from "../src/legion/workspace-helpers";
 import type { CommandContext, PiApi, SessionContext, ToolCallEventResult } from "../src/pi-types";
-import { claimEnvoyRole, deleteEnvoyInterest } from "./envoy";
+import { claimEnvoyRole } from "./envoy";
 
-// Read by the daemon's startup probe extension (packages/daemon/src/daemon/index.ts,
-// verifyLegionPluginLoaded) to prove this extension actually loaded from an ambient
-// installed-plugin discovery — not just that a manifest file exists, which stays true
-// even when the plugin is disabled or unregistered in OMP's own plugin registry.
+interface LegionCapability {
+  readonly kind: "root-architect" | "phase-worker";
+  readonly sessionID: string;
+  readonly tree: string;
+  readonly issue: string;
+  readonly role: LegionRole;
+  readonly roleToken: string;
+  readonly secret: string;
+}
+
+// Fatal bootstrap failures call this instead of `process.exit` directly, so a
+// test can substitute a throwing stand-in without killing the test runner.
+// Production callers never override it.
+let exitProcess: (code: number) => never = (code) => process.exit(code) as never;
+export function setLegionBootstrapExitForTests(hook: (code: number) => never): void {
+  exitProcess = hook;
+}
+
+async function persistedTranscript(
+  context: SessionContext
+): Promise<{ readonly sessionFile: string; readonly agentId: string }> {
+  await context.sessionManager.ensureOnDisk();
+  const sessionFile = context.sessionManager.getSessionFile();
+  if (!sessionFile?.endsWith(".jsonl")) {
+    throw new Error("Legion session must have a persisted transcript");
+  }
+  const agentId = path.basename(sessionFile, ".jsonl");
+  if (!agentId) throw new Error("Legion session transcript has no agent id");
+  return { sessionFile, agentId };
+}
+
+// Read by the daemon's startup probe (packages/daemon/src/daemon/index.ts,
+// verifyLegionPluginLoaded) to prove this extension actually loaded from an
+// ambient installed-plugin discovery -- not just that a manifest file exists,
+// which stays true even when the plugin is disabled or unregistered in OMP's
+// own plugin registry.
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
 export default function legionExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
   (globalThis as Record<symbol, unknown>)[LEGION_LOADED_MARKER] = import.meta.url;
-  const agents = pi.agents;
   const defaults = envoyDefaultsFromEnvironment(process.env);
-  let rootSessionID: string | undefined;
-  let rootArchitectRole: string | undefined;
-  let rootSecret: string | undefined;
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
   let controlConnection: NatsConnection | undefined;
   let controlSubscription: Subscription | undefined;
   const controlCodec = StringCodec();
-  let workspaceStateDir: string | undefined;
-  const workspaceProvisions = new Map<IssueKey, Promise<WorkspaceSpec>>();
+
+  // A Legion root or phase-worker session boots as its own OMP process and
+  // holds exactly one role for its whole lifetime, so its identity lives in
+  // plain closure state.
+  let capability: LegionCapability | undefined;
+  let bootstrap: Promise<void> | undefined;
+
   const roleDaemon = () => {
     return createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"), fetch, {
       recoveryToken: (sessionId) => {
-        if (sessionId === rootSessionID) {
+        // A worker's LEGION_BOOT_TOKEN is its recovery token exactly like the
+        // root's: it is single-use to redeem the initial capability, but the
+        // daemon accepts it again on /worker-session to reissue a secret it
+        // has since forgotten (e.g. after a daemon restart).
+        if (capability !== undefined && sessionId === capability.sessionID) {
           return requiredEnvironment(process.env, "LEGION_BOOT_TOKEN");
         }
-        const worker = workerSessions.get(sessionId);
-        if (worker === undefined) {
-          throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
-        }
-        return worker.spawnToken;
+        throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
       },
       onRecovered: (sessionId, recovered) => {
-        if (sessionId === rootSessionID) {
-          const tree = requiredEnvironment(process.env, "LEGION_TREE");
-          if (
-            recovered.tree !== tree ||
-            recovered.issue !== tree ||
-            recovered.role !== "architect"
-          ) {
-            throw new Error("Daemon recovered a capability for a different root architect role");
-          }
-          rootSecret = recovered.secret;
-          return;
+        if (capability === undefined || sessionId !== capability.sessionID) {
+          throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
         }
-        const worker = workerSessions.get(sessionId);
         if (
-          worker === undefined ||
-          recovered.tree !== worker.tree ||
-          recovered.issue !== worker.issue ||
-          recovered.role !== worker.role
+          recovered.tree !== capability.tree ||
+          recovered.issue !== capability.issue ||
+          recovered.role !== capability.role
         ) {
-          throw new Error("Daemon recovered a capability for a different Legion worker role");
+          throw new Error("Daemon recovered a capability for a different Legion role");
         }
-        workerSessions.set(sessionId, { ...worker, secret: recovered.secret });
+        capability = { ...capability, secret: recovered.secret };
       },
     });
-  };
-  const provisionWorkspace = async (
-    issue: IssueKey,
-    capability: { readonly tree: string; readonly sessionId: string; readonly secret: string }
-  ): Promise<WorkspaceSpec> => {
-    if (workspaceStateDir === undefined) {
-      throw new Error("Legion workspace state directory is unavailable before root bootstrap");
-    }
-    const existing = workspaceProvisions.get(issue);
-    if (existing !== undefined) return await existing;
-
-    const provision = provisionIssueWorkspace(issue, {
-      extensionPackage: path.resolve(import.meta.dir, ".."),
-      stateDir: workspaceStateDir,
-      credentialHelper: requiredEnvironment(process.env, "LEGION_CREDENTIAL_HELPER"),
-      provisioningToken: async () =>
-        (
-          await roleDaemon().provisioningCredential({
-            tree: capability.tree,
-            issue,
-            sessionId: capability.sessionId,
-            secret: capability.secret,
-          })
-        ).token,
-      run: runWorkspaceCommand,
-    }).catch((error: unknown) => {
-      workspaceProvisions.delete(issue);
-      throw error;
-    });
-    workspaceProvisions.set(issue, provision);
-    return await provision;
-  };
-  const claimRole = async (
-    sessionID: string,
-    role: string,
-    context?: SessionContext
-  ): Promise<void> => {
-    await claimEnvoyRole(sessionID, role, context);
   };
 
   const claimController = async (context: CommandContext | SessionContext): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
     const daemon = createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"));
-    const capability = controllerCapability ?? requiredControllerCapability(process.env);
-    controllerCapability = capability;
+    const secret = controllerCapability ?? requiredControllerCapability(process.env);
+    controllerCapability = secret;
     const { project } = await daemon.state();
-    await claimRole(
+    await claimEnvoyRole(
       sessionID,
       controllerToken(project),
       "setInterval" in context ? context : undefined
     );
-    await daemon.controllerReady({ secret: capability, sessionId: sessionID });
+    await daemon.controllerReady({ secret, sessionId: sessionID });
     controllerSessionID = sessionID;
   };
 
   const reclaimArchitect = async (): Promise<void> => {
-    if (!rootSessionID || !rootArchitectRole) {
+    if (capability === undefined || capability.kind !== "root-architect") {
       throw new Error("Legion root architect is not available for reclamation");
     }
-    await claimRole(rootSessionID, rootArchitectRole);
+    await claimEnvoyRole(capability.sessionID, capability.roleToken);
   };
 
-  const startControlSubscription = async (): Promise<void> => {
+  const startControlSubscription = async (sessionID: string): Promise<void> => {
     const subject = process.env.LEGION_CONTROL_SUBJECT;
     if (!subject || controlSubscription) return;
     if (defaults.natsUrls.length === 0) {
@@ -178,7 +135,7 @@ export default function legionExtension(pi: PiApi): void {
     }
     const connection = await connect({
       servers: [...defaults.natsUrls],
-      name: `legion-control-${rootSessionID ?? "unknown"}`,
+      name: `legion-control-${sessionID}`,
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,
@@ -207,7 +164,6 @@ export default function legionExtension(pi: PiApi): void {
           continue;
         }
         await handleLegionControlDirective(directive, {
-          agents,
           reclaimArchitect,
           requestShutdown: () => pi.sendMessage({ type: "shutdown-request" }),
           acknowledge: () => {
@@ -226,304 +182,237 @@ export default function legionExtension(pi: PiApi): void {
     })();
   };
 
-  const bootstrapRoot = async (context: SessionContext): Promise<void> => {
+  const bootstrapRoot = async (context: SessionContext, tree: string): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
-    const tree = process.env.LEGION_TREE;
-    if (!tree || (rootSessionID !== undefined && rootSessionID !== sessionID)) return;
+    if (capability !== undefined && capability.sessionID !== sessionID) return;
+    if (bootstrap) return bootstrap;
 
     const bootToken = requiredEnvironment(process.env, "LEGION_BOOT_TOKEN");
-    if (rootBootstraps.has(bootToken)) return;
-    const sessionFile = context.sessionManager.getSessionFile();
-    if (!sessionFile) throw new Error("Legion root session must be persisted");
-    const agentId = workerAgentId(context);
 
-    const bootstrap = (async (): Promise<RootBootstrap> => {
-      const started = await createLegionDaemonClient(
-        requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-      ).processStarted({
-        tree,
-        generation: generation(process.env),
-        bootToken,
-        rootSessionId: sessionID,
-        agentId,
-        ompSessionFile: sessionFile,
-      });
-      workspaceStateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
-      const role = started.roleTokens.architect;
-      if (!role) throw new Error("Legion daemon did not return an architect role token");
-      return { role, secret: started.secret };
+    bootstrap = (async () => {
+      const { sessionFile, agentId } = await persistedTranscript(context);
+
+      const started = await (async () => {
+        try {
+          return await createLegionDaemonClient(
+            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
+          ).processStarted({
+            tree,
+            generation: generation(process.env),
+            bootToken,
+            rootSessionId: sessionID,
+            agentId,
+            ompSessionFile: sessionFile,
+          });
+        } catch (error) {
+          if (error instanceof LegionDaemonApiError && error.status === 403) {
+            console.error(
+              `[legion] worker boot token rejected; exiting for the daemon to respawn: ${messageFor(error)}`
+            );
+            exitProcess(1);
+          }
+          throw error;
+        }
+      })();
+      const roleToken = started.roleTokens.architect;
+      if (!roleToken) throw new Error("Legion daemon did not return an architect role token");
+
+      try {
+        await exportJjSessionAttribution(
+          sessionFile,
+          requiredEnvironment(process.env, "LEGION_STATE_DIR")
+        );
+        capability = {
+          kind: "root-architect",
+          sessionID,
+          tree,
+          issue: tree,
+          role: "architect",
+          roleToken,
+          secret: started.secret,
+        };
+        await claimEnvoyRole(sessionID, roleToken, context);
+        await startControlSubscription(sessionID);
+        await roleDaemon().processReady({
+          tree,
+          sessionId: sessionID,
+          secret: started.secret,
+        });
+        registerArchitectTools();
+        await activateLegionTool();
+      } catch (error) {
+        console.error(
+          `[legion] root bootstrap failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+        );
+        exitProcess(1);
+      }
     })();
-    rootBootstraps.set(bootToken, bootstrap);
     try {
-      const root = await bootstrap;
-      await exportJjSessionAttribution(
-        sessionFile,
-        requiredEnvironment(process.env, "LEGION_STATE_DIR")
-      );
-      rootSessionID = sessionID;
-      rootArchitectRole = root.role;
-      rootSecret = root.secret;
-      await claimRole(sessionID, root.role, context);
-      await startControlSubscription();
-      await roleDaemon().processReady({
-        tree,
-        sessionId: sessionID,
-        secret: root.secret,
-      });
-      registerArchitectTools();
-      await activateLegionTool();
+      await bootstrap;
     } catch (error) {
-      if (rootBootstraps.get(bootToken) === bootstrap) rootBootstraps.delete(bootToken);
+      bootstrap = undefined;
       throw error;
     }
   };
-  const recoverWorkerSession = async (
-    context: SessionContext
-  ): Promise<WorkerSession | undefined> => {
+
+  const bootstrapWorker = async (
+    context: SessionContext,
+    role: LegionRole,
+    tree: string,
+    issue: string
+  ): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
-    const existing = workerSessions.get(sessionID);
-    if (existing) return existing;
-    const daemonUrl = process.env.LEGION_DAEMON_URL;
-    const project = process.env.LEGION_PROJECT;
-    if (
-      !process.env.LEGION_TREE ||
-      !daemonUrl ||
-      !project ||
-      process.env.LEGION_CONTROLLER === "1" ||
-      (context.taskDepth ?? 0) === 0 ||
-      isRootSession(process.env, context)
-    ) {
-      return undefined;
+    if (capability !== undefined && capability.sessionID !== sessionID) return;
+    if (bootstrap) return bootstrap;
+
+    const bootToken = requiredEnvironment(process.env, "LEGION_BOOT_TOKEN");
+    const workspace = requiredEnvironment(process.env, "LEGION_WORKSPACE");
+
+    bootstrap = (async () => {
+      const { sessionFile, agentId } = await persistedTranscript(context);
+
+      const started = await (async () => {
+        try {
+          return await createLegionDaemonClient(
+            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
+          ).workerStarted({
+            tree,
+            issue,
+            role,
+            bootToken,
+            sessionId: sessionID,
+            agentId,
+            ompSessionFile: sessionFile,
+          });
+        } catch (error) {
+          if (error instanceof LegionDaemonApiError && error.status === 403) {
+            console.error(
+              `[legion] worker boot token rejected; exiting for the daemon to respawn: ${messageFor(error)}`
+            );
+            exitProcess(1);
+          }
+          throw error;
+        }
+      })();
+
+      try {
+        await exportJjSessionAttribution(
+          sessionFile,
+          requiredEnvironment(process.env, "LEGION_STATE_DIR")
+        );
+        await setJjIdentity(workspace, started.gitName, started.gitEmail);
+        capability = {
+          kind: "phase-worker",
+          sessionID,
+          tree,
+          issue,
+          role,
+          roleToken: started.roleToken,
+          secret: started.secret,
+        };
+        await claimEnvoyRole(sessionID, started.roleToken, context);
+        if (role === "architect") {
+          registerArchitectTools();
+          await activateLegionTool();
+        }
+        await roleDaemon().workerReady({
+          tree,
+          issue,
+          role,
+          sessionId: sessionID,
+          secret: started.secret,
+          generation: generation(process.env),
+        });
+      } catch (error) {
+        console.error(
+          `[legion] worker bootstrap failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+        );
+        exitProcess(1);
+      }
+    })();
+    try {
+      await bootstrap;
+    } catch (error) {
+      bootstrap = undefined;
+      throw error;
     }
-    throw new Error(`Legion worker session ${sessionID} has no persisted recovery token`);
   };
 
   pi.on("session_start", async (_event, context) => {
-    const sessionID = context.sessionManager.getSessionId();
-    if (process.env.LEGION_CONTROLLER === "1") {
-      if (controllerSessionID === undefined || controllerSessionID === sessionID)
-        await claimController(context);
-      return;
-    }
-    const worker = await recoverWorkerSession(context);
-    if (worker) {
-      await ensureWorkerBudgetPermit(sessionID);
-      try {
-        await createLegionDaemonClient(
-          requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-        ).roleBacking({
-          tree: worker.tree,
-          issue: worker.issue,
-          role: worker.role,
-          agentId: worker.agentId,
-          sessionId: sessionID,
-          spawnToken: worker.spawnToken,
-        });
-        await claimRole(sessionID, worker.token, context);
-      } catch (error) {
-        releaseWorkerBudgetPermit(sessionID);
-        throw error;
+    const classification = classifySession(process.env);
+    switch (classification.kind) {
+      case "controller": {
+        const sessionID = context.sessionManager.getSessionId();
+        if (controllerSessionID === undefined || controllerSessionID === sessionID) {
+          await claimController(context);
+        }
+        return;
       }
-      return;
-    }
-    if (isRootSession(process.env, context)) await bootstrapRoot(context);
-  });
-
-  pi.on("before_agent_start", async (event, context) => {
-    const sessionID = context.sessionManager.getSessionId();
-    if (workerSessions.has(sessionID)) {
-      await ensureWorkerBudgetPermit(sessionID);
-      return;
-    }
-    const project = process.env.LEGION_PROJECT;
-    const spawn = project ? parseWorkerSpawn(event.prompt, project) : undefined;
-    if (!spawn) {
-      if (isRootSession(process.env, context)) await bootstrapRoot(context);
-      return;
-    }
-
-    const pending = pendingLegionSpawnsByToken.get(spawn.spawnToken);
-    const release = pending
-      ? transferPendingLegionSpawn(pending)
-      : await acquireWorkerBudget(
-          positiveIntegerEnvironment(process.env, "LEGION_WORKER_BUDGET", "6")
+      case "phase-worker":
+        await bootstrapWorker(
+          context,
+          classification.role,
+          classification.tree,
+          classification.issue
         );
-    try {
-      const agentId = workerAgentId(context);
-      const daemon = createLegionDaemonClient(
-        requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-      );
-      await daemon.roleBacking({
-        tree: spawn.tree,
-        issue: spawn.issue,
-        role: spawn.role,
-        agentId,
-        sessionId: sessionID,
-        spawnToken: spawn.spawnToken,
-      });
-      const phase = await daemon.phase({
-        tree: spawn.tree,
-        issue: spawn.issue,
-        phase: spawn.role,
-        spawnToken: spawn.spawnToken,
-        sessionId: sessionID,
-      });
-      await setJjIdentity(spawn.workspace, phase.gitName, phase.gitEmail);
-      workerSessions.set(sessionID, {
-        tree: spawn.tree,
-        issue: spawn.issue,
-        role: spawn.role,
-        token: spawn.token,
-        spawnToken: spawn.spawnToken,
-        agentId,
-        secret: phase.secret,
-      });
-      registerWorkerBudgetPermit(sessionID, release);
-      if (spawn.role === "architect") {
-        registerArchitectTools();
-        await activateLegionTool();
-      }
-      await claimRole(sessionID, spawn.token, context);
-    } catch (error) {
-      workerSessions.delete(sessionID);
-      release();
-      throw error;
+        return;
+      case "root-architect":
+        await bootstrapRoot(context, classification.tree);
+        return;
+      case "not-legion":
+        return;
     }
   });
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
     const sessionID = context.sessionManager.getSessionId();
     if (
-      sessionID === rootSessionID &&
+      capability !== undefined &&
+      capability.kind === "root-architect" &&
+      capability.sessionID === sessionID &&
       ["edit", "write", "bash", "apply_patch"].includes(toolCall.toolName)
     ) {
       return { block: true, reason: "the architect delegates all code work to phase workers" };
     }
-    if (toolCall.toolName === "task") {
-      const injectLegionSpawn = async (
-        taskInput: Record<string, unknown>
-      ): Promise<Record<string, unknown> | undefined> => {
-        const agent = taskInput.agent;
-        if (typeof agent !== "string" || !agent.startsWith("legion-")) return undefined;
-        const role = agent.slice("legion-".length);
-        const task = taskInput.task;
-        if (!isLegionRole(role) || typeof task !== "string") return undefined;
-        const issueText = task.split(/\r?\n/, 1)[0]?.slice("Legion-Issue: ".length);
-        const parsedIssue =
-          issueText && task.startsWith("Legion-Issue: ") ? parseIssueKey(issueText) : undefined;
-        const issue = parsedIssue
-          ? formatIssueKey(parsedIssue.owner, parsedIssue.repo, parsedIssue.number)
-          : undefined;
-        if (!issue) {
-          throw new Error("legion spawns must name their issue: Legion-Issue: owner/repo#n");
-        }
-        if (!toolCall.toolCallId) throw new Error("Legion task spawn is missing a tool call id");
-        const architect = architectSession(context);
-        const workspace = await provisionWorkspace(issue, {
-          tree: architect.tree,
-          sessionId: sessionID,
-          secret: architect.secret,
-        });
-        const tree = requiredEnvironment(process.env, "LEGION_TREE");
-        const depth = context.taskDepth ?? 0;
-        const maxDepth = positiveIntegerEnvironment(process.env, "LEGION_MAX_RECURSION_DEPTH", "8");
-        if (role === "architect" && depth + 2 > maxDepth) {
-          throw new Error(
-            `sub-architect at depth ${depth} would place its workers at the recursion cap ` +
-              `(${maxDepth}); escalate to your parent architect instead`
-          );
-        }
-        const release = await acquireWorkerBudget(
-          positiveIntegerEnvironment(process.env, "LEGION_WORKER_BUDGET", "6")
-        );
-        try {
-          const token = roleToken(requiredEnvironment(process.env, "LEGION_PROJECT"), issue, role);
-          const spawn = await roleDaemon().spawnToken({
-            tree,
-            issue,
-            role,
-            sessionId: sessionID,
-            secret: architect.secret,
-          });
-          const pending: PendingLegionSpawn = {
-            toolCallId: toolCall.toolCallId,
-            tree,
-            issue,
-            role,
-            token,
-            spawnToken: spawn.spawnToken,
-            release,
-          };
-          addPendingLegionSpawn(pending);
-          const taskWithoutMachineBlocks = task.replace(legionSpawnBlockPattern, "").trimEnd();
-          const spawnBlock = [
-            `<legion-spawn issue="${issue}"`,
-            `role="${role}"`,
-            `token="${token}"`,
-            `tree="${tree}"`,
-            `spawnToken="${spawn.spawnToken}"`,
-            `workspace="${workspace.workspaceDir}"/>`,
-          ].join(" ");
-          return {
-            ...taskInput,
-            task: `${taskWithoutMachineBlocks}\n\n${spawnBlock}`,
-          };
-        } catch (error) {
-          release();
-          throw error;
-        }
-      };
-      try {
-        const rawTasks: unknown[] | undefined = Array.isArray(toolCall.input.tasks)
-          ? toolCall.input.tasks
-          : undefined;
-        if (rawTasks) {
-          let injected = false;
-          const tasks: unknown[] = [];
-          for (const task of rawTasks) {
-            if (typeof task !== "object" || task === null || Array.isArray(task)) {
-              tasks.push(task);
-              continue;
-            }
-            const rewritten = await injectLegionSpawn(task as Record<string, unknown>);
-            if (rewritten) injected = true;
-            tasks.push(rewritten ?? task);
-          }
-          if (injected) return { input: { ...toolCall.input, tasks } };
-        } else {
-          const rewritten = await injectLegionSpawn(toolCall.input);
-          if (rewritten) return { input: rewritten };
-        }
-      } catch (error) {
-        return { block: true, reason: messageFor(error) };
+    if (
+      capability !== undefined &&
+      capability.kind === "phase-worker" &&
+      capability.sessionID === sessionID
+    ) {
+      if (
+        capability.role === "reviewer" &&
+        ["edit", "write", "apply_patch"].includes(toolCall.toolName)
+      ) {
+        return { block: true, reason: "the reviewer does not modify the branch" };
+      }
+      if (
+        capability.role === "merger" &&
+        ["edit", "write", "apply_patch", "task"].includes(toolCall.toolName)
+      ) {
+        return { block: true, reason: "the merger only verifies and reports" };
       }
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
       return undefined;
-    const priorWorker = workerSessions.get(sessionID);
-    let worker: WorkerSession | undefined;
-    try {
-      worker = priorWorker ?? (await recoverWorkerSession(context));
-      if (!worker) {
-        if (
-          process.env.LEGION_TREE &&
-          process.env.LEGION_CONTROLLER !== "1" &&
-          sessionID !== rootSessionID
-        ) {
-          return {
-            block: true,
-            reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
-          };
-        }
-        return undefined;
+    if (capability === undefined || capability.sessionID !== sessionID) {
+      // A worker (root or phase) whose own boot handshake has not completed
+      // yet has no capability to mint a grant with. The controller is
+      // exempt: the daemon also sets LEGION_ROLE=controller on its process,
+      // but a controller never claims a Legion role here.
+      if (process.env.LEGION_ROLE !== undefined && process.env.LEGION_CONTROLLER !== "1") {
+        return {
+          block: true,
+          reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
+        };
       }
-      await ensureWorkerBudgetPermit(sessionID);
-      if (!priorWorker) await claimRole(sessionID, worker.token, context);
+      return undefined;
+    }
+    try {
       const grant = await roleDaemon().grant({
-        tree: worker.tree,
-        issue: worker.issue,
+        tree: capability.tree,
+        issue: capability.issue,
         sessionId: sessionID,
-        secret: worker.secret,
+        secret: capability.secret,
       });
       const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
       const workerBin = await installWorkerGhShim(stateDir);
@@ -540,41 +429,28 @@ export default function legionExtension(pi: PiApi): void {
       return { block: true, reason: messageFor(error) };
     }
   });
-  pi.on("tool_result", async (result) => {
-    const pending = pendingLegionSpawns.get(result.toolCallId);
-    if (!pending || !result.isError) return;
-    for (const spawn of [...pending]) releasePendingLegionSpawn(spawn);
-  });
-
-  pi.on("agent_end", async (event, context) => {
-    if (event.willContinue === true) return;
-    releaseWorkerBudgetPermit(context.sessionManager.getSessionId());
-  });
 
   pi.on("session_shutdown", async (_event, context) => {
     const sessionID = context.sessionManager.getSessionId();
-    if (sessionID === rootSessionID && process.env.LEGION_TREE) {
-      try {
-        const architect = architectSession(context);
-        await roleDaemon().processExit({
-          tree: architect.tree,
-          generation: generation(process.env),
-          sessionId: sessionID,
-          secret: architect.secret,
-        });
-      } finally {
-        controlSubscription?.unsubscribe();
-        controlSubscription = undefined;
-        await controlConnection?.close();
-        controlConnection = undefined;
-      }
+    if (
+      capability === undefined ||
+      capability.kind !== "root-architect" ||
+      capability.sessionID !== sessionID
+    ) {
       return;
     }
-    if (!workerSessions.has(sessionID)) return;
     try {
-      await deleteEnvoyInterest(defaults.envoyUrl, sessionID);
+      await roleDaemon().processExit({
+        tree: capability.tree,
+        generation: generation(process.env),
+        sessionId: sessionID,
+        secret: capability.secret,
+      });
     } finally {
-      releaseWorkerBudgetPermit(sessionID);
+      controlSubscription?.unsubscribe();
+      controlSubscription = undefined;
+      await controlConnection?.close();
+      controlConnection = undefined;
     }
   });
 
@@ -582,18 +458,17 @@ export default function legionExtension(pi: PiApi): void {
     context: SessionContext
   ): { tree: string; issue: string; role: LegionRole; secret: string } => {
     const sessionID = context.sessionManager.getSessionId();
-    if (sessionID === rootSessionID && process.env.LEGION_TREE) {
-      if (!rootSecret) throw new Error("Legion root architect capability is unavailable");
+    if (
+      capability !== undefined &&
+      capability.sessionID === sessionID &&
+      capability.role === "architect"
+    ) {
       return {
-        tree: process.env.LEGION_TREE,
-        issue: process.env.LEGION_TREE,
-        role: "architect",
-        secret: rootSecret,
+        tree: capability.tree,
+        issue: capability.issue,
+        role: capability.role,
+        secret: capability.secret,
       };
-    }
-    const worker = workerSessions.get(sessionID);
-    if (worker?.role === "architect") {
-      return { tree: worker.tree, issue: worker.issue, role: worker.role, secret: worker.secret };
     }
     throw new Error("legion is available only to root and sub-architect sessions");
   };

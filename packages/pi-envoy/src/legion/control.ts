@@ -1,6 +1,4 @@
-import { isLegionRole, type LegionRole } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
-import type { ExtensionAgentsApi } from "../pi-types";
 
 export interface Redelivery {
   readonly topic: string;
@@ -9,18 +7,10 @@ export interface Redelivery {
 }
 
 export type LegionControlDirective =
-  | {
-      readonly type: "revive-worker";
-      readonly role: LegionRole;
-      readonly agentId: string;
-      readonly parentSessionFile: string;
-      readonly redeliver: Redelivery;
-    }
   | { readonly type: "reclaim-architect"; readonly redeliver: Redelivery }
   | { readonly type: "shutdown" };
 
 export interface LegionControlActions {
-  readonly agents?: ExtensionAgentsApi;
   readonly reclaimArchitect: () => Promise<void>;
   readonly requestShutdown: () => void;
   readonly acknowledge: () => void;
@@ -33,14 +23,6 @@ export async function handleLegionControlDirective(
 ): Promise<void> {
   try {
     switch (directive.type) {
-      case "revive-worker":
-        if (!actions.agents) {
-          throw new Error("reviving Legion workers requires an OMP host with pi.agents");
-        }
-        await actions.agents.ensureLive(directive.agentId, {
-          parentSessionFile: directive.parentSessionFile,
-        });
-        break;
       case "reclaim-architect":
         await actions.reclaimArchitect();
         break;
@@ -59,7 +41,8 @@ export function parseControlDirective(raw: string): LegionControlDirective {
   if (typeof payload !== "object" || payload === null || !("type" in payload)) {
     throw new Error("Legion control directive must be an object with a type");
   }
-  const redelivery = (): Redelivery => {
+  if (payload.type === "shutdown") return { type: "shutdown" };
+  if (payload.type === "reclaim-architect") {
     if (
       !("redeliver" in payload) ||
       typeof payload.redeliver !== "object" ||
@@ -74,31 +57,13 @@ export function parseControlDirective(raw: string): LegionControlDirective {
       throw new Error("Legion control directive is missing redelivery metadata");
     }
     return {
-      topic: payload.redeliver.topic,
-      payload: payload.redeliver.payload,
-      eventId: payload.redeliver.eventId,
+      type: "reclaim-architect",
+      redeliver: {
+        topic: payload.redeliver.topic,
+        payload: payload.redeliver.payload,
+        eventId: payload.redeliver.eventId,
+      },
     };
-  };
-  if (payload.type === "shutdown") return { type: "shutdown" };
-  if (payload.type === "reclaim-architect")
-    return { type: "reclaim-architect", redeliver: redelivery() };
-  if (
-    payload.type !== "revive-worker" ||
-    !("role" in payload) ||
-    typeof payload.role !== "string" ||
-    !isLegionRole(payload.role) ||
-    !("agentId" in payload) ||
-    typeof payload.agentId !== "string" ||
-    !("parentSessionFile" in payload) ||
-    typeof payload.parentSessionFile !== "string"
-  ) {
-    throw new Error("Invalid Legion control directive");
   }
-  return {
-    type: "revive-worker",
-    role: payload.role,
-    agentId: payload.agentId,
-    parentSessionFile: payload.parentSessionFile,
-    redeliver: redelivery(),
-  };
+  throw new Error("Invalid Legion control directive");
 }

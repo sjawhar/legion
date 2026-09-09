@@ -1,5 +1,3 @@
-import type { RunResult, WorkspaceCommandOptions } from "@legion/workspace";
-
 export async function setJjIdentity(cwd: string, gitName: string, gitEmail: string): Promise<void> {
   for (const [key, value] of [
     ["user.name", gitName],
@@ -15,22 +13,4 @@ export async function setJjIdentity(cwd: string, gitName: string, gitEmail: stri
     const stderr = await new Response(child.stderr).text();
     throw new Error(`jj config set ${key} failed: ${stderr.trim()}`);
   }
-}
-
-export async function runWorkspaceCommand(
-  cmd: string[],
-  opts?: WorkspaceCommandOptions
-): Promise<RunResult> {
-  const child = Bun.spawn(cmd, {
-    ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }),
-    ...(opts?.env === undefined ? {} : { env: { ...process.env, ...opts.env } }),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
 }

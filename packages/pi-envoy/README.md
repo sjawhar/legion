@@ -44,9 +44,10 @@ set -g set-clipboard on
 
 This package declares two OMP extension entries in `package.json`: `extensions/envoy.ts`
 (Envoy messaging, subscriptions, and steering delivery) and `extensions/legion.ts` (the
-Legion lifecycle: root bootstrap, worker spawning, budgets, and daemon capabilities).
-`extensions/legion.ts` is inert without `LEGION_TREE`, `LEGION_ROLE`, or `LEGION_CONTROLLER`
-set in the environment, so loading both alongside each other is safe for every session.
+Legion lifecycle: root and phase-worker bootstrap from the daemon's environment, and
+daemon capabilities). The Legion daemon spawns every root and phase-worker process with
+the installed plugin already active, so `extensions/legion.ts` loads for them automatically;
+it is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment.
 
 For local development of the messaging extension alone, link the entry into OMP:
 

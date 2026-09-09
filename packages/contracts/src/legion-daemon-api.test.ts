@@ -40,6 +40,25 @@ test("requires a transcript-derived agent id to establish a root architect capab
   ).toBeTrue();
 });
 
+test("requires a transcript-derived agent id to establish a worker capability", () => {
+  const workerStarted = {
+    tree: "acme/widgets#1",
+    issue: "acme/widgets#42",
+    role: "tester",
+    bootToken: "boot-capability",
+    sessionId: "ses_worker",
+    ompSessionFile: "/tmp/worker.jsonl",
+  };
+
+  expect(LegionDaemonApi.WorkerStarted.request.safeParse(workerStarted).success).toBeFalse();
+  expect(
+    LegionDaemonApi.WorkerStarted.request.safeParse({
+      ...workerStarted,
+      agentId: "worker",
+    }).success
+  ).toBeTrue();
+});
+
 test("requires a grant and bot login to redeem a GitHub App token", () => {
   expect(LegionDaemonApi.GitHubToken.request.safeParse({}).success).toBeFalse();
   expect(

@@ -6,8 +6,8 @@ Autonomous development swarm using Oh My Pi agents. Root processes own issue tre
 
 Legion is event-driven. The daemon derives role and gate state from GitHub artifacts, records
 root-process session locators, and publishes only the verdict changes each role needs. Root
-processes run in tmux; phase workers are headless `omp --mode rpc` processes the daemon
-spawns directly, one tmux pane per worker, bridged through `legion worker-shim`.
+processes run in tmux; phase workers are headless `omp --mode rpc` processes the daemon spawns
+directly, one tmux pane per worker, bridged through `legion worker-shim`.
 
 - **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
   credential grants, resync, recovery, and human-gate backstops.
