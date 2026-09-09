@@ -51,6 +51,7 @@ describe("daemon config", () => {
     const { config } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
+        LEGION_BOARD_PROJECT_IDS: "PVT_x",
         DISPATCH_MCP_URL: "http://127.0.0.1:18766/mcp",
       },
       cliOverrides: {
@@ -65,6 +66,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: {
           ...requiredEnv,
+          LEGION_BOARD_PROJECT_IDS: "PVT_x",
           DISPATCH_MCP_URL: "not a url",
         },
         cliOverrides: {
@@ -120,7 +122,21 @@ describe("daemon config", () => {
       gates: { design: "off", merge: "off" },
       ompInvocation: "mise x github:acme/oh-my-pi@18.0.3 -- omp",
     });
-    expect(file.warnings).toEqual([]);
+  });
+
+  it("loads dispatch_mcp_url from the YAML config without rejecting it as unknown", () => {
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "dispatch_mcp_url: http://127.0.0.1:18766/mcp",
+        "gates:",
+        "  design: off",
+        "  merge: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+    const { config } = resolveDaemonConfig({ env: requiredEnv, configFile: file });
+    expect(config.dispatchMcpUrl).toBe("http://127.0.0.1:18766/mcp");
   });
 
   it("rejects missing NATS configuration instead of inventing a transport", () => {
@@ -134,5 +150,17 @@ describe("daemon config", () => {
     expect(() =>
       loadConfigFromFile("project: acme/7\nworker_budget: 1.5\n", "/tmp/legion-config")
     ).toThrow("worker_budget");
+  });
+
+  it("rejects a design gate left on without board_project_ids configured", () => {
+    expect(() => resolveDaemonConfig({ env: requiredEnv })).toThrow(
+      "board_project_ids is required when the design gate is on"
+    );
+  });
+
+  it("rejects unknown config keys instead of silently tolerating drift", () => {
+    expect(() =>
+      loadConfigFromFile(["project: acme/7", "runtime: opencode"].join("\n"), "/tmp/legion-config")
+    ).toThrow('Unknown config key "runtime"');
   });
 });

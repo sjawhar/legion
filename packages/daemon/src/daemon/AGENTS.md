@@ -44,7 +44,7 @@ The localhost-only Legion API lives in `api.ts`.
 Set `omp_invocation` in `legion.yaml` or `LEGION_OMP_INVOCATION` to the required `mise x <tool> -- omp` command that launches the root architect and controller. The default is:
 
 ```sh
-mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp
+mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp
 ```
 
 Launch the daemon normally with `bun run ...`, not inside that scoped `mise x` command. At startup it obtains the complete `mise env --json` environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and uses `mise where` to turn the default invocation into the pinned OMP binary path. All daemon subprocesses use those absolute paths; root and controller panes receive the complete `PATH` and execute that same OMP path.
