@@ -209,7 +209,7 @@ function renderDispatch(envelope: InboundEnvelope, sessionID: string): RenderInb
   return {
     skip: false,
     content: [
-      `dispatch ${event.issue_key} · ${event.type} · ${dispatchActorLabel(event.actor)}`,
+      `dispatch ${event.issue_key} · ${event.type} · by ${dispatchActorLabel(event.actor)}`,
       ...dispatchBody(event),
     ].join("\n"),
     envelope,

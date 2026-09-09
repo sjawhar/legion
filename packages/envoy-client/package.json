@@ -13,6 +13,11 @@
       "bun": "./src/defaults.ts",
       "default": "./dist/defaults.js"
     },
+    "./dispatch-config": {
+      "types": "./src/dispatch-config.ts",
+      "bun": "./src/dispatch-config.ts",
+      "default": "./dist/dispatch-config.js"
+    },
     "./dispatch-execute": {
       "types": "./src/dispatch-execute.ts",
       "bun": "./src/dispatch-execute.ts",

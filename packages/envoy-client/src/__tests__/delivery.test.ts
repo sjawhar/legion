@@ -111,7 +111,7 @@ describe("renderInbound dispatch events", () => {
     for (const type of ["issue.created", "issue.updated", "issue.closed"]) {
       expect(renderInbound(dispatchEvent(type, issue), reader).content).toBe(
         [
-          `dispatch DSP-1 · ${type} · session session-1`,
+          `dispatch DSP-1 · ${type} · by session session-1`,
           "Title: Native Dispatch",
           "Status: in_progress",
           "Route: role:legion-controller",
@@ -127,7 +127,7 @@ describe("renderInbound dispatch events", () => {
         reader
       ).content
     ).toBe(
-      ["dispatch DSP-1 · artifact.created · session session-1", "Artifact: spec.md"].join("\n")
+      ["dispatch DSP-1 · artifact.created · by session session-1", "Artifact: spec.md"].join("\n")
     );
   });
 
@@ -150,7 +150,7 @@ describe("renderInbound dispatch events", () => {
       ).content
     ).toBe(
       [
-        "dispatch DSP-1 · artifact.version · session session-1",
+        "dispatch DSP-1 · artifact.version · by session session-1",
         "Artifact: spec.md",
         "Version: 3",
         "Summary: Clarify transport",
@@ -165,14 +165,14 @@ describe("renderInbound dispatch events", () => {
   test("renders opened and answered asks", () => {
     expect(renderInbound(dispatchEvent("ask.opened", openAsk), reader).content).toBe(
       [
-        "dispatch DSP-1 · ask.opened · session session-1",
+        "dispatch DSP-1 · ask.opened · by session session-1",
         "Question: Which API?",
         "Options: JSON, MCP",
       ].join("\n")
     );
     expect(renderInbound(dispatchEvent("ask.answered", answeredAsk), reader).content).toBe(
       [
-        "dispatch DSP-1 · ask.answered · session session-1",
+        "dispatch DSP-1 · ask.answered · by session session-1",
         "Question: Which API?",
         "Selected: JSON",
         "Text: Use JSON HTTP.",
@@ -185,7 +185,7 @@ describe("renderInbound dispatch events", () => {
       const type = eventComment.resolved ? "comment.resolved" : "comment.created";
       expect(renderInbound(dispatchEvent(type, eventComment), reader).content).toBe(
         [
-          `dispatch DSP-1 · ${type} · session session-1`,
+          `dispatch DSP-1 · ${type} · by session session-1`,
           "Artifact: spec.md",
           "> old line",
           "Reply chain: comment-0",
@@ -207,7 +207,7 @@ describe("renderInbound dispatch events", () => {
         ).content
       ).toBe(
         [
-          `dispatch DSP-1 · ${type} · session session-1`,
+          `dispatch DSP-1 · ${type} · by session session-1`,
           "Artifact: spec.md",
           "> old line",
           "old line → new line",
@@ -229,7 +229,7 @@ describe("renderInbound dispatch events", () => {
         reader
       ).content
     ).toBe(
-      ["dispatch DSP-1 · message.created · session session-1", "Body: The build is green."].join(
+      ["dispatch DSP-1 · message.created · by session session-1", "Body: The build is green."].join(
         "\n"
       )
     );
@@ -242,9 +242,10 @@ describe("renderInbound dispatch events", () => {
         reader
       ).content
     ).toBe(
-      ["dispatch DSP-1 · child.status · session session-1", "Child: DSP-2 todo → in_progress"].join(
-        "\n"
-      )
+      [
+        "dispatch DSP-1 · child.status · by session session-1",
+        "Child: DSP-2 todo → in_progress",
+      ].join("\n")
     );
   });
 
