@@ -87,6 +87,10 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if input.Options == nil {
+		input.Options = []model.AskOption{}
+	}
+
 	options, err := encodeJSON(input.Options)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -282,6 +286,10 @@ func scanAsk(row askRow) (model.Ask, error) {
 	if err := json.Unmarshal(options, &ask.Options); err != nil {
 		return model.Ask{}, fmt.Errorf("decode ask options: %w", err)
 	}
+	if ask.Options == nil {
+		ask.Options = []model.AskOption{}
+	}
+
 	if len(anchor) > 0 {
 		var value model.Anchor
 		if err := json.Unmarshal(anchor, &value); err != nil {

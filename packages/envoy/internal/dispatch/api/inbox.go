@@ -66,6 +66,10 @@ func decodeInboxAsk(ask *model.Ask, author, options, anchor, answer []byte) erro
 	if err := json.Unmarshal(options, &ask.Options); err != nil {
 		return fmt.Errorf("decode inbox ask options: %w", err)
 	}
+	if ask.Options == nil {
+		ask.Options = []model.AskOption{}
+	}
+
 	if len(anchor) > 0 {
 		var value model.Anchor
 		if err := json.Unmarshal(anchor, &value); err != nil {

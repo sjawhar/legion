@@ -82,6 +82,42 @@ func sessionActor() map[string]any {
 	return map[string]any{"kind": "session", "id": "session-0123456789abcdef"}
 }
 
+func TestAskWithoutOptionsEmitsEmptyOptionsArray(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Options", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "No options provided", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"options":[]`) {
+		t.Fatalf("create ask without options: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"options":[]`) {
+		t.Fatalf("read ask without options: status=%d body=%s", read.Code, read.Body.String())
+	}
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK || !strings.Contains(inbox.Body.String(), `"options":[]`) {
+		t.Fatalf("inbox ask without options: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+
+	if _, err := database.Pool.Exec(context.Background(), `update asks set options = 'null'::jsonb where id = $1`, ask.ID); err != nil {
+		t.Fatalf("restore legacy null ask options: %v", err)
+	}
+	legacyRead := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if legacyRead.Code != http.StatusOK || !strings.Contains(legacyRead.Body.String(), `"options":[]`) {
+		t.Fatalf("read legacy ask with null options: status=%d body=%s", legacyRead.Code, legacyRead.Body.String())
+	}
+	legacyInbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if legacyInbox.Code != http.StatusOK || !strings.Contains(legacyInbox.Body.String(), `"options":[]`) {
+		t.Fatalf("inbox legacy ask with null options: status=%d body=%s", legacyInbox.Code, legacyInbox.Body.String())
+	}
+}
+
 func TestAnchoredAskAnswerAndInbox(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchored ask", "The quick brown fox")
