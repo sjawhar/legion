@@ -203,7 +203,13 @@ jobs:
         run: bun run build:web
         working-directory: packages/dispatch
       - name: Install Playwright Chromium
-        run: bunx playwright install --with-deps chromium
+        # The runner image preconfigures Google's chrome-stable apt source, whose
+        # index intermittently fails `apt-get update` with a hash-sum mismatch and
+        # takes `--with-deps` down with it. Chrome is already installed there; the
+        # source only serves upgrades, so drop it before installing our deps.
+        run: |
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          bunx playwright install --with-deps chromium
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
         run: bun run e2e
