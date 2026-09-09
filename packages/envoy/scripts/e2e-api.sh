@@ -3,8 +3,7 @@ set -euo pipefail
 
 : "${DISPATCH_URL:?DISPATCH_URL is required}"
 : "${DISPATCH_USER:?DISPATCH_USER is required}"
-# DISPATCH_AGENT_TOKEN is optional: this human-facing smoke sequence does not
-# need a bearer caller, but E1 supplies it when exercising agent operations.
+: "${DISPATCH_AGENT_TOKEN:?DISPATCH_AGENT_TOKEN is required}"
 
 readonly dispatch_url="${DISPATCH_URL%/}"
 readonly dispatch_user="$DISPATCH_USER"
@@ -33,6 +32,13 @@ request() {
     "$@"
 }
 
+agent_request() {
+  curl -fsS \
+    -H "Authorization: Bearer ${DISPATCH_AGENT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    "$@"
+}
+
 project="$(request -X POST "${dispatch_url}/api/v1/projects" \
   -d "{\"key\":\"${project_key}\",\"name\":\"Dispatch API E2E\"}")"
 [[ "$project" == *"\"key\":\"${project_key}\""* ]] || {
@@ -41,33 +47,46 @@ project="$(request -X POST "${dispatch_url}/api/v1/projects" \
 }
 
 issue="$(request -X POST "${dispatch_url}/api/v1/issues" \
-  -d "{\"project\":\"${project_key}\",\"title\":\"Dispatch API E2E\",\"spec\":\"# Hello\"}")"
+  -d "{\"project\":\"${project_key}\",\"title\":\"Dispatch API E2E\",\"spec\":\"The quick brown fox\"}")"
 [[ "$issue" == *"\"key\":\"${issue_key}\""* ]] || {
   printf 'issue response did not contain %s: %s\n' "$issue_key" "$issue" >&2
   exit 1
 }
 
-# The stream replays the issue creation, then must emit the live message event.
+# The stream replays the issue creation, then must emit the live answer event.
 timeout 5s curl -fsSN \
   -H "X-Dispatch-User: ${dispatch_user}" \
   "${dispatch_url}/api/v1/events?since=0" >"$sse_file" &
 echo "$!" >"$sse_pid_file"
 sleep 0.1
 
-message="$(request -X POST "${dispatch_url}/api/v1/issues/${issue_key}/messages" \
-  -d '{"body":"Dispatch API E2E message"}')"
-[[ "$message" == *'"body":"Dispatch API E2E message"'* ]] || {
-  printf 'message response was unexpected: %s\n' "$message" >&2
+ask="$(agent_request -X POST "${dispatch_url}/api/v1/issues/${issue_key}/asks" \
+  -d '{"question":"Which colour?","options":[{"label":"brown"},{"label":"red"}],"custom":false,"anchor":{"artifact":"spec","quote":"brown"},"actor":{"kind":"session","id":"session-e2e-api"}}')"
+ask_id="$(jq -er '.id' <<<"$ask")"
+jq -e '.anchor.quote == "brown" and .anchor.from == 10 and .anchor.to == 15 and .state == "open"' <<<"$ask" >/dev/null || {
+  printf 'anchored ask response was unexpected: %s\n' "$ask" >&2
+  exit 1
+}
+
+inbox="$(request "${dispatch_url}/api/v1/inbox?project=${project_key}")"
+jq -e --arg id "$ask_id" 'length == 1 and .[0].id == $id and .[0].issue.key != "" and .[0].issue.title == "Dispatch API E2E"' <<<"$inbox" >/dev/null || {
+  printf 'inbox response was unexpected: %s\n' "$inbox" >&2
+  exit 1
+}
+
+answer="$(request -X POST "${dispatch_url}/api/v1/asks/${ask_id}/answer" -d '{"selected":["brown"]}')"
+jq -e '.state == "answered" and .answer.user != "" and .answer.selected == ["brown"]' <<<"$answer" >/dev/null || {
+  printf 'answer response was unexpected: %s\n' "$answer" >&2
   exit 1
 }
 
 for _ in $(seq 1 40); do
-  if grep -Fq 'event: message.created' "$sse_file" && grep -Fq 'Dispatch API E2E message' "$sse_file"; then
-    printf 'PASS: project %s, issue %s, and live message SSE event\n' "$project_key" "$issue_key"
+  if grep -Fq 'event: ask.answered' "$sse_file" && grep -Fq '"state":"answered"' "$sse_file"; then
+    printf 'PASS: project %s, anchored ask, inbox, answer, and live ask.answered SSE event\n' "$project_key"
     exit 0
   fi
   sleep 0.1
 done
-printf 'SSE message event was not observed:\n' >&2
+printf 'SSE ask.answered event was not observed:\n' >&2
 cat "$sse_file" >&2
 exit 1

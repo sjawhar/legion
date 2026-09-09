@@ -52,6 +52,17 @@ printed connection string is also the expected
 | `/api/github/rest/...` | any | `Identity` | Proxy GitHub REST with the resolved user's token. |
 | `/api/github/graphql` | POST | `Identity` | Proxy GitHub GraphQL with the resolved user's token. |
 | `/healthz` | GET | none | Report database readiness. |
+| `/api/v1/inbox?project=` | GET | `Identity` or bearer | Open asks, newest first, with issue key and title. |
+| `/api/v1/issues/{key}/asks` | POST | `Identity` or bearer | Create an ask, optionally anchored to a document range. |
+| `/api/v1/asks/{id}` | GET | `Identity` or bearer | Read an ask. |
+| `/api/v1/asks/{id}/answer` | POST | `Identity` | Answer an open ask; bearer callers are forbidden. |
+| `/api/v1/issues/{key}/comments?artifact=` | GET | `Identity` or bearer | List comments; an artifact ID limits results to anchored comments. |
+| `/api/v1/issues/{key}/comments` | POST | `Identity` or bearer | Create a comment, reply, or anchored suggestion. |
+| `/api/v1/comments/{id}/resolve` | POST | `Identity` or bearer | Mark a comment resolved. |
+| `/api/v1/comments/{id}/accept` | POST | `Identity` | Apply and accept an anchored suggestion. |
+| `/api/v1/comments/{id}/reject` | POST | `Identity` | Reject a suggestion. |
+| `/api/v1/issues/{key}/messages` | POST | `Identity` or bearer | Post a short issue message. |
+| `/api/v1/artifacts/{id}` | GET | `Identity` or bearer | Read an artifact, including posts that reference it. |
 
 ## Checks
 

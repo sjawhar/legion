@@ -34,6 +34,15 @@ type Anchor struct {
 	Orphaned   bool   `json:"orphaned"`
 }
 
+// AnchorInput selects document text by quote or by a browser-owned UTF-16 range.
+type AnchorInput struct {
+	Artifact   string  `json:"artifact"`
+	Quote      *string `json:"quote,omitempty"`
+	Occurrence *int    `json:"occurrence,omitempty"`
+	From       *int    `json:"from,omitempty"`
+	To         *int    `json:"to,omitempty"`
+}
+
 // Project groups native issues under a short key.
 type Project struct {
 	Key  string `json:"key"`
@@ -163,6 +172,14 @@ type Message struct {
 	Author    Actor     `json:"author"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// ReferencedBy identifies a post that mentions an artifact.
+type ReferencedBy struct {
+	Kind     string `json:"kind"`
+	ID       string `json:"id"`
+	IssueKey string `json:"issue_key"`
+	Excerpt  string `json:"excerpt"`
 }
 
 // Event is the immutable event-log record for an issue mutation.

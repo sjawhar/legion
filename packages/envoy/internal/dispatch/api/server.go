@@ -32,6 +32,7 @@ type Deps struct {
 	Identity     identity.Identity
 	AgentToken   string
 	RepoProjects map[string]string
+	ServerURL    string
 	Docs         docs.API
 	Events       *events.Broker
 }
@@ -42,6 +43,7 @@ type DepsInput struct {
 	Identity        identity.Identity
 	AgentToken      string
 	RepoProjectsRaw string
+	ServerURL       string
 	Docs            docs.API
 	Events          *events.Broker
 }
@@ -63,6 +65,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Identity:     input.Identity,
 		AgentToken:   input.AgentToken,
 		RepoProjects: repoProjects,
+		ServerURL:    strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:         input.Docs,
 		Events:       input.Events,
 	}, nil
@@ -109,6 +112,15 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts", s.listArtifacts)
 	mux.HandleFunc("POST /api/v1/issues/{key}/artifacts", s.uploadArtifact)
 	mux.HandleFunc("POST /api/v1/issues/{key}/messages", s.createMessage)
+	mux.HandleFunc("GET /api/v1/inbox", s.listInbox)
+	mux.HandleFunc("POST /api/v1/issues/{key}/asks", s.createAsk)
+	mux.HandleFunc("GET /api/v1/asks/{id}", s.getAsk)
+	mux.HandleFunc("POST /api/v1/asks/{id}/answer", s.answerAsk)
+	mux.HandleFunc("GET /api/v1/issues/{key}/comments", s.listComments)
+	mux.HandleFunc("POST /api/v1/issues/{key}/comments", s.createComment)
+	mux.HandleFunc("POST /api/v1/comments/{id}/resolve", s.resolveComment)
+	mux.HandleFunc("POST /api/v1/comments/{id}/accept", s.acceptComment)
+	mux.HandleFunc("POST /api/v1/comments/{id}/reject", s.rejectComment)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}", s.getArtifact)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/text", s.getArtifactText)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/versions/{number}", s.getArtifactVersion)
@@ -136,6 +148,15 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
+		return
+	}
+	var ambiguous *targetAmbiguousError
+	if errors.As(err, &ambiguous) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":      ambiguous.Error(),
+			"code":       "TARGET_AMBIGUOUS",
+			"candidates": ambiguous.candidates,
+		})
 		return
 	}
 	if errors.Is(err, docs.ErrServiceUnavailable) {
@@ -182,6 +203,22 @@ func (s *server) requireActor(w http.ResponseWriter, r *http.Request, supplied *
 	}
 	s.writeHandlerError(w, err)
 	return model.Actor{}, false
+}
+
+func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
+	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); authorization != "" {
+		if s.deps.AgentToken == "" || authorization != "Bearer "+s.deps.AgentToken {
+			writeError(w, "UNAUTHORIZED", http.StatusUnauthorized, "invalid bearer token")
+			return model.Actor{}, false
+		}
+		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "only users may perform this action")
+		return model.Actor{}, false
+	}
+	return s.requireActor(w, r, nil)
+}
+
+func capExceeded(w http.ResponseWriter, field string, length, limit int) {
+	writeError(w, "CAP_EXCEEDED", http.StatusBadRequest, fmt.Sprintf("%s length %d exceeds limit %d", field, length, limit))
 }
 
 func decodeJSON(r *http.Request, value any) error {

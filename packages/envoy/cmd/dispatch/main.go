@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -41,6 +42,16 @@ func main() {
 	if err != nil {
 		slog.Error("dispatch: resolve boot config", "error", err)
 		os.Exit(1)
+	}
+
+	envoyConfig, err := config.Load(config.LoadOptions{})
+	if err != nil {
+		slog.Error("dispatch: load envoy config", "error", err)
+		os.Exit(1)
+	}
+	serverURL := ""
+	if envoyConfig.Dispatch != nil {
+		serverURL = envoyConfig.Dispatch.ServerURL
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -107,6 +118,7 @@ func main() {
 		Store:         database,
 		AgentToken:    boot.AgentToken,
 		RepoProjects:  boot.RepoProjects,
+		ServerURL:     serverURL,
 		App:           appCfg,
 		AppSource:     appSource,
 	})

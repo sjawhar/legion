@@ -250,10 +250,15 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	referencedBy, err := s.loadReferencedBy(r.Context(), artifact)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, struct {
 		model.Artifact
-		ReferencedBy []any `json:"referenced_by"`
-	}{Artifact: artifact, ReferencedBy: []any{}})
+		ReferencedBy []model.ReferencedBy `json:"referenced_by"`
+	}{Artifact: artifact, ReferencedBy: referencedBy})
 }
 
 func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {

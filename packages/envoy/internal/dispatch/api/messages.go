@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-const maxMessageBodyRunes = 2000
+const maxMessageBody16 = 2000
 
 func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -28,8 +28,8 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_MESSAGE", http.StatusBadRequest, "message body is required")
 		return
 	}
-	if utf8.RuneCountInString(input.Body) > maxMessageBodyRunes {
-		writeError(w, "CAP_EXCEEDED", http.StatusBadRequest, "message body exceeds 2000 characters")
+	if length := text.Len16(input.Body); length > maxMessageBody16 {
+		capExceeded(w, "body", length, maxMessageBody16)
 		return
 	}
 	tx, err := s.begin(r.Context())
@@ -66,6 +66,10 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := json.Unmarshal(authorRaw, &message.Author); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.replaceRefs(r.Context(), tx, "message", message.ID, message.Body); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

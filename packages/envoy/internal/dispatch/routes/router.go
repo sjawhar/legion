@@ -57,6 +57,7 @@ type AppContextOptions struct {
 	Store         *store.Store
 	AgentToken    string
 	RepoProjects  string
+	ServerURL     string
 	App           *auth.AppConfig
 	AppSource     string
 }
@@ -77,6 +78,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Identity:        opts.Identity,
 		AgentToken:      opts.AgentToken,
 		RepoProjectsRaw: opts.RepoProjects,
+		ServerURL:       opts.ServerURL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)

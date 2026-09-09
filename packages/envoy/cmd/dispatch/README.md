@@ -15,6 +15,10 @@ application state in Postgres.
 `DISPATCH_REPO_PROJECTS` is optional and maps GitHub repositories to Dispatch
 projects for the agent API.
 
+`dispatch.serverUrl` in the merged `envoy.json` identifies Dispatch's public
+base URL. The server recognizes native issue, artifact, ask, and comment links
+under that URL when it stores post references.
+
 GitHub App credentials come either from these environment variables or from
 `~/.local/share/dispatch/app.json`; environment variables take precedence:
 
@@ -82,6 +86,17 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 | `/api/github/rest/...` | any | cookie or trusted header | Proxy a GitHub REST request using the caller's stored token. |
 | `/api/github/graphql` | POST | cookie or trusted header | Proxy GitHub GraphQL using the caller's stored token. |
 | `/healthz` | GET | none | Report Postgres readiness. |
+| `/api/v1/inbox?project=` | GET | cookie, trusted header, or bearer | List open asks newest-first, including their issue key and title. |
+| `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. |
+| `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask. |
+| `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |
+| `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
+| `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, reply, or suggestion. |
+| `/api/v1/comments/{id}/resolve` | POST | cookie, trusted header, or bearer | Resolve a comment. |
+| `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. |
+| `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
+| `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
+| `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact and its incoming references. |
 | `/...` | GET | none | Serve the dashboard static files. |
 
 A caller resolved by header identity without a stored GitHub token receives
