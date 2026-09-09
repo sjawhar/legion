@@ -18,6 +18,8 @@ import {
   type ExceptionInfo,
   ProcessManager,
   type ProcessManagerDeps,
+  StopFailed,
+  TreeClosingError,
 } from "../processes";
 import type { WorkerRpcClient } from "../worker-rpc";
 
@@ -32,7 +34,7 @@ async function temporaryDir(): Promise<string> {
   return directory;
 }
 
-function fakeWorkerRpcClient(): WorkerRpcClient & {
+type FakeWorkerRpcClient = WorkerRpcClient & {
   prompts: string[];
   negotiated: boolean;
   getStateCalls: number;
@@ -43,7 +45,8 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
    * post-rejection restore (an undo, never a transition; see `WorkerRpcClient.prompt`'s doc
    * comment), as opposed to `emitRunState`, which fires `onIdle` on a genuine idle transition. */
   setRunStateSilently(state: "unknown" | "running" | "idle"): void;
-} {
+};
+function fakeWorkerRpcClient(): FakeWorkerRpcClient {
   const closed = Promise.withResolvers<void>();
   let idleCallback: (() => void) | undefined;
   let runState: "unknown" | "running" | "idle" = "unknown";
@@ -68,7 +71,14 @@ function fakeWorkerRpcClient(): WorkerRpcClient & {
       client.getStateCalls += 1;
       return client.getStateImpl ? client.getStateImpl() : {};
     },
-    shutdown() {},
+    shutdown() {
+      // Mirrors the real shim: the frame alone never closes the socket — the shim closes it only
+      // once OMP actually exits, asynchronously relative to receiving the frame. Deferred by a
+      // microtask (never synchronous) so a test asserting the graceful path is decided by real
+      // promise ordering against `stopProcess`'s timeout race, not by `closed` already having
+      // settled before that race was even built.
+      queueMicrotask(() => client.close());
+    },
     close() {
       const wasIdle = runState === "idle";
       runState = "idle";
@@ -112,6 +122,8 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     lingerHours: 2,
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
+    workerStopTimeoutSeconds: 10,
+    treeStopTimeoutSeconds: 60,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir,
@@ -126,6 +138,8 @@ function tree(state: LegionState, issue: IssueKey = root, generation = 1) {
     locator: {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
       ompSessionFile: "/state/trees/sjawhar-legion-42/.omp/session.json",
     },
     status: "active",
@@ -713,7 +727,7 @@ describe("ProcessManager", () => {
     expect(commands).not.toContainEqual(["tmux", "kill-window", "-t", "@100"]);
   });
 
-  it("kills and clears a dead tree's tmux locator", async () => {
+  it("clears a self-reporting root's locator without attempting to stop it (it is the caller, still alive and blocked on this response)", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
     if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
@@ -723,7 +737,8 @@ describe("ProcessManager", () => {
     await processes.markProcessDead(root);
 
     expect(state.trees[root]?.locator).toBeUndefined();
-    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
+    expect(state.trees[root]?.status).toBe("dead");
+    expect(commands).toEqual([]);
   });
 
   it("passes the packaged role prompt path to OMP for root and controller windows, without an --extension flag", async () => {
@@ -1439,7 +1454,9 @@ describe("ProcessManager", () => {
     expect(state.phases[root]).toBeUndefined();
     expect(state.phases[child]).toBeUndefined();
     expect(publications).toEqual([]);
-    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
+    // The default fixture's fake pane never reports a live pid, so `probe` sees the root as
+    // already dead and `stopProcess` skips straight to reaping its recorded pane.
+    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%0"]);
   });
 
   it("awaits a promoted queued tree's full spawn attempt before beginLinger resolves", async () => {
@@ -1512,9 +1529,15 @@ describe("ProcessManager", () => {
     expect(state.admission.active).toEqual([child]);
     expect(state.admission.queue).toEqual([]);
   });
-  it("kills every issue window in the tree when closing it, not just the root's own", async () => {
+  it("gracefully stops the root and every worker under the tree via their own shim sockets before removing their claims", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
+    };
     state.issues[child] = {
       key: child,
       title: "Child",
@@ -1534,28 +1557,580 @@ describe("ProcessManager", () => {
         socketPath: "/state/workers/implementer.sock",
       },
     };
-    const { manager: processes, commands } = manager(state);
+    const shutdownCalls: string[] = [];
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      // `probe(root)` must find the recorded root pane alive so `closeTree`'s unilateral
+      // (non-self-report) leg actually attempts the root's own graceful stop instead of
+      // skipping straight to a kill on the assumption nothing is there.
+      run: async (command) => {
+        commands.push(command);
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async (socketPath) => {
+        const client = fakeWorkerRpcClient();
+        const shutdown = client.shutdown.bind(client);
+        client.shutdown = () => {
+          shutdownCalls.push(socketPath);
+          shutdown();
+        };
+        return client;
+      },
+    });
 
     await processes.closeTree(root);
 
-    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
-    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@99"]);
+    expect(shutdownCalls.sort()).toEqual([
+      "/state/workers/architect.sock",
+      "/state/workers/implementer.sock",
+    ]);
+    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([]);
+    expect(commands.filter((command) => command[1] === "kill-pane")).toEqual([]);
     expect(state.roles[roleToken("omp", child, "implementer")]).toBeUndefined();
     expect(state.trees[root].locator).toBeUndefined();
+    expect(state.trees[root].status).toBe("closed");
+  });
+
+  it("skips gracefully stopping the root's own process on a self-report, but still gracefully stops every worker", async () => {
+    // markProcessDead's doc comment explains why: the architect's own `session_shutdown` hook
+    // awaits `/process/exit` before OMP exits, so a self-reported closeTree IS that same
+    // still-running process — asking its own shim to close would deadlock forever waiting on
+    // itself. This is the one case where `probe`'s "alive" would otherwise be true but the root
+    // leg must be skipped unconditionally.
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.roles[roleToken("omp", child, "implementer")] = {
+      issue: child,
+      role: "implementer",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@99",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const connectedSockets: string[] = [];
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      run: async (command) => {
+        commands.push(command);
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async (socketPath) => {
+        connectedSockets.push(socketPath);
+        return fakeWorkerRpcClient();
+      },
+    });
+
+    await processes.closeTree(root, { stopRoot: false });
+
+    expect(connectedSockets).toEqual(["/state/workers/implementer.sock"]);
+    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([]);
+    expect(commands.filter((command) => command[1] === "kill-pane")).toEqual([]);
+    expect(state.trees[root].locator).toBeUndefined();
+    expect(state.trees[root].status).toBe("closed");
+  });
+
+  it("kills only a timed-out worker's own pane on a tree close, leaving a sibling that closed gracefully untouched", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.issues[grandchild] = {
+      key: grandchild,
+      title: "Grandchild",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.roles[roleToken("omp", child, "implementer")] = {
+      issue: child,
+      role: "implementer",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@99",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/hung.sock",
+      },
+    };
+    state.roles[roleToken("omp", grandchild, "tester")] = {
+      issue: grandchild,
+      role: "tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@100",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/graceful.sock",
+      },
+    };
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      // A real macrotask (not an instantly-resolving microtask) for the timeout: microtasks
+      // (including the default fake client's queueMicrotask-deferred close) always fully drain
+      // before a timer fires, so the graceful worker's close deterministically wins this race
+      // without relying on engine-specific microtask-tick counting.
+      sleep: async () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      run: async (command) => {
+        commands.push(command);
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async (socketPath) => {
+        if (socketPath === "/state/workers/hung.sock") {
+          const stuck = fakeWorkerRpcClient();
+          stuck.shutdown = () => {};
+          return stuck;
+        }
+        return fakeWorkerRpcClient();
+      },
+    });
+
+    await processes.closeTree(root);
+
+    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
+    expect(commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%2"]);
+    expect(commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%0"]);
+    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([]);
+  });
+
+  it("throws StopFailed and leaves the tree lingering (not closed) when a root locator is a corrupt record missing a pane id", async () => {
+    // `TmuxWindowLocator.tmuxPaneId` (the root's own locator type) is optional — unlike the
+    // strictly-required `WorkerLocator.tmuxPaneId` every worker claim carries — so this is a
+    // real, type-reachable state for a root: a launch that recorded only a window id before a
+    // pane id was ever confirmed, or a pre-pane-id legacy record.
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@42",
+      // No tmuxPaneId.
+      socketPath: "/state/workers/architect.sock",
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      sleep: async () => {},
+      run: async (command) => {
+        commands.push(command);
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async () => {
+        const stuck = fakeWorkerRpcClient();
+        stuck.shutdown = () => {};
+        return stuck;
+      },
+    });
+
+    await expect(processes.closeTree(root)).rejects.toThrow(StopFailed);
+
+    expect(commands.filter((command) => command[1] === "kill-pane")).toEqual([]);
+    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([]);
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining(`root process failed to stop while closing ${root}`),
+      expect.objectContaining({ message: expect.stringContaining("missing a pane id") })
+    );
+    // Never marked closed while a possibly-live process's locator couldn't be confirmed
+    // stopped: the tree is left lingering (with a fresh retry deadline) for the sweep.
+    expect(state.trees[root].status).toBe("lingering");
+    expect(state.trees[root].locator).toEqual({
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@42",
+      socketPath: "/state/workers/architect.sock",
+    });
+    errorLog.mockRestore();
+  });
+
+  it("tolerates killing a pane tmux already reaped without logging it as a failure", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes } = manager(state, {
+      sleep: async () => {},
+      run: async (command) => {
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", stderr: "can't find pane: %0", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async () => {
+        const stuck = fakeWorkerRpcClient();
+        stuck.shutdown = () => {};
+        return stuck;
+      },
+    });
+
+    await processes.closeTree(root);
+
+    expect(errorLog).not.toHaveBeenCalled();
+    errorLog.mockRestore();
+  });
+
+  it("is idempotent: a second concurrent closeTree call awaits the same in-flight close instead of stopping each locator twice", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
+    };
+    const shutdownCalls: string[] = [];
+    const { manager: processes } = manager(state, {
+      run: async (command) => {
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async (socketPath) => {
+        const client = fakeWorkerRpcClient();
+        const shutdown = client.shutdown.bind(client);
+        client.shutdown = () => {
+          shutdownCalls.push(socketPath);
+          shutdown();
+        };
+        return client;
+      },
+    });
+
+    const [first, second] = await Promise.all([
+      processes.closeTree(root),
+      processes.closeTree(root),
+    ]);
+
+    expect(first).toBeUndefined();
+    expect(second).toBeUndefined();
+    expect(shutdownCalls).toEqual(["/state/workers/architect.sock"]);
+    expect(state.trees[root].status).toBe("closed");
+  });
+
+  it("never joins an in-flight closeTree from a root's own self-report, letting the outer close complete once the root actually exits", async () => {
+    // The self-report deadlock: closeTree's root leg sends `{type:"shutdown"}` and awaits the
+    // root's own shim socket closing. The root's real `session_shutdown` hook awaits
+    // `/process/exit` (== `reportRootExit`) before OMP finishes exiting -- so if
+    // `reportRootExit` joined this same in-flight close, the close would wait on the root
+    // exiting, and the root's own exit would wait on this call returning: deadlock. This test's
+    // fake root client simulates exactly that self-report, firing synchronously from inside
+    // `shutdown()`, before its own `closed` promise ever resolves.
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
+    };
+    const commands: string[][] = [];
+    let processes!: ProcessManager;
+    let reportRootExitSettled = false;
+    const rootClient = fakeWorkerRpcClient();
+    rootClient.shutdown = () => {
+      void processes.reportRootExit(root).then(() => {
+        reportRootExitSettled = true;
+        // Only now does OMP actually finish exiting session_shutdown -- the shim's socket closes.
+        rootClient.close();
+      });
+    };
+    ({ manager: processes } = manager(state, {
+      run: async (command) => {
+        commands.push(command);
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async () => rootClient,
+    }));
+
+    const closing = processes.closeTree(root);
+
+    for (let attempt = 0; attempt < 100 && !reportRootExitSettled; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(reportRootExitSettled).toBe(true);
+
+    await closing;
+
+    expect(state.trees[root].status).toBe("closed");
+    expect(commands.filter((command) => command[1] === "kill-pane")).toEqual([]);
+  });
+
+  it("marks a tree lingering as its first durable act before any stop, so a crash mid-close leaves it retryable by the sweep instead of stuck active", async () => {
+    const stateDir = await temporaryDir();
+    const stateFile = path.join(stateDir, "state.json");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
+    };
+    expect(state.trees[root].status).toBe("active");
+    let saveCalls = 0;
+    const { manager: processes } = manager(state, {
+      saveState: async () => {
+        saveCalls += 1;
+        // Call 1 is closeTree's own upfront lingering mark: let it durably land on disk. Call 2
+        // is the close's final success save recording "closed" -- simulate a crash losing that
+        // write entirely (never reaches disk), not merely rejecting after writing.
+        if (saveCalls === 2) throw new Error("simulated crash mid-close");
+        await saveState(stateFile, state);
+      },
+      run: async (command) => {
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async () => fakeWorkerRpcClient(),
+    });
+
+    await expect(processes.closeTree(root)).rejects.toThrow("simulated crash mid-close");
+    expect(saveCalls).toBe(2);
+
+    // What actually survives the "crash" is whatever the last successful write put on disk --
+    // never the in-memory object, which a real process crash would discard entirely.
+    const reloaded = await loadState(stateFile, { project: "omp", cap: 1 });
+    expect(reloaded.trees[root]?.status).toBe("lingering");
+    expect(reloaded.trees[root]?.lingerUntil).toBeString();
+
+    // The periodic sweep's retry, against the reloaded (post-crash) state: finishes cleanly.
+    const { manager: retryProcesses } = manager(reloaded, {
+      saveState: () => saveState(stateFile, reloaded),
+      run: async (command) => {
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    const retry = await retryProcesses.closeTree(root);
+    expect(retry).toBeUndefined();
+    expect(reloaded.trees[root]?.status).toBe("closed");
+  });
+
+  it("treats a socket error while waiting for a graceful close as unconfirmed, falling through to the kill instead of a false success", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxPaneId: "%0",
+      socketPath: "/state/workers/architect.sock",
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes } = manager(state, {
+      sleep: async () => {},
+      run: async (command) => {
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", stderr: "no server running", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async () => {
+        const closed = Promise.withResolvers<void>();
+        return {
+          closed: closed.promise,
+          runState: "unknown" as const,
+          negotiate: async () => {},
+          prompt: async () => {},
+          getState: async () => ({}),
+          // A socket reset while waiting, not a graceful close -- must never be mistaken for
+          // proof the process exited.
+          shutdown: () => {
+            queueMicrotask(() => closed.reject(new Error("socket reset")));
+          },
+          close: () => {},
+          onIdle: () => {},
+        };
+      },
+    });
+
+    await expect(processes.closeTree(root)).rejects.toThrow(StopFailed);
+
+    expect(state.trees[root].status).toBe("lingering");
+    expect(state.trees[root].locator).toBeDefined();
+    errorLog.mockRestore();
+  });
+
+  it("does not launch a replacement when retiring a dead-socket claim's pane fails to stop, surfacing StopFailed instead", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+      },
+    };
+    const staleClient = fakeWorkerRpcClient();
+    staleClient.getStateImpl = async () => {
+      throw new Error("ECONNRESET");
+    };
+    staleClient.shutdown = () => {};
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {},
+      connectWorkerRpc: async () => staleClient,
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", stderr: "no server running", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const error = await processes
+      .spawnWorker(root, root, "tester", "verify again")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(StopFailed);
+    // Never opened a replacement pane over a possibly-still-live one.
+    expect(commands.filter((c) => c[1] === "new-window" || c[1] === "split-window")).toEqual([]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    // The failed-to-stop claim's own locator is untouched -- it is the only durable handle left
+    // on a pane that might still be alive.
+    expect(claim.locator?.tmuxPaneId).toBe("%7");
   });
 
   it("requests control directives on the sanitized tree generation topic", async () => {
     const state = newLegionState("omp", 1);
     tree(state, root, 3);
     const { manager: processes, controlRequests, publications } = manager(state);
-    const directive: ControlDirective = { type: "shutdown" };
+    const original = { topic: "notifications.role.legion-omp-1", payload: "{}", eventId: "evt-1" };
+    const directive: ControlDirective = {
+      type: "reclaim-architect",
+      issue: root,
+      redeliver: original,
+    };
 
-    await processes.controlDirective(root, directive);
+    await processes.controlDirective(root, directive, false);
 
     expect(controlRequests).toEqual([
       {
         subject: "legion.ctl.sjawhar-legion-42.3",
-        json: '{"type":"shutdown"}',
+        json: JSON.stringify(directive),
       },
     ]);
     expect(publications).toEqual([]);
@@ -2772,6 +3347,337 @@ describe("ProcessManager", () => {
     expect(testerClaim.locator?.tmuxWindowId).toBe("@99");
   });
 
+  it("retires its own just-opened pane and reports TreeClosingError, not a launch failure, when the tree starts closing while the pane was opening", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-43");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [child],
+      released: true,
+      labels: [],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%0",
+        socketPath: "/state/workers/architect.sock",
+      },
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const paneOpenGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const stuckRootClient = fakeWorkerRpcClient();
+    stuckRootClient.shutdown = () => {};
+    const { manager: processes, state: managedState } = manager(state, {
+      sleep: async () => {},
+      config: config(stateDir),
+      connectWorkerRpc: async () => stuckRootClient,
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          await paneOpenGate.promise;
+          return { stdout: "@99 %201 12345\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const spawnPromise = processes.spawnWorker(root, child, "tester", "verify #41");
+    // Poll (real macrotask ticks, not just microtasks -- the workspace/socket prep this crosses
+    // first are real fs operations) until the launch has actually reached its blocked
+    // `new-window` call before starting the race.
+    for (
+      let attempt = 0;
+      attempt < 100 && !commands.some((c) => c[1] === "new-window");
+      attempt++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(commands.some((c) => c[1] === "new-window")).toBe(true);
+
+    const closePromise = processes.closeTree(root);
+    paneOpenGate.resolve();
+
+    const result = await spawnPromise.catch((caught: unknown) => caught);
+
+    expect(result).toBeInstanceOf(TreeClosingError);
+    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%201"]);
+    expect(managedState.roles[roleToken("omp", child, "tester")]).toBeUndefined();
+
+    await closePromise;
+  });
+
+  it("keeps closeTree from finishing while a launch is still in flight, so its own retire always runs before closingTrees clears", async () => {
+    // Without waiting on `inFlightLaunches`, closeTree's fixed-point loop could see an empty
+    // `state.roles` snapshot (the launch below hasn't written its claim yet), finish, and clear
+    // `closingTrees` -- all while this launch is still blocked mid-flight. Once it later
+    // resumes, its own post-launch closing check would find `closingTrees` already empty and
+    // write the claim as if nothing had happened, leaving a fresh pane alive and untracked in a
+    // tree already reported closed.
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-43");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [child],
+      released: true,
+      labels: [],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    // No root locator: the root leg is skipped entirely, isolating this test to the worker race.
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const paneOpenGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      sleep: async () => {},
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          await paneOpenGate.promise;
+          return { stdout: "@99 %201 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const spawnPromise = processes.spawnWorker(root, child, "tester", "verify #41");
+    for (
+      let attempt = 0;
+      attempt < 100 && !commands.some((c) => c[1] === "new-window");
+      attempt++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(commands.some((c) => c[1] === "new-window")).toBe(true);
+
+    let closeSettled = false;
+    const closePromise = processes.closeTree(root).then(() => {
+      closeSettled = true;
+    });
+
+    // Give closeTree every real chance to run its (otherwise-empty) worker loop and finish while
+    // the launch above is still blocked on `new-window`.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(closeSettled).toBe(false);
+
+    paneOpenGate.resolve();
+    const spawnResult = await spawnPromise.catch((caught: unknown) => caught);
+    await closePromise;
+
+    expect(spawnResult).toBeInstanceOf(TreeClosingError);
+    expect(closeSettled).toBe(true);
+    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%201"]);
+    expect(managedState.roles[roleToken("omp", child, "tester")]).toBeUndefined();
+    expect(managedState.trees[root].status).toBe("closed");
+  });
+
+  it("preserves a launch's just-opened locator for closeTree to retry when its own post-launch retire fails to stop the pane", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-43");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [child],
+      released: true,
+      labels: [],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const paneOpenGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes, state: managedState } = manager(state, {
+      sleep: async () => {},
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          await paneOpenGate.promise;
+          return { stdout: "@99 %201 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", stderr: "no server running", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const spawnPromise = processes.spawnWorker(root, child, "tester", "verify #41");
+    for (
+      let attempt = 0;
+      attempt < 100 && !commands.some((c) => c[1] === "new-window");
+      attempt++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    const closePromise = processes.closeTree(root);
+    paneOpenGate.resolve();
+
+    const spawnResult = await spawnPromise.catch((caught: unknown) => caught);
+    expect(spawnResult).toBeInstanceOf(StopFailed);
+    const token = roleToken("omp", child, "tester");
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("claim was discarded on StopFailed");
+    expect(claim.locator?.tmuxPaneId).toBe("%201");
+    // A successful launch always starts this claim'''s failure count fresh (see launchWorker'''s
+    // freshClaim), even though this same launch's post-write closing-tree branch goes on to
+    // fail its own retire below.
+    expect(claim.launchFailures).toBe(0);
+
+    const closeResult = await closePromise.catch((caught: unknown) => caught);
+    expect(closeResult).toBeInstanceOf(StopFailed);
+    expect(managedState.trees[root].status).toBe("lingering");
+    errorLog.mockRestore();
+  });
+
+  it("throws TreeClosingError from a stale-claim probe's recheck when a concurrent closeTree starts mid-probe, leaving the untouched old claim for closeTree itself to reap", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    // No root locator: isolates this test to the worker race.
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const probeGate = Promise.withResolvers<void>();
+    const stuckClient = fakeWorkerRpcClient();
+    stuckClient.getStateImpl = async () => {
+      await probeGate.promise;
+      throw new Error("dead");
+    };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {},
+      connectWorkerRpc: async () => stuckClient,
+      run: async (command) => {
+        commands.push(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const spawnPromise = processes.spawnWorker(root, root, "tester", "verify again");
+    for (let attempt = 0; attempt < 100 && stuckClient.getStateCalls === 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(stuckClient.getStateCalls).toBe(1);
+
+    let closeSettled = false;
+    const closePromise = processes.closeTree(root).then(() => {
+      closeSettled = true;
+    });
+    // Give closeTree every real chance to reap the untouched stale claim and finish while the
+    // probe above is still blocked -- without `inFlightLaunches` covering this whole decision
+    // (not merely `launchWorker`'s own pane-opening step), closeTree's fixed-point loop could
+    // take its first snapshot right now, see the claim's still-stale locator, stop it, and
+    // delete the claim, all before the still-running decision below has had any chance to
+    // recheck `closingTrees` and bail out on its own.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(closeSettled).toBe(false);
+
+    probeGate.resolve();
+    const spawnResult = await spawnPromise.catch((caught: unknown) => caught);
+    await closePromise;
+
+    expect(spawnResult).toBeInstanceOf(TreeClosingError);
+    expect(closeSettled).toBe(true);
+    // Never retired or relaunched: the decision's post-probe recheck threw before either step,
+    // leaving the stale claim entirely untouched for closeTree itself to reap.
+    expect(
+      commands.some((c) => c[0] === "tmux" && (c[1] === "new-window" || c[1] === "split-window"))
+    ).toBe(false);
+    expect(managedState.roles[token]).toBeUndefined();
+    expect(managedState.trees[root].status).toBe("closed");
+  });
+
   it("rewrites every claim's stale window id once a dead recorded window falls back to a fresh one", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
@@ -3338,6 +4244,83 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");
     expect(claim.launchFailures).toBe(0);
+  });
+
+  it("respawns a dead-socket worker without deadlocking its own launch queue while retiring the stale locator", async () => {
+    // `retireWorkerLocator`'s stop must be the RAW (unserialized) `stopProcess`. This whole call
+    // is already running inside `spawnWorker`'s `workerAdmission.mutateClaim(token, …)` callback
+    // for this exact token; if `retireWorkerLocator` instead called `stopProcessSerialized`
+    // (which re-enters that same per-token critical section), it would await a promise that can
+    // only settle after this very callback returns — deadlocking forever.
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+      },
+    };
+    const shutdownCalls: string[] = [];
+    const staleClient = fakeWorkerRpcClient();
+    staleClient.getStateImpl = async () => {
+      throw new Error("ECONNRESET");
+    };
+    const shutdown = staleClient.shutdown.bind(staleClient);
+    staleClient.shutdown = () => {
+      shutdownCalls.push("dead-tester");
+      shutdown();
+    };
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => staleClient,
+      run: async (command) => {
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%301 23456\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return { stdout: "%7\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const timeout = Symbol("timeout");
+    const result = await Promise.race([
+      processes.spawnWorker(root, root, "tester", "verify again"),
+      new Promise((resolve) => setTimeout(() => resolve(timeout), 2_000)),
+    ]);
+
+    expect(result).not.toBe(timeout);
+    expect(result).toEqual({ status: "spawned", roleToken: token });
+    expect(shutdownCalls).toEqual(["dead-tester"]);
   });
 
   it("passes a respawned claim's existing sessionId as the worker boot token's expected session", async () => {
@@ -4244,23 +5227,41 @@ describe("ProcessManager", () => {
       config: config(stateDir, { workerCap: 1 }),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
-          // Held open until closeTree below has already flipped the tree to "closed" — proves
-          // launchWorker re-checks after this I/O, not before it.
+        // The tester splits into the root's own already-alive window (from `tree()`), rather
+        // than opening a fresh one.
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          // Held open until closeTree below has actually started -- proves launchWorker
+          // re-checks after this I/O, not before it.
           await launchGate.promise;
-          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+          return { stdout: "%1 12345\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },
     });
 
     const spawnPromise = processes.spawnWorker(root, root, "tester", "verify #41");
-    await processes.closeTree(root);
-    expect(managedState.trees[root]?.status).toBe("closed");
+    // Poll until the launch has actually reached its blocked `split-window` call before racing:
+    // `inFlightLaunches` makes `closeTree` await this exact decision before concluding the
+    // tree is empty, so starting the race any earlier would just serialize the two calls.
+    for (
+      let attempt = 0;
+      attempt < 100 && !commands.some((c) => c[1] === "split-window");
+      attempt++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(commands.some((c) => c[1] === "split-window")).toBe(true);
 
+    const closePromise = processes.closeTree(root);
     launchGate.resolve();
-    await spawnPromise;
+    const spawnResult = await spawnPromise.catch((caught: unknown) => caught);
+    await closePromise;
 
+    // The just-opened pane is retired and reported as a closing error, not a silent success or
+    // a launch failure -- `spawnWorker`/`launchWorker` never write a claim for a tree that has
+    // already started tearing down.
+    expect(spawnResult).toBeInstanceOf(TreeClosingError);
+    expect(managedState.trees[root]?.status).toBe("closed");
     // No zombie claim was ever written for a tree that closed mid-launch, and the pane this
     // launch just opened was retired (killed), not left running unrecorded and forever
     // occupying a running-worker slot.
@@ -4271,6 +5272,80 @@ describe("ProcessManager", () => {
           command[0] === "tmux" && (command[1] === "kill-pane" || command[1] === "kill-window")
       )
     ).toBeTrue();
+  });
+
+  it("keeps closeTree from finishing while a QUEUE-PROMOTED launch is still in flight, not only a direct spawnWorker one", async () => {
+    // Without the constructor's `trackLaunch` wrap on the `launchWorker` dependency
+    // `WorkerAdmission`'s own queue-drain calls directly (`promoteQueuedWorker`, bypassing
+    // `spawnWorker`'s own `trackLaunch` entirely), closeTree's fixed-point loop would see an
+    // empty `state.roles` snapshot (this promoted launch has not written its claim yet), finish,
+    // and clear `closingTrees` -- all while this exact promotion is still blocked mid-flight.
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const testerToken = roleToken("omp", root, "tester");
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: "verify #41",
+    };
+    state.workerAdmission.queue.push(testerToken);
+
+    const launchGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+      run: async (command) => {
+        commands.push(command);
+        // The tester splits into the root's own already-alive window (from `tree()`) — held
+        // open until closeTree below has had every real chance to finish, proving the PROMOTED
+        // launch (not just a direct spawnWorker call) is what `inFlightLaunches` awaits.
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          await launchGate.promise;
+          return { stdout: "%1 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Nothing else occupies the cap, so this promotes immediately through WorkerAdmission's own
+    // queue-drain, never through `spawnWorker`.
+    const drainPromise = processes.reconcileWorkerAdmission();
+
+    for (
+      let attempt = 0;
+      attempt < 100 && !commands.some((c) => c[1] === "split-window");
+      attempt++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(commands.some((c) => c[1] === "split-window")).toBe(true);
+
+    let closeSettled = false;
+    const closePromise = processes.closeTree(root).then(() => {
+      closeSettled = true;
+    });
+
+    // Give closeTree every real chance to run its (otherwise-empty) worker loop and finish while
+    // the promoted launch above is still blocked on `split-window`.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(closeSettled).toBe(false);
+
+    launchGate.resolve();
+    await drainPromise;
+    await closePromise;
+
+    expect(closeSettled).toBe(true);
+    expect(managedState.trees[root]?.status).toBe("closed");
+    // No zombie claim was ever left for a tree that closed mid-promotion, and the promoted
+    // launch's own queue entry does not survive a close it never got the chance to run inside.
+    expect(managedState.roles[testerToken]).toBeUndefined();
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    // Exactly the one pane this launch opened -- no second pane from a retry treating the
+    // TreeClosingError like an ordinary launch failure and rotating/relaunching this token.
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[1] === "split-window")
+    ).toHaveLength(1);
   });
 
   it("re-evaluates a persisted running-worker queue against a raised cap across a restart", async () => {
@@ -4425,6 +5500,155 @@ describe("ProcessManager", () => {
           publication.subject === architectTopic && publication.json.includes("worker-started")
       )
     ).toHaveLength(1);
+  });
+
+  it("refuses to spawn or resume a worker on a tree that is mid-teardown, with a 409-mapped TreeClosingError", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const stuckClient = fakeWorkerRpcClient();
+    stuckClient.shutdown = () => {};
+    const { manager: processes } = manager(state, {
+      sleep: async () => {},
+      connectWorkerRpc: async () => stuckClient,
+    });
+
+    // Not awaited: `closeTree` runs synchronously up to its first internal await (inside
+    // `probe`), so `closingTrees` is already populated by the time this line returns control.
+    const closePromise = processes.closeTree(root);
+
+    const error = await processes
+      .spawnWorker(root, root, "tester", "verify #41")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(TreeClosingError);
+    expect((error as TreeClosingError).treeKey).toBe(root);
+
+    await closePromise;
+  });
+
+  it("refuses to deliver a worker/ready queued assignment on a tree that is mid-teardown", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.roles[roleToken("omp", root, "tester")] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const stuckClient = fakeWorkerRpcClient();
+    stuckClient.shutdown = () => {};
+    const readyClient = fakeWorkerRpcClient();
+    const { manager: processes } = manager(state, {
+      sleep: async () => {},
+      connectWorkerRpc: async (socketPath) =>
+        socketPath === "/state/workers/tester.sock" ? readyClient : stuckClient,
+    });
+
+    const closePromise = processes.closeTree(root);
+
+    const error = await processes
+      .workerReady(root, "tester", "ses_tester", 1)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(TreeClosingError);
+    expect((error as TreeClosingError).treeKey).toBe(root);
+    expect(readyClient.prompts).toEqual([]);
+
+    await closePromise;
+  });
+
+  it("rejects mutateLiveRoleClaim (the fence /worker/started's own claim write runs behind) once closeTree has already deleted this token's claim under the same per-role lock", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const { manager: processes, state: managedState } = manager(state, { sleep: async () => {} });
+
+    await processes.closeTree(root);
+    expect(managedState.trees[root]?.status).toBe("closed");
+    expect(managedState.roles[token]).toBeUndefined();
+
+    let fnCalled = false;
+    const error = await processes
+      .mutateLiveRoleClaim(root, root, token, async () => {
+        fnCalled = true;
+      })
+      .catch((caught: unknown) => caught);
+
+    // Rejected at entry -- before ever touching the per-role lock or `fn` -- exactly like
+    // spawnWorker/workerReady already do for a tree that is closed by the time the request
+    // arrives, not merely one still tearing down.
+    expect(error).toBeInstanceOf(TreeClosingError);
+    expect((error as TreeClosingError).treeKey).toBe(root);
+    expect(fnCalled).toBe(false);
+  });
+
+  it("rejects mutateLiveRoleClaim queued behind an in-progress closeTree for the same token, never running fn once that close has deleted the claim", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const stopGate = Promise.withResolvers<void>();
+    const client = fakeWorkerRpcClient();
+    client.shutdown = () => {
+      void stopGate.promise.then(() => client.close());
+    };
+    const { manager: processes, state: managedState } = manager(state, {
+      sleep: async () => {},
+      connectWorkerRpc: async () => client,
+    });
+
+    // closeTree marks `closingTrees` synchronously as its very first act, before ever touching
+    // this token's own critical section (its stop-then-delete only follows once the gated
+    // `shutdown()` below resolves) -- so a call arriving any time after this line, on this same
+    // per-token lock `closeTreeLocked`'s delete also uses, is rejected by the entry check alone,
+    // consistent with every other write this fence protects (`spawnWorker`, `workerReady`).
+    const closePromise = processes.closeTree(root);
+
+    let fnCalled = false;
+    const mutatePromise = processes
+      .mutateLiveRoleClaim(root, root, token, async () => {
+        fnCalled = true;
+      })
+      .catch((caught: unknown) => caught);
+
+    stopGate.resolve();
+    const error = await mutatePromise;
+    await closePromise;
+
+    expect(error).toBeInstanceOf(TreeClosingError);
+    expect(fnCalled).toBe(false);
+    expect(managedState.trees[root]?.status).toBe("closed");
+    expect(managedState.roles[token]).toBeUndefined();
   });
 
   it("delivers a worker's pending assignment over its socket on worker/ready and clears it", async () => {
@@ -4772,6 +5996,56 @@ describe("ProcessManager", () => {
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.locator).toBeUndefined();
     expect(claim.pendingAssignment).toBe("verify #41");
+  });
+
+  it("bails without connecting again or killing when the current claim's locator no longer matches the one that was probed", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    const staleLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@42",
+      tmuxPaneId: "%7",
+      socketPath: "/state/workers/tester.sock",
+    };
+    const freshLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@50",
+      tmuxPaneId: "%9",
+      socketPath: "/state/workers/tester.sock",
+    };
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: "verify #41",
+      locator: staleLocator,
+    };
+    const connectAttempts: string[] = [];
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async (socketPath) => {
+        connectAttempts.push(socketPath);
+        // A respawn completes and replaces this claim's locator with a fresh pane id while the
+        // probe is still in flight -- mirrors a concurrent spawnWorker finishing between this
+        // probe starting and its failure being handled.
+        const current = state.roles[token];
+        if (current && "issue" in current) current.locator = freshLocator;
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.reconnectWorkers();
+
+    // Exactly the one probe connect -- the identity mismatch bails before `stopClient` ever
+    // gets a chance to connect (which would otherwise reach the socket path a respawn reuses).
+    expect(connectAttempts).toEqual(["/state/workers/tester.sock"]);
+    expect(commands.filter((c) => c[1] === "kill-pane")).toEqual([]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.locator).toEqual(freshLocator);
   });
 
   it("swallows a controller shim connect failure on ready, so held-event replay is never blocked by it", async () => {
@@ -5147,11 +6421,15 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
-    // Root tree's own locator: `tree()`'s default carries a `tmuxWindowId` but no `tmuxPaneId` —
-    // exactly the pre-backfill state this exemption protects.
-    if (state.trees[root]?.locator?.tmuxPaneId !== undefined) {
-      throw new Error("test setup expects the root tree locator to start without a pane id");
-    }
+    // `tree()`'s default now carries a `tmuxPaneId` (needed by the graceful-stop tests
+    // elsewhere in this file) -- reconstructed without it here to restore the pre-backfill
+    // state this exemption protects.
+    const rootLocator = state.trees[root]?.locator;
+    if (!rootLocator) throw new Error("test setup expects tree() to have recorded a root locator");
+    const { tmuxPaneId: _rootPaneId, ...rootLocatorWithoutPaneId } = rootLocator;
+    const rootTree = state.trees[root];
+    if (!rootTree) throw new Error("test setup expects tree() to have recorded a root tree");
+    rootTree.locator = rootLocatorWithoutPaneId;
     state.controllerLocator = {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@43",
@@ -5215,9 +6493,16 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
-    // `tree()`'s default locator carries a `tmuxWindowId` but no `tmuxPaneId` — exactly the
-    // pre-backfill state this test exercises (see the exemption test above for the same
-    // invariant asserted directly).
+    // `tree()`'s default now carries a `tmuxPaneId` (needed by the graceful-stop tests
+    // elsewhere in this file) -- reconstructed without it here to restore the pre-backfill
+    // state this test exercises (see the exemption test above for the same invariant asserted
+    // directly).
+    const rootLocator = state.trees[root]?.locator;
+    if (!rootLocator) throw new Error("test setup expects tree() to have recorded a root locator");
+    const { tmuxPaneId: _rootPaneId, ...rootLocatorWithoutPaneId } = rootLocator;
+    const rootTree = state.trees[root];
+    if (!rootTree) throw new Error("test setup expects tree() to have recorded a root tree");
+    rootTree.locator = rootLocatorWithoutPaneId;
     state.controllerLocator = {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@43",

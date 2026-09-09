@@ -136,6 +136,8 @@ export function config(): DaemonConfig {
     lingerHours: 72,
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
+    workerStopTimeoutSeconds: 10,
+    treeStopTimeoutSeconds: 60,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir: "/state",

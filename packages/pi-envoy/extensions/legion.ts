@@ -197,7 +197,6 @@ export default function legionExtension(pi: PiApi): void {
         }
         await handleLegionControlDirective(directive, {
           reclaimArchitect,
-          requestShutdown: () => pi.sendMessage({ type: "shutdown-request" }),
           acknowledge: () => {
             if (reply)
               connection.publish(reply, controlCodec.encode(JSON.stringify({ type: "ack" })));

@@ -52,6 +52,7 @@ import {
   handleWorkerStarted,
 } from "./api/routes/workers";
 import type { LegionState } from "./legion-state";
+import { StopFailed, TreeClosingError } from "./processes";
 
 const GRANT_TTL_MS = 60_000;
 
@@ -87,8 +88,16 @@ export interface LegionApiProcessManager {
     sessionId: string,
     generation: number
   ): void | Promise<void>;
+  rejectIfTreeGone(tree: IssueKey, issue: IssueKey): void;
+  mutateLiveRoleClaim<T>(
+    tree: IssueKey,
+    issue: IssueKey,
+    token: string,
+    fn: () => Promise<T>
+  ): Promise<T>;
   markProcessDead(tree: IssueKey): void | Promise<void>;
-  closeTree(tree: IssueKey): void | Promise<void>;
+  reportRootExit(tree: IssueKey): void | Promise<void>;
+  closeTree(tree: IssueKey, options?: { stopRoot?: boolean }): void | Promise<void>;
   markTreeReady(tree: IssueKey): void | Promise<void>;
   markControllerReady(): void | Promise<void>;
   beginLinger(tree: IssueKey): void;
@@ -262,6 +271,12 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     } catch (error) {
       if (error instanceof HttpError) {
         return Response.json({ error: error.message }, { status: error.status });
+      }
+      if (error instanceof TreeClosingError) {
+        return Response.json({ error: error.message }, { status: 409 });
+      }
+      if (error instanceof StopFailed) {
+        return Response.json({ error: error.message }, { status: 502 });
       }
       return Response.json(
         {

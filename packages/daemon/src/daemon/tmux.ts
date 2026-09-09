@@ -179,9 +179,14 @@ export async function killWindow(run: TmuxRun, windowId: string): Promise<void> 
   await run(["tmux", "kill-window", "-t", windowId]);
 }
 
-/** Kills a single pane, leaving the rest of its window (and any sibling panes) intact. */
-export async function killPane(run: TmuxRun, paneId: string): Promise<void> {
-  await run(["tmux", "kill-pane", "-t", paneId]);
+/** Kills a single pane, leaving the rest of its window (and any sibling panes) intact. The caller
+ * decides whether/how to surface a non-zero exit — this never throws. */
+export async function killPane(
+  run: TmuxRun,
+  paneId: string
+): Promise<{ exitCode: number; stderr?: string }> {
+  const result = await run(["tmux", "kill-pane", "-t", paneId]);
+  return { exitCode: result.exitCode, stderr: result.stderr };
 }
 
 /** A window this daemon's session owns, not already known to the caller. */

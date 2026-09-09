@@ -21,6 +21,8 @@ describe("daemon config", () => {
         LEGION_MAX_RECURSION_DEPTH: "11",
         LEGION_LINGER_HOURS: "48",
         LEGION_WORKER_CAP: "9",
+        LEGION_WORKER_STOP_TIMEOUT_SECONDS: "15",
+        LEGION_TREE_STOP_TIMEOUT_SECONDS: "90",
         LEGION_OMP_INVOCATION: "custom-omp-from-env",
       },
       cliOverrides: {
@@ -42,6 +44,8 @@ describe("daemon config", () => {
       maxRecursionDepth: 11,
       lingerHours: 48,
       workerCap: 9,
+      workerStopTimeoutSeconds: 15,
+      treeStopTimeoutSeconds: 90,
       resyncIntervalMs: 600_000,
       gates: { design: "root-issues", merge: "human" },
       ompInvocation: "custom-omp-from-env",
@@ -80,6 +84,18 @@ describe("daemon config", () => {
       },
     });
     expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
+  });
+
+  it("defaults worker and tree stop timeouts to 10 and 60 seconds", () => {
+    const { config } = resolveDaemonConfig({
+      env: requiredEnv,
+      cliOverrides: {
+        boardProjectIds: ["PVT_x"],
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(config.workerStopTimeoutSeconds).toBe(10);
+    expect(config.treeStopTimeoutSeconds).toBe(60);
   });
 
   it("rejects DISPATCH_MCP_URL from the environment when it disagrees with DISPATCH_URL", () => {
@@ -213,6 +229,8 @@ describe("daemon config", () => {
         "max_recursion_depth: 6",
         "linger_hours: 24",
         "worker_cap: 2",
+        "worker_stop_timeout_seconds: 20",
+        "tree_stop_timeout_seconds: 45",
         "resync_interval_seconds: 120",
         "omp_invocation: mise x github:acme/oh-my-pi@18.0.3 -- omp",
         "state_dir: ./state",
@@ -238,6 +256,8 @@ describe("daemon config", () => {
       maxRecursionDepth: 6,
       lingerHours: 24,
       workerCap: 2,
+      workerStopTimeoutSeconds: 20,
+      treeStopTimeoutSeconds: 45,
       resyncIntervalMs: 120_000,
       stateDir: "/tmp/legion-config/state",
       gates: { design: "off", merge: "off" },

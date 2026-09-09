@@ -1,6 +1,7 @@
 import type { SpawnWorkerResponse } from "@legion/contracts";
 import { type IssueKey, type LegionRole, parseRoleToken } from "@legion/contracts";
 import type { LegionState, WorkerRoleClaim } from "./legion-state";
+import { StopFailed, TreeClosingError } from "./process-errors";
 import type { WorkerRpcClient } from "./worker-rpc";
 
 /** Bounds a claim's `launchFailures` (cold-launch attempts) or `promptFailures` (queued
@@ -365,6 +366,30 @@ export class WorkerAdmission {
     });
   }
 
+  /** Removes every FIFO-queued token whose tree is `treeKey` — called by `closeTreeLocked` as
+   * part of its final cleanup, so a tree that has fully closed never leaves behind a queue entry
+   * a later, unrelated drain would try to promote against a tree that no longer exists (the
+   * promotion catch's `TreeClosingError` handling stops that one attempt from corrupting
+   * `launchFailures`/rotation, but does nothing to remove the entry itself). Runs inside
+   * `admissionLock` — the same critical section every other queue mutation uses — even though
+   * the caller already owns this tree's own teardown, so a concurrent admission decision for a
+   * different tree can never observe a half-pruned queue array. */
+  async pruneQueueForTree(treeKey: IssueKey): Promise<void> {
+    await this.withAdmissionLock(async () => {
+      const queue = this.deps.state.workerAdmission.queue;
+      for (let index = queue.length - 1; index >= 0; index -= 1) {
+        const parsed = parseRoleToken(this.deps.state.project, queue[index]);
+        if (
+          parsed &&
+          !("controller" in parsed) &&
+          this.deps.rootForIssue(parsed.issue) === treeKey
+        ) {
+          queue.splice(index, 1);
+        }
+      }
+    });
+  }
+
   /** Promotes queued workers in FIFO order, one at a time, while a running-worker slot is
    * available. Each pass re-peeks the current queue head (outside any lock — staleness is
    * re-validated inside `promoteQueuedWorker`) and runs the actual admission decision through
@@ -560,6 +585,17 @@ export class WorkerAdmission {
       return true;
     } catch (error) {
       console.error(`[legion] failed to promote queued worker ${token}:`, error);
+      if (error instanceof TreeClosingError || error instanceof StopFailed) {
+        // The tree closed (or a post-open retire failed while it was closing) — `launchWorker`'s
+        // own catch deliberately rethrows both without touching `launchFailures` (see there), so
+        // treating this like an ordinary launch failure here would be wrong twice over: it would
+        // bump a counter this was never a failure of, and rotate this token to the tail of a
+        // queue for a tree that is gone rather than leaving it for `closeTreeLocked`'s own
+        // queue-pruning (see `pruneQueueForTree`) to remove. `drainWorkerQueue`'s own
+        // attempted-token tracking stops this pass on the very next loop iteration regardless
+        // (the head hasn't moved), so nothing here can spin.
+        return true;
+      }
       // launchWorker's own catch already recorded launchFailures on the claim and published
       // `launch-failed` exactly once, at the tick it crosses MAX_LAUNCH_FAILURES. Mirror tree
       // admission: once that threshold is hit, retire the head from the queue so an

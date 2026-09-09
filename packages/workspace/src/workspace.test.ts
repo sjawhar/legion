@@ -217,11 +217,11 @@ describe("provisionIssueWorkspace", () => {
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
-      run: async (cmd) => {
+      run: async (cmd, opts) => {
         if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
-        return runCommand(cmd[0] === "jj" ? [...STOCK_JJ, ...cmd.slice(1)] : cmd);
+        return runCommand(cmd[0] === "jj" ? [...STOCK_JJ, ...cmd.slice(1)] : cmd, opts);
       },
     });
 

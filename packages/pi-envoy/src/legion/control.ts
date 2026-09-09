@@ -6,13 +6,13 @@ export interface Redelivery {
   readonly eventId: string;
 }
 
-export type LegionControlDirective =
-  | { readonly type: "reclaim-architect"; readonly redeliver: Redelivery }
-  | { readonly type: "shutdown" };
+export type LegionControlDirective = {
+  readonly type: "reclaim-architect";
+  readonly redeliver: Redelivery;
+};
 
 export interface LegionControlActions {
   readonly reclaimArchitect: () => Promise<void>;
-  readonly requestShutdown: () => void;
   readonly acknowledge: () => void;
   readonly reject: (error: string) => void;
 }
@@ -26,9 +26,6 @@ export async function handleLegionControlDirective(
       case "reclaim-architect":
         await actions.reclaimArchitect();
         break;
-      case "shutdown":
-        actions.requestShutdown();
-        break;
     }
     actions.acknowledge();
   } catch (error) {
@@ -41,7 +38,6 @@ export function parseControlDirective(raw: string): LegionControlDirective {
   if (typeof payload !== "object" || payload === null || !("type" in payload)) {
     throw new Error("Legion control directive must be an object with a type");
   }
-  if (payload.type === "shutdown") return { type: "shutdown" };
   if (payload.type === "reclaim-architect") {
     if (
       !("redeliver" in payload) ||
