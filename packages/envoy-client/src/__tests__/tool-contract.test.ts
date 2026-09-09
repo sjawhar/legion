@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { z } from "zod";
 import { zodSchemaApi } from "@legion/contracts";
+import { z } from "zod";
 import {
   envoyToolSpecs,
-  messageMetadataShape,
   MessageMetadataSchema,
+  messageMetadataShape,
   toMessageMetadata,
 } from "../tool-contract";
 
@@ -71,7 +71,11 @@ describe("envoyToolSpecs", () => {
       "topic",
       "urgency",
     ]);
-    expect(Object.keys(sessions?.arguments(schemaApi) ?? {}).sort()).toEqual(["dir", "machine", "title"]);
+    expect(Object.keys(sessions?.arguments(schemaApi) ?? {}).sort()).toEqual([
+      "dir",
+      "machine",
+      "title",
+    ]);
   });
 
   test("documents delivery guarantees and the full Envoy topic guide", () => {

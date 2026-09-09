@@ -11,8 +11,8 @@ message to the reader, formats sender identity and reply metadata, renders struc
 once as `message`, and marks unknown sources or fields with `unrecognised`.
 
 Malformed input is safe: a non-JSON frame becomes a TOON block naming its topic and an
-`unrecognised` parse failure. The renderer never emits raw frame bytes. It skips only a reader's
-own GitHub dispatch echo.
+`unrecognised` parse failure. The renderer never emits raw frame bytes. Dispatch events render as
+plain-text issue updates and skip events authored by the reader's own session.
 
 ## HTTP transport
 
@@ -25,6 +25,17 @@ the envelope and an optional role holder. Network failures and 5xx responses ret
 `subscribe` exposes listener warnings, including a topic that has no event in the configured
 stream. `getRole` returns a role holder with its last-seen timestamp, and `listSessions` accepts
 optional directory and title filters.
+
+## Dispatch native tools
+
+`dispatch-http.ts` sends the native Dispatch JSON API with the configured bearer token; it URL-encodes
+issue references as one path segment and uploads artifacts as multipart form data. `dispatch-execute.ts`
+validates each shared `dispatch_*` schema, derives the caller's session origin and Legion issue
+reference, and returns the typed tool-result details that host adapters use for subscriptions.
+
+`resolveDispatchConfig` enables Dispatch only when both its URL and bearer token resolve. Configure
+`dispatch.token` with `dispatch.serverUrl` in `envoy.json`, or override them with `DISPATCH_TOKEN` and
+`DISPATCH_URL`.
 
 ## Tool contract
 

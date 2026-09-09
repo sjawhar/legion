@@ -1,6 +1,7 @@
 import { agentSubject, EnvelopeSchema } from "@legion/contracts";
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
+import type { Event } from "./dispatch-http";
 
 const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -71,21 +72,148 @@ export function replyWith(envelope: DeliveryEnvelope): string | undefined {
   return `envoy_send(session_id="${envelope.source_session}", message="...")`;
 }
 
-function isOwnDispatchEchoPayload(payload: unknown, sessionID: string): boolean {
-  if (typeof payload !== "object" || payload === null || !("dispatch_session" in payload)) {
-    return false;
-  }
-  return payload.dispatch_session === sessionID;
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
-export function isOwnDispatchEcho(envelope: DeliveryEnvelope, sessionID: string): boolean {
-  if (envelope.source !== "github" || envelope.payload === undefined) return false;
-
-  try {
-    return isOwnDispatchEchoPayload(JSON.parse(envelope.payload), sessionID);
-  } catch {
-    return false;
+function asDispatchEvent(value: unknown): Event | null {
+  const event = asRecord(value);
+  if (
+    event === null ||
+    typeof event.issue_key !== "string" ||
+    typeof event.type !== "string" ||
+    typeof event.actor !== "object" ||
+    event.actor === null ||
+    typeof event.payload !== "object" ||
+    event.payload === null
+  ) {
+    return null;
   }
+  return event as unknown as Event;
+}
+
+function dispatchActorLabel(actor: Event["actor"]): string {
+  return `${actor.kind} ${actor.id ?? "unknown"}`;
+}
+
+function dispatchBody(event: Event): string[] {
+  const payload = asRecord(event.payload);
+  if (payload === null) return [];
+  const lines: string[] = [];
+  const text = (name: string): string | undefined =>
+    typeof payload[name] === "string" ? (payload[name] as string) : undefined;
+
+  switch (event.type) {
+    case "issue.created":
+    case "issue.updated":
+    case "issue.closed": {
+      const title = text("title");
+      const status = text("status");
+      const route = text("route");
+      if (title) lines.push(`Title: ${title}`);
+      if (status) lines.push(`Status: ${status}`);
+      if (route) lines.push(`Route: ${route}`);
+      break;
+    }
+    case "artifact.created": {
+      const name = text("name");
+      if (name) lines.push(`Artifact: ${name}`);
+      break;
+    }
+    case "artifact.version": {
+      const name = text("name");
+      const version = asRecord(payload.version);
+      if (name) lines.push(`Artifact: ${name}`);
+      if (typeof version?.number === "number") lines.push(`Version: ${version.number}`);
+      if (typeof version?.summary === "string") lines.push(`Summary: ${version.summary}`);
+      const diff = text("diff");
+      if (diff) lines.push("Diff:", diff);
+      break;
+    }
+    case "ask.opened":
+    case "ask.answered": {
+      const question = text("question");
+      if (question) lines.push(`Question: ${question}`);
+      if (event.type === "ask.opened") {
+        const options = Array.isArray(payload.options)
+          ? payload.options
+              .map((option) => asRecord(option)?.label)
+              .filter((label): label is string => typeof label === "string")
+          : [];
+        if (options.length > 0) lines.push(`Options: ${options.join(", ")}`);
+      } else {
+        const answer = asRecord(payload.answer);
+        const selected = Array.isArray(answer?.selected)
+          ? answer.selected.filter((choice): choice is string => typeof choice === "string")
+          : [];
+        lines.push(`Selected: ${selected.join(", ") || "none"}`);
+        if (typeof answer?.text === "string") lines.push(`Text: ${answer.text}`);
+      }
+      break;
+    }
+    case "comment.created":
+    case "comment.resolved": {
+      const artifactName = text("artifact_name");
+      const anchor = asRecord(payload.anchor);
+      const replyTo = text("reply_to");
+      const body = text("body");
+      if (artifactName) lines.push(`Artifact: ${artifactName}`);
+      if (typeof anchor?.quote === "string") lines.push(`> ${anchor.quote}`);
+      if (replyTo) lines.push(`Reply chain: ${replyTo}`);
+      if (body) lines.push(`Body: ${body}`);
+      break;
+    }
+    case "suggestion.accepted":
+    case "suggestion.rejected": {
+      const artifactName = text("artifact_name");
+      const quote = asRecord(payload.anchor)?.quote;
+      const replacement = asRecord(payload.suggestion)?.replace_with;
+      if (artifactName) lines.push(`Artifact: ${artifactName}`);
+      if (typeof quote === "string") lines.push(`> ${quote}`);
+      if (typeof quote === "string" && typeof replacement === "string") {
+        lines.push(`${quote} → ${replacement}`);
+      }
+      break;
+    }
+    case "message.created": {
+      const body = text("body");
+      if (body) lines.push(`Body: ${body}`);
+      break;
+    }
+    case "child.status": {
+      const child = text("child_key");
+      const from = text("from");
+      const to = text("to");
+      if (child && from && to) lines.push(`Child: ${child} ${from} → ${to}`);
+      break;
+    }
+  }
+  return lines;
+}
+
+function renderDispatch(envelope: InboundEnvelope, sessionID: string): RenderInboundResult | null {
+  if (envelope.payload === undefined) return null;
+  let rawEvent: unknown;
+  try {
+    rawEvent = JSON.parse(envelope.payload);
+  } catch {
+    return null;
+  }
+  const event = asDispatchEvent(rawEvent);
+  if (event === null) return null;
+  if (event.actor.kind === "session" && event.actor.id === sessionID) {
+    return { skip: true, content: "", envelope };
+  }
+  return {
+    skip: false,
+    content: [
+      `dispatch ${event.issue_key} · ${event.type} · ${dispatchActorLabel(event.actor)}`,
+      ...dispatchBody(event),
+    ].join("\n"),
+    envelope,
+  };
 }
 
 export function inboundTimestamp(milliseconds: number | undefined): string {
@@ -129,6 +257,11 @@ export function renderInbound(
     const data = tolerant.data as Partial<InboundEnvelope>;
     envelope = { ...data, source: data.source ?? "unknown" };
   }
+  if (envelope.source === "dispatch") {
+    const renderedDispatch = renderDispatch(envelope, sessionID);
+    if (renderedDispatch !== null) return renderedDispatch;
+  }
+
   let parsedPayload: unknown;
   if (
     envelope.payload !== undefined &&
@@ -139,9 +272,6 @@ export function renderInbound(
     } catch {
       parsedPayload = envelope.payload;
     }
-  }
-  if (envelope.source === "github" && isOwnDispatchEchoPayload(parsedPayload, sessionID)) {
-    return { skip: true, content: "", envelope };
   }
 
   const payloadSummary = envelope.payload_summary ?? "unknown";

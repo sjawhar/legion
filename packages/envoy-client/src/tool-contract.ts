@@ -1,9 +1,9 @@
 import {
   EnvelopeSchema,
-  zodSchemaApi,
   type SchemaApi,
   type SchemaNode,
   type ToolArgumentsShape,
+  zodSchemaApi,
 } from "@legion/contracts";
 import { z } from "zod";
 import type { MessageMetadataInput } from "./transport";
@@ -34,11 +34,8 @@ const URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options as unknown 
   "high",
   "blocking",
 ];
-const EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap().options as unknown as readonly [
-  "none",
-  "optional",
-  "required",
-];
+const EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap()
+  .options as unknown as readonly ["none", "optional", "required"];
 
 /** Message metadata arguments shared by envoy_send and envoy_publish, built on the host's Zod. */
 export function messageMetadataShape<Element extends SchemaNode<Element>>(

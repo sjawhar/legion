@@ -6,6 +6,21 @@ import { messageFor } from "./errors";
 
 /** Default dispatch server base URL, matching the Go server's listen address. */
 const DEFAULT_SERVER_URL = "http://localhost:8766";
+let emittedDeprecatedUrlWarning = false;
+
+function normalizeDispatchUrl(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
+function deprecatedMcpUrl(url: string): string {
+  return normalizeDispatchUrl(url).replace(/\/mcp$/, "");
+}
+
+function warnDeprecatedMcpUrl(): void {
+  if (emittedDeprecatedUrlWarning) return;
+  emittedDeprecatedUrlWarning = true;
+  console.warn("DISPATCH_MCP_URL is deprecated; use DISPATCH_URL instead.");
+}
 
 // Mirrors the shared envoy.json contract (the Go loader in
 // packages/envoy/internal/dispatch/config, which the dispatch server reads):
@@ -18,6 +33,7 @@ const EnvoyFileSchema = z.looseObject({
     .strictObject({
       enabled: z.boolean().optional(),
       serverUrl: z.url().optional(),
+      token: z.string().optional(),
     })
     .optional(),
 });
@@ -61,34 +77,33 @@ function readEnvoyFile(filePath: string): EnvoyFileResult {
 }
 
 type DispatchEnvironment = {
+  readonly DISPATCH_URL?: string;
   readonly DISPATCH_MCP_URL?: string;
+  readonly DISPATCH_TOKEN?: string;
   readonly HOME?: string;
 } & Record<string, string | undefined>;
 
 export interface DispatchConfigResolution {
+  readonly enabled: boolean;
   readonly url: string | null;
-  /** Set when a config file failed validation and explains why resolution yielded nothing. */
-  readonly error: string | null;
+  readonly token: string | null;
 }
 
 /**
- * Load the dispatch service URL from the shared envoy.json contract.
+ * Load Dispatch's URL and bearer token from the shared envoy.json contract.
  *
- * Precedence: an explicit DISPATCH_MCP_URL wins (the Legion daemon and the
- * smoke rig set it to point sessions at a specific service); otherwise the
- * shared envoy.json opt-in decides — user config
- * (~/.config/opencode/envoy.json) shallow-merged with repo config
- * (<cwd>/.opencode/envoy.json, repo keys win), the same files the dispatch
- * server reads, validated against the same contract.
- * `url` is null when dispatch is not enabled or a config file is invalid;
- * `error` names the invalid file and key when that is the cause.
+ * DISPATCH_URL and DISPATCH_TOKEN override file settings. DISPATCH_MCP_URL
+ * remains a temporary compatibility alias for the daemon passthrough; its
+ * obsolete path suffix is removed before use. Dispatch tools are available
+ * only when both a URL and a bearer token resolve.
  */
 export function resolveDispatchConfig(
   env: DispatchEnvironment,
   options: { readonly cwd?: string; readonly home?: string } = {}
 ): DispatchConfigResolution {
-  const explicit = env.DISPATCH_MCP_URL;
-  if (explicit) return { url: explicit, error: null };
+  const explicitUrl = env.DISPATCH_URL;
+  const deprecatedUrl = explicitUrl ? undefined : env.DISPATCH_MCP_URL;
+  if (deprecatedUrl) warnDeprecatedMcpUrl();
 
   // env is the call's one source of truth: a caller that hands us an
   // environment with HOME set is read from there. os.homedir() alone is not a
@@ -99,14 +114,21 @@ export function resolveDispatchConfig(
   const repoFile = readEnvoyFile(path.join(cwd, ".opencode", "envoy.json"));
 
   for (const file of [userFile, repoFile]) {
-    if (file.kind === "invalid") return { url: null, error: file.reason };
+    if (file.kind === "invalid") return { enabled: false, url: null, token: null };
   }
 
   const merged: DispatchSettings = {
     ...(userFile.kind === "valid" ? userFile.settings : null),
     ...(repoFile.kind === "valid" ? repoFile.settings : null),
   };
-  if (merged.enabled !== true) return { url: null, error: null };
-  const baseUrl = (merged.serverUrl ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
-  return { url: `${baseUrl}/mcp`, error: null };
+  const url =
+    explicitUrl !== undefined
+      ? normalizeDispatchUrl(explicitUrl)
+      : deprecatedUrl !== undefined
+        ? deprecatedMcpUrl(deprecatedUrl)
+        : merged.enabled === true
+          ? normalizeDispatchUrl(merged.serverUrl ?? DEFAULT_SERVER_URL)
+          : null;
+  const token = env.DISPATCH_TOKEN ?? merged.token ?? null;
+  return { enabled: url !== null && token !== null, url, token };
 }
