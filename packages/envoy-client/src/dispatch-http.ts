@@ -243,6 +243,7 @@ function isJson(response: Response): boolean {
 /** JSON HTTP client for Dispatch's native-tool API. */
 export class DispatchClient {
   readonly #baseUrl: string;
+  readonly #resolvedIssues = new Map<string, Promise<string>>();
 
   constructor(
     baseUrl: string,
@@ -257,24 +258,38 @@ export class DispatchClient {
   }
 
   async getIssue(issue: string): Promise<IssueDetails> {
-    return this.#json("GET", ["api", "v1", "issues", issue]);
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
   }
 
   async getIssueEvents(issue: string, after = 0, limit = 200): Promise<Event[]> {
-    return this.#json("GET", ["api", "v1", "issues", issue, "events"], undefined, { after, limit });
+    return this.#json(
+      "GET",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "events"],
+      undefined,
+      { after, limit }
+    );
   }
   async read(issueReference: string): Promise<IssueRead> {
-    const issue = await this.getIssue(issueReference);
-    const events = await this.getIssueEvents(issueReference, Math.max(0, issue.last_seq - 10), 10);
+    const issueKey = await this.#resolveIssue(issueReference);
+    const issue = await this.getIssue(issueKey);
+    const events = await this.getIssueEvents(issueKey, Math.max(0, issue.last_seq - 10), 10);
     return { issue, events };
   }
 
   async ask(issue: string, input: AskInput): Promise<Ask> {
-    return this.#json("POST", ["api", "v1", "issues", issue, "asks"], input);
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"],
+      input
+    );
   }
 
   async comment(issue: string, input: CommentInput): Promise<Comment> {
-    return this.#json("POST", ["api", "v1", "issues", issue, "comments"], input);
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
+      input
+    );
   }
 
   async suggest(
@@ -289,7 +304,11 @@ export class DispatchClient {
     issue: string,
     input: { readonly body: string; readonly actor: Actor }
   ): Promise<Message> {
-    return this.#json("POST", ["api", "v1", "issues", issue, "messages"], input);
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"],
+      input
+    );
   }
 
   async artifact(
@@ -302,7 +321,11 @@ export class DispatchClient {
     if (input.summary !== undefined) form.set("summary", input.summary);
     form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
-    return this.#form("POST", ["api", "v1", "issues", issue, "artifacts"], form);
+    return this.#form(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"],
+      form
+    );
   }
 
   async getArtifact(id: string): Promise<Artifact> {
@@ -318,7 +341,7 @@ export class DispatchClient {
   async docEdit(
     id: string,
     input: { readonly ops: EditOperation[]; readonly summary?: string; readonly actor: Actor }
-  ): Promise<{ applied: number; version?: Version }> {
+  ): Promise<{ applied: number; version: Version | null }> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
   }
 
@@ -336,12 +359,23 @@ export class DispatchClient {
   async getComments(issue: string, artifact?: string): Promise<Comment[]> {
     return this.#json(
       "GET",
-      ["api", "v1", "issues", issue, "comments"],
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
       undefined,
       artifact ? { artifact } : undefined
     );
   }
 
+  async #resolveIssue(issueReference: string): Promise<string> {
+    if (!issueReference.includes("#")) return issueReference;
+    let resolved = this.#resolvedIssues.get(issueReference);
+    if (!resolved) {
+      resolved = this.#json<{ key: string }>("GET", ["api", "v1", "issues", "resolve"], undefined, {
+        ref: issueReference,
+      }).then((resolution) => resolution.key);
+      this.#resolvedIssues.set(issueReference, resolved);
+    }
+    return resolved;
+  }
   async #json<T>(
     method: string,
     path: readonly string[],

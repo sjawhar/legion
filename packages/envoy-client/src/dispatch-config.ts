@@ -6,7 +6,6 @@ import { messageFor } from "./errors";
 
 /** Default dispatch server base URL, matching the Go server's listen address. */
 const DEFAULT_SERVER_URL = "http://localhost:8766";
-let emittedDeprecatedUrlWarning = false;
 
 function normalizeDispatchUrl(url: string): string {
   return url.replace(/\/+$/, "");
@@ -27,12 +26,6 @@ function parsedDispatchUrl(
   } catch {
     return { url: null, error: `${source} must be a valid URL` };
   }
-}
-
-function warnDeprecatedMcpUrl(): void {
-  if (emittedDeprecatedUrlWarning) return;
-  emittedDeprecatedUrlWarning = true;
-  console.warn("DISPATCH_MCP_URL is deprecated; use DISPATCH_URL instead.");
 }
 
 // Mirrors the shared envoy.json contract (the Go loader in
@@ -118,7 +111,6 @@ export function resolveDispatchConfig(
 ): DispatchConfigResolution {
   const explicitUrl = env.DISPATCH_URL;
   const deprecatedUrl = explicitUrl ? undefined : env.DISPATCH_MCP_URL;
-  if (deprecatedUrl) warnDeprecatedMcpUrl();
 
   // env is the call's one source of truth: a caller that hands us an
   // environment with HOME set is read from there. os.homedir() alone is not a

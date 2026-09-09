@@ -175,4 +175,22 @@ describe("DispatchClient", () => {
       })
     );
   });
+  test("resolves an external issue reference once before native-key routes", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ key: "DSP-42" }),
+      jsonResponse({ key: "DSP-42", last_seq: 3 }),
+      jsonResponse([]),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await client.read("owner/repo#42");
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
+      "/api/v1/issues/DSP-42",
+      "/api/v1/issues/DSP-42/events?after=0&limit=10",
+    ]);
+  });
 });

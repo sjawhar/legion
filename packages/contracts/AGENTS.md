@@ -27,9 +27,8 @@ the native Dispatch tool suite:
 - `src/dispatch-tools.ts` is the source of the nine native Dispatch tools:
   `dispatch_issue`, `dispatch_ask`, `dispatch_comment`, `dispatch_suggest`,
   `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
-  `dispatch_artifact`, and `dispatch_read`. It defines their names,
-  descriptions, schemas, and subscription declarations; host adapters consume
-  `dispatchToolSpecs` directly.
+  `dispatch_artifact`, and `dispatch_read`. It defines their names, descriptions,
+  and schemas; host adapters consume `dispatchToolSpecs` directly.
 - Build Dispatch tool shapes through `zodSchemaApi(hostZod)` so option bags
   apply to the host's Zod.
 - Do not hand-edit `packages/envoy/internal/contracts/generated.go`.

@@ -1,5 +1,10 @@
 import { Box, Spacer, Text } from "@oh-my-pi/pi-tui";
-import type { MessageRenderOptions, MessageRendererTheme, PiApi, RenderableMessage } from "../src/pi-types";
+import type {
+  MessageRendererTheme,
+  MessageRenderOptions,
+  PiApi,
+  RenderableMessage,
+} from "../src/pi-types";
 
 /**
  * Lines of the inbound body shown before the "…" fold when collapsed. Kept

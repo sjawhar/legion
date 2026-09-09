@@ -149,9 +149,9 @@ Use these in document, ask, comment, and message bodies; Dispatch unfurls them:
 ```text
 dispatch://KEY
 dispatch://KEY/spec
-dispatch://KEY/artifact/<slug>[@vN]
-dispatch://KEY/ask/<id>
-dispatch://KEY/comment/<id>
+dispatch://KEY/artifacts/<slug>[@vN]
+dispatch://KEY/asks/<id>
+dispatch://KEY/comments/<id>
 ```
 
 ## Before / after

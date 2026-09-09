@@ -15,7 +15,7 @@ function writeUserConfig(home: string, config: unknown): void {
 }
 
 describe("resolveDispatchConfig", () => {
-  test("strips the deprecated MCP suffix and warns only once", () => {
+  test("strips the deprecated MCP suffix without writing to the console", () => {
     const previousWarn = console.warn;
     const warnings: string[] = [];
     console.warn = (message: unknown) => warnings.push(String(message));
@@ -36,7 +36,7 @@ describe("resolveDispatchConfig", () => {
         error: null,
       });
       expect(second.url).toBe("http://other.test");
-      expect(warnings).toEqual([expect.stringContaining("DISPATCH_URL")]);
+      expect(warnings).toEqual([]);
     } finally {
       console.warn = previousWarn;
     }

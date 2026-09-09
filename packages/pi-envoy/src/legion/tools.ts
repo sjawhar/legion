@@ -5,9 +5,9 @@ import {
   LEGION_ROLES,
   type LegionRole,
 } from "@legion/contracts";
-import type { LegionDaemonClient } from "./daemon-client";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
+import type { LegionDaemonClient } from "./daemon-client";
 
 interface ArchitectSession {
   readonly tree: string;
@@ -108,12 +108,14 @@ export function createLegionTool(deps: {
         }
         switch (parameters.op) {
           case "merge_gate":
-            return jsonSuccess(await daemon.mergeGate({
-              tree: architect.tree,
-              pr: numberInput("pr"),
-              sessionId,
-              secret: architect.secret,
-            }));
+            return jsonSuccess(
+              await daemon.mergeGate({
+                tree: architect.tree,
+                pr: numberInput("pr"),
+                sessionId,
+                secret: architect.secret,
+              })
+            );
           case "issue_create": {
             const labels = parameters.labels;
             if (
@@ -126,14 +128,16 @@ export function createLegionTool(deps: {
             ) {
               throw new Error("issue_create labels must use architect-mutable Legion labels");
             }
-            return jsonSuccess(await daemon.issueCreate({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              title: stringInput("title"),
-              body: stringInput("body"),
-              labels: labels ?? [],
-            }));
+            return jsonSuccess(
+              await daemon.issueCreate({
+                tree: architect.tree,
+                sessionId,
+                secret: architect.secret,
+                title: stringInput("title"),
+                body: stringInput("body"),
+                labels: labels ?? [],
+              })
+            );
           }
           case "wave_release": {
             const children = parameters.children;
@@ -143,21 +147,25 @@ export function createLegionTool(deps: {
             ) {
               throw new Error("wave_release requires children");
             }
-            return jsonSuccess(await daemon.waveRelease({
-              tree: architect.tree,
-              children,
-              sessionId,
-              secret: architect.secret,
-            }));
+            return jsonSuccess(
+              await daemon.waveRelease({
+                tree: architect.tree,
+                children,
+                sessionId,
+                secret: architect.secret,
+              })
+            );
           }
           case "comment":
-            return jsonSuccess(await daemon.comment({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              issue: stringInput("issue"),
-              body: stringInput("body"),
-            }));
+            return jsonSuccess(
+              await daemon.comment({
+                tree: architect.tree,
+                sessionId,
+                secret: architect.secret,
+                issue: stringInput("issue"),
+                body: stringInput("body"),
+              })
+            );
           case "post_spec":
             await daemon.postBody({
               tree: architect.tree,
@@ -172,13 +180,15 @@ export function createLegionTool(deps: {
             if (!isArchitectMutableLabel(label)) {
               throw new Error("label changes must use architect-mutable Legion labels");
             }
-            return jsonSuccess(await daemon.labels({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              issue: stringInput("issue"),
-              add: [label],
-            }));
+            return jsonSuccess(
+              await daemon.labels({
+                tree: architect.tree,
+                sessionId,
+                secret: architect.secret,
+                issue: stringInput("issue"),
+                add: [label],
+              })
+            );
           }
           case "escalate": {
             const kind = stringInput("kind");
@@ -241,4 +251,3 @@ export function createLegionTool(deps: {
     },
   };
 }
-

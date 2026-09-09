@@ -84,6 +84,7 @@ interface DispatchPayload {
   readonly status?: unknown;
   readonly route?: unknown;
   readonly name?: unknown;
+  readonly artifact?: unknown;
   readonly version?: unknown;
   readonly diff?: unknown;
   readonly question?: unknown;
@@ -171,8 +172,8 @@ function dispatchBody(event: Event): string[] {
       break;
     }
     case "artifact.created": {
-      const name = text("name");
-      if (name) lines.push(`Artifact: ${name}`);
+      const name = asObject<{ readonly name?: unknown }>(payload.artifact)?.name;
+      if (typeof name === "string") lines.push(`Artifact: ${name}`);
       break;
     }
     case "artifact.version": {
@@ -246,16 +247,21 @@ function dispatchBody(event: Event): string[] {
   return lines;
 }
 
-function renderDispatch(envelope: InboundEnvelope, sessionID: string): RenderInboundResult | null {
-  if (envelope.payload === undefined) return null;
+function renderDispatch(envelope: InboundEnvelope, sessionID: string): RenderInboundResult {
+  const invalid = (): RenderInboundResult => ({
+    skip: false,
+    content: "dispatch: invalid event",
+    envelope,
+  });
+  if (envelope.payload === undefined) return invalid();
   let rawEvent: unknown;
   try {
     rawEvent = JSON.parse(envelope.payload);
   } catch {
-    return null;
+    return invalid();
   }
   const event = asDispatchEvent(rawEvent);
-  if (event === null) return null;
+  if (event === null) return invalid();
   if (event.actor.kind === "session" && event.actor.id === sessionID) {
     return { skip: true, content: "", envelope };
   }

@@ -4,7 +4,6 @@ export interface DispatchToolSpec {
   readonly name: string;
   readonly description: string;
   readonly arguments: <E extends SchemaNode<E>>(z: SchemaApi<E>) => ToolArgumentsShape;
-  readonly subscribes: boolean;
 }
 
 const ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference.";
@@ -22,7 +21,6 @@ export const dispatchToolSpecs = [
       external: z.string().describe("Optional external issue reference.").optional(),
       spec: z.string().describe("Optional initial primary-document markdown.").optional(),
     }),
-    subscribes: true,
   },
   {
     name: "dispatch_ask",
@@ -60,7 +58,6 @@ export const dispatchToolSpecs = [
         .describe("Optional document location for the question.")
         .optional(),
     }),
-    subscribes: true,
   },
   {
     name: "dispatch_comment",
@@ -78,7 +75,6 @@ export const dispatchToolSpecs = [
       body: z.string({ max: 2000 }).describe("Review comment, at most 2,000 characters."),
       reply_to: z.string().describe("Optional comment id to reply to.").optional(),
     }),
-    subscribes: true,
   },
   {
     name: "dispatch_suggest",
@@ -90,13 +86,15 @@ export const dispatchToolSpecs = [
       artifact: z.string().describe("Artifact slug or id containing the quoted text."),
       quote: z.string().describe("Exact document text to replace."),
       replace_with: z.string().describe("Replacement text."),
-      body: z.string({ max: 2000 }).describe("Optional rationale, at most 2,000 characters.").optional(),
+      body: z
+        .string({ max: 2000 })
+        .describe("Optional rationale, at most 2,000 characters.")
+        .optional(),
       occurrence: z
         .number({ int: true, min: 0 })
         .describe("Optional zero-based occurrence of quote.")
         .optional(),
     }),
-    subscribes: true,
   },
   {
     name: "dispatch_message",
@@ -107,7 +105,6 @@ export const dispatchToolSpecs = [
       issue: z.string().describe(ISSUE_REFERENCE),
       body: z.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
     }),
-    subscribes: true,
   },
   {
     name: "dispatch_doc_edit",
@@ -135,7 +132,6 @@ export const dispatchToolSpecs = [
         .describe("Flat tagged edits; the server validates fields required for each operation."),
       summary: z.string().describe("Optional named-version summary.").optional(),
     }),
-    subscribes: true,
   },
   {
     name: "dispatch_doc_read",
@@ -145,11 +141,13 @@ export const dispatchToolSpecs = [
       `${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
-      artifact: z.string().describe("Optional artifact slug or id; primary document by default.").optional(),
+      artifact: z
+        .string()
+        .describe("Optional artifact slug or id; primary document by default.")
+        .optional(),
       version: z.number({ int: true, min: 1 }).describe("Optional version number.").optional(),
       ref: z.string().describe("Optional dispatch:// document reference.").optional(),
     }),
-    subscribes: false,
   },
   {
     name: "dispatch_artifact",
@@ -163,7 +161,6 @@ export const dispatchToolSpecs = [
       primary: z.boolean().describe("Make this document the issue primary artifact.").optional(),
       summary: z.string().describe("Optional version summary.").optional(),
     }),
-    subscribes: true,
   },
   {
     name: "dispatch_read",
@@ -175,6 +172,5 @@ export const dispatchToolSpecs = [
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       ref: z.string().describe("Optional dispatch:// issue reference.").optional(),
     }),
-    subscribes: false,
   },
 ] as const satisfies readonly DispatchToolSpec[];

@@ -103,7 +103,13 @@ async function resolveIssueArguments(
 ): Promise<{ args: Record<string, unknown>; ref: ParsedDispatchRef | null }> {
   if (tool === "dispatch_issue") return { args, ref: null };
   const refArgument = args["ref"];
-  const ref = typeof refArgument === "string" ? parseDispatchRef(refArgument) : null;
+  const ref =
+    typeof refArgument === "string"
+      ? (parseDispatchRef(refArgument) ??
+        (() => {
+          throw new Error("ref must be a valid dispatch:// reference");
+        })())
+      : null;
   const issueArgument = args["issue"];
   const artifactArgument = args["artifact"];
   const versionArgument = args["version"];
@@ -335,12 +341,15 @@ export async function executeDispatchTool(
         actor,
       });
       return {
-        text: `Applied ${edited.applied} document edit${edited.applied === 1 ? "" : "s"}`,
+        text:
+          edited.version === null
+            ? `Applied ${edited.applied} ops (no new version)`
+            : `Applied ${edited.applied} ops (version ${edited.version.number})`,
         details: {
           issue: resolved.issue.key,
           topic: dispatchTopic(resolved.issue.key),
           applied: edited.applied,
-          ...(edited.version === undefined ? {} : { version: edited.version.number }),
+          ...(edited.version === null ? {} : { version: edited.version.number }),
         },
       };
     }

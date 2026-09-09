@@ -100,4 +100,7 @@ describe("dispatchToolSpecs", () => {
       }).success
     ).toBe(false);
   });
+  test("leaves Dispatch subscriptions to successful tool results", () => {
+    expect(dispatchToolSpecs.every((spec) => !("subscribes" in spec))).toBe(true);
+  });
 });

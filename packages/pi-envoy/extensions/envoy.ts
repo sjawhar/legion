@@ -1,11 +1,16 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject, dispatchToolSpecs, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts";
+import {
+  agentSubject,
+  dispatchToolSpecs,
+  ROLE_TOPIC_PREFIX,
+  zodSchemaApi,
+} from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
-import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
+import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";

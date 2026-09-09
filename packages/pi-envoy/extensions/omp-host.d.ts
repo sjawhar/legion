@@ -14,5 +14,4 @@ declare module "@oh-my-pi/pi-coding-agent" {
     ): Promise<ExtensionAgent>;
     prompt(agentId: string, content: string): Promise<void>;
   }
-
 }

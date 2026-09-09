@@ -123,7 +123,7 @@ describe("renderInbound dispatch events", () => {
   test("renders artifact creation", () => {
     expect(
       renderInbound(
-        dispatchEvent("artifact.created", { id: "artifact-1", name: "spec.md" }),
+        dispatchEvent("artifact.created", { artifact: { id: "artifact-1", name: "spec.md" } }),
         reader
       ).content
     ).toBe(
@@ -249,6 +249,22 @@ describe("renderInbound dispatch events", () => {
     );
   });
 
+  test("renders malformed Dispatch events as a bounded Dispatch error", () => {
+    expect(
+      renderInbound(
+        JSON.stringify(
+          envelope({
+            source: "dispatch",
+            payload: JSON.stringify({
+              secret: "must not be rendered",
+              unexpected: { nested: true },
+            }),
+          })
+        ),
+        reader
+      ).content
+    ).toBe("dispatch: invalid event");
+  });
   test("drops an event authored by the reader session", () => {
     expect(
       renderInbound(
