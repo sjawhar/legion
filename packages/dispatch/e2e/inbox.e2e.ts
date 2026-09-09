@@ -57,11 +57,17 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   const alice = await asUser(browser, "alice");
   const alicePage = await alice.newPage();
   await alicePage.goto("/");
+  if (testInfo.project.name === "iphone") {
+    await alicePage.getByRole("button", { name: "Open navigation" }).click();
+  }
 
   const inboxCards = alicePage.locator("[data-testid^=ask-]");
   await expect(inboxCards).toHaveCount(3);
   await expect(inboxCards.nth(0)).toContainText("Newest ask");
   await alicePage.screenshot({ path: testInfo.outputPath("inbox-three-asks.png"), fullPage: true });
+  if (testInfo.project.name === "iphone") {
+    await alicePage.getByRole("button", { name: "Close navigation" }).click();
+  }
 
   await newestAsk;
   await alicePage.getByTestId(`ask-${newestAsk.id}`).getByRole("radio", { name: "Ship" }).check();
@@ -70,7 +76,13 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
     .getByRole("button", { name: "Submit answer" })
     .click();
   await expect(inboxCards).toHaveCount(2);
+  if (testInfo.project.name === "iphone") {
+    await alicePage.getByRole("button", { name: "Open navigation" }).click();
+  }
   await expect(alicePage.getByRole("heading", { name: "Needs you (2)" })).toBeVisible();
+  if (testInfo.project.name === "iphone") {
+    await alicePage.getByRole("button", { name: "Close navigation" }).click();
+  }
   await expect
     .poll(() => getAsk(newestAsk.id))
     .toMatchObject({
@@ -115,7 +127,13 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   await alicePage.getByRole("button", { name: "Pin issue" }).click();
   await alicePage.goto("/");
   await alicePage.goto(`/issues/${firstIssue.key}`);
+  if (testInfo.project.name === "iphone") {
+    await alicePage.getByRole("button", { name: "Open navigation" }).click();
+  }
   await expect(alicePage.getByRole("heading", { name: "Pinned" })).toBeVisible();
+  if (testInfo.project.name === "iphone") {
+    await alicePage.getByRole("button", { name: "Close navigation" }).click();
+  }
   await expect(alicePage.getByRole("button", { name: "Unpin issue" })).toBeVisible();
   const bob = await asUser(browser, "bob");
   const bobPage = await bob.newPage();

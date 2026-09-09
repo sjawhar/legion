@@ -30,7 +30,7 @@ export function Inbox(): ReactNode {
       {inbox.data.map((ask) => (
         <li key={ask.id}>
           <Link
-            className="mb-2 inline-flex items-baseline gap-2 text-sm text-sky-700 hover:text-sky-900"
+            className="mb-2 flex flex-col items-start gap-1 text-sm text-sky-700 hover:text-sky-900 md:inline-flex md:flex-row md:items-baseline md:gap-2"
             to={`/issues/${ask.issue_key}/asks/${ask.id}`}
           >
             <span className="font-semibold">{ask.issue_key}</span>

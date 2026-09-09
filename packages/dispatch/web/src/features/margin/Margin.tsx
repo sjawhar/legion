@@ -273,6 +273,9 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
   const list = useRef<HTMLDivElement>(null);
   const scrolledRouteItem = useRef<string | undefined>(undefined);
   const [composer, setComposer] = useState<ComposerState>();
+  const [expandedIssueKey, setExpandedIssueKey] = useState<string>();
+  const sheetDragOrigin = useRef<number | undefined>(undefined);
+  const sheetDragMoved = useRef(false);
   const issueKey = issueKeyFromPath(pathname);
   const routeArtifactSlug = artifactSlugFromPath(pathname);
   const routeItemId = pathname.match(/^\/issues\/[^/]+\/(?:asks|comments)\/([^/]+)$/)?.[1];
@@ -286,6 +289,10 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       ? issue.data?.artifacts?.find((artifact) => artifact.id === issue.data?.primary_artifact_id)
       : issue.data?.artifacts?.find((artifact) => artifact.slug === routeArtifactSlug);
   const asks = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
+  const openAskCount = (asks.data ?? []).filter(
+    (ask) => ask.issue_key === issueKey && ask.state === "open"
+  ).length;
+  const sheetExpanded = issueKey !== undefined && expandedIssueKey === issueKey;
   const comments = useQuery({
     enabled: issueKey !== undefined && visibleArtifact !== undefined,
     queryKey: ["comments", issueKey, visibleArtifact?.id],
@@ -368,7 +375,8 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
     if (
       tab !== "comments" ||
       scrolledRouteItem.current === routeItemId ||
-      !items.some((item) => itemId(item) === routeItemId)
+      !items.some((item) => itemId(item) === routeItemId) ||
+      (window.matchMedia("(max-width: 767px)").matches && !sheetExpanded)
     ) {
       return;
     }
@@ -389,7 +397,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       container.clientHeight / 4;
     container.scrollTo({ top: Math.max(0, top) });
     scrolledRouteItem.current = routeItemId;
-  }, [items, routeItemId, tab]);
+  }, [items, routeItemId, sheetExpanded, tab]);
 
   useEffect(() => {
     const container = list.current;
@@ -439,113 +447,151 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
   const isClosed = issue.data?.closed_at !== null && issue.data !== undefined;
 
   return (
-    <aside className="fixed inset-x-0 bottom-0 z-10 border-t border-slate-200 bg-white p-4 shadow-[0_-8px_24px_rgba(15,23,42,0.08)] md:static md:order-3 md:w-96 md:border-t-0 md:border-l md:shadow-none">
-      {selection === undefined || visibleArtifact === undefined || isClosed ? null : (
-        <SelectionMenu onAction={(kind) => openComposer(kind, selection)} selection={selection} />
-      )}
-      <div className="flex border-b border-slate-200" role="tablist">
-        {(["comments", "artifacts", "pinned"] as MarginTab[]).map((name) => (
-          <button
-            aria-selected={tab === name}
-            className={
-              tab === name
-                ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
-                : "px-3 py-2 text-sm text-slate-600"
-            }
-            key={name}
-            onClick={() => setTab(name)}
-            role="tab"
-            type="button"
-          >
-            {name === "comments" ? "Comments" : name === "artifacts" ? "Artifacts" : "Pinned"}
-          </button>
-        ))}
-      </div>
-      {issueKey === undefined ? (
-        <p className="pt-3 text-sm text-slate-500">Open an issue to review its margin.</p>
-      ) : null}
-      {issueKey !== undefined && visibleArtifact === undefined && issue.isPending ? (
-        <p className="pt-3 text-sm text-slate-500">Loading margin…</p>
-      ) : null}
-      {tab === "artifacts" ? ArtifactsTabSlot === undefined ? null : <ArtifactsTabSlot /> : null}
-      {tab === "pinned" ? (
-        <div className="max-h-[45dvh] overflow-y-auto pt-3">
-          {(pinned.data ?? []).map((event) => (
-            <article className="rounded-lg border border-slate-200 p-3 text-sm" key={event.id}>
-              <p className="font-medium text-slate-900">{eventLabel(event)}</p>
-              <p className="mt-1 text-xs text-slate-500">{event.actor.id}</p>
-            </article>
+    <aside
+      className={`fixed inset-x-0 bottom-0 z-10 border-t border-slate-200 bg-white shadow-[0_-8px_24px_rgba(15,23,42,0.08)] ${
+        sheetExpanded ? "max-h-[85dvh] overflow-y-auto p-4" : "h-16 overflow-hidden"
+      } md:static md:order-3 md:h-auto md:max-h-none md:w-96 md:overflow-visible md:border-t-0 md:border-l md:p-4 md:shadow-none`}
+      data-expanded={sheetExpanded ? "true" : "false"}
+      data-testid="margin-sheet"
+    >
+      <button
+        aria-expanded={sheetExpanded}
+        aria-label="Open review panel"
+        className="flex h-16 w-full items-center justify-between px-4 text-left text-sm font-semibold text-slate-800 md:hidden"
+        onClick={() => {
+          if (sheetDragMoved.current) {
+            sheetDragMoved.current = false;
+            return;
+          }
+          setExpandedIssueKey(sheetExpanded ? undefined : issueKey);
+        }}
+        onPointerDown={(event) => {
+          sheetDragOrigin.current = event.clientY;
+        }}
+        onPointerUp={(event) => {
+          const origin = sheetDragOrigin.current;
+          sheetDragOrigin.current = undefined;
+          if (origin === undefined || Math.abs(event.clientY - origin) < 12) {
+            return;
+          }
+          sheetDragMoved.current = true;
+          setExpandedIssueKey(event.clientY < origin ? issueKey : undefined);
+        }}
+        type="button"
+      >
+        <span>Review panel</span>
+        <span className="font-normal text-slate-500">
+          {openAskCount} open {openAskCount === 1 ? "ask" : "asks"}
+        </span>
+      </button>
+      <div className={sheetExpanded ? "px-4 pb-4 md:px-0 md:pb-0" : "hidden md:block"}>
+        {selection === undefined || visibleArtifact === undefined || isClosed ? null : (
+          <SelectionMenu onAction={(kind) => openComposer(kind, selection)} selection={selection} />
+        )}
+        <div className="flex border-b border-slate-200" role="tablist">
+          {(["comments", "artifacts", "pinned"] as MarginTab[]).map((name) => (
+            <button
+              aria-selected={tab === name}
+              className={
+                tab === name
+                  ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
+                  : "px-3 py-2 text-sm text-slate-600"
+              }
+              key={name}
+              onClick={() => setTab(name)}
+              role="tab"
+              type="button"
+            >
+              {name === "comments" ? "Comments" : name === "artifacts" ? "Artifacts" : "Pinned"}
+            </button>
           ))}
-          {pinnedIds.length === 0 ? (
-            <p className="text-sm text-slate-500">No pinned items.</p>
-          ) : null}
         </div>
-      ) : null}
-      {tab === "comments" && visibleArtifact !== undefined ? (
-        <div className="space-y-3 pt-3">
-          {composer === undefined ? null : (
-            <Composer
-              anchor={composer.anchor}
-              kind={composer.kind}
-              issueKey={issueKey ?? ""}
-              onClose={closeComposer}
-              replyTo={composer.replyTo}
-            />
-          )}
-          <section
-            aria-label="Margin review items"
-            className="max-h-[45dvh] space-y-3 overflow-y-auto"
-            ref={list}
-          >
-            {items.map((item) => {
-              const id = itemId(item);
-              const active = selectedItemId === id || hoveredItemId === id;
-              return (
-                <div key={id}>
-                  {item.kind === "ask" ? (
-                    <div
-                      className={active ? "rounded-xl ring-2 ring-sky-400" : undefined}
-                      data-margin-item={id}
-                    >
-                      <AskCard ask={item.ask} />
-                      <Unfurl body={item.ask.question} />
-                      <p className="mt-2 text-xs text-slate-500">
-                        {new Date(item.ask.created_at).toLocaleString()}
-                      </p>
-                    </div>
-                  ) : (
-                    <CommentCard
-                      comment={item.comment}
-                      depth={item.depth}
-                      onAction={(commentID, kind) => action.mutate({ id: commentID, kind })}
-                      onReply={(comment) => {
-                        if (comment.anchor !== null) {
-                          openComposer(
-                            "comment",
-                            {
-                              artifact: comment.anchor.artifact_id,
-                              from: comment.anchor.from,
-                              quote: comment.anchor.quote,
-                              to: comment.anchor.to,
-                            },
-                            comment.id
-                          );
-                        }
-                      }}
-                      selected={active}
-                    />
-                  )}
-                </div>
-              );
-            })}
-            {items.length === 0 && !asks.isPending && !comments.isPending ? (
-              <p className="text-sm text-slate-500">
-                No comments, asks, or suggestions on this document.
-              </p>
+        {issueKey === undefined ? (
+          <p className="pt-3 text-sm text-slate-500">Open an issue to review its margin.</p>
+        ) : null}
+        {issueKey !== undefined && visibleArtifact === undefined && issue.isPending ? (
+          <p className="pt-3 text-sm text-slate-500">Loading margin…</p>
+        ) : null}
+        {tab === "artifacts" ? ArtifactsTabSlot === undefined ? null : <ArtifactsTabSlot /> : null}
+        {tab === "pinned" ? (
+          <div className="max-h-[45dvh] overflow-y-auto pt-3">
+            {(pinned.data ?? []).map((event) => (
+              <article className="rounded-lg border border-slate-200 p-3 text-sm" key={event.id}>
+                <p className="font-medium text-slate-900">{eventLabel(event)}</p>
+                <p className="mt-1 text-xs text-slate-500">{event.actor.id}</p>
+              </article>
+            ))}
+            {pinnedIds.length === 0 ? (
+              <p className="text-sm text-slate-500">No pinned items.</p>
             ) : null}
-          </section>
-        </div>
-      ) : null}
+          </div>
+        ) : null}
+        {tab === "comments" && visibleArtifact !== undefined ? (
+          <div className="space-y-3 pt-3">
+            {composer === undefined ? null : (
+              <Composer
+                anchor={composer.anchor}
+                kind={composer.kind}
+                issueKey={issueKey ?? ""}
+                onClose={closeComposer}
+                replyTo={composer.replyTo}
+              />
+            )}
+            <section
+              aria-label="Margin review items"
+              className="max-h-[45dvh] space-y-3 overflow-y-auto"
+              ref={list}
+            >
+              {items.map((item) => {
+                const id = itemId(item);
+                const active = selectedItemId === id || hoveredItemId === id;
+                return (
+                  <div key={id}>
+                    {item.kind === "ask" ? (
+                      <div
+                        className={active ? "rounded-xl ring-2 ring-sky-400" : undefined}
+                        data-margin-item={id}
+                      >
+                        <AskCard ask={item.ask} />
+                        <Unfurl body={item.ask.question} />
+                        <p className="mt-2 text-xs text-slate-500">
+                          {new Date(item.ask.created_at).toLocaleString()}
+                        </p>
+                      </div>
+                    ) : (
+                      <CommentCard
+                        comment={item.comment}
+                        depth={item.depth}
+                        onAction={(commentID, kind) => action.mutate({ id: commentID, kind })}
+                        onReply={(comment) => {
+                          if (comment.anchor !== null) {
+                            openComposer(
+                              "comment",
+                              {
+                                artifact: comment.anchor.artifact_id,
+                                from: comment.anchor.from,
+                                quote: comment.anchor.quote,
+                                to: comment.anchor.to,
+                              },
+                              comment.id
+                            );
+                          }
+                        }}
+                        selected={active}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+              {items.length === 0 && !asks.isPending && !comments.isPending ? (
+                <p className="text-sm text-slate-500">
+                  No comments, asks, or suggestions on this document.
+                </p>
+              ) : null}
+            </section>
+          </div>
+        ) : null}
+      </div>
     </aside>
   );
 }

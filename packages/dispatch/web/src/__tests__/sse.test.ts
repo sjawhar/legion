@@ -65,7 +65,7 @@ test("artifact versions refresh the document and its anchored margin items", () 
   ]);
 });
 
-test("message events refresh only the affected issue messages", () => {
+test("message events refresh the affected issue messages and artifact references", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -81,7 +81,22 @@ test("message events refresh only the affected issue messages", () => {
     ["events", "CORE-1"],
     ["issues"],
     ["messages", "CORE-1"],
+    ["artifact"],
   ]);
+});
+
+test("comment events refresh artifact references", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
+
+  applyEventInvalidations(queryClient, event("comment.created"));
+
+  expect(invalidated).toContainEqual(["artifact"]);
 });
 
 test("SSE event prepends a newer event to the loaded log page", () => {

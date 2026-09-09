@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 
 import { api } from "./api/client";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
+import { ArtifactsTab } from "./features/artifacts/ArtifactsTab";
 import { Inbox } from "./features/inbox/Inbox";
 import { IssuePage } from "./features/issue/IssuePage";
 import { Margin, MarginProvider } from "./features/margin/Margin";
@@ -29,15 +30,45 @@ function SignInPage(): ReactNode {
 }
 
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
+  const [navigationOpen, setNavigationOpen] = useState(false);
+
   return (
     <MarginProvider>
       <div className="min-h-dvh bg-slate-50 text-slate-900 md:flex">
-        <aside className="border-b border-slate-200 bg-slate-950 p-5 text-slate-100 md:order-1 md:min-h-dvh md:w-80 md:border-r md:border-b-0">
+        <header className="flex items-center justify-between border-b border-slate-200 bg-slate-950 px-3 text-slate-100 md:hidden">
           <Link className="text-lg font-semibold" to="/">
             Dispatch
           </Link>
+          <button
+            aria-expanded={navigationOpen}
+            aria-label="Open navigation"
+            className="rounded-lg px-3 py-2 text-sm font-medium hover:bg-slate-800"
+            onClick={() => setNavigationOpen(true)}
+            type="button"
+          >
+            Menu
+          </button>
+        </header>
+        <aside
+          className={`${
+            navigationOpen ? "fixed inset-y-0 left-0 z-30 w-80 max-w-[calc(100vw-2rem)]" : "hidden"
+          } border-b border-slate-200 bg-slate-950 p-5 text-slate-100 shadow-2xl md:static md:order-1 md:block md:min-h-dvh md:w-80 md:max-w-none md:border-r md:border-b-0 md:shadow-none`}
+        >
+          <div className="flex items-center justify-between md:block">
+            <Link className="text-lg font-semibold" onClick={() => setNavigationOpen(false)} to="/">
+              Dispatch
+            </Link>
+            <button
+              aria-label="Close navigation"
+              className="rounded-lg px-3 py-2 text-sm font-medium hover:bg-slate-800 md:hidden"
+              onClick={() => setNavigationOpen(false)}
+              type="button"
+            >
+              Close
+            </button>
+          </div>
           <p className="mt-3 text-sm text-slate-400">Signed in as {user.login}</p>
-          <Sidebar />
+          <Sidebar onNavigate={() => setNavigationOpen(false)} />
         </aside>
         <main className="min-w-0 flex-1 p-6 pb-32 md:order-2 md:pb-6">
           <Routes>
@@ -54,7 +85,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <Route path="*" element={<Navigate replace to="/" />} />
           </Routes>
         </main>
-        <Margin />
+        <Margin ArtifactsTabSlot={ArtifactsTab} />
       </div>
     </MarginProvider>
   );

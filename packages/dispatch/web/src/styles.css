@@ -18,6 +18,28 @@ a {
     border-color 150ms ease;
 }
 
+@media (max-width: 767px) {
+  button,
+  a,
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  button,
+  a:not(.prose a) {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  label:has(input[type="checkbox"]),
+  label:has(input[type="radio"]) {
+    min-height: 44px;
+  }
+}
+
 .cm-content .dispatch-anchor {
   border-radius: 0.125rem;
   background-color: #fef3c7;

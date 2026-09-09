@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { api } from "../../api/client";
+import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
 
 export interface ComposerReference {
   href: string;
@@ -206,8 +207,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
     },
   });
   const upload = useMutation({
-    mutationFn: (file: File) =>
-      api.uploadArtifact(issueKey, { file, name: file.name || "image.png" }),
+    mutationFn: (file: File) => uploadFile(issueKey, file),
     onMutate: () => {
       setPendingUploads((count) => count + 1);
     },
@@ -356,7 +356,9 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
           Uploading image…
         </p>
       ) : null}
-      {upload.isError ? <p className="text-sm text-rose-700">Could not upload the image.</p> : null}
+      {upload.isError ? (
+        <p className="text-sm text-rose-700">{uploadErrorMessage(upload.error)}</p>
+      ) : null}
       {save.isError ? <p className="text-sm text-rose-700">Could not save this item.</p> : null}
       <button
         className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white enabled:hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"

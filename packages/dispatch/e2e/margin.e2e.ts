@@ -65,6 +65,9 @@ test("margin creates, follows, and preserves anchored review items", async ({
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open review panel" }).click();
+    }
     await page.getByRole("tab", { name: "Spec" }).click();
     const editor = page.getByRole("textbox", { name: "Document editor" });
     await expect(editor).toContainText(initialMarkdown);
@@ -175,9 +178,16 @@ test("margin creates, follows, and preserves anchored review items", async ({
 
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     const marginItems = page.getByLabel("Margin review items");
-    await expect
-      .poll(() => marginItems.evaluate((element) => element.scrollTop))
-      .toBeGreaterThan(0);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open review panel" }).click();
+    }
+    if (testInfo.project.name === "iphone") {
+      await expect(page.getByTestId(`margin-comment-${comment.id}`)).toBeVisible();
+    } else {
+      await expect
+        .poll(() => marginItems.evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(0);
+    }
     await page.goto(`/issues/${issue.key}/spec`);
     await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
       "Note: The quick red "

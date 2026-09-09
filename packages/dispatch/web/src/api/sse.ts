@@ -80,11 +80,13 @@ export function applyEventInvalidations(queryClient: QueryInvalidator, event: Ev
 
   if (event.type.startsWith("comment.") || event.type.startsWith("suggestion.")) {
     queryClient.invalidateQueries({ queryKey: ["comments", event.issue_key] });
+    queryClient.invalidateQueries({ queryKey: ["artifact"] });
     return;
   }
 
   if (event.type === "message.created") {
     queryClient.invalidateQueries({ queryKey: ["messages", event.issue_key] });
+    queryClient.invalidateQueries({ queryKey: ["artifact"] });
     return;
   }
 

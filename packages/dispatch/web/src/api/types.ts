@@ -91,14 +91,14 @@ export interface Artifact {
   created_by: Actor;
   created_at: string;
   versions: Version[];
-  referenced_by?: Reference[];
+  referenced_by?: ReferencedBy[];
 }
 
-export interface Reference {
-  from_kind: string;
-  from_id: string;
-  to_kind: string;
-  to_id: string;
+export interface ReferencedBy {
+  kind: "ask" | "comment" | "message";
+  id: string;
+  issue_key: string;
+  excerpt: string;
 }
 
 export interface AskOption {

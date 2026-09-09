@@ -12,8 +12,14 @@ test("an authenticated user sees their empty inbox", async ({ browser }, testInf
   const page = await context.newPage();
 
   await page.goto("/");
+  if (testInfo.project.name === "iphone") {
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  }
 
   await expect(page.getByText("Signed in as alice")).toBeVisible();
+  if (testInfo.project.name === "iphone") {
+    await page.getByRole("button", { name: "Close navigation" }).click();
+  }
   await expect(page.getByText("Nothing needs you")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("empty-inbox.png"), fullPage: true });
 

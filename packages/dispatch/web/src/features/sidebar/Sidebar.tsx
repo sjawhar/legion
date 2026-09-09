@@ -131,9 +131,11 @@ function activeIssueKey(pathname: string): string | undefined {
 function IssueLink({
   entry,
   issues,
+  onNavigate,
 }: {
   entry: SidebarEntry;
   issues: Map<string, IssueSummary>;
+  onNavigate?: () => void;
 }): ReactNode {
   const key = typeof entry === "string" ? entry : entry.key;
   const issue = issues.get(key);
@@ -145,6 +147,7 @@ function IssueLink({
     <li>
       <Link
         className="block rounded px-2 py-1.5 text-sm hover:bg-slate-800"
+        onClick={onNavigate}
         to={`/issues/${issue.key}`}
       >
         <span className="font-medium">{issue.key}</span>
@@ -162,6 +165,7 @@ function IssueLink({
               entry={child}
               issues={issues}
               key={typeof child === "string" ? child : child.key}
+              onNavigate={onNavigate}
             />
           ))}
         </ul>
@@ -170,7 +174,7 @@ function IssueLink({
   );
 }
 
-export function Sidebar(): ReactNode {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void }): ReactNode {
   const location = useLocation();
   const issues = useQuery({ queryKey: ["issues"], queryFn: () => api.listIssues() });
   const state = useQuery({ queryKey: ["user-state"], queryFn: () => api.getMyState() });
@@ -224,6 +228,7 @@ export function Sidebar(): ReactNode {
                 entry={entry}
                 issues={issueByKey}
                 key={typeof entry === "string" ? entry : entry.key}
+                onNavigate={onNavigate}
               />
             ))}
           </ul>
