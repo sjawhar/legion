@@ -749,3 +749,36 @@ func TestEditArtifactCreatesNamedVersion(t *testing.T) {
 		t.Fatalf("empty edit result: status=%d body=%s", unchanged.Code, unchanged.Body.String())
 	}
 }
+
+func TestEditArtifactWithoutSummaryReturnsNoVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Unversioned edit", "before")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":   []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	result := decodeBody[struct {
+		Applied int            `json:"applied"`
+		Version *model.Version `json:"version"`
+	}](t, edited)
+	if result.Applied != 1 || result.Version != nil {
+		t.Fatalf("edit result = %#v, want one applied operation and no named version", result)
+	}
+}
+
+func TestDoneIssueAllowsOnlyAStatusReopen(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Strict reopen", "before")
+	if closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); closed.Code != http.StatusOK {
+		t.Fatalf("set done: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	combined := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"status": "todo", "title": "Reopened with a change",
+	}, "alice")
+	if combined.Code != http.StatusConflict || !strings.Contains(combined.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("combined reopen and mutation: status=%d body=%s, want ISSUE_CLOSED", combined.Code, combined.Body.String())
+	}
+}

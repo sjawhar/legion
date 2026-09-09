@@ -300,9 +300,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if before.ClosedAt != nil && (input.Status == nil || strings.TrimSpace(*input.Status) == "done") {
-		writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
-		return
+	if before.ClosedAt != nil {
+		status := ""
+		if input.Status != nil {
+			status = strings.TrimSpace(*input.Status)
+		}
+		if status == "" || status == "done" || input.Title != nil || input.Labels != nil || input.Route != nil || input.ExternalLinks != nil {
+			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
+			return
+		}
 	}
 	changed := false
 	if input.Title != nil {

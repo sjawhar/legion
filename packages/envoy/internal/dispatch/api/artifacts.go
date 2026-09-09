@@ -419,50 +419,40 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	applied, err := s.deps.Docs.ApplyOps(r.Context(), artifact.ID, input.Ops, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if applied == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": nil})
-		return
-	}
-	tx, err = s.begin(r.Context())
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	version, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, input.Summary, actor)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: artifact.IssueKey,
-		Type:     "artifact.version",
-		Actor:    actor,
-		Payload:  map[string]any{"artifact_id": artifact.ID, "name": artifact.Name, "version": version},
-	})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	var version *model.Version
+	var published []model.Event
+	if summary := strings.TrimSpace(input.Summary); applied > 0 && summary != "" {
+		namedVersion, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, summary, actor)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		version = &namedVersion
+		event, err := s.appendEvent(r.Context(), tx, model.Event{
+			IssueKey: artifact.IssueKey,
+			Type:     "artifact.version",
+			Actor:    actor,
+			Payload:  map[string]any{"artifact_id": artifact.ID, "name": artifact.Name, "version": namedVersion},
+		})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		published = append(published, event)
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.deps.Docs.CommitVersion(artifact.ID, version)
-	s.publish(event)
+	if version != nil {
+		s.deps.Docs.CommitVersion(artifact.ID, *version)
+	}
+	s.publish(published...)
 	writeJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
 }
 
