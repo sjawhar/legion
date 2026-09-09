@@ -334,7 +334,6 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       }),
     [items]
   );
-  const itemCount = items.length;
   const action = useMutation({
     mutationFn: ({ id, kind }: { id: string; kind: "accept" | "reject" | "resolve" }) => {
       if (kind === "accept") {
@@ -356,6 +355,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
   }, [decorationAnchors, setAnchors]);
   useEffect(() => {
     if (routeItemId !== undefined) {
+      setTab("comments");
       selectItem(routeItemId);
     }
   }, [routeItemId, selectItem]);
@@ -365,7 +365,11 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       scrolledRouteItem.current = undefined;
       return;
     }
-    if (scrolledRouteItem.current === routeItemId || itemCount === 0) {
+    if (
+      tab !== "comments" ||
+      scrolledRouteItem.current === routeItemId ||
+      !items.some((item) => itemId(item) === routeItemId)
+    ) {
       return;
     }
     const container = list.current;
@@ -385,7 +389,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       container.clientHeight / 4;
     container.scrollTo({ top: Math.max(0, top) });
     scrolledRouteItem.current = routeItemId;
-  }, [itemCount, routeItemId]);
+  }, [items, routeItemId, tab]);
 
   useEffect(() => {
     const container = list.current;
