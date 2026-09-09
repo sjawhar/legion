@@ -113,6 +113,13 @@ func (b *Broker) Subscribe() (<-chan model.Event, func()) {
 	}
 }
 
+// SubscriberCount reports the active local fan-out subscriptions.
+func (b *Broker) SubscriberCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subscribers)
+}
+
 // Publish fans a committed event out to local subscribers. A slow disconnected
 // SSE client cannot block mutations; it reconnects with Last-Event-ID to replay.
 func (b *Broker) Publish(e model.Event) {

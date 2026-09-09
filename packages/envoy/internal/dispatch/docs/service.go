@@ -62,8 +62,6 @@ type Service struct {
 	nextConnection atomic.Uint64
 	stopping       atomic.Bool
 	settleWG       sync.WaitGroup
-	eventCancel    func()
-	eventWG        sync.WaitGroup
 }
 
 type roomState struct {
@@ -181,10 +179,7 @@ func New(deps Deps) *Service {
 	srv.Authorize = service.authorize
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
-	eventStream, cancelEvents := deps.Events.Subscribe()
-	service.eventCancel = cancelEvents
-	service.eventWG.Add(1)
-	go service.watchIssueClosures(eventStream)
+
 	return service
 }
 
@@ -219,9 +214,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // flushes ygo's document persistence workers.
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.stopping.Store(true)
-	if s.eventCancel != nil {
-		s.eventCancel()
-	}
+
 	s.rooms.Range(func(_, value any) bool {
 		room := value.(*roomState)
 		room.mu.Lock()
@@ -232,7 +225,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return true
 	})
 	s.waitSettles(ctx)
-	s.waitEvents(ctx)
+
 	return s.srv.Shutdown(ctx)
 }
 
@@ -311,7 +304,7 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 // SnapshotVersion returns the current immutable version, adding an unnamed
 // version only when the live text has diverged since the previous one.
 func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error) {
-	markdown, err := s.Text(ctx, artifactID)
+	markdown, capture, authors, err := s.captureLiveTextAndAuthors(ctx, artifactID, nil)
 	if err != nil {
 		return model.Version{}, false, err
 	}
@@ -322,7 +315,8 @@ func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID str
 	if latest.markdown == markdown {
 		return latest.Version, false, nil
 	}
-	capture, authors := s.capturePendingAuthors(artifactID, actor)
+	capture.authors[actorKey(actor)] = actor
+	authors = actorSlice(capture.authors)
 	version, err := writeVersion(ctx, tx, artifactID, markdown, false, nil, authors)
 	if err != nil {
 		return model.Version{}, false, err
@@ -417,10 +411,13 @@ func (s *Service) ApplyReplace(ctx context.Context, artifactID string, anchor mo
 
 // NamedVersion records the live text as a deliberately named immutable version.
 func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error) {
-	capture, authors := s.capturePendingAuthors(artifactID, actor)
+	markdown, capture, authors, err := s.captureLiveTextAndAuthors(ctx, artifactID, &actor)
+	if err != nil {
+		return model.Version{}, err
+	}
 	_, joinedTransaction := txFromContext(ctx)
 	var version model.Version
-	err := s.withTx(ctx, func(tx pgx.Tx) error {
+	err = s.withTx(ctx, func(tx pgx.Tx) error {
 		var open bool
 		if err := tx.QueryRow(ctx, `
 			select i.closed_at is null
@@ -432,10 +429,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 		if !open {
 			return ErrIssueClosed
 		}
-		markdown, err := s.Text(ctx, artifactID)
-		if err != nil {
-			return err
-		}
+
 		version, err = writeVersion(ctx, tx, artifactID, markdown, true, new(summary), authors)
 		return err
 	})
@@ -705,26 +699,7 @@ func (s *Service) SetIssueClosed(issueKey string, closed bool) {
 	}
 }
 
-func (s *Service) waitEvents(ctx context.Context) {
-	done := make(chan struct{})
-	go func() {
-		s.eventWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-	}
-}
 
-func (s *Service) watchIssueClosures(eventStream <-chan model.Event) {
-	defer s.eventWG.Done()
-	for event := range eventStream {
-		if event.Type == "issue.closed" {
-			s.SetIssueClosed(event.IssueKey, true)
-		}
-	}
-}
 
 func (s *Service) failRoom(room string, cause error) {
 	state := s.room(room)
@@ -839,16 +814,35 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state.mu.Unlock()
 }
 
-func (s *Service) capturePendingAuthors(room string, actor model.Actor) (versionPending, []model.Actor) {
+func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (string, versionPending, []model.Actor, error) {
+	if s.srv.GetDoc(room) == nil {
+		err := s.srv.Apply(ctx, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			return "", versionPending{}, nil, fmt.Errorf("warm live document: %w", err)
+		}
+	}
+
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	doc := s.srv.GetDoc(room)
+	if doc == nil {
+		return "", versionPending{}, nil, errors.New("warm live document did not retain room")
+	}
+	capture, authors := captureAuthors(state, actor)
+	return doc.GetText("content").ToString(), capture, authors, nil
+}
+
+func captureAuthors(state *roomState, actor *model.Actor) (versionPending, []model.Actor) {
 	authors := make(map[string]model.Actor, len(state.pending)+1)
 	for key, pendingActor := range state.pending {
 		authors[key] = pendingActor
 	}
-	authors[actorKey(actor)] = actor
-	return versionPending{generation: state.gen, authors: authors}, actorSlice(authors)
+	if actor != nil {
+		authors[actorKey(*actor)] = *actor
+	}
+	capture := versionPending{generation: state.gen, authors: authors}
+	return capture, actorSlice(authors)
 }
 
 func (s *Service) rememberPendingVersion(room string, version model.Version, capture versionPending) {

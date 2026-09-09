@@ -359,6 +359,105 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	}
 }
 
+func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	first := model.Actor{Kind: "user", ID: "alice"}
+	second := model.Actor{Kind: "user", ID: "bob"}
+	if err := service.ReplaceText(context.Background(), artifactID, "first", first); err != nil {
+		t.Fatalf("first edit: %v", err)
+	}
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin snapshot transaction: %v", err)
+	}
+	version, wrote, err := service.SnapshotVersion(context.Background(), tx, artifactID, first)
+	if err != nil || !wrote {
+		t.Fatalf("snapshot dirty document = %#v, wrote=%t, err=%v", version, wrote, err)
+	}
+	if err := service.ReplaceText(context.Background(), artifactID, "second", second); err != nil {
+		t.Fatalf("later edit: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit snapshot transaction: %v", err)
+	}
+	service.CommitVersion(artifactID, version)
+	state := service.room(artifactID)
+	state.mu.Lock()
+	_, retained := state.pending[actorKey(second)]
+	state.mu.Unlock()
+	if !retained {
+		t.Fatal("committed snapshot cleared author from later edit")
+	}
+
+	tx, err = service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin named transaction: %v", err)
+	}
+	version, err = service.NamedVersion(WithTx(context.Background(), tx), artifactID, "checkpoint", first)
+	if err != nil {
+		t.Fatalf("name document version: %v", err)
+	}
+	if err := service.ReplaceText(context.Background(), artifactID, "third", second); err != nil {
+		t.Fatalf("later named-version edit: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit named transaction: %v", err)
+	}
+	service.CommitVersion(artifactID, version)
+	state.mu.Lock()
+	_, retained = state.pending[actorKey(second)]
+	state.mu.Unlock()
+	if !retained {
+		t.Fatal("committed named version cleared author from later edit")
+	}
+}
+
+func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.srv.Apply(context.Background(), artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+		t.Fatalf("warm cold document: %v", err)
+	}
+	editor := model.Actor{Kind: "user", ID: "alice"}
+	snapshotter := model.Actor{Kind: "user", ID: "bob"}
+	editDone := make(chan error, 1)
+	go func() {
+		editDone <- service.ReplaceText(context.Background(), artifactID, "after", editor)
+	}()
+	if err := <-editDone; err != nil {
+		t.Fatalf("first edit: %v", err)
+	}
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin snapshot transaction: %v", err)
+	}
+	version, wrote, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	if err != nil || !wrote {
+		t.Fatalf("cold snapshot = %#v, wrote=%t, err=%v; want a version after first edit", version, wrote, err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit snapshot transaction: %v", err)
+	}
+	service.CommitVersion(artifactID, version)
+	var markdown string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select markdown from artifact_versions where artifact_id = $1 and number = $2
+	`, artifactID, version.Number).Scan(&markdown); err != nil {
+		t.Fatalf("read snapshot markdown: %v", err)
+	}
+	if markdown != "after" {
+		t.Fatalf("snapshot markdown = %q, want post-edit text", markdown)
+	}
+	if len(version.Authors) != 2 || version.Authors[0] != editor || version.Authors[1] != snapshotter {
+		t.Fatalf("snapshot authors = %#v, want editor and snapshotter", version.Authors)
+	}
+}
+
 func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -562,7 +661,7 @@ func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 	}
 }
 
-func TestIssueCloseEventClosesOpenDocumentConnection(t *testing.T) {
+func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
@@ -578,7 +677,7 @@ func TestIssueCloseEventClosesOpenDocumentConnection(t *testing.T) {
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.events.Publish(model.Event{IssueKey: "DOC-1", Type: "issue.closed"})
+	service.SetIssueClosed("DOC-1", true)
 	waitForRoomClosed(t, service, artifactID)
 	waitForNoLiveDocument(t, service, artifactID)
 	connection.SetReadDeadline(time.Now().Add(time.Second))
@@ -589,6 +688,48 @@ func TestIssueCloseEventClosesOpenDocumentConnection(t *testing.T) {
 	}
 	if err := service.srv.Apply(context.Background(), artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {}); !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("server write after issue close = %v, want ErrIssueClosed", err)
+	}
+}
+
+func TestIssueReopenRestoresLiveWrites(t *testing.T) {
+	service, artifactID := newTestService(t)
+	if got := service.events.SubscriberCount(); got != 0 {
+		t.Fatalf("document service registered %d event subscriptions, want none", got)
+	}
+	seedServiceText(t, service, artifactID, "before")
+	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close document issue: %v", err)
+	}
+	service.SetIssueClosed("DOC-1", true)
+	if err := service.ReplaceText(context.Background(), artifactID, "closed", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrIssueClosed) {
+		t.Fatalf("write to closed issue = %v, want ErrIssueClosed", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = null where key = 'DOC-1'`); err != nil {
+		t.Fatalf("reopen document issue: %v", err)
+	}
+	service.SetIssueClosed("DOC-1", false)
+	service.events.Publish(model.Event{IssueKey: "DOC-1", Type: "issue.closed"})
+	if got := service.events.SubscriberCount(); got != 0 {
+		t.Fatalf("stale issue.closed event gained %d subscriptions, want none", got)
+	}
+	if err := service.ReplaceText(context.Background(), artifactID, "reopened", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write to reopened issue: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, "reopened")
+}
+
+func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
+	service, artifactID := newTestService(t)
+	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close document issue: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/ws/doc/"+artifactID, nil)
+	request.Header.Set("X-Dispatch-User", "alice")
+	request.SetPathValue("room", artifactID)
+	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}))
+	config, ok := service.authorize(request)
+	if !ok || !config.ReadOnly {
+		t.Fatalf("cold closed room authorization = %#v, %t; want read-only acceptance", config, ok)
 	}
 }
 
@@ -603,9 +744,6 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
-	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
-		t.Fatalf("load failure = %v, want ErrServiceUnavailable", err)
-	}
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
@@ -616,6 +754,9 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 	}
 	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("failed-room connection: response=%#v err=%v, want HTTP 503", response, err)
+	}
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("load failure = %v, want ErrServiceUnavailable", err)
 	}
 }
 
@@ -630,9 +771,6 @@ func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
-	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
-		t.Fatalf("corrupt load = %v, want ErrServiceUnavailable", err)
-	}
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
@@ -643,6 +781,28 @@ func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
 	}
 	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("corrupt-room connection: response=%#v err=%v, want HTTP 503", response, err)
+	}
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("corrupt load = %v, want ErrServiceUnavailable", err)
+	}
+}
+
+func TestCancelledTextLoadDoesNotQuarantineRoom(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{
+		Store:       database,
+		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), respectContext: true},
+		Events:      events.NewBroker(),
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := service.Text(ctx, artifactID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled text load = %v, want context.Canceled", err)
+	}
+	if _, err := service.Text(context.Background(), artifactID); err != nil {
+		t.Fatalf("text after cancelled load = %v, want room to remain available", err)
 	}
 }
 
@@ -703,12 +863,16 @@ func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
 
 type failingVersionedStore struct {
 	VersionedStore
-	loadErr    error
-	loadUpdate []byte
-	appendErr  error
+	loadErr        error
+	loadUpdate     []byte
+	appendErr      error
+	respectContext bool
 }
 
 func (s failingVersionedStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+	if s.respectContext && ctx.Err() != nil {
+		return persistence.LoadResult{}, ctx.Err()
+	}
 	if s.loadErr != nil {
 		return persistence.LoadResult{}, s.loadErr
 	}
