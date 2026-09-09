@@ -133,21 +133,21 @@ export class ProcessManager {
       if (tree.status === "launch-failed") tree.launchFailures = 0;
       tree.status = "queued";
       admission.queue.push(issue);
-      this.beginPromotionSweep();
+      void this.beginPromotionSweep();
       return "queued";
     }
 
     if (admission.active.length >= admission.cap) {
       tree.status = "queued";
       admission.queue.push(issue);
-      this.persist();
+      void this.persist();
       return "queued";
     }
 
     admission.active.push(issue);
     tree.status = "active";
-    this.persist();
-    this.startRoot(issue);
+    void this.persist();
+    void this.startRoot(issue);
     return "spawned";
   }
 
@@ -156,26 +156,26 @@ export class ProcessManager {
    * until active slots fill or no eligible queued tree remains. Runs at boot
    * because a cap raised between restarts opens slots no release event fills.
    */
-  reconcileAdmission(): void {
+  async reconcileAdmission(): Promise<void> {
     const admission = this.deps.state.admission;
     admission.cap = this.deps.config.admissionCap;
     let queued = admission.queue.length;
     while (admission.active.length < admission.cap && queued > 0) {
-      this.beginPromotionSweep();
+      await this.beginPromotionSweep();
       // No progress means every remaining queued issue is ineligible.
       if (admission.queue.length === queued) break;
       queued = admission.queue.length;
     }
-    this.persist();
+    await this.persist();
   }
 
-  releaseSlot(issue: IssueKey): void {
+  async releaseSlot(issue: IssueKey): Promise<void> {
     const admission = this.deps.state.admission;
     const activeIndex = admission.active.indexOf(issue);
     if (activeIndex === -1) return;
 
     admission.active.splice(activeIndex, 1);
-    this.beginPromotionSweep();
+    await this.beginPromotionSweep();
   }
 
   async registerRoleBacking(
@@ -204,7 +204,7 @@ export class ProcessManager {
     if (tree.generation !== (generation ?? tree.generation)) return;
     await this.removeTreeWindow(tree);
     tree.status = "dead";
-    this.releaseSlot(treeKey);
+    await this.releaseSlot(treeKey);
     await this.deps.saveState();
   }
 
@@ -213,7 +213,7 @@ export class ProcessManager {
     await this.removeTreeWindow(tree);
     tree.status = "closed";
     delete tree.lingerUntil;
-    this.releaseSlot(treeKey);
+    await this.releaseSlot(treeKey);
     for (const [token, claim] of Object.entries(this.deps.state.roles)) {
       if ("issue" in claim && this.rootForIssue(claim.issue) === treeKey) {
         delete this.deps.state.roles[token];
@@ -292,8 +292,8 @@ export class ProcessManager {
         }
       }
       this.settlePromotionSpawn(issue);
-      if (this.promotionSweep) this.advancePromotionSweep();
-      else this.beginPromotionSweep(issue);
+      if (this.promotionSweep) await this.advancePromotionSweep();
+      else await this.beginPromotionSweep(issue);
       await this.deps.saveState();
       throw error;
     }
@@ -388,15 +388,28 @@ export class ProcessManager {
     await this.deps.saveState();
   }
 
-  beginLinger(treeKey: IssueKey): void {
+  /**
+   * Marks a tree lingering and releases its admission slot, awaiting the
+   * full release-promote-spawn cascade this can trigger (see `releaseSlot`,
+   * `advancePromotionSweep`, `startRoot`) before returning. This runs inside
+   * the durable lane's dispatch-before-save transaction (`applyDurableEvent`
+   * via `onLinger`): by the time this resolves, any promoted tree's spawn
+   * has already settled (locator recorded, or handled as a launch failure —
+   * `startRoot` never rethrows) and every mutation is captured by `persist`,
+   * so the transaction's outer save can never observe a promoted tree
+   * without a matching spawn attempt. A rejected `persist` (a `saveState`
+   * failure) propagates out of this function and becomes fatal, same as
+   * any other durable effect.
+   */
+  async beginLinger(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
     tree.status = "lingering";
     tree.lingerUntil = new Date(
       this.deps.now() + this.deps.config.lingerHours * HOUR_MS
     ).toISOString();
     this.clearTreePhases(treeKey);
-    this.releaseSlot(treeKey);
-    this.persist();
+    await this.releaseSlot(treeKey);
+    await this.persist();
   }
 
   async expireLinger(treeKey: IssueKey): Promise<void> {
@@ -512,8 +525,8 @@ export class ProcessManager {
     await this.deps.saveState();
   }
 
-  private startRoot(issue: IssueKey): void {
-    void this.spawnRoot(issue).catch((error) => {
+  private startRoot(issue: IssueKey): Promise<void> {
+    return this.spawnRoot(issue).catch((error) => {
       console.error(`[legion] failed to spawn ${issue}:`, error);
     });
   }
@@ -524,25 +537,25 @@ export class ProcessManager {
     if (sweep?.attempted.has(issue) && sweep.inFlight > 0) sweep.inFlight -= 1;
   }
 
-  private beginPromotionSweep(initialFailure?: IssueKey): void {
+  private async beginPromotionSweep(initialFailure?: IssueKey): Promise<void> {
     if (this.promotionSweep) {
-      this.advancePromotionSweep();
+      await this.advancePromotionSweep();
       return;
     }
     this.promotionSweep = {
       attempted: new Set(initialFailure ? [initialFailure] : []),
       inFlight: 0,
     };
-    this.advancePromotionSweep();
+    await this.advancePromotionSweep();
   }
 
-  private advancePromotionSweep(): void {
+  private async advancePromotionSweep(): Promise<void> {
     const sweep = this.promotionSweep;
     if (!sweep) return;
     const admission = this.deps.state.admission;
     if (admission.active.length >= admission.cap) {
       if (sweep.inFlight === 0) this.promotionSweep = undefined;
-      this.persist();
+      await this.persist();
       return;
     }
     const nextIndex = admission.queue.findIndex((candidate) => {
@@ -555,7 +568,7 @@ export class ProcessManager {
     });
     if (nextIndex === -1) {
       if (sweep.inFlight === 0) this.promotionSweep = undefined;
-      this.persist();
+      await this.persist();
       return;
     }
     const [next] = admission.queue.splice(nextIndex, 1);
@@ -563,8 +576,8 @@ export class ProcessManager {
     sweep.inFlight += 1;
     admission.active.push(next);
     this.ensureTree(next).status = "active";
-    this.persist();
-    this.startRoot(next);
+    await this.persist();
+    await this.startRoot(next);
   }
 
   private ensureTree(issue: IssueKey): TreeState {
@@ -903,7 +916,7 @@ export class ProcessManager {
     );
   }
 
-  private persist(): void {
-    void this.deps.saveState();
+  private persist(): Promise<void> {
+    return this.deps.saveState();
   }
 }

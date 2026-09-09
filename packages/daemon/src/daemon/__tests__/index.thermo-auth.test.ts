@@ -53,6 +53,7 @@ it("refuses to start a human merge gate with no resolvable GitHub App login", as
           publish: () => {},
           request: async () => JSON.stringify({ type: "ack" }),
           ready: async () => {},
+          flush: async () => {},
           close: async () => {},
         }),
         runner: async (command) => ({

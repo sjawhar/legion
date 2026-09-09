@@ -182,6 +182,89 @@ describe("core-NATS event pump", () => {
     }
   });
 
+  it("dispatches every effect of a multi-effect reducer input before saving; the publish hook never sees an ack", async () => {
+    const { state, issue, implementer } = stateForIssue();
+    state.phases[issue] = { phase: "implementer", sessionId: "worker-session" };
+    state.prs["acme/widgets#7"] = checkPr(issue, { verdict: "green" });
+    const nats = new FakeNats();
+    const acks: string[] = [];
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const approvalStatusCalls: unknown[] = [];
+    const saveState = vi.fn(async () => {
+      // A review approving the PR's current, green head derives three
+      // effects (pr-review publish, approval-status, pr-ready publish);
+      // save must not run until every one of them has dispatched.
+      expect(published).toHaveLength(2);
+      expect(approvalStatusCalls).toHaveLength(1);
+      expect(acks).toEqual([]);
+    });
+    const pump = startEventPump({
+      ...deps(
+        state,
+        nats,
+        async (topic, payloadJson) => {
+          expect(acks).toEqual([]);
+          published.push({ topic, payloadJson });
+        },
+        undefined,
+        {
+          onLinger: async () => {},
+          onProbe: async () => {},
+          onApprovalStatus: async (effect) => {
+            expect(acks).toEqual([]);
+            approvalStatusCalls.push(effect);
+          },
+        }
+      ),
+      saveState,
+    });
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pull_request_review.submitted",
+        envelope(
+          {
+            action: "submitted",
+            repository: { full_name: "acme/widgets" },
+            pull_request: { number: 7, head: { sha: "head-1" } },
+            review: {
+              user: { login: "sami" },
+              state: "approved",
+              commit_id: "head-1",
+              body: "Looks good",
+            },
+          },
+          "review-1"
+        ),
+        { ack: () => acks.push("ack-1") }
+      );
+      await pump.drain();
+
+      expect(published).toEqual([
+        {
+          topic: roleTopic(implementer),
+          payloadJson: JSON.stringify({
+            type: "pr-review",
+            state: "approved",
+            author: "sami",
+            body: "Looks good",
+          }),
+        },
+        {
+          topic: roleTopic(implementer),
+          payloadJson: JSON.stringify({ type: "pr-ready", pr: 7 }),
+        },
+      ]);
+      expect(approvalStatusCalls).toEqual([
+        { kind: "approval-status", repo: "acme/widgets", pr: 7, sha: "head-1" },
+      ]);
+      expect(saveState).toHaveBeenCalledTimes(1);
+      expect(acks).toEqual(["ack-1"]);
+    } finally {
+      pump.stop();
+    }
+  });
+
   it("acks after saving; a 404 no-holder publish calls onUndeliverable with subject, event id, and effect kind instead of failing", async () => {
     const { state, architect } = stateForIssue();
     const nats = new FakeNats();
@@ -215,7 +298,8 @@ describe("core-NATS event pump", () => {
         role: architect,
         eventId: "comment-1",
         subject: "notifications.github.acme.widgets.issue.1.comment",
-        effectKind: "publish",
+        summary: "test",
+        kind: "publish",
       });
     } finally {
       pump.stop();
@@ -317,7 +401,7 @@ describe("core-NATS event pump", () => {
       const subIssuePayload = {
         action: "sub_issue_added",
         repository: { full_name: "acme/widgets" },
-        parent_issue: { number: 1 },
+        parent_issue: { number: 1, updated_at: "2026-01-01T00:00:00.000Z" },
         sub_issue: { number: 2, title: "Child", state: "open", labels: [] },
       };
       const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
@@ -338,11 +422,58 @@ describe("core-NATS event pump", () => {
       expect(state.issues[issue].children).toEqual([childKey]);
       expect(calls).toEqual({ acks: 0, naks: [], terms: [expect.any(String)] });
       expect(fatalCalls).toHaveLength(1);
+      // The term frame is only in the client's outgoing buffer until
+      // flushed; a flush before the fatal exit is what keeps JetStream
+      // from redelivering a message the daemon already decided to term.
+      expect(nats.flushCalls).toBe(1);
       const [message] = errorLog.mock.calls[0] ?? [];
       expect(message).toContain("notifications.github.acme.widgets.issue.1.sub_issue");
       expect(message).toContain("stream_seq=3");
       expect(message).toContain("event_id=corrupt-phase-1");
       expect(message).toContain("unrecognized phase");
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("calls fatal even when terming or flushing a poison message itself throws", async () => {
+    const { state, issue } = stateForIssue();
+    state.phases[issue] = { phase: "not-a-real-role", sessionId: "corrupt-session" };
+    const nats = new FakeNats();
+    nats.flush = () => {
+      throw new Error("connection draining");
+    };
+    const fatalCalls: unknown[] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {}),
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
+
+    try {
+      const subIssuePayload = {
+        action: "sub_issue_added",
+        repository: { full_name: "acme/widgets" },
+        parent_issue: { number: 1, updated_at: "2026-01-01T00:00:00.000Z" },
+        sub_issue: { number: 2, title: "Child", state: "open", labels: [] },
+      };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.sub_issue",
+        envelope(subIssuePayload, "corrupt-phase-2")
+      );
+      await flush();
+
+      // A rejected flush (or a term call that throws outright) must never
+      // suppress the fatal exit: the reducer has already mutated live
+      // state, so the process must not keep serving other messages against
+      // it regardless of whether the term frame made it out.
+      expect(fatalCalls).toHaveLength(1);
+      expect(
+        errorLog.mock.calls.some(([message]) => String(message).includes("connection draining"))
+      ).toBe(true);
     } finally {
       errorLog.mockRestore();
       pump.stop();
@@ -1144,7 +1275,7 @@ describe("core-NATS event pump", () => {
         envelope({
           action: "reopened",
           repository: { full_name: "acme/widgets" },
-          issue: { number: 1, state: "open" },
+          issue: { number: 1, state: "open", updated_at: "2026-01-01T00:00:00.000Z" },
         }),
         {},
         calls
@@ -1279,7 +1410,7 @@ describe("core-NATS event pump", () => {
       envelope(
         {
           action: "closed",
-          issue: { number: 1 },
+          issue: { number: 1, updated_at: "2026-01-01T00:00:00.000Z" },
           repository: { full_name: "acme/widgets" },
         },
         "issue-closed"
@@ -1292,7 +1423,7 @@ describe("core-NATS event pump", () => {
       envelope(
         {
           action: "reopened",
-          issue: { number: 1 },
+          issue: { number: 1, updated_at: "2026-01-01T00:00:01.000Z" },
           repository: { full_name: "acme/widgets" },
         },
         "issue-reopened"

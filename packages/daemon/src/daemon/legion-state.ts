@@ -100,7 +100,7 @@ export interface LegionEventPayload {
   [key: string]: unknown;
 }
 
-/** An effect a reducer derives from one event, dispatched best-effort after the reducer's mutation is durably saved (see `events.ts`). */
+/** An effect a reducer derives from one event. For a durable GitHub event, every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). */
 export type Effect =
   | { kind: "publish"; role: string; payload: LegionEventPayload }
   | { kind: "controller"; payload: LegionEventPayload }
@@ -118,6 +118,8 @@ export interface LegionState {
   spawnCapabilities: Record<string, SpawnCapability>;
   prs: Record<string, PrState>;
   prByBranch: Record<string, string>;
+  /** A closed-unmerged PR's `headUpdatedAt` at close, keyed by `repo#number`: keeps an older `opened`/`synchronize` redelivery from recreating a PR this state has already deleted (see `pullRequest` in reducers.ts). Pruned past 30 days by `pruneStalePrTombstones`. */
+  prTombstones: Record<string, number>;
   admission: { cap: number; active: IssueKey[]; queue: IssueKey[] };
   phases: Record<IssueKey, { phase: string; sessionId: string } | undefined>;
   controllerHeldEvents: HeldEvent[];
@@ -281,6 +283,7 @@ const LegionStateSchema = z
     spawnCapabilities: z.record(z.string().regex(/^[a-f0-9]{64}$/), SpawnCapabilitySchema),
     prs: z.record(z.string(), PrStateSchema),
     prByBranch: z.record(z.string(), z.string()),
+    prTombstones: z.record(z.string(), z.number()).default({}),
     admission: z
       .object({
         cap: z.number().int().nonnegative(),
@@ -313,6 +316,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     spawnCapabilities: {},
     prs: {},
     prByBranch: {},
+    prTombstones: {},
     admission: { cap, active: [], queue: [] },
     phases: {},
     controllerHeldEvents: [],
@@ -502,6 +506,15 @@ function migrateV12State(state: unknown): unknown {
   return { ...state, version: 13 };
 }
 
+const PR_TOMBSTONE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Drops PR closed-tombstones older than 30 days: past that window an out-of-order `opened`/`synchronize` redelivery for the closed PR is no longer plausible, and leaving them forever would leak memory across a project's whole history. */
+export function pruneStalePrTombstones(state: LegionState, now: number): void {
+  for (const [key, closedAt] of Object.entries(state.prTombstones)) {
+    if (now - closedAt > PR_TOMBSTONE_MAX_AGE_MS) delete state.prTombstones[key];
+  }
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -545,6 +558,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
       if (!hasErrnoCode(error, "EEXIST")) throw error;
     }
   }
+  pruneStalePrTombstones(validatedState, Date.now());
   return validatedState;
 }
 

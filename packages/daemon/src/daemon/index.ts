@@ -355,8 +355,6 @@ async function startDaemonLocked(
     now: deps.now,
   });
 
-  processManager.reconcileAdmission();
-
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
     const payload = await overseerCatchup(state, tree);
     await deps.envoyPublish(
@@ -371,9 +369,7 @@ async function startDaemonLocked(
     state,
     saveState: save,
     onException: (exception) => processManager.handleException(exception),
-    onLinger: async (tree) => {
-      processManager.beginLinger(tree);
-    },
+    onLinger: (tree) => processManager.beginLinger(tree),
     onProbe: async (tree) => {
       if ((await processManager.probe(tree)) === "dead") await processManager.resurrect(tree);
     },
@@ -411,6 +407,11 @@ async function startDaemonLocked(
     },
     apiDeps
   );
+
+  // Awaited only now that `api` is assigned: the promotion cascade this can
+  // trigger calls back into `processManager`'s `mintBootToken`/
+  // `mintControllerCapability` closures, which read `api` by reference.
+  await processManager.reconcileAdmission();
   const ready = nats.ready();
   const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 

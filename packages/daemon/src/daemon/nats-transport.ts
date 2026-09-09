@@ -1,16 +1,16 @@
 import {
   AckPolicy,
+  type ConnectionOptions,
   type ConsumerConfig,
   type ConsumerInfo,
   connect,
   consumerOpts,
   DeliverPolicy,
   ErrorCode,
-  type JetStreamPullSubscription,
+  type NatsConnection,
   NatsError,
   nanos,
   StringCodec,
-  type Subscription,
 } from "nats";
 import type { DaemonConfig } from "./config";
 
@@ -57,6 +57,16 @@ export interface NatsTransport {
   publish(subject: string, data: string): void;
   request(subject: string, data: string): Promise<string>;
   ready(): Promise<void>;
+  /**
+   * Flushes every frame already written to the client's outgoing buffer
+   * (ack/nak/term calls included) out to the server, round-tripping a
+   * PING/PONG so the caller knows the server has seen them. Used before a
+   * fatal exit so a just-sent `term` is durably applied to the poison
+   * message before the process disappears (see events.ts's
+   * `processDurableMessage`) — otherwise JetStream can redeliver a message
+   * the daemon already decided to never retry.
+   */
+  flush(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -205,8 +215,74 @@ export function createCancellableSleep(): CancellableSleep {
   };
 }
 
-export async function createNatsTransport(config: DaemonConfig): Promise<NatsTransport> {
-  const connection = await connect({
+/** The minimal JetStream message shape `consumeDurable` reads from a delivered pull message. */
+interface DurableJsMsg {
+  subject: string;
+  info: { streamSequence: number; deliverySequence: number };
+  string(): string;
+  ack(): void;
+  nak(delayMs?: number): void;
+  term(reason?: string): void;
+}
+
+/**
+ * The minimal pull-subscription surface `consumeDurable` needs: an
+ * async-iterable message source plus `pull`/`unsubscribe`. Narrowed (rather
+ * than the real `JetStreamPullSubscription`) so a test can inject a fake
+ * without implementing that interface's full surface.
+ */
+export interface MinimalPullSubscription {
+  pull(opts: { batch: number; expires: number }): void;
+  unsubscribe(): void;
+  [Symbol.asyncIterator](): AsyncIterator<DurableJsMsg>;
+}
+
+/**
+ * The minimal core-NATS subscription surface `subscribe()` needs. Narrowed
+ * (rather than the real `Subscription`) so a test can inject a fake
+ * connection without implementing that interface's full surface.
+ */
+export interface MinimalCoreSubscription {
+  unsubscribe(): void;
+  [Symbol.asyncIterator](): AsyncIterator<{ subject: string; data: Uint8Array }>;
+}
+
+/**
+ * The subset of `NatsConnection` `createNatsTransport` actually uses,
+ * narrowed so a test can inject a fake connection without implementing the
+ * full client surface.
+ */
+export interface JetStreamConnection {
+  jetstreamManager(): Promise<{
+    consumers: {
+      info(stream: string, durable: string): Promise<ConsumerInfo>;
+      add(stream: string, config: Partial<ConsumerConfig>): Promise<ConsumerInfo>;
+      update(
+        stream: string,
+        durable: string,
+        config: Partial<ConsumerConfig>
+      ): Promise<ConsumerInfo>;
+    };
+  }>;
+  jetstream(): {
+    pullSubscribe(subject: string, opts: unknown): Promise<MinimalPullSubscription>;
+  };
+  subscribe(subject: string): MinimalCoreSubscription;
+  publish: NatsConnection["publish"];
+  request(
+    subject: string,
+    data: Uint8Array,
+    opts: { timeout: number }
+  ): Promise<{ data: Uint8Array }>;
+  flush(): Promise<void>;
+  drain(): Promise<void>;
+}
+
+export async function createNatsTransport(
+  config: DaemonConfig,
+  connectFn: (opts: ConnectionOptions) => Promise<JetStreamConnection> = connect
+): Promise<NatsTransport> {
+  const connection = await connectFn({
     servers: config.natsUrls,
     name: `legion-daemon-${config.project}`,
     reconnect: true,
@@ -214,7 +290,7 @@ export async function createNatsTransport(config: DaemonConfig): Promise<NatsTra
     reconnectTimeWait: 2_000,
   });
   const codec = StringCodec();
-  const subscriptions = new Set<Subscription>();
+  const subscriptions = new Set<MinimalCoreSubscription>();
   const durableStops = new Set<() => void>();
   const durableRuns = new Set<Promise<void>>();
 
@@ -234,7 +310,7 @@ export async function createNatsTransport(config: DaemonConfig): Promise<NatsTra
     },
     consumeDurable(stream, durable, filterSubjects, callback) {
       let cancelled = false;
-      let activeSubscription: JetStreamPullSubscription | undefined;
+      let activeSubscription: MinimalPullSubscription | undefined;
 
       const ensureAndConsume = async (): Promise<void> => {
         const jsm = await connection.jetstreamManager();
@@ -325,6 +401,9 @@ export async function createNatsTransport(config: DaemonConfig): Promise<NatsTra
       return codec.decode(reply.data);
     },
     ready() {
+      return connection.flush();
+    },
+    flush() {
       return connection.flush();
     },
     async close() {

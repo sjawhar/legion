@@ -30,6 +30,9 @@ const GITHUB_STREAM = "ENVOY_NOTIFICATIONS";
 /** Fixed nak delay for a durable delivery that fails for a reason that may be transient (see processDurableMessage). */
 const DURABLE_NAK_DELAY_MS = 30_000;
 
+/** Bounds a JetStream `term` reason so an oversized reducer/parse error never fails the term frame itself. */
+const MAX_TERM_REASON_LENGTH = 1_024;
+
 /** Logs a poison durable message (never redeliverable) and terminates it so JetStream never retries it. */
 function poisonMessage(
   subject: string,
@@ -37,10 +40,12 @@ function poisonMessage(
   reason: string,
   eventId?: string
 ): void {
+  const truncatedReason =
+    reason.length > MAX_TERM_REASON_LENGTH ? `${reason.slice(0, MAX_TERM_REASON_LENGTH)}…` : reason;
   console.error(
-    `[legion] poison durable message on ${subject} (stream_seq=${control.streamSequence} delivery_seq=${control.deliverySequence}${eventId ? ` event_id=${eventId}` : ""}): ${reason}`
+    `[legion] poison durable message on ${subject} (stream_seq=${control.streamSequence} delivery_seq=${control.deliverySequence}${eventId ? ` event_id=${eventId}` : ""}): ${truncatedReason}`
   );
-  control.term(reason);
+  control.term(truncatedReason);
 }
 
 /**
@@ -82,11 +87,13 @@ export interface UndeliverableInfo {
   eventId: string;
   envelope: EnvelopeJson;
   subject: string;
-  effectKind: "publish" | "controller";
+  /** `envelope.payload_summary`, surfaced directly so a hook doesn't have to re-derive it. */
+  summary?: string;
+  kind: "publish" | "controller";
 }
 
 export interface EventPumpDeps {
-  nats: Pick<NatsTransport, "subscribe" | "consumeDurable" | "publish">;
+  nats: Pick<NatsTransport, "subscribe" | "consumeDurable" | "publish" | "flush">;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   state: LegionState;
   saveState(): Promise<void>;
@@ -498,14 +505,21 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     eventId: string,
     envelope: EnvelopeJson,
     subject: string,
-    effectKind: "publish" | "controller"
+    kind: "publish" | "controller"
   ): Promise<void> => {
     if (deps.onUndeliverable) {
-      await deps.onUndeliverable({ role, eventId, envelope, subject, effectKind });
+      await deps.onUndeliverable({
+        role,
+        eventId,
+        envelope,
+        subject,
+        summary: envelope.payload_summary,
+        kind,
+      });
       return;
     }
     console.error(
-      `legion: no holder for ${role}, event ${eventId} undelivered (subject=${subject}${envelope.payload_summary ? ` summary=${envelope.payload_summary}` : ""} effect=${effectKind}); recovered via the worker's own catch-up on resume`
+      `legion: no holder for ${role}, event ${eventId} undelivered (subject=${subject}${envelope.payload_summary ? ` summary=${envelope.payload_summary}` : ""} effect=${kind}); recovered via the worker's own catch-up on resume`
     );
   };
 
@@ -527,13 +541,13 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     const publishOrThrow = async (
       role: string,
       payloadJson: string,
-      effectKind: "publish" | "controller"
+      kind: "publish" | "controller"
     ): Promise<void> => {
       try {
         await deps.envoyPublish(roleTopic(role), payloadJson);
       } catch (error) {
         if (isNoHolderError(error)) {
-          await notifyUndeliverable(role, eventId, envelope, subject, effectKind);
+          await notifyUndeliverable(role, eventId, envelope, subject, kind);
           return;
         }
         throw error;
@@ -799,7 +813,18 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       await handleEnvelope(subject, envelope);
     } catch (error) {
       if (error instanceof DurableReducerFailure) {
-        poisonMessage(subject, control, error.message, envelope.event_id);
+        try {
+          poisonMessage(subject, control, error.message, envelope.event_id);
+          // Term only writes a frame to the client's outgoing buffer; without
+          // a flush, the process below can exit before it reaches the
+          // server, and JetStream would redeliver a "poison" message the
+          // daemon already decided to never retry.
+          await deps.nats.flush();
+        } catch (termOrFlushError) {
+          console.error(
+            `[legion] failed to term/flush poison message on ${subject}: ${termOrFlushError instanceof Error ? termOrFlushError.message : termOrFlushError}`
+          );
+        }
         await runFatal(error);
         return;
       }

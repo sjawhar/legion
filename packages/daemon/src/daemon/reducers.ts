@@ -560,6 +560,7 @@ function addNode(
     released: prior?.released ?? released,
     labels: labels(raw.labels),
     ...(prior?.finalCommentRef ? { finalCommentRef: prior.finalCommentRef } : {}),
+    ...(prior?.updatedAt !== undefined ? { updatedAt: prior.updatedAt } : {}),
   };
   const ancestor = parent ?? prior?.parent;
   if (ancestor) node.parent = ancestor;
@@ -657,8 +658,28 @@ function ingress(
   if (isDispatchThread(raw.labels)) return [];
   const currentLabels = labels(raw.labels);
   if (currentLabels.includes("legion-child") || currentLabels.includes("legion-backlog")) return [];
+
+  const existing = state.issues[key];
+  const rawUpdatedAt = updatedAt(raw);
+  if (
+    rawUpdatedAt !== undefined &&
+    existing?.updatedAt !== undefined &&
+    rawUpdatedAt < existing.updatedAt
+  ) {
+    console.debug(
+      `[legion] ignored stale ingress event for ${key}: issue.updated_at is older than the last applied event`
+    );
+    return [];
+  }
+  // A tree already exists: this issue was already triaged once, so a
+  // redelivered or duplicate "opened"/"created" webhook must not re-triage
+  // it or clobber children/labels/state a newer event has already applied.
+  if (state.trees[key]) return [];
+
   const preexistingChildren = childKeys(repo, raw);
-  addNode(state, key, raw, true).children = preexistingChildren;
+  const node = addNode(state, key, raw, true);
+  node.children = preexistingChildren;
+  if (rawUpdatedAt !== undefined) node.updatedAt = rawUpdatedAt;
   const rawSubIssues = raw.sub_issues;
   const values = Array.isArray(rawSubIssues) ? rawSubIssues : asRecord(rawSubIssues)?.nodes;
   if (Array.isArray(values)) {
@@ -681,7 +702,8 @@ function ingress(
 function subIssue(
   state: LegionState,
   payload: JsonRecord,
-  envelope: EnvelopeJson
+  envelope: EnvelopeJson,
+  requireTimestamp: boolean
 ): Effect[] | undefined {
   const rawParent = asRecord(payload.parent_issue);
   const rawChild = asRecord(payload.sub_issue);
@@ -696,6 +718,11 @@ function subIssue(
   if (!parentKey || !childKey || !parent) return [];
 
   const parentUpdatedAt = updatedAt(rawParent);
+  if (requireTimestamp && parentUpdatedAt === undefined) {
+    throw new Error(
+      `sub_issue event for ${parentKey} is missing a parseable parent_issue.updated_at (GitHub always sends one; payload is malformed)`
+    );
+  }
   if (
     parentUpdatedAt !== undefined &&
     parent.updatedAt !== undefined &&
@@ -706,7 +733,6 @@ function subIssue(
     );
     return [];
   }
-  if (parentUpdatedAt !== undefined) parent.updatedAt = parentUpdatedAt;
 
   if (payload.action === "sub_issue_added") {
     // Never adopt a dispatch thread as a child (see isDispatchThread).
@@ -715,6 +741,7 @@ function subIssue(
     if (!known) parent.children.push(childKey);
     const child = state.issues[childKey] ?? addNode(state, childKey, rawChild, false, parentKey);
     child.parent = parentKey;
+    if (parentUpdatedAt !== undefined) parent.updatedAt = parentUpdatedAt;
     if (known || treeFor(state, parentKey)?.status !== "active") return [];
     return routeActive(
       state,
@@ -733,6 +760,7 @@ function subIssue(
   const wasOpen = child?.state === "open";
   parent.children = parent.children.filter((key) => key !== childKey);
   if (child?.parent === parentKey) delete child.parent;
+  if (parentUpdatedAt !== undefined) parent.updatedAt = parentUpdatedAt;
   const result = routeActive(
     state,
     parentKey,
@@ -752,7 +780,8 @@ function subIssue(
 function issueEvent(
   state: LegionState,
   payload: JsonRecord,
-  envelope: EnvelopeJson
+  envelope: EnvelopeJson,
+  requireTimestamp: boolean
 ): Effect[] | undefined {
   const raw = asRecord(payload.issue);
   if (!raw || payload.comment !== undefined || raw.pull_request !== undefined) return undefined;
@@ -763,6 +792,11 @@ function issueEvent(
   if (!key || !node) return [];
 
   const issueUpdatedAt = updatedAt(raw);
+  if (requireTimestamp && issueUpdatedAt === undefined) {
+    throw new Error(
+      `issue event for ${key} is missing a parseable updated_at (GitHub always sends one; payload is malformed)`
+    );
+  }
   if (
     issueUpdatedAt !== undefined &&
     node.updatedAt !== undefined &&
@@ -773,7 +807,6 @@ function issueEvent(
     );
     return [];
   }
-  if (issueUpdatedAt !== undefined) node.updatedAt = issueUpdatedAt;
 
   if (payload.action === "labeled" || payload.action === "unlabeled") {
     const label = stringValue(asRecord(payload.label)?.name);
@@ -781,12 +814,14 @@ function issueEvent(
     if (payload.action === "labeled") {
       if (node.labels.includes(label)) return [];
       node.labels.push(label);
+      if (issueUpdatedAt !== undefined) node.updatedAt = issueUpdatedAt;
       return label === "human-approved"
         ? routeActive(state, key, { type: "human-approved" }, envelope)
         : [];
     }
     if (!node.labels.includes(label)) return [];
     node.labels = node.labels.filter((value) => value !== label);
+    if (issueUpdatedAt !== undefined) node.updatedAt = issueUpdatedAt;
     return [];
   }
 
@@ -794,6 +829,7 @@ function issueEvent(
     const parent = node.parent ? state.issues[node.parent] : undefined;
     const wasOpen = node.state === "open";
     node.state = "closed";
+    if (issueUpdatedAt !== undefined) node.updatedAt = issueUpdatedAt;
     if (!parent || !node.parent) {
       return state.trees[key]?.status === "active" ? [{ kind: "linger", tree: key }] : [];
     }
@@ -822,6 +858,7 @@ function issueEvent(
 
   if (payload.action !== "reopened") return [];
   node.state = "open";
+  if (issueUpdatedAt !== undefined) node.updatedAt = issueUpdatedAt;
   delete node.finalCommentRef;
   if (node.parent)
     return routeActive(state, node.parent, { type: "child-reopened", child: key }, envelope);
@@ -958,10 +995,17 @@ function pullRequest(
   const branch = stringValue(payload.head_ref);
   const sha = stringValue(payload.head_sha);
   const headUpdatedAt = updatedAt(payload);
+  const tombstonedAt = state.prTombstones[prKey];
 
   if (payload.action === "opened") {
+    const existing = state.prs[prKey];
+    const priorClock = existing?.headUpdatedAt ?? tombstonedAt;
+    if (headUpdatedAt !== undefined && priorClock !== undefined && headUpdatedAt < priorClock) {
+      return [];
+    }
     const pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
     if (!pr) return [];
+    delete state.prTombstones[prKey];
     return routeActive(
       state,
       pr.key,
@@ -972,7 +1016,11 @@ function pullRequest(
 
   let pr: PrState | undefined = state.prs[prKey];
   if (!pr && payload.action === "synchronize") {
+    if (headUpdatedAt !== undefined && tombstonedAt !== undefined && headUpdatedAt < tombstonedAt) {
+      return [];
+    }
     pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
+    if (pr) delete state.prTombstones[prKey];
   }
   if (!pr) return [];
   if (payload.action === "synchronize") {
@@ -1001,6 +1049,7 @@ function pullRequest(
   if (payload.action === "closed" && payload.merged === "false") {
     delete state.prs[prKey];
     removeBranchMappings(state, prKey);
+    if (headUpdatedAt !== undefined) state.prTombstones[prKey] = headUpdatedAt;
     return routeActive(state, pr.key, { type: "pr-closed-unmerged", pr: number }, envelope);
   }
   return [];
@@ -1020,14 +1069,20 @@ export function reduceGithubEvent(
   if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/issue-")) return [];
   // Only pullRequest understands Envoy's normalized GitHub envelopes. The issue, issue-comment,
   // review, and projects_v2_item reducers still require raw GitHub nesting and ignore Envoy payloads.
+  // "resync" is the daemon's own sentinel topic for reducer input it
+  // reconstructs from a GitHub board/CI read, not an external webhook (see
+  // resync.ts's labeledBoardIssue/openedBoardIssue) — GitHub's updated_at
+  // contract on issue/sub_issue events applies only to real webhook
+  // deliveries, so those reducers relax their timestamp requirement here.
+  const isWebhookSourced = topic !== "resync";
   return collapseClosedTreeWakes(
     ingress(state, payload, config) ??
-      subIssue(state, payload, envelope) ??
+      subIssue(state, payload, envelope, isWebhookSourced) ??
       issueComment(state, payload, envelope, config) ??
       reviewComment(state, payload, envelope, config) ??
       review(state, payload, envelope) ??
       pullRequest(state, payload, envelope) ??
-      issueEvent(state, payload, envelope) ??
+      issueEvent(state, payload, envelope, isWebhookSourced) ??
       []
   );
 }

@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import { controllerToken, formatIssueKey, roleToken } from "@legion/contracts";
-import { loadState, newLegionState, saveState } from "../legion-state";
+import { loadState, newLegionState, pruneStalePrTombstones, saveState } from "../legion-state";
 
 const issue = formatIssueKey("sjawhar", "legion", 42);
 const initialState = { project: "omp", cap: 4 };
@@ -115,10 +115,45 @@ describe("legion state", () => {
       spawnCapabilities: {},
       prs: {},
       prByBranch: {},
+      prTombstones: {},
       admission: { cap: 4, active: [], queue: [] },
       phases: {},
       controllerHeldEvents: [],
     });
+  });
+
+  it("drops PR tombstones older than 30 days but keeps ones within the window", () => {
+    const now = Date.parse("2026-09-07T00:00:00.000Z");
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    const state = newLegionState("omp", 4);
+    state.prTombstones = {
+      "acme/widgets#7": now - THIRTY_DAYS_MS - 1,
+      "acme/widgets#8": now - THIRTY_DAYS_MS,
+      "acme/widgets#9": now - 1_000,
+    };
+
+    pruneStalePrTombstones(state, now);
+
+    expect(state.prTombstones).toEqual({
+      "acme/widgets#8": now - THIRTY_DAYS_MS,
+      "acme/widgets#9": now - 1_000,
+    });
+  });
+
+  it("prunes stale PR tombstones on load", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-tombstone-"));
+    const file = path.join(tempDir, "state.json");
+    const state = newLegionState("omp", 4);
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    state.prTombstones = {
+      "acme/widgets#7": Date.now() - THIRTY_DAYS_MS - 60_000,
+      "acme/widgets#8": Date.now(),
+    };
+
+    await saveState(file, state);
+    const loaded = await loadState(file, initialState);
+
+    expect(loaded.prTombstones).toEqual({ "acme/widgets#8": state.prTombstones["acme/widgets#8"] });
   });
 
   it("persists and reloads state without losing tree, role, or PR data", async () => {

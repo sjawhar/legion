@@ -78,6 +78,7 @@ class FakeNats {
   async ready(): Promise<void> {
     this.readyCalls += 1;
   }
+  async flush(): Promise<void> {}
 }
 
 function matches(pattern: string, subject: string): boolean {

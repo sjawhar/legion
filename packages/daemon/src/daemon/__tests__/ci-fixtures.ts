@@ -82,6 +82,12 @@ export class FakeNats {
 
   publish(): void {}
 
+  flushCalls = 0;
+  flush(): Promise<void> {
+    this.flushCalls += 1;
+    return Promise.resolve();
+  }
+
   /**
    * Dispatches `data` to every subscription matching `subject`. `control`
    * overrides the fake `ack`/`nak`/`term` control object (a plain function

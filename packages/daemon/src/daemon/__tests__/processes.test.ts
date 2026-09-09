@@ -722,7 +722,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { admissionCap: 2 }),
     });
 
-    processes.reconcileAdmission();
+    await processes.reconcileAdmission();
 
     expect(state.admission).toEqual({ cap: 2, active: [root, child], queue: [] });
     expect(state.trees[root]?.status).toBe("active");
@@ -739,7 +739,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { admissionCap: 2 }),
     });
 
-    processes.reconcileAdmission();
+    await processes.reconcileAdmission();
 
     expect(state.admission).toEqual({ cap: 2, active: [], queue: [root] });
   });
@@ -754,7 +754,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { admissionCap: 2 }),
     });
 
-    processes.reconcileAdmission();
+    await processes.reconcileAdmission();
 
     expect(state.admission).toEqual({ cap: 2, active: [child, grandchild], queue: [root] });
     expect(state.trees[root].status).toBe("launch-failed");
@@ -773,7 +773,7 @@ describe("ProcessManager", () => {
       },
     });
 
-    processes.reconcileAdmission();
+    await processes.reconcileAdmission();
 
     expect(state.admission).toEqual({ cap: 3, active: [], queue: [] });
     expect(saves).toBeGreaterThan(0);
@@ -799,7 +799,7 @@ describe("ProcessManager", () => {
           : { stdout: "", exitCode: 0 },
     });
 
-    processes.reconcileAdmission();
+    await processes.reconcileAdmission();
     await settled.promise;
     await Promise.resolve();
 
@@ -828,7 +828,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { admissionCap: 5 }),
     });
 
-    processes.reconcileAdmission();
+    await processes.reconcileAdmission();
 
     expect(state.admission).toEqual({
       cap: 5,
@@ -1043,7 +1043,7 @@ describe("ProcessManager", () => {
     state.phases[child] = { phase: "reviewer", sessionId: "ses_child_reviewer" };
     const { manager: processes, commands, publications } = manager(state);
 
-    processes.beginLinger(root);
+    await processes.beginLinger(root);
 
     expect(state.trees[root]).toMatchObject({
       status: "lingering",
@@ -1061,6 +1061,37 @@ describe("ProcessManager", () => {
     expect(state.phases[child]).toBeUndefined();
     expect(publications).toEqual([]);
     expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
+  });
+
+  it("awaits a promoted queued tree's full spawn attempt before beginLinger resolves", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.admission.active.push(root);
+    state.admission.queue.push(child);
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@99\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // The whole release-promote-spawn cascade releaseSlot triggers must
+    // settle before beginLinger's own promise resolves: otherwise the
+    // durable transaction's outer save (applyDurableEvent) could persist
+    // child as "active" before its spawn recorded a locator, and a crash
+    // in that window would leave it consuming a slot with no tmux window
+    // forever (reconcileAdmission only promotes queued work at boot, it
+    // never resurrects an already-active tree with no locator).
+    await processes.beginLinger(root);
+
+    expect(state.admission).toEqual({ cap: 1, active: [child], queue: [] });
+    expect(state.trees[child]).toMatchObject({
+      status: "active",
+      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@99" },
+    });
   });
 
   it("requests control directives on the sanitized tree generation topic", async () => {
