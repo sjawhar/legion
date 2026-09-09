@@ -1,53 +1,42 @@
-import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
-import type { SessionContext } from "../pi-types";
+import { isLegionRole, type LegionRole } from "@legion/contracts";
 
 export type LegionSessionKind =
-  | { kind: "root-architect"; tree: string }
   | { kind: "controller" }
-  | { kind: "phase-worker"; role: LegionRole }
-  | { kind: "sub-architect" }
+  | { kind: "root-architect"; tree: string }
+  | { kind: "phase-worker"; role: LegionRole; tree: string; issue: string }
   | { kind: "not-legion" };
 
-export function classifySession(
-  env: NodeJS.ProcessEnv,
-  agentName: string | undefined,
-  taskDepth: number
-): LegionSessionKind {
+export function classifySession(env: NodeJS.ProcessEnv): LegionSessionKind {
   if (env.LEGION_CONTROLLER !== undefined && env.LEGION_TREE !== undefined) {
     throw new Error("Legion session has both controller and tree launch markers");
   }
 
+  // The controller marker is LEGION_CONTROLLER alone. The daemon also sets
+  // LEGION_ROLE=controller on that process, but "controller" is not a
+  // LegionRole and this extension never reads LEGION_ROLE for it — one
+  // signal, checked once, so the two markers can never disagree in practice.
   if (env.LEGION_CONTROLLER === "1") return { kind: "controller" };
 
-  if (taskDepth === 0 && env.LEGION_TREE) {
-    return { kind: "root-architect", tree: env.LEGION_TREE };
+  if (env.LEGION_ROLE === undefined) return { kind: "not-legion" };
+
+  if (!isLegionRole(env.LEGION_ROLE)) {
+    throw new Error(`LEGION_ROLE "${env.LEGION_ROLE}" is not a Legion role`);
   }
-
-  if (agentName === "legion-architect" && taskDepth >= 1) {
-    return { kind: "sub-architect" };
+  const tree = requiredEnvironment(env, "LEGION_TREE");
+  const issue = requiredEnvironment(env, "LEGION_ISSUE");
+  // The daemon roots an issue tree at itself: the root architect's own issue
+  // key equals the tree's. A sub-architect on a child issue is a phase
+  // worker like any other role — bootstrapWorker already special-cases
+  // role === "architect" for tool registration.
+  if (env.LEGION_ROLE === "architect" && issue === tree) {
+    return { kind: "root-architect", tree };
   }
-
-  const role = LEGION_ROLES.find((candidate) => agentName === `legion-${candidate}`);
-  if (role && role !== "architect") return { kind: "phase-worker", role };
-
-  return { kind: "not-legion" };
+  return { kind: "phase-worker", role: env.LEGION_ROLE, tree, issue };
 }
 
 export function requiredEnvironment(env: NodeJS.ProcessEnv, key: string): string {
   const value = env[key];
   if (!value) throw new Error(`${key} is required for Legion`);
-  return value;
-}
-
-export function positiveIntegerEnvironment(
-  env: NodeJS.ProcessEnv,
-  key: string,
-  defaultValue: string
-): number {
-  const value = Number(env[key] ?? defaultValue);
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${key} must be a positive integer`);
-  }
   return value;
 }
 
@@ -67,10 +56,4 @@ export function generation(env: NodeJS.ProcessEnv): number {
   const value = Number(requiredEnvironment(env, "LEGION_GENERATION"));
   if (!Number.isSafeInteger(value)) throw new Error("LEGION_GENERATION must be an integer");
   return value;
-}
-
-export function isRootSession(env: NodeJS.ProcessEnv, context: SessionContext): boolean {
-  if (context.taskDepth !== undefined) return context.taskDepth === 0;
-  const rootWorkspace = env.LEGION_ROOT_WORKSPACE;
-  return rootWorkspace ? context.cwd === rootWorkspace : true;
 }

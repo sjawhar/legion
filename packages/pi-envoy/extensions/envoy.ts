@@ -49,6 +49,9 @@ interface GlobalLegionRoleClaimBridgeStore {
   [key: symbol]: LegionRoleClaimBridge | undefined;
 }
 
+// A process-wide symbol bridges legion.ts's `claimEnvoyRole` import to the
+// one envoyExtension(pi) instance OMP actually ran, since each manifest entry
+// loads as its own module instance with its own module-scope state.
 const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.pi-envoy.role-claim-bridge");
 
 function legionRoleClaimBridge(): LegionRoleClaimBridge {
@@ -71,18 +74,6 @@ export async function claimEnvoyRole(
 ): Promise<void> {
   const bridge = legionRoleClaimBridge();
   await (bridge.claim ?? (await bridge.ready.promise))(sessionID, role, context);
-}
-
-export async function deleteEnvoyInterest(baseUrl: string, sessionID: string): Promise<void> {
-  const response = await fetch(`${baseUrl}/v1/interests/${encodeURIComponent(sessionID)}`, {
-    method: "DELETE",
-  });
-  const responseBody = await response.text();
-  if (!response.ok) {
-    throw new Error(
-      `DELETE /v1/interests/${sessionID} failed with ${response.status}: ${responseBody}`
-    );
-  }
 }
 function resolveSkillsDirectory(): string {
   const moduleDirectory = dirname(fileURLToPath(import.meta.url));

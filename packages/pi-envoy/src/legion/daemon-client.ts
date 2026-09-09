@@ -19,17 +19,12 @@ import {
   LegionDaemonApi,
   type MergeGateInput,
   type MergeGateResponse,
-  type PhaseInput,
-  type PhaseResponse,
   type ProcessExitInput,
   type ProcessReadyInput,
   type ProcessStartedInput,
   type ProcessStartedResponse,
   type ProvisioningCredentialInput,
   type ProvisioningCredentialResponse,
-  type RoleBackingInput,
-  type SpawnTokenInput,
-  type SpawnTokenResponse,
   type SpawnWorkerInput,
   type SpawnWorkerResponse,
   type WaveReleaseInput,
@@ -48,6 +43,9 @@ export interface LegionDaemonClient {
   readonly controllerReady: (input: ControllerReadyInput) => Promise<void>;
   readonly processStarted: (input: ProcessStartedInput) => Promise<ProcessStartedResponse>;
   readonly processReady: (input: ProcessReadyInput) => Promise<void>;
+  readonly workerStarted: (input: WorkerStartedInput) => Promise<WorkerStartedResponse>;
+  readonly workerReady: (input: WorkerReadyInput) => Promise<void>;
+  readonly spawnWorker: (input: SpawnWorkerInput) => Promise<SpawnWorkerResponse>;
   readonly mergeGate: (input: MergeGateInput) => Promise<MergeGateResponse>;
   readonly issueCreate: (input: IssueCreateInput) => Promise<IssueCreateResponse>;
   readonly provisioningCredential: (
@@ -59,12 +57,6 @@ export interface LegionDaemonClient {
   readonly labels: (input: LabelsInput) => Promise<LabelsResponse>;
   readonly escalate: (input: EscalateInput) => Promise<void>;
   readonly issueClose: (input: IssueCloseInput) => Promise<void>;
-  readonly spawnToken: (input: SpawnTokenInput) => Promise<SpawnTokenResponse>;
-  readonly spawnWorker: (input: SpawnWorkerInput) => Promise<SpawnWorkerResponse>;
-  readonly workerStarted: (input: WorkerStartedInput) => Promise<WorkerStartedResponse>;
-  readonly workerReady: (input: WorkerReadyInput) => Promise<void>;
-  readonly roleBacking: (input: RoleBackingInput) => Promise<void>;
-  readonly phase: (input: PhaseInput) => Promise<PhaseResponse>;
   readonly gatesApprove: (input: ControllerIssueInput) => Promise<void>;
   readonly admission: (input: ControllerIssueInput) => Promise<AdmissionResponse>;
   readonly backlog: (input: BacklogInput) => Promise<void>;
@@ -187,6 +179,12 @@ export function createLegionDaemonClient(
       post("/legion/v1/process/started", input, LegionDaemonApi.ProcessStarted.response),
     processReady: (input) =>
       noContent("/legion/v1/process/ready", input, LegionDaemonApi.ProcessReady.response),
+    workerStarted: (input) =>
+      post("/legion/v1/worker/started", input, LegionDaemonApi.WorkerStarted.response),
+    workerReady: (input) =>
+      noContent("/legion/v1/worker/ready", input, LegionDaemonApi.WorkerReady.response),
+    spawnWorker: (input) =>
+      post("/legion/v1/worker/spawn", input, LegionDaemonApi.SpawnWorker.response),
     mergeGate: (input) => post("/legion/v1/merge-gate", input, LegionDaemonApi.MergeGate.response),
     issueCreate: (input) => post("/legion/v1/issues", input, LegionDaemonApi.IssueCreate.response),
     waveRelease: (input) =>
@@ -202,19 +200,8 @@ export function createLegionDaemonClient(
       noContent("/legion/v1/issues/body", input, LegionDaemonApi.PostBody.response),
     labels: (input) => post("/legion/v1/issues/labels", input, LegionDaemonApi.Labels.response),
     escalate: (input) => noContent("/legion/v1/escalate", input, LegionDaemonApi.Escalate.response),
-    spawnToken: (input) =>
-      post("/legion/v1/spawn-token", input, LegionDaemonApi.SpawnToken.response),
-    spawnWorker: (input) =>
-      post("/legion/v1/worker/spawn", input, LegionDaemonApi.SpawnWorker.response),
-    workerStarted: (input) =>
-      post("/legion/v1/worker/started", input, LegionDaemonApi.WorkerStarted.response),
-    workerReady: (input) =>
-      noContent("/legion/v1/worker/ready", input, LegionDaemonApi.WorkerReady.response),
-    roleBacking: (input) =>
-      noContent("/legion/v1/role-backing", input, LegionDaemonApi.RoleBacking.response),
     issueClose: (input) =>
       noContent("/legion/v1/issues/close", input, LegionDaemonApi.IssueClose.response),
-    phase: (input) => post("/legion/v1/phase", input, LegionDaemonApi.Phase.response),
     workerSession: (input) =>
       post("/legion/v1/worker-session", input, LegionDaemonApi.WorkerSession.response),
     gatesApprove: (input) =>

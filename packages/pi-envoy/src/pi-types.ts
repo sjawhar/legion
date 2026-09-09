@@ -21,6 +21,13 @@ export interface SessionContext {
      */
     readonly getSessionName?: () => string | undefined;
     readonly getSessionFile: () => string | undefined;
+    /**
+     * Force the session's transcript onto disk even before it has an
+     * assistant message. OMP allocates the session file path eagerly but
+     * writes it lazily; a boot handshake that hands the path to the daemon
+     * (for later resume/liveness probing) must call this first.
+     */
+    readonly ensureOnDisk: () => Promise<void>;
     /** Entries of the active branch; non-empty at session_start on resume. */
     readonly getBranch?: () => readonly unknown[];
   };
