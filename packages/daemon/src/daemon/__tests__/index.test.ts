@@ -524,7 +524,11 @@ describe("startDaemon", () => {
           createNatsTransport: async () => new FakeNats(),
           runner: async (command) => {
             if (command[0] === "sh") {
-              return { stdout: "LEGION_OMP_AGENTS=available\n", stderr: "", exitCode: 0 };
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
             }
             if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
               const workspaceDir = command[3];
@@ -1014,7 +1018,11 @@ describe("startDaemon", () => {
               shProbeCalls += 1;
               if (shProbeCalls === 1) {
                 // First sh-shaped probe: verifyOmpAgentsCapability.
-                return { stdout: "LEGION_OMP_AGENTS=available\n", stderr: "", exitCode: 0 };
+                return {
+                  stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                  stderr: "",
+                  exitCode: 0,
+                };
               }
               // Second sh-shaped probe: verifyLegionPluginLoaded. The plugin is
               // disabled/unregistered, so the marker never appears.
@@ -1215,7 +1223,7 @@ describe("startDaemon", () => {
       createNatsTransport: async () => new FakeNats(),
       runner: async () => ({
         stdout: "[]",
-        stderr: "LEGION_OMP_AGENTS=available\n",
+        stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
         exitCode: 0,
       }),
       resolveDaemonEnvironment: async () => daemonEnvironment,
