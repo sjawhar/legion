@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when handling Legion controller wakes for root-issue triage, backlog admission, architect escalation, resync healing, human interaction, or gate approval.
+description: Use when handling Legion controller wakes for root-issue triage, backlog admission, architect escalation, resync healing, or human interaction.
 ---
 
 # Legion Controller
@@ -23,8 +23,8 @@ For an interactive takeover, start OMP with `LEGION_CONTROLLER_SECRET` and
 
 The command resolves the project from daemon state, claims the Envoy role for the current
 session, and posts readiness before controller commands can act. It retains the environment
-capability for `legion admit`, `legion approve`, and `legion backlog`. Never pass a secret as a
-command argument or copy it into a transcript.
+capability for `legion admit` and `legion backlog`. Never pass a secret as a command argument
+or copy it into a transcript.
 
 This handshake lets the daemon redeliver held controller work. It does not turn the controller
 into a state holder: daemon state and GitHub artifacts remain authoritative.
@@ -49,7 +49,6 @@ into a state holder: daemon state and GitHub artifacts remain authoritative.
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch` from the owning architect, not here |
 | Resync report | artifact-driven anomaly list (zero-owner trees, erroring issues) | Verify against fresh state, then dispatch/heal |
 | Mention | Slack/GitHub @mention text | Answer, or route to the owning issue's architect role |
-| Approval interpretation | ambiguous human comment on a gated issue | Decide whether it's an approval; if so, apply `human-approved` via the daemon |
 | Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion admit <root>`; otherwise no action — the event is not held or redelivered |
 | Direct user message | — | Always first |
 
@@ -111,19 +110,6 @@ Read the mention and its artifact. Answer it when it asks the controller for tri
 human-facing information. Otherwise resolve the authoritative owning architect role and
 route the verified context with `envoy_publish`. Do not route raw event traffic or invent a
 role token from a partial issue reference.
-
-## Approval interpretation
-
-For an ambiguous human comment on a gated issue, verify the current issue, gate state, and
-comment's meaning. If it is Sami's approval, apply the daemon transition:
-
-```bash
-legion approve <issue>
-```
-
-This applies `human-approved` and clears `needs-approval` atomically. It is not a generic
-label-edit operation. The design gate remains skill-enforced by the architect, and the
-merge gate remains config-armed until Sami approves the final reviewed head.
 
 ## Label vocabulary
 
