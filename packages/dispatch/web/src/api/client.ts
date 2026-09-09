@@ -292,7 +292,9 @@ export class DispatchApiClient {
   }
 }
 
-export function createApiClient(fetchImpl: FetchImplementation = fetch): DispatchApiClient {
+export function createApiClient(
+  fetchImpl: FetchImplementation = (...args) => fetch(...args)
+): DispatchApiClient {
   return new DispatchApiClient(fetchImpl);
 }
 

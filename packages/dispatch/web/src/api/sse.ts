@@ -30,9 +30,10 @@ function artifactId(event: Event): string | undefined {
 
 export function applyEventInvalidations(queryClient: QueryInvalidator, event: Event): void {
   queryClient.invalidateQueries({ queryKey: ["issue", event.issue_key] });
+  queryClient.invalidateQueries({ queryKey: ["events", event.issue_key] });
+  queryClient.invalidateQueries({ queryKey: ["issues"] });
 
   if (event.type.startsWith("issue.")) {
-    queryClient.invalidateQueries({ queryKey: ["issues"] });
     return;
   }
 

@@ -1,0 +1,88 @@
+import { expect, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import type { Ask } from "../api/types";
+import { AskCard } from "../features/inbox/AskCard";
+
+function ask(overrides: Partial<Ask> = {}): Ask {
+  return {
+    anchor: null,
+    answer: null,
+    author: { kind: "session", id: "session-1" },
+    created_at: "2026-09-09T00:00:00Z",
+    custom: false,
+    id: "ask-1",
+    issue_key: "CORE-1",
+    multiple: false,
+    options: [],
+    question: "Which option should ship?",
+    state: "open",
+    urgency: "med",
+    ...overrides,
+  };
+}
+
+function renderCard(node: ReactNode): void {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  render(<QueryClientProvider client={queryClient}>{node}</QueryClientProvider>);
+}
+
+test("AskCard submits the selected single option", async () => {
+  const submitted: Array<{ id: string; input: { selected: string[]; text?: string } }> = [];
+  renderCard(
+    <AskCard
+      ask={ask({ options: [{ label: "Ship" }, { label: "Hold" }] })}
+      answerAsk={async (id, input) => {
+        submitted.push({ id, input });
+        return ask({ id, state: "answered" });
+      }}
+    />
+  );
+
+  fireEvent.click(screen.getByRole("radio", { name: "Ship" }));
+  fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
+
+  await waitFor(() => expect(submitted).toEqual([{ id: "ask-1", input: { selected: ["Ship"] } }]));
+});
+
+test("AskCard submits every checked multiple option", async () => {
+  const submitted: Array<{ selected: string[] }> = [];
+  renderCard(
+    <AskCard
+      ask={ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] })}
+      answerAsk={async (_id, input) => {
+        submitted.push(input);
+        return ask({ state: "answered" });
+      }}
+    />
+  );
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "Docs" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Tests" }));
+  fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
+
+  await waitFor(() => expect(submitted).toEqual([{ selected: ["Docs", "Tests"] }]));
+});
+
+test("AskCard submits custom text without inventing a selected option", async () => {
+  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  renderCard(
+    <AskCard
+      ask={ask({ custom: true })}
+      answerAsk={async (_id, input) => {
+        submitted.push(input);
+        return ask({ state: "answered" });
+      }}
+    />
+  );
+
+  fireEvent.change(screen.getByLabelText("Your answer"), {
+    target: { value: "Take the third path" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
+
+  await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Take the third path" }]));
+});

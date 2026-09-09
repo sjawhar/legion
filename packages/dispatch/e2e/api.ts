@@ -1,6 +1,16 @@
-import type { Actor, Ask, Comment, Issue, Project } from "../web/src/api/types";
+import type {
+  Actor,
+  Ask,
+  CreateAskInput,
+  CreateMessageInput,
+  Event,
+  Issue,
+  Project,
+  UpdateIssueInput,
+} from "../web/src/api/types";
 
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:8766";
+const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
+const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${e2ePort}`;
 const agentToken = process.env.E2E_AGENT_TOKEN ?? "e2e-token";
 const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 
@@ -48,8 +58,40 @@ export function createProject(input: Project, login = "alice"): Promise<Project>
   return request<Project>("/api/v1/projects", "POST", input, { login });
 }
 
+export function getIssue(key: string, options: ApiOptions = {}): Promise<Issue> {
+  return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "GET", undefined, options);
+}
+
+export function getIssueEvents(
+  key: string,
+  options: { after?: number; limit?: number } = {},
+  requestOptions: ApiOptions = {}
+): Promise<Event[]> {
+  const query = new URLSearchParams();
+  if (options.after !== undefined) {
+    query.set("after", String(options.after));
+  }
+  if (options.limit !== undefined) {
+    query.set("limit", String(options.limit));
+  }
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<Event[]>(
+    `/api/v1/issues/${encodeURIComponent(key)}/events${suffix}`,
+    "GET",
+    undefined,
+    requestOptions
+  );
+}
+
+export function patchIssue(
+  key: string,
+  input: UpdateIssueInput,
+  options: ApiOptions = {}
+): Promise<Issue> {
+  return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "PATCH", input, options);
+}
 export function createIssue(
-  input: Pick<Issue, "project" | "title"> & { spec?: string },
+  input: Pick<Issue, "project" | "title"> & { parent?: string; spec?: string },
   options: ApiOptions = {}
 ): Promise<Issue> {
   return request<Issue>("/api/v1/issues", "POST", input, options);
@@ -57,19 +99,23 @@ export function createIssue(
 
 export function createAsk(
   issue: string,
-  input: Pick<Ask, "question">,
+  input: CreateAskInput,
   options: ApiOptions = {}
 ): Promise<Ask> {
   return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
 }
 
-export function createComment(
+export function getAsk(id: string, options: ApiOptions = {}): Promise<Ask> {
+  return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
+}
+
+export function createMessage(
   issue: string,
-  input: Pick<Comment, "body">,
+  input: CreateMessageInput,
   options: ApiOptions = {}
-): Promise<Comment> {
-  return request<Comment>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/comments`,
+): Promise<{ id: string }> {
+  return request<{ id: string }>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/messages`,
     "POST",
     input,
     options

@@ -27,7 +27,13 @@ test("ask events refresh the issue, its asks, and the inbox", () => {
 
   applyEventInvalidations(queryClient, event("ask.answered", { id: "ask-1" }));
 
-  expect(invalidated).toEqual([["issue", "CORE-1"], ["asks", "CORE-1"], ["inbox"]]);
+  expect(invalidated).toEqual([
+    ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues"],
+    ["asks", "CORE-1"],
+    ["inbox"],
+  ]);
 });
 
 test("artifact versions refresh the issue and the artifact collection", () => {
@@ -43,6 +49,8 @@ test("artifact versions refresh the issue and the artifact collection", () => {
 
   expect(invalidated).toEqual([
     ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues"],
     ["artifacts", "CORE-1"],
     ["artifact", "artifact-1"],
   ]);
@@ -61,6 +69,8 @@ test("message events refresh only the affected issue messages", () => {
 
   expect(invalidated).toEqual([
     ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues"],
     ["messages", "CORE-1"],
   ]);
 });

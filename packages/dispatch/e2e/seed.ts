@@ -1,3 +1,6 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 const tables = [
   "user_issue_state",
   "events",
@@ -18,6 +21,7 @@ const tables = [
 
 const defaultDatabaseUrl =
   "postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable";
+const execFileAsync = promisify(execFile);
 
 export async function resetDatabase(): Promise<void> {
   const databaseUrl =
@@ -25,17 +29,11 @@ export async function resetDatabase(): Promise<void> {
     globalThis.process.env.DATABASE_URL ??
     defaultDatabaseUrl;
 
-  const command = Bun.spawn([
-    "psql",
+  await execFileAsync("psql", [
     databaseUrl,
     "-v",
     "ON_ERROR_STOP=1",
     "-c",
     `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`,
   ]);
-  const exitCode = await command.exited;
-
-  if (exitCode !== 0) {
-    throw new Error(`Database reset failed with exit code ${exitCode}.`);
-  }
 }

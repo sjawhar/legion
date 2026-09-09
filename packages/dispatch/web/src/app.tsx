@@ -1,18 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import {
-  Link,
-  Navigate,
-  Route,
-  Routes,
-  useLocation,
-  useParams,
-  useSearchParams,
-} from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { api } from "./api/client";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
+import { AskCard } from "./features/inbox/AskCard";
+import { Inbox } from "./features/inbox/Inbox";
+import { IssuePage } from "./features/issue/IssuePage";
+import { Sidebar } from "./features/sidebar/Sidebar";
 
 function SignInPage(): ReactNode {
   return (
@@ -32,75 +28,28 @@ function SignInPage(): ReactNode {
   );
 }
 
-function Inbox(): ReactNode {
-  const inbox = useQuery({
-    queryKey: ["inbox"],
-    queryFn: () => api.getInbox(),
-  });
-
-  if (inbox.isPending) {
-    return <p className="text-slate-500">Loading your inbox…</p>;
-  }
-
-  if (inbox.isError) {
-    return <p className="text-rose-700">Could not load your inbox.</p>;
-  }
-
-  if (inbox.data.length === 0) {
-    return (
-      <p className="rounded-xl border border-dashed border-slate-300 p-8 text-slate-500">
-        Nothing needs you
-      </p>
-    );
-  }
-
-  return (
-    <ul className="space-y-3">
-      {inbox.data.map((ask) => (
-        <li key={ask.id}>
-          <Link
-            className="block rounded-xl border border-slate-200 p-4 hover:border-sky-400"
-            to={`/issues/${ask.issue_key}/asks/${ask.id}`}
-          >
-            <p className="font-medium text-slate-950">{ask.question}</p>
-            <p className="mt-1 text-sm text-slate-500">{ask.issue?.title ?? ask.issue_key}</p>
-          </Link>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function IssueScreen({ title }: { title: string }): ReactNode {
-  const { key } = useParams();
-  const [searchParams] = useSearchParams();
-  const artifactVersion = searchParams.get("v");
-
-  return (
-    <section>
-      <p className="text-sm font-medium text-sky-700">{key}</p>
-      <h1 className="mt-1 text-2xl font-semibold text-slate-950">{title}</h1>
-      {artifactVersion === null ? null : (
-        <p className="mt-3 text-slate-500">Version {artifactVersion}</p>
-      )}
-    </section>
-  );
-}
-
 function Margin(): ReactNode {
   const { pathname } = useLocation();
-  const selected = pathname.match(/\/(asks|comments)\/([^/]+)$/);
+  const askId = pathname.match(/^\/issues\/[^/]+\/asks\/([^/]+)$/)?.[1];
+  const commentId = pathname.match(/^\/issues\/[^/]+\/comments\/([^/]+)$/)?.[1];
+  const ask = useQuery({
+    enabled: askId !== undefined,
+    queryKey: ["ask", askId],
+    queryFn: () => api.getAsk(askId ?? ""),
+  });
 
   return (
     <aside className="fixed inset-x-0 bottom-0 z-10 border-t border-slate-200 bg-white p-4 shadow-[0_-8px_24px_rgba(15,23,42,0.08)] md:static md:order-3 md:w-80 md:border-t-0 md:border-l md:shadow-none">
-      {selected === null ? (
+      {askId === undefined && commentId === undefined ? (
         <p className="text-sm text-slate-500">Select an ask or comment to review it here.</p>
+      ) : askId !== undefined && ask.data !== undefined ? (
+        <AskCard ask={ask.data} />
+      ) : askId !== undefined && ask.isError ? (
+        <p className="text-sm text-rose-700">Could not load this ask.</p>
       ) : (
         <div>
-          <p className="text-sm font-medium text-sky-700">
-            {selected[1] === "asks" ? "Ask" : "Comment"}
-          </p>
-          <p className="mt-1 break-all text-sm text-slate-600">{selected[2]}</p>
+          <p className="text-sm font-medium text-sky-700">Comment</p>
+          <p className="mt-1 break-all text-sm text-slate-600">{commentId}</p>
         </div>
       )}
     </aside>
@@ -110,11 +59,12 @@ function Margin(): ReactNode {
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   return (
     <div className="min-h-dvh bg-slate-50 text-slate-900 md:flex">
-      <aside className="border-b border-slate-200 bg-slate-950 p-5 text-slate-100 md:order-1 md:min-h-dvh md:w-64 md:border-r md:border-b-0">
+      <aside className="border-b border-slate-200 bg-slate-950 p-5 text-slate-100 md:order-1 md:min-h-dvh md:w-80 md:border-r md:border-b-0">
         <Link className="text-lg font-semibold" to="/">
           Dispatch
         </Link>
-        <p className="mt-8 text-sm text-slate-400">Signed in as {user.login}</p>
+        <p className="mt-3 text-sm text-slate-400">Signed in as {user.login}</p>
+        <Sidebar />
       </aside>
       <main className="min-w-0 flex-1 p-6 pb-32 md:order-2 md:pb-6">
         <Routes>
@@ -127,11 +77,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               </section>
             }
           />
-          <Route path="/issues/:key" element={<IssueScreen title="Issue" />} />
-          <Route path="/issues/:key/spec" element={<IssueScreen title="Specification" />} />
-          <Route path="/issues/:key/artifacts/:slug" element={<IssueScreen title="Artifact" />} />
-          <Route path="/issues/:key/asks/:id" element={<IssueScreen title="Issue" />} />
-          <Route path="/issues/:key/comments/:id" element={<IssueScreen title="Issue" />} />
+          <Route path="/issues/:key/*" element={<IssuePage />} />
           <Route path="*" element={<Navigate replace to="/" />} />
         </Routes>
       </main>
@@ -157,7 +103,6 @@ export function AuthGate(): ReactNode {
       <main className="grid min-h-dvh place-items-center text-slate-500">Loading Dispatch…</main>
     );
   }
-
   if (whoAmI.isError || whoAmI.data === undefined) {
     return <SignInPage />;
   }

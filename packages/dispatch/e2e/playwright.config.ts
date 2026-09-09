@@ -1,7 +1,9 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
-const e2ePort = process.env.DISPATCH_E2E_PORT ?? "8777";
+const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${e2ePort}`;
+const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
 export default defineConfig({
   testDir: ".",
@@ -20,13 +22,13 @@ export default defineConfig({
     ? {}
     : {
         webServer: {
-          command: "bash e2e/run-server.sh",
+          command: `bash ${runServer}`,
           port: Number(e2ePort),
           reuseExistingServer: !process.env.CI,
         },
       }),
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
-    { name: "iphone", use: { ...devices["iPhone 13"] } },
+    { name: "iphone", use: { ...devices["iPhone 13"], browserName: "chromium" } },
   ],
 });

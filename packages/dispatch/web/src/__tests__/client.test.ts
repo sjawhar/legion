@@ -27,6 +27,24 @@ function stubFetch(
   };
 }
 
+test("API client does not invoke its default fetch as a client method", async () => {
+  const originalFetch = globalThis.fetch;
+  let receiver: unknown;
+
+  globalThis.fetch = function (this: unknown): Promise<Response> {
+    receiver = this;
+    return Promise.resolve(Response.json({ login: "alice" }));
+  } as unknown as typeof fetch;
+
+  try {
+    const api = createApiClient();
+    await api.whoAmI();
+    expect(receiver).not.toBe(api);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("API client sends the documented method and JSON body for mutations", async () => {
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
