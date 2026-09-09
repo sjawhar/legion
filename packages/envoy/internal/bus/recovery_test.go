@@ -375,3 +375,25 @@ func TestRecovery_ConcurrentRecoverySerializes(t *testing.T) {
 		t.Fatalf("expected exactly 1 delivery after recovery cycles, got %d", count)
 	}
 }
+
+func TestStreamSubjectsIncludesDispatchEvents(t *testing.T) {
+	for _, subject := range bus.StreamSubjects() {
+		if subject == "notifications.dispatch.>" {
+			return
+		}
+	}
+	t.Fatal("dispatch notification subject is not retained by the stream")
+}
+
+func TestConnectedReportsLiveConnection(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	if !client.Connected() {
+		t.Fatal("connected client reported unhealthy")
+	}
+}

@@ -289,6 +289,7 @@ func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.
 func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 	wantSubjects := []string{
 		"notifications.agent.>",
+		"notifications.dispatch.>",
 		"notifications.github.>",
 		"notifications.slack.>",
 		"notifications.ghostwispr.>",

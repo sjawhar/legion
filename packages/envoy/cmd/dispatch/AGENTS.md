@@ -13,6 +13,13 @@ The server requires `DATABASE_URL` and `DISPATCH_AGENT_TOKEN`. It opens a
 `DISPATCH_REPO_PROJECTS` is optional configuration for agent-side issue
 resolution. The router receives it with the agent token for API handlers.
 
+Unless `DISPATCH_NATS_DISABLED=1`, startup connects through `bus.Connect` using
+`natsUrls` from envoy.json, ensures the Dispatch notification stream subject, and
+runs the Postgres-backed event outbox. With NATS disabled, Dispatch continues to
+serve the database and SSE paths without publishing events; `/healthz` reports
+`nats: null`. When enabled, `/healthz` reports the live client's NATS connection
+status and returns unavailable while that connection is down.
+
 ## Identity
 
 `internal/dispatch/identity` is the sole human identity boundary. Handler code
@@ -51,7 +58,7 @@ printed connection string is also the expected
 | `/auth/whoami` | GET | `Identity` | Return the resolved login. |
 | `/api/github/rest/...` | any | `Identity` | Proxy GitHub REST with the resolved user's token. |
 | `/api/github/graphql` | POST | `Identity` | Proxy GitHub GraphQL with the resolved user's token. |
-| `/healthz` | GET | none | Report database readiness. |
+| `/healthz` | GET | none | Report database and NATS readiness. |
 | `/api/v1/inbox?project=` | GET | `Identity` or bearer | Open asks, newest first, with issue key and title. |
 | `/api/v1/issues/{key}/asks` | POST | `Identity` or bearer | Create an ask, optionally anchored to a document range. |
 | `/api/v1/asks/{id}` | GET | `Identity` or bearer | Read an ask. |

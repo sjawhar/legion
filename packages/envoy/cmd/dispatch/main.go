@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,11 +16,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -35,6 +38,7 @@ type bootConfig struct {
 	RepoProjects   string
 	IdentityHeader string
 	AllowedLogins  map[string]struct{}
+	NATSDisabled   bool
 }
 
 func main() {
@@ -58,6 +62,18 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	var natsClient *bus.Client
+	if boot.NATSDisabled {
+		slog.Info("dispatch: NATS publisher disabled")
+	} else {
+		natsClient, err = bus.Connect(envoyConfig.NatsURLs)
+		if err != nil {
+			slog.Error("dispatch: connect NATS", "error", err)
+			os.Exit(1)
+		}
+		defer natsClient.Close()
+	}
 
 	database, err := store.Open(ctx, boot.DatabaseURL)
 	if err != nil {
@@ -120,10 +136,11 @@ func main() {
 	})
 
 	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
-		SigningKey:    signingKey,
-		WebDistDir:    webDistDir,
-		Users:         users,
-		Identity:      requestIdentity,
+		SigningKey: signingKey,
+		WebDistDir: webDistDir,
+		Users:      users,
+		Identity:   requestIdentity,
+
 		AllowedLogins: boot.AllowedLogins,
 		Store:         database,
 		AgentToken:    boot.AgentToken,
@@ -140,7 +157,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	handler := routes.New(appCtx)
+	if natsClient != nil {
+		go outbox.Run(ctx, outbox.Deps{
+			Store:     database,
+			Publisher: natsClient,
+			Broker:    broker,
+			Docs:      documentService,
+		})
+	}
+
+	handler := dispatchHandler(routes.New(appCtx), database, natsClient)
 	listenAddr, err := listenAddress()
 	if err != nil {
 		slog.Error("dispatch: resolve listen address", "error", err)
@@ -248,6 +274,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		AgentToken:    strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
 		RepoProjects:  strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
 		AllowedLogins: parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
+		NATSDisabled:  getenv("DISPATCH_NATS_DISABLED") == "1",
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
@@ -297,6 +324,39 @@ func parsePositiveInt(raw string) (int, error) {
 		return 0, fmt.Errorf("not a positive integer: %q", raw)
 	}
 	return n, nil
+}
+
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient))
+	mux.Handle("/", handler)
+	return mux
+}
+
+func healthzHandler(database *store.Store, natsClient *bus.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		databaseOK := database != nil && database.Pool != nil
+		if databaseOK {
+			databaseOK = database.Pool.Ping(req.Context()) == nil
+		}
+		var natsOK *bool
+		if natsClient != nil {
+			connected := natsClient.Connected()
+			natsOK = &connected
+		}
+		ok := databaseOK && (natsOK == nil || *natsOK)
+		status := http.StatusOK
+		if !ok {
+			status = http.StatusServiceUnavailable
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(struct {
+			OK   bool  `json:"ok"`
+			DB   bool  `json:"db"`
+			NATS *bool `json:"nats"`
+		}{OK: ok, DB: databaseOK, NATS: natsOK})
+	}
 }
 
 // listenAddress builds the listen address from DISPATCH_LISTEN_HOST and

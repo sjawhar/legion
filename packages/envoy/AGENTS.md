@@ -82,6 +82,9 @@ caller must provide a field.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
   `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended
   per-PR default receives lifecycle plus child events.
+- Dispatch issue events use `notifications.dispatch.issue.<KEY>.<type>`. They are
+  retained in JetStream; an issue route also publishes the same envelope to its
+  `notifications.role.<role>` or `notifications.agent.<session_id>` subject.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,
   rather than subscribed to by role holders.
