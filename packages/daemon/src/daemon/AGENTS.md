@@ -15,6 +15,9 @@ The localhost-only Legion API lives in `api.ts`.
 | `POST /legion/v1/process/exit` | Authenticated architect exit that releases an admission slot or marks its root process dead. |
 | `POST /legion/v1/issues`, `/waves/release`, `/issues/comment`, `/issues/body`, `/issues/labels`, `/issues/close` | Scoped architect writes. |
 | `POST /legion/v1/phase`, `/role-backing`, `/worker-session`, `/grants`, `/git-credential`, `/gh-token` | Phase claims, durable architect and worker capability recovery, and credential grants. |
+| `POST /legion/v1/worker/started` | Registers a headless phase worker's session against its daemon-minted boot token; mints its session capability, git identity lease, and records its tmux/socket locator and a hash of its boot token on the claim (so `/worker-session` can rebind it after a daemon restart). |
+| `POST /legion/v1/worker/ready` | Verifies the worker's session capability, redelivers any held role events, and sends its queued assignment as an OMP RPC `prompt` frame over the worker's `legion worker-shim` socket. |
+| `POST /legion/v1/worker/spawn` | Architect-only: spawns a phase worker for `{issue, role, task}` — resumes an already-live worker over its socket (`resumed`), respawns a dead one with `--resume` (`spawned`), or opens a fresh pane (`spawned`). |
 | `POST /legion/v1/controller/ready`, `/gates/approve`, `/admission`, `/backlog` | Controller lifecycle and control-plane actions. |
 
 ## Files
@@ -30,6 +33,8 @@ The localhost-only Legion API lives in `api.ts`.
 | `catchup.ts` | Derived overseer and worker catch-up payloads. |
 | `resync.ts` | Low-frequency board convergence, re-emitted triage for unadmitted tracked roots, and residual anomaly reporting. |
 | `approval-check.ts` | Human approval status backstop for the current PR head. |
+| `worker-rpc.ts` | Minimal OMP RPC protocol v2 client (`negotiate_protocol`/`prompt`/`get_state`/`shutdown`) reached through a worker's `legion worker-shim` unix socket rather than a spawned process's stdio. |
+| `tmux.ts` | Pure tmux command construction/parsing (open/split a window, probe pane liveness and pid, kill a window, list a session's unknown owned windows) over an injected `run` callback — no daemon state. |
 
 ## Operational invariants
 
@@ -37,9 +42,12 @@ The localhost-only Legion API lives in `api.ts`.
 - Controller delivery exceptions enter durable `controllerHeldEvents` before replacement is requested; `/controller/ready` redelivers each held event and removes it only after Envoy acknowledges publication.
 - Root processes and the controller are tmux windows under global admission control. The daemon stores tmux window IDs; names are cosmetic, escaped issue labels.
 - Process failure recovery is exception-driven. A root is trusted only when its recorded window's pane is live and running OMP; a dead root is resurrected under a generation lock.
-- A lingering or closed root releases its admission slot, kills its recorded window, clears its locator, and removes its role claims. The linger sweep also removes session windows not recorded by a tree or controller.
+- A lingering or closed root releases its admission slot, kills every tmux window recorded for the tree (its own and every worker's), clears its locator, and removes its role claims. The linger sweep also removes session windows not recorded by a tree or controller.
 - `DaemonConfig` supplies all lifecycle defaults: admission cap, worker budget, recursion depth, linger duration, resync interval, and retry limit.
 - Boot never resurrects trees; it only reconciles admission so slots opened by a raised cap promote queued issues in order.
+
+- Phase workers (planner/implementer/tester/reviewer/merger, and sub-architects for child issues) run headless — `omp --mode rpc` behind a `legion worker-shim` process — one tmux window per issue, one pane per worker. The issue's first worker opens the window; every later worker on that issue splits into it. Closing a tree kills every one of its windows directly (a pane/window kill, not a graceful per-worker shim shutdown).
+- `spawn_worker` always resumes the same agent for an existing phase: a live claim gets the new task prompted directly over its socket (`resumed`); a claim whose boot has not yet been confirmed by `/worker/started` gets its task queued as `pendingAssignment` without launching a second pane (`resumed`); a dead claim with a recorded OMP session file respawns with `--resume`; only a role with no claim at all gets a genuinely fresh spawn. `/worker/ready` only delivers a queued task when both the caller's session id and generation match the claim's current ones, so a stale respawned session can never drain a newer claim's pending assignment.
 
 ## OMP invocation and daemon tools
 

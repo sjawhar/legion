@@ -11,8 +11,11 @@ spawns directly, one tmux pane per worker, bridged through `legion worker-shim`.
 
 - **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
   credential grants, resync, recovery, and human-gate backstops.
-- **OMP extension** — injects the Legion tool and event delivery into active OMP sessions, provisions
-  issue workspaces, and enforces phase-worker admission and recursion limits.
+- **OMP extension** — injects the Legion tool and event delivery into active OMP sessions and
+  provisions issue workspaces. Phase workers (planner/implementer/tester/reviewer/merger, and
+  sub-architects for child issues) are headless `omp --mode rpc` processes the daemon spawns
+  directly, one tmux pane per worker, bridged through `legion worker-shim`; the daemon enforces
+  recursion limits when spawning them.
 - **Skills** — guide the architect and sequential phase workers. Durable `.legion/<phase>.json`
   handoffs are the recovery source of truth.
 
@@ -46,6 +49,7 @@ legion approve <issue>               # Apply a human approval
 legion admit <issue>                 # Admit a root issue
 legion backlog <issue> <marker>      # Mark an issue as deliberately backlogged
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
+legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-worker OMP process to the daemon over a unix socket (daemon-spawned, not run by hand)
 ```
 
 ## Version Control

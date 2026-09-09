@@ -44,6 +44,8 @@ export interface RecoveryEvent {
 export interface TmuxWindowLocator {
   tmuxSession: string;
   tmuxWindowId: string;
+  tmuxPaneId?: string;
+  socketPath?: string;
   ompSessionFile?: string;
 }
 
@@ -83,11 +85,24 @@ export interface PrState {
   reviewDecision?: "approved" | "changes_requested";
 }
 
+export interface WorkerLocator {
+  tmuxSession: string;
+  tmuxWindowId: string;
+  tmuxPaneId: string;
+  socketPath: string;
+  ompSessionFile?: string;
+}
+
 export interface WorkerRoleClaim {
   issue: IssueKey;
   role: string;
   sessionId?: string;
   agentId?: string;
+  locator?: WorkerLocator;
+  generation?: number;
+  pendingAssignment?: string;
+  launchFailures?: number;
+  bootTokenHash?: string;
 }
 
 export interface ControllerRoleClaim {
@@ -103,11 +118,14 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 13;
+  version: 14;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
-  controllerLocator?: Pick<TmuxWindowLocator, "tmuxSession" | "tmuxWindowId">;
+  controllerLocator?: Pick<
+    TmuxWindowLocator,
+    "tmuxSession" | "tmuxWindowId" | "tmuxPaneId" | "socketPath"
+  >;
   roles: Record<string, RoleClaim>;
   spawnCapabilities: Record<string, SpawnCapability>;
   prs: Record<string, PrState>;
@@ -188,6 +206,8 @@ const TreeStateSchema = z
       .object({
         tmuxSession: z.string(),
         tmuxWindowId: z.string(),
+        tmuxPaneId: z.string().optional(),
+        socketPath: z.string().optional(),
         ompSessionFile: z.string().optional(),
       })
       .strict()
@@ -232,12 +252,26 @@ const PrStateSchema = z
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
   })
   .strict();
+const WorkerLocatorSchema = z
+  .object({
+    tmuxSession: z.string(),
+    tmuxWindowId: z.string(),
+    tmuxPaneId: z.string(),
+    socketPath: z.string(),
+    ompSessionFile: z.string().optional(),
+  })
+  .strict();
 const WorkerRoleClaimSchema = z
   .object({
     issue: IssueKeySchema,
     role: z.string(),
     sessionId: z.string().optional(),
     agentId: z.string().optional(),
+    locator: WorkerLocatorSchema.optional(),
+    generation: z.number().int().nonnegative().optional(),
+    pendingAssignment: z.string().optional(),
+    launchFailures: z.number().int().nonnegative().optional(),
+    bootTokenHash: z.string().optional(),
   })
   .strict();
 const ControllerRoleClaimSchema = z
@@ -262,7 +296,7 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(13),
+    version: z.literal(14),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -272,6 +306,8 @@ const LegionStateSchema = z
       .object({
         tmuxSession: z.string(),
         tmuxWindowId: z.string(),
+        tmuxPaneId: z.string().optional(),
+        socketPath: z.string().optional(),
       })
       .strict()
       .optional(),
@@ -304,7 +340,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 13,
+    version: 14,
     project,
     issues: {},
     trees: {},
@@ -511,6 +547,37 @@ export function pruneStalePrTombstones(state: LegionState, now: number): void {
   }
 }
 
+/** Renamed from the original `migrateV12State` T5 defined (bumped 12->13): #814 independently
+ * claimed v13 for the PR-tombstone migration above, so this worker-locator migration becomes
+ * the v13->v14 step instead. Same defaults/cutover as originally authored, just re-numbered. */
+function migrateV13State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 13) return state;
+  const { roles, ...rest } = state;
+  const migratedRoles = recordValue(roles)
+    ? Object.fromEntries(
+        Object.entries(roles).map(([key, claim]) => {
+          if (
+            !recordValue(claim) ||
+            !("issue" in claim) ||
+            claim.locator !== undefined ||
+            (claim.sessionId === undefined && claim.agentId === undefined)
+          ) {
+            return [key, claim];
+          }
+          // A role claim with a sessionId/agentId but no locator names a session this daemon has
+          // no tmux pane or socket to resume; drop the identity so the next spawn starts fresh
+          // instead of expecting a respawn to reproduce a session id it can never produce.
+          const {
+            sessionId: _droppedSessionId,
+            agentId: _droppedAgentId,
+            ...withoutIdentity
+          } = claim;
+          return [key, withoutIdentity];
+        })
+      )
+    : undefined;
+  return { ...rest, version: 14, ...(migratedRoles ? { roles: migratedRoles } : {}) };
+}
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -524,14 +591,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV12State(
-    migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))))
+  const state = migrateV13State(
+    migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
   );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 13) {
+  if (version !== 14) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

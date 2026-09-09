@@ -16,6 +16,7 @@ export async function handleControllerReady(
     sessionId,
   };
   await ctx.save();
+  await ctx.deps.processManager.markControllerReady();
   await ctx.controllerGate.ensureReady(ctx.deps.onControllerReady);
   return Response.json(validateContractResponse(LegionDaemonApi.ControllerReady.response, {}));
 }

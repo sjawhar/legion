@@ -23,6 +23,19 @@ export function treeContains(state: LegionState, tree: IssueKey, candidate: Issu
   return false;
 }
 
+/** Walks `issue`'s parent chain to the tree root it belongs to, if any. */
+export function rootForIssue(state: LegionState, issue: IssueKey): IssueKey | undefined {
+  if (state.trees[issue]) return issue;
+  const seen = new Set<IssueKey>();
+  let current: IssueKey | undefined = issue;
+  while (current && !seen.has(current)) {
+    if (state.trees[current]) return current;
+    seen.add(current);
+    current = state.issues[current]?.parent;
+  }
+  return undefined;
+}
+
 export function matchingHeldEvent(state: LegionState, issue: IssueKey, role: string): boolean {
   const claim = state.roles[role];
   if (claim && "issue" in claim && claim.issue === issue) {

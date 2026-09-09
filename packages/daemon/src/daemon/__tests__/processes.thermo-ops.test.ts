@@ -56,6 +56,10 @@ function manager(
     natsRequest: async () => JSON.stringify({ type: "ack" }),
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
+    mintWorkerBootToken: async () => "worker-boot-token",
+    connectWorkerRpc: async () => {
+      throw new Error("connectWorkerRpc is not exercised by this fixture");
+    },
     provisioningToken: async () => "installation-token",
     statPrompt: async () => {},
     workerCatchup: {
@@ -81,7 +85,7 @@ it("marks each daemon-created tmux window with its Legion owner", async () => {
         return { stdout: "", exitCode: 1 };
       }
       if (command[0] === "tmux" && command[1] === "new-window") {
-        return { stdout: "@2\n", exitCode: 0 };
+        return { stdout: "@2 %1 12345\n", exitCode: 0 };
       }
       return { stdout: "", exitCode: 0 };
     });

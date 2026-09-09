@@ -18,6 +18,7 @@ import {
   ProcessManager,
   type ProcessManagerDeps,
 } from "../processes";
+import type { WorkerRpcClient } from "../worker-rpc";
 
 const root = formatIssueKey("sjawhar", "legion", 42);
 const child = formatIssueKey("sjawhar", "legion", 43);
@@ -30,6 +31,36 @@ async function temporaryDir(): Promise<string> {
   return directory;
 }
 
+function fakeWorkerRpcClient(): WorkerRpcClient & {
+  prompts: string[];
+  negotiated: boolean;
+  getStateCalls: number;
+  getStateImpl?: () => Promise<Record<string, unknown>>;
+} {
+  const closed = Promise.withResolvers<void>();
+  const client = {
+    closed: closed.promise,
+    prompts: [] as string[],
+    negotiated: false,
+    getStateCalls: 0,
+    getStateImpl: undefined as (() => Promise<Record<string, unknown>>) | undefined,
+    async negotiate() {
+      client.negotiated = true;
+    },
+    async prompt(message: string) {
+      client.prompts.push(message);
+    },
+    async getState() {
+      client.getStateCalls += 1;
+      return client.getStateImpl ? client.getStateImpl() : {};
+    },
+    shutdown() {},
+    close() {
+      closed.resolve();
+    },
+  };
+  return client;
+}
 function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): DaemonConfig {
   return {
     project: "omp",
@@ -109,10 +140,33 @@ function manager(
   const publications: Array<{ subject: string; json: string }> = [];
   const controlRequests: Array<{ subject: string; json: string }> = [];
   const { run: requestedRun, ...overrides } = options;
+  let launchedAnyWindow = false;
   const commandRunner =
     requestedRun ??
     (async (command: string[]) => {
       commands.push(command);
+      // A liveness probe of a previously-recorded window happens before this test's first
+      // successful new-window/split-window; once one has succeeded, tmux's own `-P -F` output
+      // already reports the pane id and pid synchronously, so no further discovery call happens.
+      if (
+        command[0] === "tmux" &&
+        command[1] === "list-panes" &&
+        (command.includes("#{pane_id}") || command.includes("#{pane_pid}"))
+      ) {
+        if (!launchedAnyWindow) return { stdout: "", exitCode: 1 };
+        return {
+          stdout: command.includes("#{pane_id}") ? "%1\n" : "12345\n",
+          exitCode: 0,
+        };
+      }
+      if (command[0] === "tmux" && command[1] === "split-window") {
+        launchedAnyWindow = true;
+        return { stdout: "%2 12345\n", exitCode: 0 };
+      }
+      if (command[0] === "tmux" && command[1] === "new-window") {
+        launchedAnyWindow = true;
+        return { stdout: "@42 %1 12345\n", exitCode: 0 };
+      }
       return { stdout: "", exitCode: 0 };
     });
   const deps: ProcessManagerDeps = {
@@ -126,6 +180,8 @@ function manager(
     },
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
+    mintWorkerBootToken: async () => "worker-boot-token",
+    connectWorkerRpc: async () => fakeWorkerRpcClient(),
     provisioningToken: async () => "daemon-installation-token",
     statPrompt: async () => {},
     ompInvocation: "/opt/oh-my-pi/18.0.3/omp",
@@ -207,7 +263,10 @@ describe("ProcessManager", () => {
     const { manager: processes, state } = manager(newLegionState("omp", 1), {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "new-window" && ++windows === 2) completeSpawns?.();
+        if (command[1] === "new-window") {
+          if (++windows === 2) completeSpawns?.();
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -229,7 +288,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@42\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@42 %1 4242\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
       saveState: async () => {
@@ -288,17 +347,15 @@ describe("ProcessManager", () => {
         if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
           await mkdir(workspace, { recursive: true });
         }
-        return command[1] === "has-session"
-          ? { stdout: "", exitCode: 1 }
-          : { stdout: "", exitCode: 0 };
+        if (command[1] === "has-session") return { stdout: "", exitCode: 1 };
+        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
       },
     });
 
     await processes.spawnRoot(root);
 
-    expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toBe(
-      "task:\n  maxRecursionDepth: 8\n"
-    );
+    expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toBe("");
     expect(state.trees[root]).toMatchObject({
       generation: 1,
       status: "active",
@@ -344,13 +401,17 @@ describe("ProcessManager", () => {
         "new-window",
         "-P",
         "-F",
-        "#{window_id}",
+        "#{window_id} #{pane_id} #{pane_pid}",
         "-t",
         "legion-omp",
         "-n",
         "sjawhar__legion-42",
         "-e",
         "LEGION_TREE=sjawhar/legion#42",
+        "-e",
+        "LEGION_ISSUE=sjawhar/legion#42",
+        "-e",
+        "LEGION_ROLE=architect",
         "-e",
         `LEGION_ROOT_WORKSPACE=${workspace}`,
         "-e",
@@ -368,8 +429,6 @@ describe("ProcessManager", () => {
         "-e",
         "LEGION_CONTROL_SUBJECT=legion.ctl.sjawhar-legion-42.1",
         "-e",
-        "LEGION_WORKER_BUDGET=5",
-        "-e",
         "LEGION_MAX_RECURSION_DEPTH=8",
         "-e",
         `LEGION_STATE_DIR=${stateDir}`,
@@ -383,7 +442,7 @@ describe("ProcessManager", () => {
         "PATH=/full/bin:/usr/bin",
         "-e",
         "DISPATCH_MCP_URL=http://127.0.0.1:18766/mcp",
-        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)"`,
+        `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-architect-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)"`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
@@ -414,6 +473,7 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: sessionExists ? 0 : 1 };
         }
         if (command[1] === "new-session") sessionExists = true;
+        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -429,6 +489,7 @@ describe("ProcessManager", () => {
 
     expect(tmuxWindowEnvironment(controllerWindow)).toEqual({
       LEGION_CONTROLLER: "1",
+      LEGION_ROLE: "controller",
       LEGION_CONTROLLER_SECRET: "controller-secret",
       LEGION_DAEMON_URL: "http://127.0.0.1:13999",
       LEGION_PROJECT: "omp",
@@ -438,6 +499,8 @@ describe("ProcessManager", () => {
     });
     expect(tmuxWindowEnvironment(rootWindow)).toEqual({
       LEGION_TREE: root,
+      LEGION_ISSUE: root,
+      LEGION_ROLE: "architect",
       LEGION_ROOT_WORKSPACE: path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42"),
       LEGION_GENERATION: "1",
       LEGION_BOOT_TOKEN: "boot-token",
@@ -446,7 +509,6 @@ describe("ProcessManager", () => {
       ENVOY_NATS_URL: "nats://127.0.0.1:4222",
       ENVOY_URL: "http://127.0.0.1:9020",
       LEGION_CONTROL_SUBJECT: "legion.ctl.sjawhar-legion-42.1",
-      LEGION_WORKER_BUDGET: "5",
       LEGION_MAX_RECURSION_DEPTH: "8",
       LEGION_STATE_DIR: stateDir,
       LEGION_CREDENTIAL_HELPER: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
@@ -485,6 +547,22 @@ describe("ProcessManager", () => {
     expect(window?.[window.indexOf("-n") + 1]).toHaveLength(160);
   });
 
+  it("keeps the worker socket path under the Unix socket length limit for a very long issue key", async () => {
+    const stateDir = await temporaryDir();
+    const issue = formatIssueKey("a".repeat(200), "b".repeat(200), 1);
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+    });
+
+    await processes.spawnRoot(issue);
+
+    const window = commands.find((command) => command[0] === "tmux" && command.includes("-n"));
+    const shellCommand = window?.at(-1);
+    const socketMatch = shellCommand?.match(/--socket (\S+)/);
+    if (!socketMatch?.[1]) throw new Error("launch command is missing its --socket argument");
+    expect(Buffer.byteLength(socketMatch[1])).toBeLessThan(100);
+  });
+
   it("records a new tmux window id and probes that id rather than its cosmetic name", async () => {
     const stateDir = await temporaryDir();
     const commands: string[][] = [];
@@ -493,8 +571,8 @@ describe("ProcessManager", () => {
       run: async (command) => {
         commands.push(command);
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@314\n", exitCode: 0 };
-        if (command[1] === "list-panes" && command.includes("@314")) {
+        if (command[1] === "new-window") return { stdout: "@314 %7 12345\n", exitCode: 0 };
+        if (command[1] === "list-panes" && command.includes("%7")) {
           return { stdout: "12345\n", exitCode: 0 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
@@ -507,9 +585,10 @@ describe("ProcessManager", () => {
     expect(state.trees[root]?.locator).toMatchObject({
       tmuxSession: "legion-omp",
       tmuxWindowId: "@314",
+      tmuxPaneId: "%7",
     });
     expect(await processes.probe(root)).toBe("alive");
-    expect(commands).toContainEqual(["tmux", "list-panes", "-t", "@314", "-F", "#{pane_pid}"]);
+    expect(commands).toContainEqual(["tmux", "list-panes", "-t", "%7", "-F", "#{pane_pid}"]);
   });
 
   it("rejects a live pane whose process command is not OMP", async () => {
@@ -582,6 +661,7 @@ describe("ProcessManager", () => {
       panePath,
       run: async (command) => {
         commands.push(command);
+        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -592,10 +672,13 @@ describe("ProcessManager", () => {
     const workspaceDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     const controllerDir = path.join(stateDir, "controller");
     const extensionDir = path.resolve(import.meta.dir, "../../../../pi-envoy");
+    const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
+    const socketPath = path.join(stateDir, "workers", "42-architect-edb483d7.sock");
+    const controllerSocketPath = path.join(stateDir, "workers", "controller.sock");
     const windows = commands.filter((command) => command[1] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
-      `cd ${workspaceDir} && ${ompInvocation} --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)"`,
-      `cd ${controllerDir} && ${ompInvocation} --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
+      `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)"`,
+      `cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
     ]);
     expect(windows.map((command) => command.includes(`PATH=${panePath}`))).toEqual([true, true]);
   });
@@ -696,6 +779,7 @@ describe("ProcessManager", () => {
         }
         if (command[1] === "new-window" && command.includes(`LEGION_TREE=${child}`)) {
           completePromotion?.();
+          return { stdout: "@2 %2 4242\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -782,7 +866,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@77\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@77 %1 4242\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -863,7 +947,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@88\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@88 %1 4242\n", exitCode: 0 };
         if (command[1] === "set-option" && command[2] === "-w") {
           return { stdout: "marker rejected", exitCode: 1 };
         }
@@ -1045,7 +1129,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@42\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@42 %1 4242\n", exitCode: 0 };
         if (command[1] === "kill-window") {
           killedWindows.push(command[3] ?? "");
           return { stdout: "", exitCode: 0 };
@@ -1125,15 +1209,29 @@ describe("ProcessManager", () => {
 
   it("serializes concurrent resurrection attempts for the same dead generation", async () => {
     const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
     const state = newLegionState("omp", 1);
     tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
     let windows = 0;
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "list-windows") return { stdout: "", exitCode: 1 };
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") windows += 1;
+        if (command[1] === "new-window") {
+          windows += 1;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_id}")) {
+          return windows > 0 ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_pid}")) {
+          return windows > 0 ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1161,9 +1259,11 @@ describe("ProcessManager", () => {
 
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
+    const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
+    const socketPath = path.join(stateDir, "workers", "42-architect-edb483d7.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
+      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
     );
   });
 
@@ -1190,13 +1290,15 @@ describe("ProcessManager", () => {
 
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
+    const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
+    const socketPath = path.join(stateDir, "workers", "42-architect-edb483d7.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
+      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
     );
   });
 
-  it("logs and starts fresh when a resurrected root's recorded OMP session is missing", async () => {
+  it("fails a resurrection loudly when the recorded OMP session file is missing, never starting fresh", async () => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "missing-architect-session.json");
     const state = newLegionState("omp", 1);
@@ -1204,26 +1306,17 @@ describe("ProcessManager", () => {
     const locator = state.trees[root].locator;
     if (!locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
-    const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
     });
 
-    try {
-      await processes.resurrect(root);
-      expect(log).toHaveBeenCalledWith(
-        `[legion] resurrecting ${root} with a fresh OMP session; recorded session file is missing: ${sessionFile}`
-      );
-    } finally {
-      log.mockRestore();
-    }
+    await expect(processes.resurrect(root)).rejects.toThrow(/recorded OMP session file is missing/);
 
-    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
-    const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
-    const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
-    expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
-    );
+    expect(
+      commands.some((command) => command[0] === "tmux" && command[1] === "new-window")
+    ).toBeFalse();
+    expect(state.trees[root].launchFailures).toBe(1);
+    expect(state.trees[root].status).toBe("queued");
   });
 
   it("clears completed-tree phases and releases its admission slot at linger start, then shuts down its recorded tmux tree", async () => {
@@ -1277,7 +1370,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@99\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@99 %1 4242\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1309,7 +1402,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@99\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@99 %1 4242\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
       saveState: async () => {
@@ -1336,6 +1429,37 @@ describe("ProcessManager", () => {
     });
     expect(state.admission.active).toEqual([child]);
     expect(state.admission.queue).toEqual([]);
+  });
+  it("kills every issue window in the tree when closing it, not just the root's own", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.roles[roleToken("omp", child, "implementer")] = {
+      issue: child,
+      role: "implementer",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@99",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const { manager: processes, commands } = manager(state);
+
+    await processes.closeTree(root);
+
+    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
+    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@99"]);
+    expect(state.roles[roleToken("omp", child, "implementer")]).toBeUndefined();
+    expect(state.trees[root].locator).toBeUndefined();
   });
 
   it("requests control directives on the sanitized tree generation topic", async () => {
@@ -1546,7 +1670,10 @@ describe("ProcessManager", () => {
             : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") controllerSpawned = true;
+        if (command[1] === "new-window") {
+          controllerSpawned = true;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
         if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
@@ -1564,6 +1691,8 @@ describe("ProcessManager", () => {
     expect(state.controllerLocator).toEqual({
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
     });
     expect(publications).toEqual([]);
   });
@@ -1586,7 +1715,10 @@ describe("ProcessManager", () => {
           return controllerLive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") controllerLive = true;
+        if (command[1] === "new-window") {
+          controllerLive = true;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1625,7 +1757,10 @@ describe("ProcessManager", () => {
             : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") controllerSpawned = true;
+        if (command[1] === "new-window") {
+          controllerSpawned = true;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1740,12 +1875,32 @@ describe("ProcessManager", () => {
 
   it("resurrects a dead root architect instead of holding the root event", async () => {
     const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
     const state = newLegionState("omp", 1);
     tree(state);
+    const rootLocator = state.trees[root].locator;
+    if (!rootLocator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...rootLocator, ompSessionFile: sessionFile };
+    let launched = false;
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "list-windows") return { stdout: "", exitCode: 1 };
+        if (command[1] === "new-window") {
+          launched = true;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "split-window") {
+          launched = true;
+          return { stdout: "%2 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_id}")) {
+          return launched ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_pid}")) {
+          return launched ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1756,8 +1911,13 @@ describe("ProcessManager", () => {
   });
   it("persists a dead worker's original delivery before resurrecting its root", async () => {
     const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
     const state = newLegionState("omp", 1);
     tree(state);
+    const rootLocator = state.trees[root].locator;
+    if (!rootLocator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...rootLocator, ompSessionFile: sessionFile };
     state.issues[child] = {
       key: child,
       title: "Child",
@@ -1771,10 +1931,27 @@ describe("ProcessManager", () => {
     const token = roleToken("omp", child, role);
     state.roles[token] = { issue: child, role, agentId: "agt-worker" };
     const original = exception(token).original;
+    let launched = false;
     const { manager: processes } = manager(state, {
       config: config(stateDir),
-      run: async (command) =>
-        command[1] === "list-windows" ? { stdout: "", exitCode: 1 } : { stdout: "", exitCode: 0 },
+      run: async (command) => {
+        if (command[1] === "list-windows") return { stdout: "", exitCode: 1 };
+        if (command[1] === "new-window") {
+          launched = true;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "split-window") {
+          launched = true;
+          return { stdout: "%2 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_id}")) {
+          return launched ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_pid}")) {
+          return launched ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
     });
 
     await processes.handleException(exception(token, original));
@@ -1790,8 +1967,13 @@ describe("ProcessManager", () => {
   });
   it("delivers worker catch-up and the original event once the resurrected root is ready", async () => {
     const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
     const state = newLegionState("omp", 1);
     tree(state);
+    const rootLocator = state.trees[root].locator;
+    if (!rootLocator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...rootLocator, ompSessionFile: sessionFile };
     state.issues[child] = {
       key: child,
       title: "Child",
@@ -1805,11 +1987,26 @@ describe("ProcessManager", () => {
     const token = roleToken("omp", child, role);
     state.roles[token] = { issue: child, role, agentId: "agt-worker" };
     const original = exception(token).original;
+    let launched = false;
     const { manager: processes, publications } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "list-windows") return { stdout: "", exitCode: 1 };
         if (command[0] === "gh") return { stdout: "[]", exitCode: 0 };
+        if (command[1] === "new-window") {
+          launched = true;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "split-window") {
+          launched = true;
+          return { stdout: "%2 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_id}")) {
+          return launched ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_pid}")) {
+          return launched ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1831,6 +2028,68 @@ describe("ProcessManager", () => {
       { subject: original.topic, json: original.payload },
     ]);
     expect(state.trees[root].recoveryEvents).toEqual([]);
+  });
+
+  it("connects a worker-shim client to the root architect's socket when its tree becomes ready", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].locator = {
+      ...state.trees[root].locator,
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@42",
+      socketPath: "/state/workers/sjawhar__legion-42-architect.sock",
+    };
+    const connectedSockets: string[] = [];
+    const client = fakeWorkerRpcClient();
+    const { manager: processes } = manager(state, {
+      connectWorkerRpc: async (socketPath) => {
+        connectedSockets.push(socketPath);
+        return client;
+      },
+    });
+
+    await processes.markTreeReady(root);
+
+    expect(connectedSockets).toEqual(["/state/workers/sjawhar__legion-42-architect.sock"]);
+    expect(client.negotiated).toBe(true);
+  });
+
+  it("connects a worker-shim client to the controller's socket when it becomes ready", async () => {
+    const state = newLegionState("omp", 1);
+    state.controllerLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@43",
+      tmuxPaneId: "%1",
+      socketPath: "/state/workers/controller.sock",
+    };
+    const connectedSockets: string[] = [];
+    const client = fakeWorkerRpcClient();
+    const { manager: processes } = manager(state, {
+      connectWorkerRpc: async (socketPath) => {
+        connectedSockets.push(socketPath);
+        return client;
+      },
+    });
+
+    await processes.markControllerReady();
+
+    expect(connectedSockets).toEqual(["/state/workers/controller.sock"]);
+    expect(client.negotiated).toBe(true);
+  });
+
+  it("does nothing when the controller has no recorded socket yet", async () => {
+    const state = newLegionState("omp", 1);
+    const connectedSockets: string[] = [];
+    const { manager: processes } = manager(state, {
+      connectWorkerRpc: async (socketPath) => {
+        connectedSockets.push(socketPath);
+        return fakeWorkerRpcClient();
+      },
+    });
+
+    await processes.markControllerReady();
+
+    expect(connectedSockets).toEqual([]);
   });
 
   it("holds an exception until an unbacked worker exists", async () => {
@@ -1895,8 +2154,13 @@ describe("ProcessManager", () => {
 
   it("resurrects a dead backed worker and reports a revival nack to the controller", async () => {
     const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
     const state = newLegionState("omp", 1);
     tree(state);
+    const rootLocator = state.trees[root].locator;
+    if (!rootLocator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...rootLocator, ompSessionFile: sessionFile };
     state.issues[child] = {
       key: child,
       title: "Child",
@@ -1911,10 +2175,25 @@ describe("ProcessManager", () => {
       role: "implementer",
       agentId: "agt-worker",
     } as LegionState["roles"][string];
+    let launched = false;
     const { manager: processes, publications } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
         if (command[1] === "list-windows") return { stdout: "", exitCode: 1 };
+        if (command[1] === "new-window") {
+          launched = true;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "split-window") {
+          launched = true;
+          return { stdout: "%2 12345\n", exitCode: 0 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_id}")) {
+          return launched ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[1] === "list-panes" && command.includes("#{pane_pid}")) {
+          return launched ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -2073,4 +2352,928 @@ describe("ProcessManager", () => {
       }
     }
   );
+
+  it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          return { stdout: "@99 %201 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const result = await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    expect(result).toEqual({ status: "spawned", roleToken: roleToken("omp", root, "tester") });
+    const windowCommand = commands.find(
+      (command) => command[0] === "tmux" && command[1] === "new-window" && command.includes("-n")
+    );
+    if (!windowCommand) throw new Error("worker spawn did not open a tmux window");
+    expect(windowCommand[windowCommand.indexOf("-n") + 1]).toBe("sjawhar__legion-42");
+    expect(tmuxWindowEnvironment(windowCommand)).toEqual({
+      LEGION_TREE: root,
+      LEGION_ISSUE: root,
+      LEGION_ROLE: "tester",
+      LEGION_WORKSPACE: workspace,
+      LEGION_BOOT_TOKEN: "worker-boot-token",
+      LEGION_GENERATION: "1",
+      LEGION_DAEMON_URL: "http://127.0.0.1:13999",
+      LEGION_PROJECT: "omp",
+      LEGION_STATE_DIR: stateDir,
+      LEGION_CREDENTIAL_HELPER: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
+      ENVOY_NATS_URL: "nats://127.0.0.1:4222",
+      ENVOY_URL: "http://127.0.0.1:9020",
+      GIT_CONFIG_COUNT: "0",
+      GIT_TERMINAL_PROMPT: "0",
+      PATH: "/full/bin:/usr/bin",
+    });
+    const promptPath = path.join(
+      path.resolve(import.meta.dir, "../../../../pi-envoy"),
+      "roles",
+      "tester.md"
+    );
+    expect(windowCommand.at(-1)).toBe(
+      `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-tester-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${promptPath})"`
+    );
+    const claim = managedState.roles[roleToken("omp", root, "tester")];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");
+    expect(claim.generation).toBe(1);
+    expect(claim.pendingAssignment).toBe("verify #41");
+    expect(claim.locator).toMatchObject({
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@99",
+      tmuxPaneId: "%201",
+      socketPath: path.join(stateDir, "workers", "42-tester-edb483d7.sock"),
+    });
+  });
+
+  it("splits a second worker on the same issue into the window the first worker just opened", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          return { stdout: "@99 %101 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%201 67890\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return { stdout: "%101\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnWorker(root, root, "planner", "plan #41");
+    const result = await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    expect(result.status).toBe("spawned");
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+    ).toHaveLength(1);
+    const split = commands.find(
+      (command) => command[0] === "tmux" && command[1] === "split-window"
+    );
+    if (!split) throw new Error("second worker did not split the existing window");
+    expect(split).toContain("@99");
+    expect(commands).toContainEqual(["tmux", "select-layout", "-t", "@99", "tiled"]);
+  });
+
+  it("serializes two concurrent first spawns on the same issue into a single new window", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const commands: string[][] = [];
+    let windowsOpened = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          // Widens the race window a concurrency bug would need to slip through.
+          await Bun.sleep(5);
+          windowsOpened += 1;
+          return { stdout: `@99 %${100 + windowsOpened} 12345\n`, exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%201 67890\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return windowsOpened > 0
+            ? { stdout: "%101\n", exitCode: 0 }
+            : { stdout: "", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const [plannerResult, testerResult] = await Promise.all([
+      processes.spawnWorker(root, root, "planner", "plan #41"),
+      processes.spawnWorker(root, root, "tester", "verify #41"),
+    ]);
+
+    expect(plannerResult.status).toBe("spawned");
+    expect(testerResult.status).toBe("spawned");
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+    ).toHaveLength(1);
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[1] === "split-window")
+    ).toHaveLength(1);
+    const plannerClaim = managedState.roles[roleToken("omp", root, "planner")];
+    const testerClaim = managedState.roles[roleToken("omp", root, "tester")];
+    if (!plannerClaim || !("issue" in plannerClaim) || !testerClaim || !("issue" in testerClaim)) {
+      throw new Error("both worker claims must be recorded");
+    }
+    expect(plannerClaim.locator?.tmuxWindowId).toBe("@99");
+    expect(testerClaim.locator?.tmuxWindowId).toBe("@99");
+  });
+
+  it("rewrites every claim's stale window id once a dead recorded window falls back to a fresh one", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const plannerToken = roleToken("omp", root, "planner");
+    const implementerToken = roleToken("omp", root, "implementer");
+    state.roles[plannerToken] = {
+      issue: root,
+      role: "planner",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/planner.sock",
+      },
+    };
+    state.roles[implementerToken] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          return { stdout: "@99 %201 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%301 67890\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return command.includes("@42")
+            ? { stdout: "", exitCode: 1 }
+            : { stdout: "%201\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+    ).toHaveLength(1);
+    for (const token of [plannerToken, implementerToken]) {
+      const claim = managedState.roles[token];
+      if (!claim || !("issue" in claim)) throw new Error(`${token} claim disappeared`);
+      expect(claim.locator?.tmuxWindowId).toBe("@99");
+    }
+
+    await processes.spawnWorker(root, root, "reviewer", "review #41");
+
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+    ).toHaveLength(1);
+    const split = commands.find(
+      (command) => command[0] === "tmux" && command[1] === "split-window"
+    );
+    if (!split) throw new Error("fourth worker did not split into the rewritten window");
+    expect(split).toContain("@99");
+  });
+
+  it("resumes an already-alive worker by sending the task over its live socket, spawning nothing new", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 2,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+        ompSessionFile: "/state/workers/tester-session.json",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    const { manager: processes, commands } = manager(state, {
+      connectWorkerRpc: async () => client,
+    });
+
+    const result = await processes.spawnWorker(root, root, "tester", "verify #55");
+
+    expect(result).toEqual({ status: "resumed", roleToken: token });
+    expect(client.prompts).toEqual(["verify #55"]);
+    expect(commands.some((command) => command[0] === "tmux")).toBeFalse();
+  });
+  it("treats a same-role spawn during an in-flight boot as resumed-pending, never launching a second pane", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    const {
+      manager: processes,
+      state: managedState,
+      commands,
+    } = manager(state, {
+      config: config(stateDir),
+    });
+
+    const first = await processes.spawnWorker(root, root, "tester", "verify #41");
+    expect(first).toEqual({ status: "spawned", roleToken: token });
+
+    // /worker/started has not run yet, so the claim has a locator but no sessionId: this second
+    // call must never open or split another pane, and must queue its task for worker/ready.
+    const second = await processes.spawnWorker(root, root, "tester", "verify #55");
+    expect(second).toEqual({ status: "resumed", roleToken: token });
+
+    expect(
+      commands.filter(
+        (command) =>
+          command[0] === "tmux" && (command[1] === "new-window" || command[1] === "split-window")
+      )
+    ).toHaveLength(1);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.sessionId).toBeUndefined();
+    expect(claim.pendingAssignment).toBe("verify #55");
+  });
+
+  it("respawns with --resume when a worker's claimed socket is dead, splitting into its own persisted window", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(path.join(stateDir, "prior-tester-session.json"), "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+        ompSessionFile: path.join(stateDir, "prior-tester-session.json"),
+      },
+    };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%301 23456\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return { stdout: "%301\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const result = await processes.spawnWorker(root, root, "tester", "verify again");
+
+    expect(result).toEqual({ status: "spawned", roleToken: token });
+    const split = commands.find(
+      (command) => command[0] === "tmux" && command[1] === "split-window"
+    );
+    if (!split) throw new Error("dead-worker respawn did not split its persisted window");
+    expect(split).toContain("@42");
+    expect(split.at(-1)).toContain(`--resume=${path.join(stateDir, "prior-tester-session.json")}`);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");
+    expect(claim.generation).toBe(2);
+  });
+
+  it("kills a dead-socket worker's still-running pane before respawning it", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(path.join(stateDir, "prior-tester-session.json"), "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+        ompSessionFile: path.join(stateDir, "prior-tester-session.json"),
+      },
+    };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("%7") &&
+          command.includes("#{pane_pid}")
+        ) {
+          // The old pane's OMP child is still running despite the dead socket.
+          return { stdout: "22222\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%301 23456\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return { stdout: "%301\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const result = await processes.spawnWorker(root, root, "tester", "verify again");
+
+    expect(result).toEqual({ status: "spawned", roleToken: token });
+    expect(
+      commands.some(
+        (command) => command[0] === "tmux" && command[1] === "kill-pane" && command.includes("%7")
+      )
+    ).toBeTrue();
+    const killPaneIndex = commands.findIndex(
+      (command) => command[1] === "kill-pane" && command.includes("%7")
+    );
+    const splitWindowIndex = commands.findIndex((command) => command[1] === "split-window");
+    expect(killPaneIndex).toBeGreaterThanOrEqual(0);
+    expect(splitWindowIndex).toBeGreaterThan(killPaneIndex);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");
+    expect(claim.generation).toBe(2);
+  });
+
+  it("fails a worker respawn loudly when its recorded OMP session file is missing, never starting fresh", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+        ompSessionFile: path.join(stateDir, "missing-tester-session.json"),
+      },
+    };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await expect(processes.spawnWorker(root, root, "tester", "verify again")).rejects.toThrow(
+      /recorded OMP session file is missing/
+    );
+
+    expect(
+      commands.some((command) => command[0] === "tmux" && command[1] === "split-window")
+    ).toBeFalse();
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.launchFailures).toBe(1);
+  });
+
+  it("passes a respawned claim's existing sessionId as the worker boot token's expected session", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      sessionId: "ses_original",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    let expectedSessionId: string | undefined;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      mintWorkerBootToken: async (_tree, _issue, _role, generation, sessionId) => {
+        expectedSessionId = sessionId;
+        return `boot-${generation}`;
+      },
+      run: async (command) => {
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%301 23456\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return { stdout: "%7\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnWorker(root, root, "tester", "verify again");
+
+    expect(expectedSessionId).toBe("ses_original");
+  });
+
+  it("refuses to spawn a sub-architect at or beyond the configured recursion depth", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [child],
+      released: true,
+      labels: [],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    tree(state);
+    const { manager: processes } = manager(state, {
+      config: config("/state", { maxRecursionDepth: 1 }),
+    });
+
+    await expect(processes.spawnWorker(root, child, "architect", "plan sub-tree")).rejects.toThrow(
+      /recursion/
+    );
+  });
+
+  it("delivers a worker's pending assignment over its socket on worker/ready and clears it", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => client,
+    });
+
+    await processes.workerReady(root, "tester", "ses_tester", 1);
+
+    expect(client.prompts).toEqual(["verify #41"]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.pendingAssignment).toBeUndefined();
+  });
+
+  it("ignores worker/ready from a stale generation even when the session id matches, leaving pendingAssignment intact", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 2,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #55",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => client,
+    });
+
+    // A same-agent respawn keeps the session id, so a late worker/ready from the replaced
+    // (generation 1) process must not be able to consume generation 2's pending assignment.
+    await processes.workerReady(root, "tester", "ses_tester", 1);
+
+    expect(client.prompts).toEqual([]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.pendingAssignment).toBe("verify #55");
+  });
+
+  it("reconnects to every worker claim with a locator on daemon start", async () => {
+    const state = newLegionState("omp", 1);
+    state.roles[roleToken("omp", root, "planner")] = {
+      issue: root,
+      role: "planner",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/planner.sock",
+      },
+    };
+    state.roles[roleToken("omp", root, "tester")] = {
+      issue: root,
+      role: "tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const connectedSockets: string[] = [];
+    const { manager: processes } = manager(state, {
+      connectWorkerRpc: async (socketPath) => {
+        connectedSockets.push(socketPath);
+        return fakeWorkerRpcClient();
+      },
+    });
+
+    await processes.reconnectWorkers();
+
+    expect(connectedSockets.sort()).toEqual(
+      ["/state/workers/planner.sock", "/state/workers/tester.sock"].sort()
+    );
+  });
+
+  it("closes and does not cache a worker socket whose negotiation fails, so a later call reconnects", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    let connectCalls = 0;
+    let firstClientClosed = false;
+    const goodClient = fakeWorkerRpcClient();
+    const { manager: processes } = manager(state, {
+      connectWorkerRpc: async () => {
+        connectCalls += 1;
+        if (connectCalls === 1) {
+          return {
+            ...fakeWorkerRpcClient(),
+            negotiate: async () => {
+              throw new Error("shim never answered negotiate_protocol");
+            },
+            close: () => {
+              firstClientClosed = true;
+            },
+          };
+        }
+        return goodClient;
+      },
+    });
+
+    await expect(processes.workerReady(root, "tester", "ses_tester", 1)).rejects.toThrow(
+      "shim never answered negotiate_protocol"
+    );
+    expect(firstClientClosed).toBe(true);
+
+    await processes.workerReady(root, "tester", "ses_tester", 1);
+
+    expect(connectCalls).toBe(2);
+    expect(goodClient.prompts).toEqual(["verify #41"]);
+  });
+
+  it("clears a claim's stale locator when reconnectWorkers finds its socket dead, keeping its pending assignment", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+      },
+    };
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+
+    await processes.reconnectWorkers();
+
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.locator).toBeUndefined();
+    expect(claim.pendingAssignment).toBe("verify #41");
+  });
+
+  it("kills a still-running pane whose socket is unreachable before clearing its locator on reconnect", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+      },
+    };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("%7") &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "22222\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.reconnectWorkers();
+
+    expect(
+      commands.some(
+        (command) => command[0] === "tmux" && command[1] === "kill-pane" && command.includes("%7")
+      )
+    ).toBeTrue();
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.locator).toBeUndefined();
+    expect(claim.pendingAssignment).toBe("verify #41");
+  });
+
+  it("swallows a controller shim connect failure on ready, so held-event replay is never blocked by it", async () => {
+    const state = newLegionState("omp", 1);
+    state.controllerLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@43",
+      tmuxPaneId: "%1",
+      socketPath: "/state/workers/controller.sock",
+    };
+    const { manager: processes } = manager(state, {
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+
+    await expect(processes.markControllerReady()).resolves.toBeUndefined();
+  });
 });

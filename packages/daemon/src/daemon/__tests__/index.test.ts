@@ -10,6 +10,7 @@ import type { DaemonEnvironment } from "../environment";
 import * as daemonIndex from "../index";
 import { newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
+import type { WorkerRpcClient } from "../worker-rpc";
 
 const { startDaemon } = daemonIndex;
 
@@ -140,15 +141,26 @@ function daemonTestDependencies(
         if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
           return { stdout: "", stderr: "", exitCode: 1 };
         }
-        if (
-          command[0]?.endsWith("/tmux") &&
-          (command[1] === "new-session" || command[1] === "new-window")
-        ) {
-          return { stdout: "@42", stderr: "", exitCode: 0 };
+        if (command[0]?.endsWith("/tmux") && command[1] === "new-session") {
+          return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
+        }
+        if (command[0]?.endsWith("/tmux") && command[1] === "new-window") {
+          return { stdout: "@42 %1 12345", stderr: "", exitCode: 0 };
         }
         return { stdout: "", stderr: "", exitCode: 0 };
       },
       resolveDaemonEnvironment: async () => daemonEnvironment,
+      connectWorkerRpc: async (): Promise<WorkerRpcClient> => {
+        const closed = Promise.withResolvers<void>();
+        return {
+          closed: closed.promise,
+          negotiate: async () => {},
+          prompt: async () => {},
+          getState: async () => ({}),
+          shutdown: () => {},
+          close: () => closed.resolve(),
+        };
+      },
       statPrompt: async () => {},
       readPluginManifest: async () => validLegionPluginManifest,
       envoyPublish: async (topic, payload) => {
@@ -549,7 +561,7 @@ describe("startDaemon", () => {
               command[0]?.endsWith("/tmux") &&
               (command[1] === "new-session" || command[1] === "new-window")
             ) {
-              return { stdout: "@42", stderr: "", exitCode: 0 };
+              return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
@@ -758,6 +770,75 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("accepts controller/ready and still redelivers held events when the controller's shim socket is unreachable", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const firstNats = new FakeNats();
+    const secondNats = new FakeNats();
+    const publications: Array<{ topic: string; payload: unknown }> = [];
+    let controllerSecret: string | undefined;
+    let first: daemonIndex.DaemonHandle | undefined;
+    let second: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      first = await startDaemon(
+        daemonConfig,
+        daemonTestDependencies(firstNats, publications, (secret) => {
+          controllerSecret = secret;
+        })
+      );
+      const controller = controllerToken(daemonConfig.project);
+      firstNats.emit(
+        `notifications.envoy.exceptions.notifications.role.${controller}`,
+        controllerException(daemonConfig.project)
+      );
+      await first.drain();
+      expect(controllerSecret).toBeString();
+      await first.stop();
+      first = undefined;
+
+      const secondOptions = daemonTestDependencies(secondNats, publications, () => {});
+      second = await startDaemon(daemonConfig, {
+        deps: {
+          ...secondOptions.deps,
+          connectWorkerRpc: async () => {
+            throw new Error("ECONNREFUSED: controller shim socket unreachable");
+          },
+        },
+      });
+
+      const ready = await fetch(
+        `http://127.0.0.1:${second.server.port}/legion/v1/controller/ready`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            secret: controllerSecret,
+            sessionId: "ses-controller",
+          }),
+        }
+      );
+
+      // A shim connect failure must never block /controller/ready from accepting the role and
+      // running its held-event redelivery: the response is 2xx and the persisted exception is
+      // still redelivered exactly as it is when the shim socket connects cleanly.
+      expect(ready.status).toBe(200);
+      expect(publications).toEqual([
+        {
+          topic: roleTopic(controller),
+          payload: {
+            type: "triage",
+            issue: formatIssueKey("acme", "widgets", 42),
+            preexistingChildren: [],
+          },
+        },
+      ]);
+    } finally {
+      await first?.stop();
+      await second?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("promotes queued persisted issues before boot completes when config raises the admission cap", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = { ...config(stateDir), admissionCap: 2 };
@@ -803,7 +884,11 @@ describe("startDaemon", () => {
                 launchedRoots += 1;
                 if (launchedRoots === 2) rootLaunches.resolve();
               }
-              return { stdout: `@${40 + launchedRoots}\n`, stderr: "", exitCode: 0 };
+              return {
+                stdout: `@${40 + launchedRoots} %${launchedRoots} 1234${launchedRoots}\n`,
+                stderr: "",
+                exitCode: 0,
+              };
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },

@@ -132,6 +132,45 @@ export const LegionDaemonApi = {
     }),
     response: z.object({}),
   },
+  WorkerStarted: {
+    request: z.strictObject({
+      tree: nonEmptyString,
+      issue: nonEmptyString,
+      role: legionRole,
+      bootToken: nonEmptyString,
+      sessionId: nonEmptyString,
+      agentId: nonEmptyString,
+      ompSessionFile: nonEmptyString,
+    }),
+    response: z.object({
+      roleToken: nonEmptyString,
+      secret: nonEmptyString,
+      gitName: nonEmptyString,
+      gitEmail: nonEmptyString,
+    }),
+  },
+  WorkerReady: {
+    request: z.strictObject({
+      tree: nonEmptyString,
+      issue: nonEmptyString,
+      role: legionRole,
+      sessionId: nonEmptyString,
+      generation: z.number().int().nonnegative(),
+      secret: nonEmptyString,
+    }),
+    response: z.object({}),
+  },
+  SpawnWorker: {
+    request: architectCapability.extend({
+      issue: nonEmptyString,
+      role: legionRole,
+      task: nonEmptyString,
+    }),
+    response: z.object({
+      status: z.enum(["spawned", "resumed"]),
+      roleToken: nonEmptyString,
+    }),
+  },
   Phase: {
     request: z.strictObject({
       tree: nonEmptyString,
@@ -210,6 +249,11 @@ export type IssueCloseInput = InputOf<typeof LegionDaemonApi.IssueClose.request>
 export type SpawnTokenInput = InputOf<typeof LegionDaemonApi.SpawnToken.request>;
 export type SpawnTokenResponse = OutputOf<typeof LegionDaemonApi.SpawnToken.response>;
 export type RoleBackingInput = InputOf<typeof LegionDaemonApi.RoleBacking.request>;
+export type WorkerStartedInput = InputOf<typeof LegionDaemonApi.WorkerStarted.request>;
+export type WorkerStartedResponse = OutputOf<typeof LegionDaemonApi.WorkerStarted.response>;
+export type WorkerReadyInput = InputOf<typeof LegionDaemonApi.WorkerReady.request>;
+export type SpawnWorkerInput = InputOf<typeof LegionDaemonApi.SpawnWorker.request>;
+export type SpawnWorkerResponse = OutputOf<typeof LegionDaemonApi.SpawnWorker.response>;
 export type PhaseInput = InputOf<typeof LegionDaemonApi.Phase.request>;
 export type PhaseResponse = OutputOf<typeof LegionDaemonApi.Phase.response>;
 export type WorkerSessionInput = InputOf<typeof LegionDaemonApi.WorkerSession.request>;

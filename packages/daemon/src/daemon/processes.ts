@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   controllerToken,
@@ -9,13 +9,17 @@ import {
   parseRoleToken,
   roleToken,
   roleTopic,
+  type SpawnWorkerResponse,
   sanitizeToken,
 } from "@legion/contracts";
-import { provisionIssueWorkspace } from "@legion/workspace";
+import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
 import type { CommandRunnerOptions } from "../state/fetch";
+import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
-import type { LegionState, TreeState, WorkerRoleClaim } from "./legion-state";
+import type { LegionState, TreeState, WorkerLocator, WorkerRoleClaim } from "./legion-state";
+import * as tmux from "./tmux";
+import type { WorkerRpcClient } from "./worker-rpc";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -78,9 +82,20 @@ export interface ProcessManagerDeps {
   natsRequest(subject: string, json: string): Promise<string>;
   mintControllerCapability(): Promise<string>;
   mintBootToken(tree: IssueKey, generation: number): Promise<string>;
+  mintWorkerBootToken(
+    tree: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    generation: number,
+    expectedSessionId?: string
+  ): Promise<string>;
+  connectWorkerRpc(socketPath: string): Promise<WorkerRpcClient>;
   provisioningToken(owner: string): Promise<string>;
   statPrompt?(promptPath: string): Promise<unknown>;
   readProcessCmdline?(pid: number): Promise<string>;
+  /** Overridable for tests; defaults to a real timer. Used only to bound the wait for a
+   * retiring worker's pane to exit before it is killed outright. */
+  sleep?(ms: number): Promise<void>;
   workerCatchup: WorkerCatchupDeps;
   now(): number;
 }
@@ -89,6 +104,9 @@ type RoleBacking = WorkerRoleClaim;
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 const TMUX_RECONCILIATION_GRACE_MS = 120_000;
+/** Bounds for waiting on a retiring worker's pane to exit on its own before it is force-killed. */
+const WORKER_RETIREMENT_POLL_ATTEMPTS = 20;
+const WORKER_RETIREMENT_POLL_INTERVAL_MS = 100;
 
 function treeName(issue: IssueKey): string {
   const parsed = parseIssueKey(issue);
@@ -107,8 +125,27 @@ function treeName(issue: IssueKey): string {
   return `${fullName.slice(0, MAX_TMUX_WINDOW_NAME_LENGTH - suffix.length - 1)}-${suffix}`;
 }
 
+/**
+ * A worker socket's basename must stay well under the ~100-byte Unix socket path limit
+ * regardless of the issue key's length (unlike `treeName`, which only bounds itself to tmux's
+ * much longer window-name limit): derived from the issue number and role alone, plus a short
+ * hash of the full issue key to disambiguate the same issue number across different repos.
+ */
+function workerSocketBasename(issue: IssueKey, role: LegionRole): string {
+  const parsed = parseIssueKey(issue);
+  if (!parsed) throw new Error(`Invalid IssueKey: ${issue}`);
+  const hash = createHash("sha256").update(issue).digest("hex").slice(0, 8);
+  return `${parsed.number}-${role}-${hash}`;
+}
+
 function shellPath(value: string): string {
   return /[^A-Za-z0-9_./:-]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
+}
+/** Flattens an env record into repeated `-e KEY=VALUE` pairs for tmux; `undefined` values are omitted. */
+function tmuxEnv(env: Record<string, string | undefined>): string[] {
+  return Object.entries(env).flatMap(([key, value]) =>
+    value === undefined ? [] : ["-e", `${key}=${value}`]
+  );
 }
 export function daemonCredentialHelper(
   runtime = process.execPath,
@@ -135,12 +172,40 @@ function controlReplyType(raw: string): "ack" | "nack" {
 /** Starts and supervises only the tmux trees whose locator it records in Legion state. */
 export class ProcessManager {
   private readonly resurrecting = new Map<IssueKey, Promise<void>>();
+  private readonly workerClients = new Map<string, WorkerRpcClient>();
+  private readonly workerConnections = new Map<string, Promise<WorkerRpcClient>>();
+  /** Serializes tmux window creation per issue and launch decisions per role, so two concurrent
+   * spawns never each see "no window yet" and open two, or each see "no live claim" and launch
+   * twice. Keyed by issue for the former, by role token for the latter. */
+  private readonly issueLaunchQueue = new Map<IssueKey, Promise<unknown>>();
+  private readonly roleLaunchQueue = new Map<string, Promise<unknown>>();
+  /** A just-opened window for an issue with no persisted claim yet (its first-ever worker, still
+   * mid-launch): recordedWindowId falls back to this so a concurrent second spawn on the same
+   * issue splits into it instead of racing to open its own. */
+  private readonly issueWindowIds = new Map<IssueKey, string>();
   private controllerSpawn?: Promise<void>;
   private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
 
   constructor(private readonly deps: ProcessManagerDeps) {}
+
+  private serialize<T>(
+    queue: Map<string, Promise<unknown>>,
+    key: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const previous = queue.get(key) ?? Promise.resolve();
+    const gated = previous.then(fn, fn);
+    queue.set(
+      key,
+      gated.then(
+        () => undefined,
+        () => undefined
+      )
+    );
+    return gated;
+  }
 
   admit(issue: IssueKey): "spawned" | "queued" {
     const tree = this.ensureTree(issue);
@@ -248,6 +313,104 @@ export class ProcessManager {
     await this.deps.saveState();
   }
 
+  async spawnWorker(
+    treeKey: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    task: string
+  ): Promise<SpawnWorkerResponse> {
+    if (this.rootForIssue(issue) !== treeKey) {
+      throw new Error(`Issue ${issue} does not belong to Legion tree ${treeKey}`);
+    }
+    if (role === "architect" && this.issueDepth(issue) >= this.deps.config.maxRecursionDepth) {
+      throw new Error(
+        `Refusing to spawn a sub-architect for ${issue}: recursion depth already at the configured maximum (${this.deps.config.maxRecursionDepth})`
+      );
+    }
+    const token = roleToken(this.deps.state.project, issue, role);
+    return this.serialize(this.roleLaunchQueue, token, async () => {
+      const existing = this.deps.state.roles[token];
+      const claim = existing && "issue" in existing ? existing : undefined;
+
+      if (claim?.locator) {
+        if (!claim.sessionId) {
+          // Booting: launchWorker opened the pane but /worker/started has not yet registered
+          // this generation's session. Never launch a second pane while a boot is in flight —
+          // queue the task and let /worker/ready deliver it once the worker registers.
+          claim.pendingAssignment = task;
+          await this.deps.saveState();
+          return { status: "resumed", roleToken: token };
+        }
+        const socketPath = claim.locator.socketPath;
+        const client = await this.workerClient(token, socketPath).catch(() => undefined);
+        const alive = client
+          ? await client
+              .getState(5_000)
+              .then(() => true)
+              .catch(() => false)
+          : false;
+        if (client && alive) {
+          await client.prompt(task);
+          return { status: "resumed", roleToken: token };
+        }
+        await this.retireWorkerLocator(token, claim.locator);
+        await this.launchWorker(treeKey, issue, role, claim, task);
+        return { status: "spawned", roleToken: token };
+      }
+
+      await this.launchWorker(treeKey, issue, role, claim, task);
+      return { status: "spawned", roleToken: token };
+    });
+  }
+
+  async workerReady(
+    issue: IssueKey,
+    role: LegionRole,
+    sessionId: string,
+    generation: number
+  ): Promise<void> {
+    const token = roleToken(this.deps.state.project, issue, role);
+    const claim = this.deps.state.roles[token];
+    if (
+      !claim ||
+      !("issue" in claim) ||
+      claim.sessionId !== sessionId ||
+      claim.generation !== generation
+    ) {
+      return;
+    }
+    const task = claim.pendingAssignment;
+    if (!task || !claim.locator) return;
+    const client = await this.workerClient(token, claim.locator.socketPath);
+    await client.prompt(task);
+    delete claim.pendingAssignment;
+    await this.deps.saveState();
+  }
+
+  /** Reconnects to every live worker's shim socket after a daemon restart, probing liveness. */
+  async reconnectWorkers(): Promise<void> {
+    const claims = Object.entries(this.deps.state.roles).filter(
+      (entry): entry is [string, WorkerRoleClaim & { locator: WorkerLocator }] =>
+        "issue" in entry[1] && entry[1].locator !== undefined
+    );
+    await Promise.all(
+      claims.map(async ([token, claim]) => {
+        try {
+          const client = await this.workerClient(token, claim.locator.socketPath);
+          await client.getState(5_000);
+        } catch (error) {
+          console.error(`[legion] failed to reconnect worker ${token}:`, error);
+          // Dead locator: retire whatever pane it may still be running, then clear the locator
+          // but leave pendingAssignment so the eventual respawn still delivers it.
+          await this.retireWorkerLocator(token, claim.locator);
+          const current = this.deps.state.roles[token];
+          if (current && "issue" in current) delete current.locator;
+          this.persist();
+        }
+      })
+    );
+  }
+
   async markProcessDead(treeKey: IssueKey, generation?: number): Promise<void> {
     const tree = this.requireTree(treeKey);
     if (tree.generation !== (generation ?? tree.generation)) return;
@@ -257,9 +420,26 @@ export class ProcessManager {
     await this.deps.saveState();
   }
 
+  /**
+   * Kills every tmux window this tree's root and worker claims recorded, not just the root's own
+   * — a child-issue worker window is never referenced by `tree.locator`, so closing a tree only
+   * ever killed the root's window and left every other issue's worker window orphaned until the
+   * next reconciliation sweep. Shutdown today is a direct pane/window kill, without first asking
+   * each worker's shim to close its OMP process's stdin.
+   */
   async closeTree(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
-    await this.removeTreeWindow(tree);
+    const windowIds = new Set<string>();
+    if (tree.locator?.tmuxWindowId) windowIds.add(tree.locator.tmuxWindowId);
+    for (const claim of Object.values(this.deps.state.roles)) {
+      if ("issue" in claim && this.rootForIssue(claim.issue) === treeKey && claim.locator) {
+        windowIds.add(claim.locator.tmuxWindowId);
+      }
+    }
+    for (const windowId of windowIds) {
+      await tmux.killWindow(this.deps.run, windowId);
+    }
+    delete tree.locator;
     tree.status = "closed";
     delete tree.lingerUntil;
     await this.releaseSlot(treeKey);
@@ -282,33 +462,20 @@ export class ProcessManager {
    */
   async reconcileTmuxWindows(graceMs = TMUX_RECONCILIATION_GRACE_MS): Promise<void> {
     const session = `legion-${this.deps.state.project}`;
-    const owner = `legion-${this.deps.state.project}`;
-    const windows = await this.deps.run([
-      "tmux",
-      "list-windows",
-      "-t",
-      session,
-      "-F",
-      "#{window_id}\t#{@legion_owner}\t#{window_activity}",
-    ]);
-    if (windows.exitCode !== 0) return;
-
+    const owner = session;
     const known = new Set(
       [
         ...Object.values(this.deps.state.trees).map((tree) => tree.locator?.tmuxWindowId),
+        ...Object.values(this.deps.state.roles).map((claim) =>
+          "issue" in claim ? claim.locator?.tmuxWindowId : undefined
+        ),
         this.deps.state.controllerLocator?.tmuxWindowId,
       ].filter((windowId): windowId is string => windowId !== undefined)
     );
-    for (const line of windows.stdout.split(/\r?\n/)) {
-      const [windowId, windowOwner, activitySeconds] = line.split("\t");
-      if (!windowId || !/^@\d+$/.test(windowId) || known.has(windowId) || windowOwner !== owner) {
-        continue;
-      }
-      const activityAt = Number(activitySeconds) * 1000;
-      if (!Number.isFinite(activityAt) || this.deps.now() - activityAt < graceMs) {
-        continue;
-      }
-      await this.deps.run(["tmux", "kill-window", "-t", windowId]);
+    const unknown = await tmux.listUnknownOwnedWindows(this.deps.run, session, owner, known);
+    for (const { windowId, activityAt } of unknown) {
+      if (this.deps.now() - activityAt < graceMs) continue;
+      await tmux.killWindow(this.deps.run, windowId);
     }
   }
 
@@ -384,12 +551,12 @@ export class ProcessManager {
 
   async probe(treeKey: IssueKey): Promise<"alive" | "dead"> {
     const tree = this.deps.state.trees[treeKey];
-    const windowId = tree?.locator?.tmuxWindowId;
-    if (!windowId) return "dead";
+    const locator = tree?.locator;
+    if (!locator) return "dead";
 
-    const panes = await this.deps.run(["tmux", "list-panes", "-t", windowId, "-F", "#{pane_pid}"]);
-    const pid = Number(panes.stdout.trim().split(/\s+/)[0]);
-    if (panes.exitCode !== 0 || !Number.isSafeInteger(pid) || pid <= 0) return "dead";
+    const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
+    const pid = await tmux.panePid(this.deps.run, target);
+    if (pid === undefined) return "dead";
     return (await this.isOmpPane(pid)) ? "alive" : "dead";
   }
 
@@ -434,6 +601,14 @@ export class ProcessManager {
   }
   async markTreeReady(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
+    if (tree.locator?.socketPath) {
+      // The root architect is a worker of its own issue: connect exactly as workerReady does so
+      // its shim's pre-connect backlog drains and it can be prompted/resumed later.
+      await this.workerClient(
+        roleToken(this.deps.state.project, treeKey, "architect"),
+        tree.locator.socketPath
+      );
+    }
     const recoveries = tree.recoveryEvents;
     if (!recoveries?.length) return;
     for (const recovery of [...recoveries]) {
@@ -684,231 +859,384 @@ export class ProcessManager {
     return tree;
   }
 
-  private async spawnTree(
-    tree: TreeState,
-    resume: boolean,
-    resumeSessionFile?: string
-  ): Promise<void> {
-    const name = treeName(tree.root);
-    const parsedTree = parseIssueKey(tree.root);
-    if (!parsedTree) throw new Error(`Invalid IssueKey: ${tree.root}`);
-    const workspace = await provisionIssueWorkspace(tree.root, {
+  private async computeResumeArgument(
+    issue: IssueKey,
+    resumeSessionFile: string | undefined,
+    logVerb: string
+  ): Promise<string> {
+    if (!resumeSessionFile) return "";
+    try {
+      await stat(resumeSessionFile);
+    } catch (error) {
+      if (
+        typeof error !== "object" ||
+        error === null ||
+        !("code" in error) ||
+        error.code !== "ENOENT"
+      ) {
+        throw error;
+      }
+      // Same-agent invariant: a recorded session that has gone missing is a launch failure, never
+      // a silent fresh start that would lose the original agent's context.
+      throw new Error(
+        `Refusing to start ${issue} fresh while ${logVerb}: recorded OMP session file is missing: ${resumeSessionFile}`
+      );
+    }
+    console.info(`[legion] ${logVerb} ${issue} by resuming OMP session ${resumeSessionFile}`);
+    return ` --resume=${shellPath(resumeSessionFile)}`;
+  }
+  /** Provisions the jj workspace and credential wiring shared by every issue's process — the
+   * root architect and every phase worker alike. */
+  private async provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
+    const parsed = parseIssueKey(issue);
+    if (!parsed) throw new Error(`Invalid IssueKey: ${issue}`);
+    return provisionIssueWorkspace(issue, {
       extensionPackage: EXTENSION_PACKAGE,
       stateDir: this.deps.config.stateDir,
-      maxRecursionDepth: this.deps.config.maxRecursionDepth,
-      provisioningToken: async () => await this.deps.provisioningToken(parsedTree.owner),
+      provisioningToken: async () => await this.deps.provisioningToken(parsed.owner),
       credentialHelper: this.deps.credentialHelper,
       run: async (command, options) => {
         const result = await this.deps.run(command, options);
         return { ...result, stderr: result.stderr ?? "" };
       },
     });
+  }
+
+  private async spawnTree(
+    tree: TreeState,
+    resume: boolean,
+    resumeSessionFile?: string
+  ): Promise<void> {
+    const workspace = await this.provisionWorkspace(tree.root);
     const promptPath = path.join(EXTENSION_PACKAGE, "roles", "architect-root.md");
-    await (this.deps.statPrompt ?? stat)(promptPath);
     const priorSessionFile = resume
       ? (resumeSessionFile ?? tree.locator?.ompSessionFile)
       : undefined;
-    let resumeArgument = "";
-    if (priorSessionFile) {
-      try {
-        await stat(priorSessionFile);
-        resumeArgument = ` --resume=${shellPath(priorSessionFile)}`;
-        console.info(
-          `[legion] resurrecting ${tree.root} by resuming OMP session ${priorSessionFile}`
-        );
-      } catch (error) {
-        if (
-          typeof error !== "object" ||
-          error === null ||
-          !("code" in error) ||
-          error.code !== "ENOENT"
-        ) {
-          throw error;
-        }
-        console.info(
-          `[legion] resurrecting ${tree.root} with a fresh OMP session; recorded session file is missing: ${priorSessionFile}`
-        );
-      }
-    }
-    const session = `legion-${this.deps.state.project}`;
+
     const generation = tree.generation;
     const bootToken = await this.deps.mintBootToken(tree.root, generation);
-    const tmuxWindowId = await this.openTmuxWindow(session, name, [
-      "-e",
-      `LEGION_TREE=${tree.root}`,
-      "-e",
-      `LEGION_ROOT_WORKSPACE=${workspace.workspaceDir}`,
-      "-e",
-      `LEGION_GENERATION=${generation}`,
-      "-e",
-      `LEGION_BOOT_TOKEN=${bootToken}`,
-      "-e",
-      `LEGION_DAEMON_URL=http://127.0.0.1:${this.deps.config.port}`,
-      "-e",
-      `LEGION_PROJECT=${this.deps.state.project}`,
-      "-e",
-      `ENVOY_NATS_URL=${this.deps.config.natsUrls.join(",")}`,
-      "-e",
-      `ENVOY_URL=${this.deps.config.envoyUrl}`,
-      "-e",
-      `LEGION_CONTROL_SUBJECT=legion.ctl.${sanitizeToken(tree.root)}.${generation}`,
-      "-e",
-      `LEGION_WORKER_BUDGET=${this.deps.config.workerBudget}`,
-      "-e",
-      `LEGION_MAX_RECURSION_DEPTH=${this.deps.config.maxRecursionDepth}`,
-      "-e",
-      `LEGION_STATE_DIR=${this.deps.config.stateDir}`,
-      "-e",
-      `LEGION_CREDENTIAL_HELPER=${this.deps.credentialHelper}`,
-      "-e",
-      "GIT_CONFIG_COUNT=0",
-      "-e",
-      "GIT_TERMINAL_PROMPT=0",
-      "-e",
-      `PATH=${this.deps.panePath}`,
-      ...(this.deps.config.dispatchMcpUrl === undefined
-        ? []
-        : ["-e", `DISPATCH_MCP_URL=${this.deps.config.dispatchMcpUrl}`]),
-      `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation}${resumeArgument} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
-    ]);
-    tree.locator = { tmuxSession: session, tmuxWindowId };
+    const env = tmuxEnv({
+      LEGION_TREE: tree.root,
+      LEGION_ISSUE: tree.root,
+      LEGION_ROLE: "architect",
+      LEGION_ROOT_WORKSPACE: workspace.workspaceDir,
+      LEGION_GENERATION: String(generation),
+      LEGION_BOOT_TOKEN: bootToken,
+      LEGION_DAEMON_URL: `http://127.0.0.1:${this.deps.config.port}`,
+      LEGION_PROJECT: this.deps.state.project,
+      ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
+      ENVOY_URL: this.deps.config.envoyUrl,
+      LEGION_CONTROL_SUBJECT: `legion.ctl.${sanitizeToken(tree.root)}.${generation}`,
+      LEGION_MAX_RECURSION_DEPTH: String(this.deps.config.maxRecursionDepth),
+      LEGION_STATE_DIR: this.deps.config.stateDir,
+      LEGION_CREDENTIAL_HELPER: this.deps.credentialHelper,
+      GIT_CONFIG_COUNT: "0",
+      GIT_TERMINAL_PROMPT: "0",
+      PATH: this.deps.panePath,
+      DISPATCH_MCP_URL: this.deps.config.dispatchMcpUrl,
+    });
+    const locator = await this.launchShimmedProcess(
+      tree.root,
+      "architect",
+      workspace.workspaceDir,
+      promptPath,
+      env,
+      priorSessionFile,
+      "resurrecting"
+    );
+    tree.locator = locator;
     tree.status = "active";
+  }
+
+  private issueDepth(issue: IssueKey): number {
+    let depth = 0;
+    let current: IssueKey | undefined = issue;
+    const seen = new Set<IssueKey>();
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      const parent: IssueKey | undefined = this.deps.state.issues[current]?.parent;
+      if (!parent) break;
+      depth += 1;
+      current = parent;
+    }
+    return depth;
+  }
+
+  private recordedWindowId(issue: IssueKey): string | undefined {
+    if (this.rootForIssue(issue) === issue) {
+      const windowId = this.deps.state.trees[issue]?.locator?.tmuxWindowId;
+      if (windowId) return windowId;
+    }
+    for (const claim of Object.values(this.deps.state.roles)) {
+      if ("issue" in claim && claim.issue === issue && claim.locator) {
+        return claim.locator.tmuxWindowId;
+      }
+    }
+    return this.issueWindowIds.get(issue);
+  }
+
+  /**
+   * After opening a fresh window for `issue` (first spawn, or a fallback from a dead recorded
+   * window), every existing claim for that issue — and the tree locator, if `issue` is a root —
+   * must point at the new window id in the same place, or `recordedWindowId` keeps handing a
+   * later spawn a stale id and each one opens yet another window instead of splitting into it.
+   */
+  private rewriteIssueWindowId(issue: IssueKey, windowId: string): void {
+    this.issueWindowIds.set(issue, windowId);
+    const tree = this.deps.state.trees[issue];
+    if (tree?.locator) tree.locator.tmuxWindowId = windowId;
+    for (const claim of Object.values(this.deps.state.roles)) {
+      if ("issue" in claim && claim.issue === issue && claim.locator) {
+        claim.locator.tmuxWindowId = windowId;
+      }
+    }
+  }
+
+  /** Trusts no recorded window id until it is confirmed live, so a human-killed window falls back to a fresh one. */
+  private async probedWindowId(issue: IssueKey): Promise<string | undefined> {
+    const candidate = this.recordedWindowId(issue);
+    if (!candidate) return undefined;
+    return (await tmux.windowAlive(this.deps.run, candidate)) ? candidate : undefined;
+  }
+
+  private async workerClient(token: string, socketPath: string): Promise<WorkerRpcClient> {
+    const existing = this.workerClients.get(token);
+    if (existing) return existing;
+    const inFlight = this.workerConnections.get(token);
+    if (inFlight) return inFlight;
+    const connecting = (async () => {
+      const client = await this.deps.connectWorkerRpc(socketPath);
+      try {
+        await client.negotiate();
+      } catch (error) {
+        client.close();
+        throw error;
+      }
+      this.workerClients.set(token, client);
+      const evict = (): void => {
+        if (this.workerClients.get(token) === client) this.workerClients.delete(token);
+      };
+      client.closed.then(evict, evict);
+      return client;
+    })().finally(() => {
+      if (this.workerConnections.get(token) === connecting) this.workerConnections.delete(token);
+    });
+    this.workerConnections.set(token, connecting);
+    return connecting;
+  }
+
+  /** The `legion worker-shim --socket <path> -- <inner>` command every Legion OMP process — root,
+   * phase worker, and controller alike — runs inside its tmux pane. */
+  private shimmedShellCommand(
+    workspaceDir: string,
+    socketPath: string,
+    innerCommand: string
+  ): string {
+    return `cd ${shellPath(workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${innerCommand}`;
+  }
+
+  private async prepareSocket(name: string): Promise<string> {
+    const socketPath = path.join(this.deps.config.stateDir, "workers", `${name}.sock`);
+    await mkdir(path.dirname(socketPath), { recursive: true });
+    await rm(socketPath, { force: true });
+    return socketPath;
+  }
+
+  /**
+   * Opens (or splits into) the tmux window for `issue`, running `legion worker-shim` around the
+   * caller's OMP invocation with its resume argument and system prompt. Shared by the root
+   * architect (a worker of its own issue) and every phase worker: the issue's first process
+   * opens a fresh window named for the issue; every later process on that issue splits into it.
+   */
+  private async launchShimmedProcess(
+    issue: IssueKey,
+    role: LegionRole,
+    workspaceDir: string,
+    promptPath: string,
+    envPairs: string[],
+    resumeSessionFile: string | undefined,
+    logVerb: string
+  ): Promise<WorkerLocator> {
+    await (this.deps.statPrompt ?? stat)(promptPath);
+    const resumeArgument = await this.computeResumeArgument(issue, resumeSessionFile, logVerb);
+    const innerCommand = `${this.deps.ompInvocation}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
+    const socketPath = await this.prepareSocket(workerSocketBasename(issue, role));
+    const shellCommand = this.shimmedShellCommand(workspaceDir, socketPath, innerCommand);
+
+    const session = `legion-${this.deps.state.project}`;
+    const { tmuxWindowId, tmuxPaneId } = await this.serialize(
+      this.issueLaunchQueue,
+      issue,
+      async () => {
+        const existingWindowId = await this.probedWindowId(issue);
+        if (existingWindowId) {
+          const { paneId } = await tmux.splitWindow(this.deps.run, existingWindowId, [
+            ...envPairs,
+            shellCommand,
+          ]);
+          return { tmuxWindowId: existingWindowId, tmuxPaneId: paneId };
+        }
+        const window = await tmux.openWindow(
+          this.deps.run,
+          session,
+          treeName(issue),
+          [...envPairs, shellCommand],
+          session
+        );
+        this.rewriteIssueWindowId(issue, window.windowId);
+        return { tmuxWindowId: window.windowId, tmuxPaneId: window.paneId };
+      }
+    );
+
+    return { tmuxSession: session, tmuxWindowId, tmuxPaneId, socketPath };
+  }
+
+  private async launchWorker(
+    treeKey: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    claim: WorkerRoleClaim | undefined,
+    task: string
+  ): Promise<void> {
+    const token = roleToken(this.deps.state.project, issue, role);
+    const generation = (claim?.generation ?? 0) + 1;
+    try {
+      const workspace = await this.provisionWorkspace(issue);
+      const promptPath = path.join(EXTENSION_PACKAGE, "roles", `${role}.md`);
+      const resumeSessionFile = claim?.locator?.ompSessionFile;
+
+      const bootToken = await this.deps.mintWorkerBootToken(
+        treeKey,
+        issue,
+        role,
+        generation,
+        claim?.sessionId
+      );
+      const env = tmuxEnv({
+        LEGION_TREE: treeKey,
+        LEGION_ISSUE: issue,
+        LEGION_ROLE: role,
+        LEGION_WORKSPACE: workspace.workspaceDir,
+        LEGION_BOOT_TOKEN: bootToken,
+        LEGION_GENERATION: String(generation),
+        LEGION_DAEMON_URL: `http://127.0.0.1:${this.deps.config.port}`,
+        LEGION_PROJECT: this.deps.state.project,
+        LEGION_STATE_DIR: this.deps.config.stateDir,
+        LEGION_CREDENTIAL_HELPER: this.deps.credentialHelper,
+        ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
+        ENVOY_URL: this.deps.config.envoyUrl,
+        GIT_CONFIG_COUNT: "0",
+        GIT_TERMINAL_PROMPT: "0",
+        PATH: this.deps.panePath,
+        DISPATCH_MCP_URL: this.deps.config.dispatchMcpUrl,
+      });
+      const locator = await this.launchShimmedProcess(
+        issue,
+        role,
+        workspace.workspaceDir,
+        promptPath,
+        env,
+        resumeSessionFile,
+        "respawning"
+      );
+
+      this.deps.state.roles[token] = {
+        issue,
+        role,
+        // sessionId deliberately not carried over: it stays unset until /worker/started
+        // confirms this generation's boot, so a concurrent spawnWorker call during the boot
+        // window sees an unconfirmed claim rather than racing a stale one (both for a fresh
+        // spawn and a resume, where OMP reports the same session id it had before).
+        ...(claim?.agentId ? { agentId: claim.agentId } : {}),
+        generation,
+        pendingAssignment: task,
+        locator: {
+          ...locator,
+          ...(resumeSessionFile ? { ompSessionFile: resumeSessionFile } : {}),
+        },
+      };
+      await this.deps.saveState();
+    } catch (error) {
+      const failures = (claim?.launchFailures ?? 0) + 1;
+      const failingClaim = this.deps.state.roles[token];
+      if (failingClaim && "issue" in failingClaim) {
+        failingClaim.launchFailures = failures;
+      } else {
+        this.deps.state.roles[token] = { issue, role, launchFailures: failures };
+      }
+      if (failures >= MAX_LAUNCH_FAILURES) {
+        this.deps.natsPublish(
+          roleTopic(roleToken(this.deps.state.project, treeKey, "architect")),
+          JSON.stringify({ type: "launch-failed", issue, role, failures })
+        );
+      }
+      await this.deps.saveState();
+      throw error;
+    }
   }
 
   private async spawnController(controllerSecret: string): Promise<void> {
     const controllerDir = path.join(this.deps.config.stateDir, "controller");
     const promptPath = path.join(EXTENSION_PACKAGE, "roles", "controller-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
-    await this.writeOmpConfig(controllerDir, this.deps.config.maxRecursionDepth);
+    await this.writeOmpConfig(controllerDir);
+    const socketPath = await this.prepareSocket("controller");
+    const innerCommand = `${this.deps.ompInvocation} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
+    const shellCommand = this.shimmedShellCommand(controllerDir, socketPath, innerCommand);
     const session = `legion-${this.deps.state.project}`;
-    const tmuxWindowId = await this.openTmuxWindow(session, "controller", [
-      "-e",
-      "LEGION_CONTROLLER=1",
-      "-e",
-      `LEGION_CONTROLLER_SECRET=${controllerSecret}`,
-      "-e",
-      `LEGION_DAEMON_URL=http://127.0.0.1:${this.deps.config.port}`,
-      "-e",
-      `LEGION_PROJECT=${this.deps.state.project}`,
-      "-e",
-      `ENVOY_NATS_URL=${this.deps.config.natsUrls.join(",")}`,
-      "-e",
-      `ENVOY_URL=${this.deps.config.envoyUrl}`,
-      "-e",
-      `PATH=${this.deps.panePath}`,
-      ...(this.deps.config.dispatchMcpUrl === undefined
-        ? []
-        : ["-e", `DISPATCH_MCP_URL=${this.deps.config.dispatchMcpUrl}`]),
-      `cd ${shellPath(controllerDir)} && ${this.deps.ompInvocation} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
-    ]);
-    this.deps.state.controllerLocator = { tmuxSession: session, tmuxWindowId };
+    const env = tmuxEnv({
+      LEGION_CONTROLLER: "1",
+      LEGION_ROLE: "controller",
+      LEGION_CONTROLLER_SECRET: controllerSecret,
+      LEGION_DAEMON_URL: `http://127.0.0.1:${this.deps.config.port}`,
+      LEGION_PROJECT: this.deps.state.project,
+      ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
+      ENVOY_URL: this.deps.config.envoyUrl,
+      PATH: this.deps.panePath,
+      DISPATCH_MCP_URL: this.deps.config.dispatchMcpUrl,
+    });
+    const window = await tmux.openWindow(
+      this.deps.run,
+      session,
+      "controller",
+      [...env, shellCommand],
+      session
+    );
+    this.deps.state.controllerLocator = {
+      tmuxSession: session,
+      tmuxWindowId: window.windowId,
+      tmuxPaneId: window.paneId,
+      socketPath,
+    };
     await this.deps.saveState();
   }
 
-  private async writeOmpConfig(directory: string, maxRecursionDepth: number): Promise<void> {
-    await mkdir(path.join(directory, ".omp"), { recursive: true });
-    await writeFile(
-      path.join(directory, ".omp", "config.yml"),
-      `task:\n  maxRecursionDepth: ${maxRecursionDepth}\n`,
-      "utf8"
-    );
+  /** Connects the controller's shim socket on `/controller/ready`, exactly as `markTreeReady`
+   * does for the root architect, so the shim's pre-connect backlog drains. Best-effort: a shim
+   * connect failure (listener race, stale socket, RPC timeout) must never block
+   * `/controller/ready` from accepting the role and replaying held events — the connection is
+   * retried on the next `spawnWorker`/`workerReady`/reconnect attempt that touches this socket.
+   */
+  async markControllerReady(): Promise<void> {
+    const socketPath = this.deps.state.controllerLocator?.socketPath;
+    if (!socketPath) return;
+    try {
+      await this.workerClient(controllerToken(this.deps.state.project), socketPath);
+    } catch (error) {
+      console.error("[legion] failed to connect controller shim socket on ready:", error);
+    }
   }
 
-  private async openTmuxWindow(
-    session: string,
-    name: string,
-    environmentAndCommand: string[]
-  ): Promise<string> {
-    const sessionExists =
-      (await this.deps.run(["tmux", "has-session", "-t", session])).exitCode === 0;
-    const bootstrapWindow = "__legion_bootstrap";
-    if (!sessionExists) {
-      const create = await this.deps.run([
-        "tmux",
-        "new-session",
-        "-d",
-        "-s",
-        session,
-        "-n",
-        bootstrapWindow,
-        "sleep 3600",
-      ]);
-      if (create.exitCode !== 0) {
-        throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
-      }
-      const marker = await this.deps.run([
-        "tmux",
-        "set-option",
-        "-t",
-        session,
-        "@legion_owner",
-        `legion-${this.deps.state.project}`,
-      ]);
-      if (marker.exitCode !== 0) {
-        throw new Error(`tmux ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`);
-      }
-    }
-
-    const command = [
-      "tmux",
-      "new-window",
-      "-P",
-      "-F",
-      "#{window_id}",
-      "-t",
-      session,
-      "-n",
-      name,
-      ...environmentAndCommand,
-    ];
-    const result = await this.deps.run(command);
-    if (!sessionExists) {
-      const cleanup = await this.deps.run([
-        "tmux",
-        "kill-window",
-        "-t",
-        `${session}:${bootstrapWindow}`,
-      ]);
-      if (cleanup.exitCode !== 0) {
-        throw new Error(
-          `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode}): ${cleanup.stdout}`
-        );
-      }
-    }
-    if (result.exitCode !== 0) {
-      throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
-    }
-    const tmuxWindowId = result.stdout.trim();
-    if (!/^@\d+$/.test(tmuxWindowId)) {
-      throw new Error(`tmux new-window did not report a window id: ${result.stdout}`);
-    }
-    const marker = await this.deps.run([
-      "tmux",
-      "set-option",
-      "-w",
-      "-t",
-      tmuxWindowId,
-      "@legion_owner",
-      `legion-${this.deps.state.project}`,
-    ]);
-    if (marker.exitCode !== 0) {
-      // Every window is either recorded (marked, then locator-assigned by
-      // the caller) or reaped: this one never got its marker, so nothing
-      // will ever recognize or clean it up later. Kill it now instead of
-      // leaving an orphan for `reconcileTmuxWindows` to find.
-      await this.deps.run(["tmux", "kill-window", "-t", tmuxWindowId]);
-      throw new Error(
-        `tmux window ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`
-      );
-    }
-    return tmuxWindowId;
+  private async writeOmpConfig(directory: string): Promise<void> {
+    await mkdir(path.join(directory, ".omp"), { recursive: true });
+    await writeFile(path.join(directory, ".omp", "config.yml"), "", "utf8");
   }
 
   private async removeTreeWindow(tree: TreeState): Promise<void> {
     const windowId = tree.locator?.tmuxWindowId;
     delete tree.locator;
     if (!windowId) return;
-    await this.deps.run(["tmux", "kill-window", "-t", windowId]);
+    await tmux.killWindow(this.deps.run, windowId);
   }
 
   private async isOmpPane(pid: number): Promise<boolean> {
@@ -923,12 +1251,42 @@ export class ProcessManager {
     }
   }
 
+  private async sleep(ms: number): Promise<void> {
+    if (this.deps.sleep) return this.deps.sleep(ms);
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Before a worker's locator is replaced or cleared (a dead spawn-time reconnect, or a failed
+   * `reconnectWorkers` probe at boot), retires whatever pane it may still be running: best-effort
+   * asks the shim to close its OMP child's stdin, gives it a bounded window to exit on its own,
+   * then kills the pane directly. This still runs when the RPC connection to the shim already
+   * failed, since a dead/unreachable shim can still leave its OMP child — or the pane itself —
+   * running and holding the role's Envoy subscription.
+   */
+  private async retireWorkerLocator(token: string, locator: WorkerLocator): Promise<void> {
+    try {
+      const client = await this.workerClient(token, locator.socketPath);
+      client.shutdown();
+    } catch {
+      // Shim unreachable or already gone; fall through to polling the pane directly.
+    }
+    this.workerClients.delete(token);
+    const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
+    for (let attempt = 0; attempt < WORKER_RETIREMENT_POLL_ATTEMPTS; attempt += 1) {
+      const pid = await tmux.panePid(this.deps.run, target);
+      if (pid === undefined || !(await this.isOmpPane(pid))) return;
+      await this.sleep(WORKER_RETIREMENT_POLL_INTERVAL_MS);
+    }
+    if (locator.tmuxPaneId) await tmux.killPane(this.deps.run, locator.tmuxPaneId);
+    else await tmux.killWindow(this.deps.run, locator.tmuxWindowId);
+  }
+
   private async controllerAlive(): Promise<boolean> {
     const windowId = this.deps.state.controllerLocator?.tmuxWindowId;
     if (!windowId) return false;
-    const panes = await this.deps.run(["tmux", "list-panes", "-t", windowId, "-F", "#{pane_pid}"]);
-    const pid = Number(panes.stdout.trim().split(/\s+/)[0]);
-    if (panes.exitCode !== 0 || !Number.isSafeInteger(pid) || pid <= 0) {
+    const pid = await tmux.panePid(this.deps.run, windowId);
+    if (pid === undefined) {
       delete this.deps.state.controllerLocator;
       return false;
     }
@@ -947,15 +1305,7 @@ export class ProcessManager {
   }
 
   private rootForIssue(issue: IssueKey): IssueKey | undefined {
-    if (this.deps.state.trees[issue]) return issue;
-    const seen = new Set<IssueKey>();
-    let current: IssueKey | undefined = issue;
-    while (current && !seen.has(current)) {
-      if (this.deps.state.trees[current]) return current;
-      seen.add(current);
-      current = this.deps.state.issues[current]?.parent;
-    }
-    return undefined;
+    return resolveRootForIssue(this.deps.state, issue);
   }
 
   private clearTreePhases(treeKey: IssueKey): void {

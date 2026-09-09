@@ -22,6 +22,7 @@ import {
 import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
 import { type DaemonHandle, startDaemon } from "../index";
+import type { WorkerRpcClient } from "../worker-rpc";
 
 const NATS_IMAGE = "nats:2.10";
 const NATS_READY_TIMEOUT_MS = 30_000;
@@ -105,6 +106,23 @@ function envelope(
     payload_summary: "daemon e2e test event",
     payload: JSON.stringify(payload),
     trace_id: `trace-${eventId}`,
+  };
+}
+
+/**
+ * The fake tmux runner never spawns a real `legion worker-shim` process, so no root/worker
+ * socket ever exists to connect to. Stands in for `connectWorkerRpc` so `markTreeReady`'s
+ * post-`/process/ready` connect (mirroring `workerReady`) succeeds without a real socket.
+ */
+function fakeWorkerRpcClient(): WorkerRpcClient {
+  const closed = Promise.withResolvers<void>();
+  return {
+    closed: closed.promise,
+    negotiate: async () => {},
+    prompt: async () => {},
+    getState: async () => ({}),
+    shutdown: () => {},
+    close: () => closed.resolve(),
   };
 }
 
@@ -241,6 +259,7 @@ describe("daemon end-to-end", () => {
       let broker: NatsConnection | undefined;
       let daemon: DaemonHandle | undefined;
       const windows = new Map<string, string>();
+      const panes = new Set<string>();
       let tmuxSessionExists = false;
       let nextWindowId = 1;
       const controllerSpawn = Promise.withResolvers<string[]>();
@@ -319,7 +338,16 @@ describe("daemon end-to-end", () => {
             if (rootSpawnCount === 1) rootSpawn.resolve([...command]);
             else rootRespawn.resolve([...command]);
           }
-          return { stdout: `${windowId}\n`, stderr: "", exitCode: 0 };
+          if (command[1] === "new-session")
+            return { stdout: `${windowId}\n`, stderr: "", exitCode: 0 };
+          const paneId = `%${nextWindowId}`;
+          panes.add(paneId);
+          return { stdout: `${windowId} ${paneId} 4242\n`, stderr: "", exitCode: 0 };
+        }
+        if (command[1] === "split-window") {
+          const paneId = `%${nextWindowId++}`;
+          panes.add(paneId);
+          return { stdout: `${paneId} 4242\n`, stderr: "", exitCode: 0 };
         }
         if (command[1] === "kill-window") {
           return { stdout: "", stderr: "", exitCode: 0 };
@@ -336,9 +364,14 @@ describe("daemon end-to-end", () => {
         }
         if (command[1] === "list-panes") {
           const target = command[3];
-          return target && windows.has(target)
-            ? { stdout: "4242\n", stderr: "", exitCode: 0 }
-            : { stdout: "", stderr: "", exitCode: 1 };
+          const format = command[command.indexOf("-F") + 1];
+          const alive = !!target && (windows.has(target) || panes.has(target));
+          if (!alive) return { stdout: "", stderr: "", exitCode: 1 };
+          return {
+            stdout: format === "#{pane_id}" ? "%9001\n" : "4242\n",
+            stderr: "",
+            exitCode: 0,
+          };
         }
         throw new Error(`Unhandled tmux command: ${command.join(" ")}`);
       };
@@ -419,6 +452,7 @@ describe("daemon end-to-end", () => {
               }),
             },
             onSignal: () => {},
+            connectWorkerRpc: async () => fakeWorkerRpcClient(),
           },
         };
         daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), daemonOptions);

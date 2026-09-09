@@ -34,16 +34,8 @@ import {
   writeMessage,
   writePhaseHandoff,
 } from "../handoff/ledger";
-
-export class CliError extends Error {
-  constructor(
-    message: string,
-    readonly code = 1
-  ) {
-    super(message);
-    this.name = "CliError";
-  }
-}
+import { CliError } from "./errors";
+import { cmdWorkerShim, defaultWorkerShimDeps } from "./worker-shim";
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 interface GhCommandDeps {
@@ -434,6 +426,27 @@ const credentialCommand = defineCommand({
     ),
 });
 
+const workerShimCommand = defineCommand({
+  meta: {
+    name: "worker-shim",
+    description: "Bridge a headless OMP worker to the daemon over a unix socket",
+  },
+  args: {
+    socket: { type: "string", required: true, description: "Unix socket path" },
+  },
+  run: ({ args }) =>
+    runCli(async () => {
+      // The first `--` marks the boundary here (unlike `gh`'s `lastIndexOf` above): everything
+      // after it is the wrapped OMP argv verbatim, which may itself contain a `--` of its own
+      // (e.g. a further-nested command), so taking the first one keeps that intact.
+      const separator = process.argv.indexOf("--");
+      const argv = separator === -1 ? [] : process.argv.slice(separator + 1);
+      const socketPath = String(args.socket);
+      const exitCode = await cmdWorkerShim(socketPath, argv, defaultWorkerShimDeps());
+      process.exit(exitCode);
+    }),
+});
+
 const stateCommand = defineCommand({
   meta: { name: "state", description: "Read daemon state" },
   args: {
@@ -514,6 +527,7 @@ export const mainCommand = defineCommand({
     handoff: handoffCommand,
     gh: ghCommand,
     credential: credentialCommand,
+    "worker-shim": workerShimCommand,
     state: stateCommand,
     approve: approveCommand,
     admit: admitCommand,
