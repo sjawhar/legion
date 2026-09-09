@@ -208,7 +208,7 @@ function IssueHeader({ issue, state }: { issue: Issue; state: UserIssueState }):
         />
         <button
           className="rounded border border-slate-300 px-2 py-1 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
-          disabled={route === "" || !routeIsValid || updateIssue.isPending}
+          disabled={!routeIsValid || updateIssue.isPending}
           type="submit"
         >
           Save route

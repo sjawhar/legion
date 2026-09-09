@@ -22,18 +22,22 @@ function event(overrides: Partial<Event> = {}): Event {
   };
 }
 
-test("log model reverses server events and folds answered asks and resolved comments", () => {
+test("log model reverses server events and folds events that resolve their item", () => {
   const items = buildLogItems(
     [
       event({ id: 1, seq: 1, type: "ask.opened" }),
       event({ id: 2, seq: 2, type: "ask.answered" }),
       event({ id: 3, seq: 3, type: "comment.resolved" }),
+      event({ id: 4, seq: 4, type: "suggestion.accepted" }),
+      event({ id: 5, seq: 5, type: "suggestion.rejected" }),
     ],
     [],
-    3
+    5
   );
 
   expect(items).toEqual([
+    { event: event({ id: 5, seq: 5, type: "suggestion.rejected" }), folded: true, kind: "event" },
+    { event: event({ id: 4, seq: 4, type: "suggestion.accepted" }), folded: true, kind: "event" },
     { event: event({ id: 3, seq: 3, type: "comment.resolved" }), folded: true, kind: "event" },
     { event: event({ id: 2, seq: 2, type: "ask.answered" }), folded: true, kind: "event" },
     { event: event({ id: 1, seq: 1, type: "ask.opened" }), folded: false, kind: "event" },

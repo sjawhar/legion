@@ -22,14 +22,18 @@ export function AskCard({ ask, answerAsk: answer = answerAsk }: AskCardProps): R
   const [optimisticallyAnswered, setOptimisticallyAnswered] = useState(false);
   const mutation = useMutation({
     mutationFn: (input: AnswerAskInput) => answer(ask.id, input),
-    onMutate: () => {
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: ["inbox"] });
+      const previous = queryClient.getQueryData<Ask[]>(["inbox"]);
       setOptimisticallyAnswered(true);
       queryClient.setQueryData<Ask[]>(["inbox"], (current) =>
         current?.filter((currentAsk) => currentAsk.id !== ask.id)
       );
+      return previous;
     },
-    onError: () => {
+    onError: (_error, _input, previous) => {
       setOptimisticallyAnswered(false);
+      queryClient.setQueryData(["inbox"], previous);
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
     },
     onSuccess: () => {

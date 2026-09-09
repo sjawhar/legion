@@ -54,7 +54,11 @@ export function buildLogItems(
     }
     items.push({
       event,
-      folded: event.type === "ask.answered" || event.type === "comment.resolved",
+      folded:
+        event.type === "ask.answered" ||
+        event.type === "comment.resolved" ||
+        event.type === "suggestion.accepted" ||
+        event.type === "suggestion.rejected",
       kind: "event",
     });
   }

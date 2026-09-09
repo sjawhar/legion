@@ -23,11 +23,12 @@ function ask(overrides: Partial<Ask> = {}): Ask {
   };
 }
 
-function renderCard(node: ReactNode): void {
+function renderCard(node: ReactNode): QueryClient {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
   render(<QueryClientProvider client={queryClient}>{node}</QueryClientProvider>);
+  return queryClient;
 }
 
 test("AskCard submits the selected single option", async () => {
@@ -85,4 +86,21 @@ test("AskCard submits custom text without inventing a selected option", async ()
   fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
 
   await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Take the third path" }]));
+});
+
+test("AskCard restores its inbox entry if an optimistic answer fails", async () => {
+  let rejectAnswer: (reason?: unknown) => void = () => {};
+  const pendingAnswer = new Promise<Ask>((_resolve, reject) => {
+    rejectAnswer = reject;
+  });
+  const input = ask({ options: [{ label: "Ship" }] });
+  const queryClient = renderCard(<AskCard ask={input} answerAsk={() => pendingAnswer} />);
+  queryClient.setQueryData<Ask[]>(["inbox"], [input]);
+
+  fireEvent.click(screen.getByRole("radio", { name: "Ship" }));
+  fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
+
+  await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([]));
+  rejectAnswer(new Error("offline"));
+  await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([input]));
 });

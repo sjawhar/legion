@@ -4,6 +4,9 @@ import { type ReactNode, useEffect, useMemo, useRef } from "react";
 import { api } from "../../api/client";
 import type { Event, UserIssueState, UserState } from "../../api/types";
 import { buildLogItems, dismissEvent, isPinnedEvent, setEventPinned } from "./log-model";
+import { IssueStateWriteQueue } from "./state-write-queue";
+
+const stateWrites = new IssueStateWriteQueue();
 
 function eventDescription(event: Event): string {
   if (event.type === "ask.answered") {
@@ -89,6 +92,44 @@ export function LogTab({
     if (visibleEventCount === 0) {
       return;
     }
+    const visible = new Set<Element>();
+    let active = true;
+    const scheduleRead = (target: Element, sequence: number) => {
+      if (
+        !active ||
+        !visible.has(target) ||
+        sequence <= lastRead.current ||
+        timers.current.has(target)
+      ) {
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        timers.current.delete(target);
+        if (!active || !visible.has(target) || sequence <= lastRead.current) {
+          return;
+        }
+        lastRead.current = sequence;
+        void api
+          .putIssueState(issueKey, { last_read_seq: sequence })
+          .then((next) => {
+            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+              ...current,
+              [issueKey]: next,
+            }));
+          })
+          .catch(async () => {
+            const current = await queryClient
+              .fetchQuery({ queryKey: ["user-state"], queryFn: () => api.getMyState() })
+              .catch(() => undefined);
+            if (!active) {
+              return;
+            }
+            lastRead.current = eventState(current, issueKey).last_read_seq;
+            scheduleRead(target, sequence);
+          });
+      }, 1_000);
+      timers.current.set(target, timer);
+    };
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -96,32 +137,17 @@ export function LogTab({
           if (sequence === undefined) {
             continue;
           }
-          const currentTimer = timers.current.get(entry.target);
           if (!entry.isIntersecting) {
+            visible.delete(entry.target);
+            const currentTimer = timers.current.get(entry.target);
             if (currentTimer !== undefined) {
               window.clearTimeout(currentTimer);
               timers.current.delete(entry.target);
             }
             continue;
           }
-          if (sequence <= lastRead.current || currentTimer !== undefined) {
-            continue;
-          }
-          timers.current.set(
-            entry.target,
-            window.setTimeout(() => {
-              if (sequence <= lastRead.current) {
-                return;
-              }
-              lastRead.current = sequence;
-              void api.putIssueState(issueKey, { last_read_seq: sequence }).then((next) => {
-                queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-                  ...current,
-                  [issueKey]: next,
-                }));
-              });
-            }, 1_000)
-          );
+          visible.add(entry.target);
+          scheduleRead(entry.target, sequence);
         }
       },
       { threshold: 0.75 }
@@ -130,6 +156,7 @@ export function LogTab({
       observer.observe(element);
     }
     return () => {
+      active = false;
       observer.disconnect();
       for (const timer of timers.current.values()) {
         window.clearTimeout(timer);
@@ -138,23 +165,29 @@ export function LogTab({
     };
   }, [issueKey, queryClient, visibleEventCount]);
 
-  const updateDismissed = (dismissed: string[]) => {
-    const optimistic = { ...issueState, dismissed };
-    queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-      ...current,
-      [issueKey]: optimistic,
-    }));
-    void api.putIssueState(issueKey, { dismissed }).then(
-      (next) => {
-        queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-          ...current,
-          [issueKey]: next,
-        }));
-      },
-      () => {
-        void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-      }
-    );
+  const updateDismissed = (update: (dismissed: string[]) => string[]) => {
+    let dismissed: string[] = [];
+    queryClient.setQueryData<UserState>(["user-state"], (current) => {
+      const issueState = eventState(current, issueKey);
+      dismissed = update(issueState.dismissed);
+      return {
+        ...current,
+        [issueKey]: { ...issueState, dismissed },
+      };
+    });
+    void stateWrites
+      .enqueue(issueKey, () => api.putIssueState(issueKey, { dismissed }))
+      .then(
+        (next) => {
+          queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+            ...current,
+            [issueKey]: next,
+          }));
+        },
+        () => {
+          void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+        }
+      );
   };
 
   if (log.isPending) {
@@ -184,14 +217,10 @@ export function LogTab({
             event={item.event}
             folded={item.folded}
             key={item.event.id}
-            onDismiss={() => updateDismissed(dismissEvent(issueState.dismissed, item.event))}
+            onDismiss={() => updateDismissed((dismissed) => dismissEvent(dismissed, item.event))}
             onPin={() =>
-              updateDismissed(
-                setEventPinned(
-                  issueState.dismissed,
-                  item.event,
-                  !isPinnedEvent(issueState.dismissed, item.event)
-                )
+              updateDismissed((dismissed) =>
+                setEventPinned(dismissed, item.event, !isPinnedEvent(dismissed, item.event))
               )
             }
             pinned={isPinnedEvent(issueState.dismissed, item.event)}

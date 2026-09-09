@@ -16,7 +16,7 @@ function event(type: Event["type"], payload: Record<string, unknown> = {}): Even
   };
 }
 
-test("ask events refresh the issue, its asks, and the inbox", () => {
+test("ask events refresh the issue, its asks, selected ask, and the inbox", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -32,6 +32,7 @@ test("ask events refresh the issue, its asks, and the inbox", () => {
     ["events", "CORE-1"],
     ["issues"],
     ["asks", "CORE-1"],
+    ["ask", "ask-1"],
     ["inbox"],
   ]);
 });

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { IssueSummary, UserState } from "../api/types";
-import { arrangeIssues } from "../features/sidebar/Sidebar";
+import { arrangeIssues, selectSidebarView } from "../features/sidebar/Sidebar";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
@@ -61,4 +61,13 @@ test("sidebar nests children under a listed parent", () => {
     { count: 0, items: [], label: "Unread" },
     { count: 0, items: [], label: "Everything else" },
   ]);
+});
+
+test("sidebar keeps its active issue snapshot while new detail data is pending", () => {
+  const frozen = [{ count: 1, items: ["CORE-1"], label: "Pinned" as const }];
+  const latest = [{ count: 0, items: ["CORE-2"], label: "Everything else" as const }];
+
+  const view = selectSidebarView("CORE-1", { groups: frozen, issueKey: "CORE-1" }, latest, true);
+
+  expect(view.displayed).toBe(frozen);
 });

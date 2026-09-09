@@ -100,6 +100,30 @@ export function arrangeIssues(
     .filter((group) => group.label !== "Pinned" || group.items.length > 0);
 }
 
+export interface FrozenSidebar {
+  groups: SidebarGroup[];
+  issueKey: string;
+}
+
+export function selectSidebarView(
+  currentIssue: string | undefined,
+  frozen: FrozenSidebar | undefined,
+  arranged: SidebarGroup[],
+  detailsPending: boolean
+): { displayed: SidebarGroup[] | undefined; frozen: FrozenSidebar | undefined } {
+  if (detailsPending && (currentIssue === undefined || frozen?.issueKey !== currentIssue)) {
+    return { displayed: undefined, frozen };
+  }
+  if (currentIssue === undefined) {
+    return { displayed: arranged, frozen: undefined };
+  }
+  if (frozen?.issueKey === currentIssue) {
+    return { displayed: frozen.groups, frozen };
+  }
+  const next = { groups: arranged, issueKey: currentIssue };
+  return { displayed: arranged, frozen: next };
+}
+
 function activeIssueKey(pathname: string): string | undefined {
   return pathname.match(/^\/issues\/([^/]+)/)?.[1];
 }
@@ -157,29 +181,30 @@ export function Sidebar(): ReactNode {
     })),
   });
   const currentIssue = activeIssueKey(location.pathname);
-  const frozen = useRef<{ issueKey: string; groups: SidebarGroup[] } | undefined>(undefined);
+  const frozen = useRef<FrozenSidebar | undefined>(undefined);
   const lastSeqByIssue = Object.fromEntries(
     issueDetails.flatMap((detail) =>
       detail.data === undefined ? [] : [[detail.data.key, detail.data.last_seq] as const]
     )
   );
-  if (issues.isPending || state.isPending || issueDetails.some((detail) => detail.isPending)) {
-    return <p className="mt-8 text-sm text-slate-400">Loading issues…</p>;
-  }
   if (issues.isError || state.isError) {
     return <p className="mt-8 text-sm text-rose-300">Could not load issues.</p>;
   }
 
   const arranged = arrangeIssues(issues.data ?? [], state.data ?? {}, lastSeqByIssue);
-  let displayed = arranged;
+  const view = selectSidebarView(
+    currentIssue,
+    frozen.current,
+    arranged,
+    issueDetails.some((detail) => detail.isPending)
+  );
+  frozen.current = view.frozen;
 
-  if (currentIssue === undefined) {
-    frozen.current = undefined;
-  } else if (frozen.current?.issueKey === currentIssue) {
-    displayed = frozen.current.groups;
-  } else {
-    frozen.current = { groups: arranged, issueKey: currentIssue };
+  if (issues.isPending || state.isPending || view.displayed === undefined) {
+    return <p className="mt-8 text-sm text-slate-400">Loading issues…</p>;
   }
+
+  const displayed = view.displayed;
 
   const issueByKey = new Map((issues.data ?? []).map((issue) => [issue.key, issue]));
   return (
