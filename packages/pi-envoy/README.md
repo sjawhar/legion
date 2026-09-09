@@ -92,8 +92,9 @@ stateless request to the dispatch service, which writes the issue or comment. Th
 `dispatch` skill (shipped in `skills/`) says when and how to ask. Replies route back to the
 asking session, which is auto-subscribed to the thread's GitHub topic on every successful
 call; a Legion role's session survives kill/resume because Legion resurrection resumes the
-same OMP session file. Lifecycle and scope decisions still go through `hub` to the owning
-architect — Dispatch is for durable questions to the human, not for coordination between roles.
+same OMP session file. Lifecycle and scope decisions go through `envoy_publish` to the owning
+architect's role topic — Dispatch is for durable questions to the human, not for coordination
+between roles.
 
 The tool's model-facing schema is the shared contract's zod shape
 (`@legion/envoy-client/dispatch-contract`) serialised to JSON Schema, so OMP shows the model

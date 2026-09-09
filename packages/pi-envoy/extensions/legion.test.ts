@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { agentSubject, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import {
+  agentSubject,
+  type IssueKey,
+  LEGION_ROLES,
+  type LegionRole,
+  roleToken,
+} from "@legion/contracts";
 import { classifySession } from "../src/legion/classify";
 import { handleLegionControlDirective } from "../src/legion/control";
 import type {
@@ -962,6 +968,49 @@ describe("Legion OMP extension", () => {
     expect(fixture.tools.at(-1)?.name).toBe("legion");
     expect(fixture.activeTools).toContain("legion");
   });
+  test("allows a single `legion ...` bash invocation for an architect worker but blocks chaining and other commands", async () => {
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({
+      role: "architect",
+      workspace,
+      extraRoutes: (url) => {
+        if (url.pathname === "/legion/v1/grants") {
+          return Response.json({
+            grantId: "grant-architect",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+          });
+        }
+        return undefined;
+      },
+    });
+    const denied = "the architect delegates all code work to phase workers";
+    const isAllowed = async (command: string): Promise<boolean> => {
+      const result = await toolCall(
+        { toolName: "bash", toolCallId: `call-${command}`, input: { command } },
+        context
+      );
+      return !(typeof result === "object" && result !== null && "block" in result && result.block);
+    };
+
+    expect(await isAllowed("legion handoff complete --summary x")).toBe(true);
+    expect(await isAllowed("legion gh -- pr view 1")).toBe(true);
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-chained",
+          input: { command: "echo hi && legion gh" },
+        },
+        context
+      )
+    ).resolves.toEqual({ block: true, reason: denied });
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-non-legion", input: { command: "rm -rf x" } },
+        context
+      )
+    ).resolves.toEqual({ block: true, reason: denied });
+  });
   test("binds a booted worker's jj identity to LEGION_WORKSPACE", async () => {
     const workspace = await createJjWorkspace();
 
@@ -972,15 +1021,25 @@ describe("Legion OMP extension", () => {
   });
   test("restricts phase-worker tool access per LEGION_ROLE", async () => {
     const blockedReason = (role: LegionRole, toolName: string): string | undefined => {
+      if (role === "architect" && ["edit", "write", "apply_patch"].includes(toolName)) {
+        return "the architect delegates all code work to phase workers";
+      }
       if (role === "reviewer" && ["edit", "write", "apply_patch"].includes(toolName)) {
-        return "the reviewer does not modify the branch";
+        return "the reviewer edits nothing except the final .legion/ cleanup commit via bash";
       }
       if (role === "merger" && ["edit", "write", "apply_patch", "task"].includes(toolName)) {
         return "the merger only verifies and reports";
       }
       return undefined;
     };
-    const roles: readonly LegionRole[] = ["planner", "implementer", "tester", "reviewer", "merger"];
+    const roles: readonly LegionRole[] = [
+      "planner",
+      "implementer",
+      "tester",
+      "reviewer",
+      "merger",
+      "architect",
+    ];
     const toolNames = ["edit", "write", "apply_patch", "task", "hub"];
 
     for (const role of roles) {
@@ -1794,5 +1853,66 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: "the architect delegates all code work to phase workers",
     });
+  });
+  test("ships a roles/<role>.md prompt file for every LegionRole", async () => {
+    // The daemon `cat`s packages/pi-envoy/roles/${role}.md at spawn for every
+    // phase-worker role, including a sub-architect (packages/daemon/src/daemon/processes.ts
+    // launchWorker). A missing file 500s the spawn.
+    for (const role of LEGION_ROLES) {
+      const rolePath = path.join(import.meta.dir, "..", "roles", `${role}.md`);
+      await access(rolePath);
+      // A zero-byte file would pass the existence check above and boot a worker with no
+      // instructions at all -- fail loudly on that instead of leaving it a silent runtime bug.
+      expect((await readFile(rolePath, "utf8")).trim()).not.toBe("");
+    }
+  });
+  test("keeps the Step-one skill-discovery section and closing envoy-addressing paragraph identical, word for word, across every roles/<role>.md", async () => {
+    // Six independent files, six independent editors: this is the drift guard. A change to
+    // shared prose in one file and not the other five goes red here instead of silently
+    // diverging (round-1's epilogue fix already drifted into five different line-wrap widths
+    // before this test existed). The Step-one paragraph is identical across all six EXCEPT
+    // that implementer/tester/reviewer each end it with one extra sentence pointing at the
+    // plan handoff's `requiredSkills.implement`/`.test`/`.review` key -- architect, planner,
+    // and merger have no corresponding key, so that sentence is deliberately absent there.
+    const normalize = (section: string): string => section.split(/\s+/).filter(Boolean).join(" ");
+    const requiredSkillsSentence =
+      "Then read the plan handoff's `requiredSkills` for your role and follow those too.";
+    const stepOneBase: Record<string, string> = {};
+    const rolesWithRequiredSkillsSentence: string[] = [];
+    const closingParagraphs: Record<string, string> = {};
+    for (const role of LEGION_ROLES) {
+      const rolePath = path.join(import.meta.dir, "..", "roles", `${role}.md`);
+      const text = await readFile(rolePath, "utf8");
+      const heading = "## Step one: find this repository's skills";
+      const headingStart = text.indexOf(heading);
+      if (headingStart === -1) throw new Error(`${role}.md is missing the Step-one heading`);
+      // Skip the blank line separating the heading from its paragraph -- stopping right after
+      // the heading text would make paragraphEnd find that same blank line, comparing "" for
+      // every role and passing even when the real paragraph diverges.
+      const afterHeading = text.slice(headingStart + heading.length).replace(/^\s+/, "");
+      const paragraphEnd = afterHeading.indexOf("\n\n");
+      if (paragraphEnd === -1) throw new Error(`${role}.md's Step-one paragraph has no end`);
+      const paragraph = normalize(afterHeading.slice(0, paragraphEnd));
+      if (paragraph.endsWith(requiredSkillsSentence)) {
+        rolesWithRequiredSkillsSentence.push(role);
+        stepOneBase[role] = paragraph.slice(0, -requiredSkillsSentence.length).trim();
+      } else {
+        stepOneBase[role] = paragraph;
+      }
+
+      const closingMatch =
+        /When\s+your\s+phase\s+is\s+done,\s+stay\s+in\s+this\s+session\s+afterwards:[\s\S]*$/.exec(
+          text
+        );
+      if (!closingMatch) throw new Error(`${role}.md is missing the closing envoy paragraph`);
+      closingParagraphs[role] = normalize(closingMatch[0]);
+    }
+    const [firstRole, ...restRoles] = LEGION_ROLES;
+    if (firstRole === undefined) throw new Error("LEGION_ROLES is empty");
+    for (const role of restRoles) {
+      expect(stepOneBase[role]).toBe(stepOneBase[firstRole]);
+      expect(closingParagraphs[role]).toBe(closingParagraphs[firstRole]);
+    }
+    expect(rolesWithRequiredSkillsSentence.sort()).toEqual(["implementer", "reviewer", "tester"]);
   });
 });

@@ -8,5 +8,5 @@ capability.
 Then read and follow the `legion-controller` skill. The controller is wake-driven: handle
 one delivered wake per turn, verify daemon and GitHub state before side effects, and do
 not poll or run an idle loop. It judges triage, controller-actionable architect
-escalations, approval interpretation, resync healing, and direct human messages; it
+escalations, resync healing, and direct human messages; it
 never performs phase-worker work or forwards raw events into an architect session.

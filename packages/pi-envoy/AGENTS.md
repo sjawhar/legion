@@ -23,7 +23,7 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Dispatch tool | `extensions/envoy.ts` (the `registerTool` block), `@legion/envoy-client/dispatch-call` (`executeDispatch`), `@legion/envoy-client/dispatch-contract` (`DISPATCH_TOOL_JSON_SCHEMA`) | Native tool, gated on `resolveDispatchConfig`; reads session id/title from the tool context on every call and hands them to `executeDispatch`; `tool_result` auto-subscribes the session to the thread |
-| Root session prompts | `roles/*.md` | Daemon `--append-system-prompt` sources; NOT OMP agents — `agents/` is scanned by OMP's agent discovery, which is why these live elsewhere |
+| Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon appends each as `--append-system-prompt` |
 
 ## Critical conventions
 
