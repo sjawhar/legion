@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Envelope } from "@legion/contracts";
+import { decode } from "@toon-format/toon";
 import { renderInbound, replyWith, senderLabel } from "../delivery";
 
 const reader = "01a01111-2222-7333-4444-555555555555";
@@ -107,34 +108,38 @@ describe("inbound delivery policy", () => {
 });
 
 describe("renderInbound dispatch events", () => {
-  test("renders issue lifecycle event blocks", () => {
-    for (const type of ["issue.created", "issue.updated", "issue.closed"]) {
-      expect(renderInbound(dispatchEvent(type, issue), reader).content).toBe(
-        [
-          `dispatch DSP-1 · ${type} · by session session-1`,
-          "Title: Native Dispatch",
-          "Status: in_progress",
-          "Route: role:legion-controller",
-        ].join("\n")
-      );
-    }
+  test("renders ask.answered as TOON carrying the full inbound envelope contract", () => {
+    const rendered = renderInbound(dispatchEvent("ask.answered", answeredAsk), reader);
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+
+    expect(decoded.envoy).toEqual({
+      from: "dispatch",
+      at: "1970-01-01T00:00:00Z",
+      id: "dispatch-1",
+      dispatch: {
+        issue_key: "DSP-1",
+        type: "ask.answered",
+        actor: { kind: "session", id: "session-1" },
+        payload: {
+          question: "Which API?",
+          options: [{ label: "JSON" }, { label: "MCP" }],
+          answer: { selected: ["JSON"], text: "Use JSON HTTP." },
+        },
+      },
+    });
   });
 
-  test("renders artifact creation", () => {
-    expect(
-      renderInbound(
-        dispatchEvent("artifact.created", { artifact: { id: "artifact-1", name: "spec.md" } }),
-        reader
-      ).content
-    ).toBe(
-      ["dispatch DSP-1 · artifact.created · by session session-1", "Artifact: spec.md"].join("\n")
-    );
-  });
-
-  test("renders named artifact versions with their diff", () => {
-    expect(
-      renderInbound(
-        dispatchEvent("artifact.version", {
+  test("types each Dispatch event's nested payload by its wire-contract schema", () => {
+    const cases: Array<{ type: string; payload: object; expectedPayload: unknown }> = [
+      { type: "issue.updated", payload: issue, expectedPayload: issue },
+      {
+        type: "artifact.created",
+        payload: { artifact: { id: "artifact-1", name: "spec.md" } },
+        expectedPayload: { artifact: { name: "spec.md" } },
+      },
+      {
+        type: "artifact.version",
+        payload: {
           artifact_id: "artifact-1",
           name: "spec.md",
           version: {
@@ -145,152 +150,108 @@ describe("renderInbound dispatch events", () => {
             created_at: "2026-09-09T00:00:00Z",
           },
           diff: "@@ -1 +1 @@\n-MCP\n+JSON",
-        }),
-        reader
-      ).content
-    ).toBe(
-      [
-        "dispatch DSP-1 · artifact.version · by session session-1",
-        "Artifact: spec.md",
-        "Version: 3",
-        "Summary: Clarify transport",
-        "Diff:",
-        "@@ -1 +1 @@",
-        "-MCP",
-        "+JSON",
-      ].join("\n")
-    );
-  });
-
-  test("renders opened and answered asks", () => {
-    expect(renderInbound(dispatchEvent("ask.opened", openAsk), reader).content).toBe(
-      [
-        "dispatch DSP-1 · ask.opened · by session session-1",
-        "Question: Which API?",
-        "Options: JSON, MCP",
-      ].join("\n")
-    );
-    expect(renderInbound(dispatchEvent("ask.answered", answeredAsk), reader).content).toBe(
-      [
-        "dispatch DSP-1 · ask.answered · by session session-1",
-        "Question: Which API?",
-        "Selected: JSON",
-        "Text: Use JSON HTTP.",
-      ].join("\n")
-    );
-  });
-
-  test("renders a free-text answer whose nil Go slices arrive as null", () => {
-    expect(
-      renderInbound(
-        dispatchEvent("ask.answered", {
-          ...openAsk,
-          options: null,
-          state: "answered",
-          answer: {
-            user: "sami",
-            selected: null,
-            text: "Use JSON HTTP.",
-            at: "2026-09-09T00:01:00Z",
-          },
-        }),
-        reader
-      ).content
-    ).toBe(
-      [
-        "dispatch DSP-1 · ask.answered · by session session-1",
-        "Question: Which API?",
-        "Selected: none",
-        "Text: Use JSON HTTP.",
-      ].join("\n")
-    );
-  });
-
-  test("renders created and resolved comments with their anchor and reply chain", () => {
-    for (const eventComment of [comment, { ...comment, resolved: true }]) {
-      const type = eventComment.resolved ? "comment.resolved" : "comment.created";
-      expect(renderInbound(dispatchEvent(type, eventComment), reader).content).toBe(
-        [
-          `dispatch DSP-1 · ${type} · by session session-1`,
-          "Artifact: spec.md",
-          "> old line",
-          "Reply chain: comment-0",
-          "Body: Please update this.",
-        ].join("\n")
-      );
-    }
-  });
-
-  test("renders accepted and rejected suggestions as replacements", () => {
-    for (const type of ["suggestion.accepted", "suggestion.rejected"]) {
-      expect(
-        renderInbound(
-          dispatchEvent(type, {
-            ...comment,
-            suggestion: { replace_with: "new line", accepted: type === "suggestion.accepted" },
-          }),
-          reader
-        ).content
-      ).toBe(
-        [
-          `dispatch DSP-1 · ${type} · by session session-1`,
-          "Artifact: spec.md",
-          "> old line",
-          "old line → new line",
-        ].join("\n")
-      );
-    }
-  });
-
-  test("renders messages", () => {
-    expect(
-      renderInbound(
-        dispatchEvent("message.created", {
+        },
+        expectedPayload: {
+          name: "spec.md",
+          version: { number: 3, summary: "Clarify transport" },
+          diff: "@@ -1 +1 @@\n-MCP\n+JSON",
+        },
+      },
+      {
+        type: "comment.resolved",
+        payload: { ...comment, resolved: true },
+        expectedPayload: {
+          artifact_name: "spec.md",
+          body: "Please update this.",
+          reply_to: "comment-0",
+          anchor: { quote: "old line" },
+          suggestion: null,
+        },
+      },
+      {
+        type: "suggestion.accepted",
+        payload: { ...comment, suggestion: { replace_with: "new line", accepted: true } },
+        expectedPayload: {
+          artifact_name: "spec.md",
+          body: "Please update this.",
+          reply_to: "comment-0",
+          anchor: { quote: "old line" },
+          suggestion: { replace_with: "new line" },
+        },
+      },
+      {
+        type: "message.created",
+        payload: {
           id: "message-1",
           issue_key: "DSP-1",
           author: actor,
           body: "The build is green.",
           created_at: "2026-09-09T00:00:00Z",
-        }),
-        reader
-      ).content
-    ).toBe(
-      ["dispatch DSP-1 · message.created · by session session-1", "Body: The build is green."].join(
-        "\n"
-      )
-    );
+        },
+        expectedPayload: { body: "The build is green." },
+      },
+      {
+        type: "child.status",
+        payload: { child_key: "DSP-2", from: "todo", to: "in_progress" },
+        expectedPayload: { child_key: "DSP-2", from: "todo", to: "in_progress" },
+      },
+    ];
+
+    for (const { type, payload, expectedPayload } of cases) {
+      const decoded = decode(renderInbound(dispatchEvent(type, payload), reader).content) as {
+        envoy: { dispatch: Record<string, unknown> };
+      };
+      expect(decoded.envoy.dispatch).toEqual({
+        issue_key: "DSP-1",
+        type,
+        actor: { kind: "session", id: "session-1" },
+        payload: expectedPayload,
+      });
+    }
   });
 
-  test("renders child status transitions", () => {
-    expect(
-      renderInbound(
-        dispatchEvent("child.status", { child_key: "DSP-2", from: "todo", to: "in_progress" }),
-        reader
-      ).content
-    ).toBe(
-      [
-        "dispatch DSP-1 · child.status · by session session-1",
-        "Child: DSP-2 todo → in_progress",
-      ].join("\n")
+  test("renders an unrecognized-shape dispatch payload as its raw structured object", () => {
+    const rendered = renderInbound(
+      JSON.stringify(
+        envelope({
+          source: "dispatch",
+          payload: JSON.stringify({
+            secret: "now visible as data, not prose",
+            unexpected: { nested: true },
+          }),
+        })
+      ),
+      reader
     );
+    const decoded = decode(rendered.content) as { envoy: { dispatch: unknown } };
+
+    expect(decoded.envoy.dispatch).toEqual({
+      secret: "now visible as data, not prose",
+      unexpected: { nested: true },
+    });
   });
 
-  test("renders malformed Dispatch events as a bounded Dispatch error", () => {
-    expect(
-      renderInbound(
-        JSON.stringify(
-          envelope({
-            source: "dispatch",
-            payload: JSON.stringify({
-              secret: "must not be rendered",
-              unexpected: { nested: true },
-            }),
-          })
-        ),
-        reader
-      ).content
-    ).toBe("dispatch: invalid event");
+  test("falls back to the generic summary path when a dispatch envelope has no payload", () => {
+    const rendered = renderInbound(
+      JSON.stringify(envelope({ source: "dispatch", payload_summary: "DSP-1 ask answered" })),
+      reader
+    );
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+
+    expect(decoded.envoy.summary).toBe("DSP-1 ask answered");
+    expect(decoded.envoy.dispatch).toBeUndefined();
+    expect(decoded.envoy.unrecognised).toBe("payload");
   });
+
+  test("preserves punctuation and newlines in a dispatch message body through TOON", () => {
+    const body = 'First line: has "quotes", commas,\nand a second line.';
+    const decoded = decode(
+      renderInbound(dispatchEvent("message.created", { body }), reader).content
+    ) as { envoy: { dispatch: { payload: { body: string } } } };
+
+    expect(decoded.envoy.dispatch.payload.body).toBe(body);
+  });
+
   test("drops an event authored by the reader session", () => {
     expect(
       renderInbound(

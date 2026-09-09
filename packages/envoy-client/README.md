@@ -11,8 +11,13 @@ message to the reader, formats sender identity and reply metadata, renders struc
 once as `message`, and marks unknown sources or fields with `unrecognised`.
 
 Malformed input is safe: a non-JSON frame becomes a TOON block naming its topic and an
-`unrecognised` parse failure. The renderer never emits raw frame bytes. Dispatch events render as
-plain-text issue updates and skip events authored by the reader's own session.
+`unrecognised` parse failure. The renderer never emits raw frame bytes. Dispatch envelopes
+(`source: "dispatch"`) render through the same TOON path as every other source, nesting the
+parsed event under `dispatch: { issue_key, type, actor, payload }` with `payload` typed per event
+type; a payload whose shape disagrees with its event type's schema is preserved as its raw parsed
+value under `dispatch`, never dropped or reduced to prose. A dispatch envelope with no payload at
+all falls back to the same `summary` field every other source gets and marks `unrecognised:
+payload`. The renderer skips events authored by the reader's own session.
 
 ## HTTP transport
 
