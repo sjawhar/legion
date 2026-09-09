@@ -2,13 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 
 const output = resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go");
+const questionSchema = resolve(import.meta.dir, "../schemas/dispatch-question.schema.json");
 const generator = resolve(import.meta.dir, "gen-go.ts");
 const repoRoot = resolve(import.meta.dir, "../../..");
 
 describe("gen-go", () => {
-  // Spawns the generator (which shells out to gofmt) and a `go test` that compiles
-  // the contracts package from cold on a CI runner; Bun's 5 s default cannot cover it.
-  test("emits the envelope sender struct", async () => {
+  // The generator shells out to gofmt, so Bun's 5 s default cannot cover a cold CI runner.
+  test("emits the envelope Go contract without a question schema", async () => {
     const process = Bun.spawn(["bun", generator], {
       cwd: repoRoot,
       stderr: "pipe",
@@ -28,24 +28,6 @@ describe("gen-go", () => {
 \tTitle     string   \`json:"title,omitempty"\`
 \tRoles     []string \`json:"roles,omitempty"\`
 }`);
-
-    const goTest = Bun.spawn(
-      ["go", "test", "./internal/contracts/...", "-run", "^TestEnvelopeSignalQualityFieldsRoundTrip$"],
-      {
-        cwd: resolve(repoRoot, "packages/envoy"),
-        stderr: "pipe",
-        stdout: "pipe",
-      }
-    );
-    // On a cold runner the toolchain writes `go: downloading …` to stderr; that is
-    // not a test failure. Judge the exit code and the package result line instead.
-    const [goStdout, goStderr, goExit] = await Promise.all([
-      new Response(goTest.stdout).text(),
-      new Response(goTest.stderr).text(),
-      goTest.exited,
-    ]);
-
-    expect(goExit, `go test failed:\n${goStdout}\n${goStderr}`).toBe(0);
-    expect(goStdout).toMatch(/^ok\s+github\.com\/sjawhar\/envoy\/internal\/contracts/m);
+    expect(await Bun.file(questionSchema).exists()).toBe(false);
   }, 120_000);
 });

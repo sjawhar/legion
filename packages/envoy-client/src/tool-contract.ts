@@ -1,4 +1,9 @@
-import { EnvelopeSchema } from "@legion/contracts";
+import {
+  EnvelopeSchema,
+  type SchemaApi,
+  type SchemaNode,
+  type ToolArgumentsShape,
+} from "@legion/contracts";
 import { z } from "zod";
 import type { MessageMetadataInput } from "./transport";
 
@@ -20,48 +25,60 @@ const TOPIC_GUIDE =
   "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " +
   "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
 
-/**
- * The slice of a Zod namespace the tool shapes are built from. Every host passes its own
- * instance: a schema object from one Zod copy is opaque to another, and OMP's converter reads
- * internals (`.ir`) that only the `pi.zod` it injects produces. Shapes built here with this
- * package's `zod` import would load in the MCP bridge and fail to register in OMP.
- *
- * `Element` is whatever the host's `array` accepts (a Zod type for real Zod, `unknown` for
- * OMP's structural surface); it only has to match the host's own `string`.
- */
-export interface SchemaProperty {
-  readonly optional: () => SchemaProperty;
-  readonly describe: (description: string) => SchemaProperty;
-}
+export type { SchemaApi, ToolArgumentsShape } from "@legion/contracts";
 
-export interface NumberSchemaProperty extends SchemaProperty {
-  readonly int: () => SchemaProperty;
-}
-
-export interface SchemaApi<Element> {
-  readonly string: () => SchemaProperty & Element;
-  readonly number: () => NumberSchemaProperty;
-  readonly array: (item: Element) => SchemaProperty;
-  readonly enum: (values: readonly string[]) => SchemaProperty;
-}
-
-export type ToolArgumentsShape = Readonly<Record<string, unknown>>;
-
-const URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options;
-const EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap().options;
+const URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options as unknown as readonly [
+  "low",
+  "med",
+  "high",
+  "blocking",
+];
+const EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap().options as unknown as readonly [
+  "none",
+  "optional",
+  "required",
+];
 
 /** Message metadata arguments shared by envoy_send and envoy_publish, built on the host's Zod. */
-export function messageMetadataShape<Element>(schema: SchemaApi<Element>): ToolArgumentsShape {
+export function messageMetadataShape<Element extends SchemaNode<Element>>(
+  schema: SchemaApi<Element>
+): ToolArgumentsShape {
   return {
     in_reply_to: schema.string().optional(),
     supersedes: schema.string().optional(),
     urgency: schema.enum(URGENCY_VALUES).optional(),
     expects_reply: schema.enum(EXPECTS_REPLY_VALUES).optional(),
-    expires_at: schema.number().int().optional(),
+    expires_at: schema.number({ int: true }).optional(),
   };
 }
+const zodSchemaApi = {
+  string: (opts = {}) => {
+    let schema = z.string();
+    if (opts.min !== undefined) schema = schema.min(opts.min);
+    if (opts.max !== undefined) schema = schema.max(opts.max);
+    return schema;
+  },
+  number: (opts = {}) => {
+    let schema = z.number();
+    if (opts.int) schema = schema.int();
+    if (opts.min !== undefined) schema = schema.min(opts.min);
+    if (opts.max !== undefined) schema = schema.max(opts.max);
+    return schema;
+  },
+  boolean: () => z.boolean(),
+  enum: (values: readonly [string, ...string[]]) => z.enum(values),
+  array: (item: z.ZodType, opts = {}) => {
+    let schema = z.array(item);
+    if (opts.min !== undefined) schema = schema.min(opts.min);
+    if (opts.max !== undefined) schema = schema.max(opts.max);
+    return schema;
+  },
+  object: (shape: Record<string, z.ZodType>) => z.object(shape),
+} satisfies SchemaApi<z.ZodType>;
 
-export const MessageMetadataSchema = z.object(messageMetadataShape(z) as z.ZodRawShape);
+export const MessageMetadataSchema = z.object(
+  messageMetadataShape(zodSchemaApi) as z.ZodRawShape
+);
 
 export type MessageMetadataArguments = {
   readonly in_reply_to?: string;
@@ -82,7 +99,9 @@ export function toMessageMetadata(args: MessageMetadataArguments): MessageMetada
   };
 }
 
-function messageArguments<Element>(schema: SchemaApi<Element>): ToolArgumentsShape {
+function messageArguments<Element extends SchemaNode<Element>>(
+  schema: SchemaApi<Element>
+): ToolArgumentsShape {
   return { message: schema.string(), ...messageMetadataShape(schema) };
 }
 
@@ -129,7 +148,9 @@ export interface ToolArgumentsByOperation {
 export type ToolSpec = {
   readonly name: string;
   readonly description: string;
-  readonly arguments: <Element>(schema: SchemaApi<Element>) => ToolArgumentsShape;
+  readonly arguments: <Element extends SchemaNode<Element>>(
+    schema: SchemaApi<Element>
+  ) => ToolArgumentsShape;
   readonly operation: EnvoyToolOperation;
   readonly requiresSubscriptionCapability: boolean;
 };

@@ -1,6 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { envoyToolSpecs, MessageMetadataSchema, toMessageMetadata } from "../tool-contract";
+import {
+  envoyToolSpecs,
+  MessageMetadataSchema,
+  toMessageMetadata,
+  type SchemaApi,
+} from "../tool-contract";
+
+const schemaApi = {
+  string: () => z.string(),
+  number: () => z.number(),
+  boolean: () => z.boolean(),
+  enum: (values: readonly [string, ...string[]]) => z.enum(values),
+  array: (item: z.ZodType) => z.array(item),
+  object: (shape: Record<string, z.ZodType>) => z.object(shape),
+} satisfies SchemaApi<z.ZodType>;
 
 describe("envoyToolSpecs", () => {
   test("defines the ten canonical Envoy tool names", () => {
@@ -45,7 +59,7 @@ describe("envoyToolSpecs", () => {
     const publish = envoyToolSpecs.find((spec) => spec.name === "envoy_publish");
     const sessions = envoyToolSpecs.find((spec) => spec.name === "envoy_sessions");
 
-    expect(Object.keys(send?.arguments(z) ?? {}).sort()).toEqual([
+    expect(Object.keys(send?.arguments(schemaApi) ?? {}).sort()).toEqual([
       "expects_reply",
       "expires_at",
       "in_reply_to",
@@ -54,7 +68,7 @@ describe("envoyToolSpecs", () => {
       "supersedes",
       "urgency",
     ]);
-    expect(Object.keys(publish?.arguments(z) ?? {}).sort()).toEqual([
+    expect(Object.keys(publish?.arguments(schemaApi) ?? {}).sort()).toEqual([
       "expects_reply",
       "expires_at",
       "in_reply_to",
@@ -63,7 +77,7 @@ describe("envoyToolSpecs", () => {
       "topic",
       "urgency",
     ]);
-    expect(Object.keys(sessions?.arguments(z) ?? {}).sort()).toEqual(["dir", "machine", "title"]);
+    expect(Object.keys(sessions?.arguments(schemaApi) ?? {}).sort()).toEqual(["dir", "machine", "title"]);
   });
 
   test("documents delivery guarantees and the full Envoy topic guide", () => {

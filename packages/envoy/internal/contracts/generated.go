@@ -67,9 +67,9 @@ func (e Envelope) Validate() error {
 		return fmt.Errorf("supersedes must not be empty")
 	}
 	switch e.Source {
-	case "agent", "human", "envoy", "github", "slack", "whatsapp", "ghostwispr":
+	case "agent", "human", "envoy", "github", "slack", "whatsapp", "ghostwispr", "dispatch":
 	default:
-		return fmt.Errorf("source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr")
+		return fmt.Errorf("source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr, dispatch")
 	}
 	if e.Urgency != "" {
 		switch e.Urgency {

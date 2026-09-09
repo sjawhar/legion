@@ -140,6 +140,12 @@ describe("EnvelopeSchema", () => {
     expect(item.source).toBe("human");
   });
 
+  test("accepts dispatch source", () => {
+    const item = EnvelopeSchema.parse(buildEnvelope({ source: "dispatch" }));
+
+    expect(item.source).toBe("dispatch");
+  });
+
   test("accepts envoy source for delivery exceptions", () => {
     const item = EnvelopeSchema.parse(
       buildEnvelope({
