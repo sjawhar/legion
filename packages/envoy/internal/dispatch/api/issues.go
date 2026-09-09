@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -145,7 +148,25 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(r.Context(), `
 			insert into issue_external_links (issue_key, url, kind) values ($1, $2, 'github_issue')
 		`, key, externalURL(externalRepo, externalNumber)); err != nil {
-			s.writeHandlerError(w, err)
+			if !isUniqueViolation(err) {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if err := tx.Rollback(r.Context()); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			existingKey, err := s.resolveIssueRef(r.Context(), input.External)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			existing, err := s.loadIssue(r.Context(), s.deps.Store.Pool, existingKey)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, existing)
 			return
 		}
 	}
@@ -205,6 +226,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(event)
 	writeJSON(w, http.StatusCreated, issue)
+}
+
+func isUniqueViolation(err error) bool {
+	var pgError *pgconn.PgError
+	return errors.As(err, &pgError) && pgError.Code == "23505"
 }
 
 func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {

@@ -266,6 +266,16 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
+	// Same shape as editArtifact: a CRDT replacement cannot be rolled back in memory, so a
+	// failure after ApplyReplace evicts the room (R30). Deferred BEFORE tx.Rollback so the
+	// transaction releases its document locks before eviction compacts the room.
+	evictOnFailure := false
+	evictArtifactID := ""
+	defer func() {
+		if evictOnFailure {
+			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
+		}
+	}()
 	defer tx.Rollback(r.Context())
 	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
@@ -303,6 +313,8 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 				writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
 				return
 			}
+			evictArtifactID = comment.Anchor.ArtifactID
+			evictOnFailure = true
 			if err := s.deps.Docs.ApplyReplace(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, *comment.Anchor, comment.Suggestion.ReplaceWith, actor); err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -349,6 +361,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
+	evictOnFailure = false
 	s.publish(event)
 	writeJSON(w, http.StatusOK, comment)
 }

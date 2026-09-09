@@ -5,12 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	gws "github.com/gorilla/websocket"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/persistence"
@@ -1105,7 +1109,9 @@ func TestGetCommentReturnsNotFound(t *testing.T) {
 	}
 }
 
-func TestEditArtifactRollbackLeavesPersistedDocumentUnchanged(t *testing.T) {
+func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
+	const settleInterval = 50 * time.Millisecond
+	var documentService *docs.Service
 	var failure *postApplyFailureDocs
 	var persistenceStore *recordingVersionedStore
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -1113,8 +1119,13 @@ func TestEditArtifactRollbackLeavesPersistedDocumentUnchanged(t *testing.T) {
 			VersionedStore: docs.NewPgVersioned(database),
 			updates:        make(chan struct{}, 2),
 		}
-		documentService := docs.New(docs.Deps{
-			Store: database, Persistence: persistenceStore, Settle: time.Hour,
+		documentService = docs.New(docs.Deps{
+			Store:       database,
+			Persistence: persistenceStore,
+			Identity: identity.HeaderIdentity{
+				Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}},
+			},
+			Settle: settleInterval,
 		})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		failure = &postApplyFailureDocs{
@@ -1123,6 +1134,15 @@ func TestEditArtifactRollbackLeavesPersistedDocumentUnchanged(t *testing.T) {
 		return failure
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Transactional edit", "before")
+	documentServer := httptest.NewServer(http.HandlerFunc(documentService.ServeHTTP))
+	t.Cleanup(documentServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(documentServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
+	connection, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect live document: response=%#v err=%v", wsResponse, err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
 	drainDocumentUpdates(persistenceStore)
 	responses := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -1133,16 +1153,24 @@ func TestEditArtifactRollbackLeavesPersistedDocumentUnchanged(t *testing.T) {
 	waitForPostApply(t, failure)
 	waitForDocumentUpdate(t, persistenceStore)
 	close(failure.release)
-	response := awaitResponse(t, responses)
-	if response.Code != http.StatusInternalServerError {
-		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", response.Code, response.Body.String())
+	handlerResponse := awaitResponse(t, responses)
+	if handlerResponse.Code != http.StatusInternalServerError {
+		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
 	}
-	if markdown := reloadedDocumentText(t, database, issue.PrimaryArtifactID); markdown != "before" {
-		t.Fatalf("persisted document after failed edit = %q, want %q", markdown, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
+	waitForDocumentConnectionClose(t, connection)
+	reconnected, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("reconnect evicted document: response=%#v err=%v", wsResponse, err)
 	}
+	t.Cleanup(func() { _ = reconnected.Close() })
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
 }
 
-func TestSuggestionAcceptRollbackLeavesPersistedDocumentUnchanged(t *testing.T) {
+func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
+	const settleInterval = 50 * time.Millisecond
+	var documentService *docs.Service
 	var failure *postApplyFailureDocs
 	var persistenceStore *recordingVersionedStore
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -1150,8 +1178,13 @@ func TestSuggestionAcceptRollbackLeavesPersistedDocumentUnchanged(t *testing.T) 
 			VersionedStore: docs.NewPgVersioned(database),
 			updates:        make(chan struct{}, 2),
 		}
-		documentService := docs.New(docs.Deps{
-			Store: database, Persistence: persistenceStore, Settle: time.Hour,
+		documentService = docs.New(docs.Deps{
+			Store:       database,
+			Persistence: persistenceStore,
+			Identity: identity.HeaderIdentity{
+				Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}},
+			},
+			Settle: settleInterval,
 		})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		failure = &postApplyFailureDocs{
@@ -1160,6 +1193,15 @@ func TestSuggestionAcceptRollbackLeavesPersistedDocumentUnchanged(t *testing.T) 
 		return failure
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Transactional suggestion", "before")
+	documentServer := httptest.NewServer(http.HandlerFunc(documentService.ServeHTTP))
+	t.Cleanup(documentServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(documentServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
+	connection, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect live document: response=%#v err=%v", wsResponse, err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
 	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body":       "replace it",
 		"anchor":     map[string]any{"artifact": "spec", "quote": "before"},
@@ -1178,13 +1220,19 @@ func TestSuggestionAcceptRollbackLeavesPersistedDocumentUnchanged(t *testing.T) 
 	waitForPostApply(t, failure)
 	waitForDocumentUpdate(t, persistenceStore)
 	close(failure.release)
-	response := awaitResponse(t, responses)
-	if response.Code != http.StatusInternalServerError {
-		t.Fatalf("accept with forced post-apply failure: status=%d body=%s", response.Code, response.Body.String())
+	handlerResponse := awaitResponse(t, responses)
+	if handlerResponse.Code != http.StatusInternalServerError {
+		t.Fatalf("accept with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
 	}
-	if markdown := reloadedDocumentText(t, database, issue.PrimaryArtifactID); markdown != "before" {
-		t.Fatalf("persisted document after failed accept = %q, want %q", markdown, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
+	waitForDocumentConnectionClose(t, connection)
+	reconnected, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("reconnect evicted document: response=%#v err=%v", wsResponse, err)
 	}
+	t.Cleanup(func() { _ = reconnected.Close() })
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
 }
 
 type recordingVersionedStore struct {
@@ -1261,13 +1309,44 @@ func waitForDocumentUpdate(t *testing.T, store *recordingVersionedStore) {
 	}
 }
 
-func reloadedDocumentText(t *testing.T, database *store.Store, artifactID string) string {
+func assertHandlerDocumentText(t *testing.T, handler http.Handler, artifactID, want string) {
 	t.Helper()
-	documentService := docs.New(docs.Deps{Store: database, Settle: time.Hour})
-	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-	markdown, err := documentService.Text(context.Background(), artifactID)
-	if err != nil {
-		t.Fatalf("read persisted document: %v", err)
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read document after rollback: status=%d body=%s", response.Code, response.Body.String())
 	}
-	return markdown
+	result := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, response)
+	if result.Markdown != want {
+		t.Fatalf("document after rollback = %q, want %q", result.Markdown, want)
+	}
+}
+
+func assertNoSettledDocumentVersion(t *testing.T, database *store.Store, artifactID string, settle time.Duration) {
+	t.Helper()
+	time.Sleep(3 * settle)
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count document versions after rollback: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("versions after rollback = %d, want 1", versions)
+	}
+}
+
+func waitForDocumentConnectionClose(t *testing.T, connection *gws.Conn) {
+	t.Helper()
+	connection.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		if _, _, err := connection.ReadMessage(); err != nil {
+			var networkError net.Error
+			if errors.As(err, &networkError) && networkError.Timeout() {
+				t.Fatal("document connection remained open after rollback")
+			}
+			return
+		}
+	}
 }

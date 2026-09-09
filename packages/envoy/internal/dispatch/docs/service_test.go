@@ -168,6 +168,41 @@ func TestReplaceTextWithTransactionRollsBackUpdate(t *testing.T) {
 	}
 }
 
+func TestEvictDropsUnconnectedRoomAndCancelsSettlement(t *testing.T) {
+	service, artifactID := newTestService(t)
+	const settleInterval = 50 * time.Millisecond
+	service.settle = settleInterval
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transactional edit: %v", err)
+	}
+	if err := service.ReplaceText(WithTx(ctx, tx), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("replace text before eviction: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("roll back document mutation: %v", err)
+	}
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatalf("evict unconnected document: %v", err)
+	}
+	waitForNoLiveDocument(t, service, artifactID)
+	if got, err := service.Text(ctx, artifactID); err != nil || got != "before" {
+		t.Fatalf("document after eviction = %q (%v), want persisted text before", got, err)
+	}
+	time.Sleep(3 * settleInterval)
+	var versions int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count versions after eviction: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("versions after eviction = %d, want 1", versions)
+	}
+}
+
 func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "one two one")

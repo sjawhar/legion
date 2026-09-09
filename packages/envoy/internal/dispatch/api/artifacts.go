@@ -437,11 +437,22 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// A CRDT edit cannot be rolled back in memory, so any failure after ApplyOps evicts the
+	// room and the next access reloads durable state (R30). Deferred BEFORE tx.Rollback so
+	// LIFO order rolls the transaction back first: eviction compacts the room and would
+	// otherwise block on the document rows this transaction still locks.
+	evictOnFailure := false
+	defer func() {
+		if evictOnFailure {
+			_ = s.deps.Docs.Evict(r.Context(), artifact.ID)
+		}
+	}()
 	defer tx.Rollback(r.Context())
 	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	evictOnFailure = true
 	applied, err := s.deps.Docs.ApplyOps(docs.WithTx(r.Context(), tx), artifact.ID, input.Ops, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -477,6 +488,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	evictOnFailure = false
 	if version != nil {
 		s.deps.Docs.CommitVersion(artifact.ID, *version)
 	}

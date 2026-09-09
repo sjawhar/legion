@@ -884,6 +884,34 @@ func (s *Service) SetIssueClosed(issueKey string, closed bool) {
 	}
 }
 
+// Evict closes a live room and discards its resident state so the next access
+// reloads the durable document without treating the room as failed.
+func (s *Service) Evict(_ context.Context, artifactID string) error {
+	value, _ := s.rooms.Load(artifactID)
+	var state *roomState
+	if value != nil {
+		state = value.(*roomState)
+		state.mu.Lock()
+		state.gen++
+		if state.settle != nil && state.settle.Stop() {
+			s.settleWG.Done()
+		}
+		state.mu.Unlock()
+	}
+	return s.evictRoom(artifactID, state)
+}
+
+func (s *Service) evictRoom(room string, state *roomState) error {
+	err := s.srv.CloseRoom(room, true)
+	if state != nil {
+		s.rooms.CompareAndDelete(room, state)
+	}
+	if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+		return fmt.Errorf("evict live document: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) failRoom(room string, cause error) {
 	state := s.room(room)
 	state.mu.Lock()
@@ -900,8 +928,7 @@ func (s *Service) failRoom(room string, cause error) {
 	}
 	state.mu.Unlock()
 	go func() {
-		_ = s.srv.CloseRoom(room, true)
-		s.rooms.CompareAndDelete(room, state)
+		_ = s.evictRoom(room, state)
 		close(done)
 	}()
 }

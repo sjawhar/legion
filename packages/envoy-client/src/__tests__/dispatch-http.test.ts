@@ -219,6 +219,45 @@ describe("DispatchClient", () => {
     });
   });
 
+  test("shares concurrent external issue creation in one client", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ code: "NOT_FOUND", error: "issue was not found" }, 404),
+      jsonResponse({ key: "DSP-42" }, 201),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(
+      Promise.all([
+        client.ensureIssue("owner/repo#42", actor),
+        client.ensureIssue("owner/repo#42", actor),
+      ])
+    ).resolves.toEqual(["DSP-42", "DSP-42"]);
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual(["/api/v1/issues/resolve?ref=owner%2Frepo%2342", "/api/v1/issues"]);
+  });
+
+  test("re-resolves an external issue after retryable creation failures", async () => {
+    for (const status of [409, 500]) {
+      const { fetchImpl, requests } = fakeFetch([
+        jsonResponse({ code: "NOT_FOUND", error: "issue was not found" }, 404),
+        jsonResponse({ error: "creation raced" }, status),
+        jsonResponse({ key: "DSP-42" }),
+      ]);
+      const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+      await expect(client.ensureIssue("owner/repo#42", actor)).resolves.toBe("DSP-42");
+      expect(
+        requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+      ).toEqual([
+        "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
+        "/api/v1/issues",
+        "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
+      ]);
+    }
+  });
+
   test("maps comment reply-chain reads to the API", async () => {
     const { fetchImpl, requests } = fakeFetch([
       jsonResponse({

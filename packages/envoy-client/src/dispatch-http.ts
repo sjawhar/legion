@@ -256,6 +256,7 @@ function isJson(response: Response): boolean {
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
+  readonly #creatingIssues = new Map<string, Promise<string>>();
 
   constructor(
     baseUrl: string,
@@ -398,12 +399,38 @@ export class DispatchClient {
     } catch (error) {
       if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
     }
-    const created = await this.#json<Issue>("POST", ["api", "v1", "issues"], {
-      external: issueReference,
-      actor,
-    });
-    this.#resolvedIssues.set(issueReference, Promise.resolve(created.key));
-    return created.key;
+
+    let creating = this.#creatingIssues.get(issueReference);
+    if (!creating) {
+      creating = this.#createExternalIssue(issueReference, actor);
+      this.#creatingIssues.set(issueReference, creating);
+    }
+    try {
+      return await creating;
+    } finally {
+      if (this.#creatingIssues.get(issueReference) === creating) {
+        this.#creatingIssues.delete(issueReference);
+      }
+    }
+  }
+
+  async #createExternalIssue(issueReference: string, actor: Actor): Promise<string> {
+    try {
+      const created = await this.#json<Issue>("POST", ["api", "v1", "issues"], {
+        external: issueReference,
+        actor,
+      });
+      this.#resolvedIssues.set(issueReference, Promise.resolve(created.key));
+      return created.key;
+    } catch (error) {
+      if (
+        error instanceof DispatchServiceError &&
+        (error.status === 409 || error.status === 500)
+      ) {
+        return this.#resolveIssue(issueReference);
+      }
+      throw error;
+    }
   }
 
   async #resolveIssue(issueReference: string): Promise<string> {
