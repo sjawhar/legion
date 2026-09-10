@@ -26,6 +26,7 @@ type API interface {
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error)
 	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (string, error)
 	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error)
+	SuggestionKind(ctx context.Context, artifactID, id string) (string, error)
 	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error
 	RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord) error

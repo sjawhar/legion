@@ -32,6 +32,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 	tx, joinedTransaction := txFromContext(ctx)
 	var slot *suppressSlot
 	var state *roomState
+	rearmSettle := false
 	if joinedTransaction {
 		slot = s.prepareSuppressedPersistence(artifactID)
 		state = s.room(artifactID)
@@ -39,12 +40,16 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 		state.gen++
 		if state.settle != nil && state.settle.Stop() {
 			s.settleWG.Done()
+			rearmSettle = true
 		}
 		state.suppressSettle++
 		state.mu.Unlock()
 		defer func() {
 			state.mu.Lock()
 			state.suppressSettle--
+			if rearmSettle {
+				s.scheduleSettleLocked(artifactID, state)
+			}
 			state.mu.Unlock()
 		}()
 	}

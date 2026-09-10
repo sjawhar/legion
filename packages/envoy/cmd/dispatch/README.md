@@ -160,6 +160,7 @@ A caller resolved by header identity without a stored GitHub token receives
 | Status / code | Meaning |
 | --- | --- |
 | `404 TARGET_NOT_FOUND` | The quote requested by an anchor or document edit is absent. |
+| `409 TARGET_AMBIGUOUS` | A quote matches more than once without an `occurrence`; the response includes candidate ranges and context. |
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |

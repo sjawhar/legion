@@ -144,6 +144,39 @@ func TestMarkRangeThenFindMark(t *testing.T) {
 	}
 }
 
+func TestFindMarkSpansTextblocks(t *testing.T) {
+	doc := crdt.New()
+	fragment := doc.GetXmlFragment("prosemirror")
+	tree, err := Parse("one\n\ntwo\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, fragment, tree)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	range_, err := FindQuote(tree, "one two", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = MarkRange(txn, fragment, range_, Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:alice"}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked, err := Read(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, quote, found := FindMark(marked, "proofComment", "c1")
+	if !found || quote != "one two" || got != range_ {
+		t.Fatalf("FindMark = %v %q %t, want %v %q true", got, quote, found, range_, "one two")
+	}
+}
+
 func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
 	doc, err := Parse("Keep **this** and change that.\n")
 	if err != nil {

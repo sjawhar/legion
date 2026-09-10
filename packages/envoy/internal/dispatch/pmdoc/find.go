@@ -296,31 +296,35 @@ func distance(left, right int) int {
 	return left - right
 }
 
-// FindMark finds the first contiguous text range covered by a mark identity.
+// FindMark finds the first document-contiguous range covered by a mark identity.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
-	var matches []markedText
-	walk(doc, func(node *Node, _ []int, pos, _ int) bool {
-		if node.Type == "text" && nodeMarkID(node, markType) == id {
-			matches = append(matches, markedText{Range: Range{From: pos, To: pos + len16(node.Text)}, text: node.Text})
+	var quote strings.Builder
+	var marked Range
+	found := false
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if node.Type != "text" {
+			return true
 		}
+		if nodeMarkID(node, markType) != id {
+			return !found
+		}
+		if !found {
+			found = true
+			marked = Range{From: pos, To: end}
+			quote.WriteString(node.Text)
+			return true
+		}
+		if pos != marked.To {
+			quote.WriteByte(' ')
+		}
+		marked.To = end
+		quote.WriteString(node.Text)
 		return true
 	})
-	if len(matches) == 0 {
+	if !found {
 		return Range{}, "", false
 	}
-
-	first := matches[0]
-	var quote strings.Builder
-	quote.WriteString(first.text)
-	out := first.Range
-	for _, match := range matches[1:] {
-		if match.From != out.To {
-			break
-		}
-		out.To = match.To
-		quote.WriteString(match.text)
-	}
-	return out, quote.String(), true
+	return marked, quote.String(), true
 }
 
 type MarkRef struct {
@@ -380,11 +384,6 @@ func MarkAttrs(doc *Node, markType, id string) (Attrs, bool) {
 		return true
 	})
 	return attrs, found
-}
-
-type markedText struct {
-	Range
-	text string
 }
 
 func nodeMarkID(node *Node, markType string) string {

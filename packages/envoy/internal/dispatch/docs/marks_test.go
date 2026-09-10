@@ -103,6 +103,18 @@ func TestVerifyMarkWaitsForTheBrowserUpdate(t *testing.T) {
 	}
 }
 
+func TestSuggestionKindReadsBrowserMark(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", "quick", pmdoc.Attrs{
+		"id": "insert-1", "by": "user:alice", "kind": "insert",
+	})
+	kind, err := service.SuggestionKind(context.Background(), artifactID, "insert-1")
+	if err != nil || kind != "insert" {
+		t.Fatalf("SuggestionKind = %q, %v, want insert", kind, err)
+	}
+}
+
 func TestAcceptSuggestionReplacesMarkedTextAndRemovesTheMark(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -261,6 +273,29 @@ func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
 	}
 	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", resolvedCommentID); !found {
 		t.Fatal("recorded resolved comment mark was swept")
+	}
+}
+
+func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 100 * time.Millisecond
+	seedServiceText(t, service, artifactID, "before")
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin projection transaction: %v", err)
+	}
+	if err := service.ProjectMark(WithTx(context.Background(), tx), artifactID, "c1", MarkRecord{
+		Kind: "comment", By: "user:alice", CreatedAt: "2026-09-10T00:00:00Z", Text: "note",
+	}); err != nil {
+		t.Fatalf("project mark: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit projection transaction: %v", err)
+	}
+	if version := waitForDocumentVersion(t, service.store, artifactID, 2); version.Named {
+		t.Fatalf("settled projection version = %#v, want unnamed browser edit version", version)
 	}
 }
 

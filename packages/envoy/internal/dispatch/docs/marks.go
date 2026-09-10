@@ -170,6 +170,32 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	}
 }
 
+// SuggestionKind returns the kind recorded on a verified browser or server suggestion mark.
+func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (string, error) {
+	var kind string
+	var markErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		tree, readErr := treeOf(doc)
+		if readErr != nil {
+			markErr = readErr
+			return
+		}
+		attrs, found := pmdoc.MarkAttrs(tree, string(MarkSuggestion), id)
+		if !found {
+			markErr = ErrAnchorMissing
+			return
+		}
+		kind, markErr = suggestionKind(attrs, id)
+	})
+	if markErr != nil {
+		return "", markErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return "", err
+	}
+	return kind, nil
+}
+
 // AcceptSuggestion applies the replacement for a suggestion mark.
 func (s *Service) AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error {
 	return s.applySuggestion(context.WithValue(ctx, skippedAnchorRefreshKey{}, id), artifactID, id, replaceWith, actor, true)

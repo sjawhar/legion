@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -89,6 +91,83 @@ func TestMarkAnchorVerifiesBrowserMark(t *testing.T) {
 	}
 	if _, found := findMarkProjection(t, database, issue.PrimaryArtifactID, comment.ID); found {
 		t.Fatalf("browser-mark projection unexpectedly uses row id %q", comment.ID)
+	}
+}
+
+func TestMarkAnchorSuggestionProjectsBrowserKind(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Browser suggestion", "The quick brown fox")
+	if _, err := documentService.MarkQuote(context.Background(), issue.PrimaryArtifactID, docs.MarkSpec{
+		Kind:  docs.MarkSuggestion,
+		ID:    "m-insert",
+		Attrs: pmdoc.Attrs{"id": "m-insert", "by": "user:alice", "kind": "insert"},
+	}, "quick", nil); err != nil {
+		t.Fatalf("write browser insert mark: %v", err)
+	}
+
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":       "new text",
+		"anchor":     map[string]any{"artifact": "spec", "mark_id": "m-insert"},
+		"suggestion": map[string]string{"replace_with": "new text"},
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("record browser insert suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	if projection := loadMarkProjection(t, database, issue.PrimaryArtifactID, "m-insert"); projection["kind"] != "insert" {
+		t.Fatalf("browser insert projection = %#v, want kind insert", projection)
+	}
+}
+
+func TestQuoteAnchorCommentSpansParagraphs(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Cross-block comment", "one\n\ntwo")
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "why", "anchor": map[string]any{"artifact": "spec", "quote": "one two"},
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create cross-block comment: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	if comment.Anchor == nil || comment.Anchor.Quote != "one two" {
+		t.Fatalf("cross-block comment anchor = %#v, want one two", comment.Anchor)
+	}
+}
+
+func TestSuggestionAcceptSpansParagraphs(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Cross-block suggestion", "one\n\ntwo")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "replace both", "anchor": map[string]any{"artifact": "spec", "quote": "one two"},
+		"suggestion": map[string]string{"replace_with": "replacement"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create cross-block suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept cross-block suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	if markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || markdown != "replacement\n" {
+		t.Fatalf("accepted cross-block document = %q (%v), want replacement", markdown, err)
+	}
+	if _, err := documentService.VerifyMark(context.Background(), issue.PrimaryArtifactID, docs.MarkSuggestion, comment.Anchor.MarkID); !errors.Is(err, docs.ErrAnchorMissing) {
+		t.Fatalf("cross-block suggestion mark = %v, want missing", err)
 	}
 }
 

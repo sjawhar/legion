@@ -205,6 +205,15 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+
+	projectionKind := ""
+	if input.Suggestion != nil && anchor != nil {
+		projectionKind, err = s.deps.Docs.SuggestionKind(r.Context(), anchor.ArtifactID, anchor.MarkID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	author, err := encodeJSON(actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -248,7 +257,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	if comment.Anchor != nil {
 		evictArtifactID = comment.Anchor.ArtifactID
 		evictOnFailure = true
-		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil)); err != nil {
+		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind)); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -265,9 +274,14 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
+			rootProjectionKind, err := s.commentProjectionKind(r.Context(), root)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
 			evictArtifactID = root.Anchor.ArtifactID
 			evictOnFailure = true
-			if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies)); err != nil {
+			if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind)); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
@@ -380,9 +394,15 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
+	projectionKind := ""
 	eventType := "comment.resolved"
 	switch action {
 	case "resolve":
+		projectionKind, err = s.commentProjectionKind(r.Context(), comment)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		if _, err := tx.Exec(r.Context(), `update comments set resolved = true where id = $1`, comment.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -400,6 +420,14 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		if action == "accept" && comment.Anchor == nil {
 			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
 			return
+		}
+		kind, kindErr := s.commentProjectionKind(r.Context(), comment)
+		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
+			s.writeHandlerError(w, kindErr)
+			return
+		}
+		if kindErr == nil {
+			projectionKind = kind
 		}
 		if comment.Anchor != nil {
 			evictArtifactID = comment.Anchor.ArtifactID
@@ -469,7 +497,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		evictArtifactID = comment.Anchor.ArtifactID
 		evictOnFailure = true
-		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies)); err != nil {
+		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind)); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -547,7 +575,14 @@ func (s *server) commentThreadRoot(ctx context.Context, q queryer, comment model
 	return comment, nil
 }
 
-func commentMarkRecord(comment model.Comment, replies []model.Comment) docs.MarkRecord {
+func (s *server) commentProjectionKind(ctx context.Context, comment model.Comment) (string, error) {
+	if comment.Suggestion == nil || comment.Anchor == nil {
+		return "", nil
+	}
+	return s.deps.Docs.SuggestionKind(ctx, comment.Anchor.ArtifactID, comment.Anchor.MarkID)
+}
+
+func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestionKind string) docs.MarkRecord {
 	record := docs.MarkRecord{
 		Kind:      "comment",
 		By:        docs.ActorRef(comment.Author),
@@ -564,7 +599,7 @@ func commentMarkRecord(comment model.Comment, replies []model.Comment) docs.Mark
 		})
 	}
 	if comment.Suggestion != nil {
-		record.Kind = "replace"
+		record.Kind = suggestionKind
 		record.Content = comment.Suggestion.ReplaceWith
 		record.Status = "pending"
 		if comment.Suggestion.Accepted != nil {
