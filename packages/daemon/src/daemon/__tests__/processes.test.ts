@@ -5485,6 +5485,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5577,6 +5578,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7630,6 +7632,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7685,6 +7688,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7745,6 +7749,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7781,6 +7786,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7811,6 +7817,42 @@ describe("ProcessManager", () => {
 
     expect(managedState.workerAdmission.queue).toEqual([]);
     expect(client.prompts).toEqual(["verify #41"]);
+  });
+
+  it("leaves a queued idle-resume entry alone when its claim has a session but no ready confirmation, deferring to the ready path/watchdog", async () => {
+    const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    const { processes, state, managedState } = await workerCapFixture(1, {
+      connectWorkerRpc: async () => client,
+    });
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      // readyConfirmedAt deliberately absent: a restart landed between /worker/ready's ack and
+      // its durable confirmation write, so this claim is neither stale (a real session and a
+      // live client) nor safely promotable (admission cannot yet trust its readiness).
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    await processes.reconnectWorkers();
+
+    await processes.reconcileWorkerAdmission();
+
+    expect(client.prompts).toEqual([]);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+    expect(claim.locator).toBeDefined();
+    expect(claim.pendingAssignment).toBe("verify #41");
   });
 
   it("stops the drain after one below-threshold failure each for two queued tokens instead of burning every MAX_LAUNCH_FAILURES attempt on both in one pass", async () => {

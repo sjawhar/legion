@@ -498,10 +498,18 @@ export class WorkerAdmission {
         const client = this.deps.getWorkerClient(token);
         if (!client || !claim.sessionId) {
           // Truly stale: the client is gone (evicted/never connected) or a session was never
-          // confirmed — the idle-resume-at-cap invariant this entry was queued under can never
-          // hold again on its own. Drop and continue.
+          // established — the idle-resume-at-cap invariant this entry was queued under can
+          // never hold again on its own. Drop and continue.
           queue.shift();
           return { kind: "stale" };
+        }
+        if (claim.readyConfirmedAt === undefined) {
+          // NOT stale — a real session and a live client, but readiness was never durably
+          // confirmed (e.g. a restart landed between /worker/ready's ack and its confirmation
+          // write, so `reconnectWorkers` re-armed this claim's boot watchdog). Prompting it
+          // here would resume an assignment against a worker admission cannot yet trust; leave
+          // it queued and stop the drain, deferring recovery to the ready path or the watchdog.
+          return { kind: "stop" };
         }
         if (client.runState !== "idle") {
           // NOT stale — the client is alive and this claim still has a real pending
