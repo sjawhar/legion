@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 
 import { DocView, sanitizeMermaidSvg } from "./DocView";
@@ -269,4 +269,73 @@ test("DocView rejects a historical range that crosses Markdown blocks", () => {
 
   expect(within(container).getByRole("status").textContent).toContain("Text changed.");
   expect(container.querySelector("mark.dispatch-anchor-history")).toBeNull();
+});
+test("DocView highlights the first occurrence of highlightTerm and scrolls to it", () => {
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = () => {};
+  const scrollIntoView = spyOn(Element.prototype, "scrollIntoView");
+
+  try {
+    const { container } = render(
+      <DocView
+        highlightTerm="astrolabe"
+        markdown="Alpha\n\nThe astrolabe measures. Another astrolabe."
+      />
+    );
+
+    expect(container.querySelectorAll("mark[data-dispatch-search-hit]")).toHaveLength(1);
+    expect(container.querySelector("mark[data-dispatch-search-hit]")?.textContent).toBe(
+      "astrolabe"
+    );
+    expect(container.querySelector("article")?.textContent?.match(/astrolabe/g)?.length).toBe(2);
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  } finally {
+    scrollIntoView.mockRestore();
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+  }
+});
+
+test("DocView reports a search term that is not in the document", () => {
+  const { container } = render(
+    <DocView highlightTerm="sextant" markdown="The astrolabe measures." />
+  );
+
+  expect(within(container).getByRole("status").textContent).toBe(
+    '"sextant" is not in this version.'
+  );
+  expect(container.querySelector("mark[data-dispatch-search-hit]")).toBeNull();
+});
+
+test("DocView re-highlights a search term when the markdown changes", () => {
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = () => {};
+
+  try {
+    const { container, rerender } = render(
+      <DocView highlightTerm="astrolabe" markdown="No match yet." />
+    );
+    rerender(<DocView highlightTerm="astrolabe" markdown="The astrolabe is here." />);
+
+    expect(container.querySelectorAll("mark[data-dispatch-search-hit]")).toHaveLength(1);
+    expect(container.querySelector("mark[data-dispatch-search-hit]")?.textContent).toBe(
+      "astrolabe"
+    );
+  } finally {
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+  }
+});
+test("DocView clears its search hit when the URL query is removed", () => {
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = () => {};
+
+  try {
+    const { container, rerender } = render(
+      <DocView highlightTerm="astrolabe" markdown="The astrolabe measures altitude." />
+    );
+    rerender(<DocView markdown="The astrolabe measures altitude." />);
+
+    expect(container.querySelector("mark[data-dispatch-search-hit]")).toBeNull();
+  } finally {
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+  }
 });

@@ -9,6 +9,9 @@ import type { AuthenticatedUser } from "./api/types";
 import { Inbox } from "./features/inbox/Inbox";
 import { Margin, MarginProvider } from "./features/margin/Margin";
 import { parseIssuePath } from "./features/refs/routes";
+import { SearchButton } from "./features/search/SearchButton";
+import { SearchPalette } from "./features/search/SearchPalette";
+import { useSearchShortcut } from "./features/search/useSearchShortcut";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { useDialog, useMediaQuery } from "./features/shell/useDialog";
@@ -195,6 +198,7 @@ function NavigationContents({
   closeButtonRef,
   compact,
   onClose,
+  onSearch,
   onSignOut,
   signOutError,
   signOutPending,
@@ -203,6 +207,7 @@ function NavigationContents({
   closeButtonRef: RefObject<HTMLButtonElement | null>;
   compact: boolean;
   onClose: () => void;
+  onSearch: () => void;
   onSignOut: () => void;
   signOutError: boolean;
   signOutPending: boolean;
@@ -226,6 +231,12 @@ function NavigationContents({
           </button>
         ) : null}
       </div>
+      <SearchButton
+        onOpen={() => {
+          onClose();
+          onSearch();
+        }}
+      />
       <p className={`mt-3 text-sm ${railMutedText}`}>Signed in as {user.login}</p>
       <button
         className={`mt-1 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
@@ -251,6 +262,7 @@ function NavigationContents({
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const connection = useConnectionState();
   const location = useLocation();
   const mainRef = useRef<HTMLElement | null>(null);
@@ -262,6 +274,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     onClose: () => setNavigationOpen(false),
     open: navigationOpen && isCompactViewport,
   });
+  useSearchShortcut(() => setSearchOpen((open) => !open));
   const signOut = useMutation({
     mutationFn: () => api.logout(),
     onSuccess: () => {
@@ -290,6 +303,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       closeButtonRef={closeButtonRef}
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
+      onSearch={() => setSearchOpen(true)}
       onSignOut={() => signOut.mutate()}
       signOutError={signOut.isError}
       signOutPending={signOut.isPending}
@@ -386,6 +400,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </Suspense>
         </main>
         <Margin />
+        <SearchPalette onClose={() => setSearchOpen(false)} open={searchOpen} />
       </div>
     </MarginProvider>
   );

@@ -235,7 +235,7 @@ func TestArtifactRoutesResolveUUIDsAndIssueScopedSlugs(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	otherIssueResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Other artifact issue",
+		"project": "TEST", "title": "Separate document record",
 	}, "alice")
 	if otherIssueResponse.Code != http.StatusCreated {
 		t.Fatalf("create other issue: status=%d body=%s", otherIssueResponse.Code, otherIssueResponse.Body.String())

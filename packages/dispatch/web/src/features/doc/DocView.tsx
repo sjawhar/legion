@@ -13,6 +13,7 @@ import {
   errorCodeBlockText,
   inlineWarningText,
 } from "../../theme/classes";
+import { highlightQuery } from "../search/highlight";
 import { sanitizeSchema } from "./sanitize";
 
 interface MermaidDiagramProps {
@@ -437,13 +438,20 @@ export interface DocViewSelection {
 
 interface DocViewProps {
   highlight?: DocViewHighlight;
+  highlightTerm?: string;
   markdown: string;
   onSelectionChange?: (selection: DocViewSelection | undefined) => void;
 }
 
-export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps): ReactNode {
+export function DocView({
+  highlight,
+  highlightTerm,
+  markdown,
+  onSelectionChange,
+}: DocViewProps): ReactNode {
   const root = useRef<HTMLElement>(null);
   const [historicalHighlightMissing, setHistoricalHighlightMissing] = useState(false);
+  const [searchTermMissing, setSearchTermMissing] = useState(false);
   const [selectionUnsupported, setSelectionUnsupported] = useState(false);
   const highlightedMarkdown = useRef(markdown);
   useEffect(() => {
@@ -460,6 +468,17 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
     setHistoricalHighlightMissing(!historicalRangeMapped);
     return () => clearHistoricalHighlights(article);
   }, [highlight, markdown]);
+
+  useEffect(() => {
+    const article = root.current;
+    if (article === null) {
+      return;
+    }
+    const searchTermFound = highlightQuery(article, highlightTerm ?? "");
+    setSearchTermMissing(
+      highlightTerm !== undefined && (markdown.length === 0 || !searchTermFound)
+    );
+  }, [highlightTerm, markdown]);
 
   const reportSelection = () => {
     if (root.current === null || onSelectionChange === undefined) {
@@ -486,6 +505,10 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
       {historicalHighlightMissing ? (
         <p className={`mb-2 text-sm ${inlineWarningText}`} role="status">
           Text changed. The selected range no longer exists in this document.
+        </p>
+      ) : searchTermMissing ? (
+        <p className={`mb-2 text-sm ${inlineWarningText}`} role="status">
+          &quot;{highlightTerm}&quot; is not in this version.
         </p>
       ) : null}
       <article

@@ -79,10 +79,10 @@ extension files it does not contain.
 
 ## Native Dispatch tools
 
-The extension registers `dispatch_issue`, `dispatch_ask`, `dispatch_resolve_ask`,
-`dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
-`dispatch_doc_read`, `dispatch_artifact`, and `dispatch_read` when Dispatch
-configuration resolves both a base URL and bearer token.
+The extension registers eleven native Dispatch tools: `dispatch_issue`, `dispatch_ask`,
+`dispatch_resolve_ask`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`,
+`dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_artifact`, `dispatch_read`, and
+`dispatch_search`, when Dispatch configuration resolves both a base URL and bearer token.
 
 Configure the shared `envoy.json` with:
 
@@ -101,14 +101,14 @@ The user file is `~/.config/opencode/envoy.json`; a
 `DISPATCH_TOKEN` override the file values for one process. Omitting
 `dispatch.serverUrl` while `dispatch.enabled` is true targets
 `http://localhost:8766`, the Go server's listen address. Invalid configuration,
-an invalid URL, or an empty token leaves the nine tools unavailable and reports
+an invalid URL, or an empty token leaves the eleven tools unavailable and reports
 the source of the error.
 
-Native tools operate on a Dispatch issue: a native `KEY` or an external
-`owner/repo#n` reference. A Legion session may omit `issue` when
-`LEGION_ISSUE` identifies its root issue and its working directory resolves to a
-repository. `dispatch_doc_read` and `dispatch_read` also accept
-`dispatch://` references.
+Every native tool except `dispatch_search` operates on a Dispatch issue: a native
+`KEY` or an external `owner/repo#n` reference. A Legion session may omit `issue` when
+`LEGION_ISSUE` identifies its root issue and its working directory resolves to a repository.
+`dispatch_doc_read` and `dispatch_read` also accept `dispatch://` references;
+`dispatch_search` needs only its query and returns no subscription topic.
 
 Every mutation result carries `details.topic` as
 `notifications.dispatch.issue.<KEY>.>`. The extension's `tool_result` hook

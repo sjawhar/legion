@@ -107,6 +107,31 @@ The command prints each document's tree or legacy state, legacy markdown parse
 result, and anchor/resolvable-anchor counts. It exits nonzero for an unparseable
 legacy document. Normal server boot performs the one-shot conversion from legacy
 `Y.Text` rooms and offset anchors to the ProseMirror tree and mark anchors.
+
+## Search
+
+Migration 0010 adds stored generated `search` columns. Postgres computes them on every write, so
+no application code writes or refreshes the search vectors. Search covers issue titles, the latest
+settled document text, comments, asks (questions and free-text answers), and messages. Live document
+text takes up to the 2 s settle delay to appear in search results.
+
+Search snippets are escaped text with only server-inserted `<mark>` elements around matches. Native
+issue creation rejects a title that near-duplicates an existing issue in the same project with
+`409 POSSIBLE_DUPLICATE` and up to five candidates; `force` bypasses that check, and external
+references skip it.
+
+To measure search latency against a restored corpus copy, run:
+
+```sh
+DISPATCH_ADMIN_URL='postgres://postgres:dispatch@127.0.0.1:55432/postgres?sslmode=disable' \
+  bash packages/envoy/scripts/restore-dispatch-dump.sh ~/dispatch.dump dispatch_search_bench
+DISPATCH_BENCH_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_search_bench?sslmode=disable' \
+  go test ./internal/dispatch/api/ -run TestSearchLatencyOnCorpus -count=1 -v
+```
+
+The restore script replaces only the named scratch database. Set `DISPATCH_ADMIN_URL` to point at
+the Postgres `postgres` database for a non-default local port.
+
 ## Routes
 
 | Path | Method | Identity | Purpose |
@@ -126,7 +151,8 @@ legacy document. Normal server boot performs the one-shot conversion from legacy
 | `/api/v1/settings/repo-projects` | GET | cookie or trusted header | List external repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
 | `/api/v1/issues?project=&status=&parent=&updated_since=` | GET | cookie, trusted header, or bearer | List issue summaries. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. Summaries contain `key`, `title`, `status`, `parent`, `updated_at`, `last_seq`, and `open_asks`. |
-| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank seeds the writing-a-spec skeleton. |
+| `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). `400 INVALID_QUERY` under 2 characters or stop words only; `400 INVALID_LIMIT`. |
+| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank seeds the writing-a-spec skeleton. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |

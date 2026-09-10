@@ -13,6 +13,7 @@ production build from `web/dist`.
 - `web/src/api/sse.ts` opens the issue event stream and invalidates TanStack
   Query cache entries for the affected issue.
 - `web/src/main.tsx` installs React Router and the shared Query client.
+- `web/src/features/search/` owns the global palette, rail `Search` control, and `Ctrl/Cmd+K` shortcut. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node.
 
 Resolved asks leave the Inbox and open-ask badges, but their thread and log entry remain available with the actor and reason. The Log renders Markdown text bodies and coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
 

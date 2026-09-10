@@ -158,14 +158,14 @@ test("margin creates and preserves anchored review items", async ({ browser }, t
     await expect(page.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
 
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    const margin = page.getByTestId("margin-sheet");
+    const deepLinkedComment = page.getByTestId(`margin-comment-${comment.id}`);
     if (testInfo.project.name === "iphone") {
       await expect(page.getByRole("button", { name: /Close review panel/ })).toBeVisible();
-      await expect(page.getByTestId(`margin-comment-${comment.id}`)).toBeVisible();
+      await expect(deepLinkedComment).toBeVisible();
       await page.getByRole("button", { name: /Close review panel/ }).click();
       await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
     } else {
-      await expect.poll(() => margin.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+      await expect(deepLinkedComment).toBeInViewport();
     }
     await page.goto(`/issues/${issue.key}/spec`);
     await expect(page.getByRole("tabpanel", { name: "Spec" }).getByRole("article")).toContainText(

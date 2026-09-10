@@ -54,11 +54,24 @@ project configured for that repository in Dispatch Settings, then falls back to 
 
 Architects create newly tracked child work with:
 ```ts
-dispatch_issue({ project, title, parent?, external?, spec? })
+dispatch_issue({ project, title, parent?, external?, spec?, force? })
 ```
 It returns `details` `{ issue, topic }`. Use `dispatch_issue` only to create an issue; never use
-it to park a question.
-When `spec` is supplied, follow [Writing a spec](#writing-a-spec).
+it to park a question. When `spec` is supplied, follow [Writing a spec](#writing-a-spec).
+
+## Search first
+
+Before you create an issue or start a design document, search:
+```ts
+dispatch_search({ query, project?, limit? })
+```
+It returns every issue, document, comment, ask, and message that contains the words, with the
+issue key and a link. Cite the hit you build on (`dispatch://KEY` or the document reference), or
+state "no prior issue" in the spec. Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`.
+
+`dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns
+the candidates (`POSSIBLE_DUPLICATE`). Read them; reference the existing issue, or repeat the
+call with `force: true` when it is genuinely new work.
 
 ## Asking
 

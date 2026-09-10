@@ -179,6 +179,42 @@ export interface Message {
   readonly body: string;
   readonly created_at: string;
 }
+export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
+
+export interface SearchIssueRef {
+  readonly key: string;
+  readonly title: string;
+  readonly status: string;
+}
+
+export interface SearchArtifactRef {
+  readonly slug: string;
+  readonly name: string;
+}
+
+export interface SearchResult {
+  readonly kind: SearchResultKind;
+  readonly issue: SearchIssueRef;
+  readonly artifact?: SearchArtifactRef;
+  readonly id: string;
+  readonly snippet: string;
+  readonly rank: number;
+  readonly href: string;
+}
+
+export interface SearchResponse {
+  readonly results: SearchResult[];
+  readonly took_ms: number;
+}
+
+export interface DuplicateCandidate {
+  readonly key: string;
+  readonly title: string;
+  readonly status: string;
+  readonly snippet: string;
+  readonly shared_terms: number;
+  readonly href: string;
+}
 
 export interface ReferencedBy {
   readonly kind: "ask" | "comment" | "message";
@@ -299,6 +335,8 @@ export interface CreateIssueInput {
   readonly parent?: string;
   readonly external?: string;
   readonly spec?: string;
+  readonly force?: boolean;
+
   readonly actor?: Actor;
 }
 
@@ -431,7 +469,7 @@ export interface TargetCandidate {
 export interface DispatchServiceErrorShape {
   readonly error?: string;
   readonly code?: string;
-  readonly candidates?: TargetCandidate[];
+  readonly candidates?: TargetCandidate[] | DuplicateCandidate[];
 }
 
 /**

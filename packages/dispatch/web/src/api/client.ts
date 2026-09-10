@@ -26,6 +26,7 @@ import type {
   Message,
   Project,
   RepoProject,
+  SearchResponse,
   UpdateIssueInput,
   UserIssueState,
   UserState,
@@ -179,6 +180,12 @@ export class DispatchApiClient {
 
   listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
     return this.json<IssueSummary[]>(pathWithQuery("/api/v1/issues", options));
+  }
+  search(
+    query: string,
+    options: { project?: string; limit?: number } = {}
+  ): Promise<SearchResponse> {
+    return this.json<SearchResponse>(pathWithQuery("/api/v1/search", { q: query, ...options }));
   }
 
   createIssue(input: CreateIssueInput): Promise<Issue> {

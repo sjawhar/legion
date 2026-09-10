@@ -108,6 +108,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		Title    string       `json:"title"`
 		Parent   *string      `json:"parent"`
 		External string       `json:"external"`
+		Force    bool         `json:"force"`
 		Spec     *string      `json:"spec"`
 		Actor    *model.Actor `json:"actor"`
 	}
@@ -161,6 +162,21 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if !projectKeyPattern.MatchString(input.Project) || input.Title == "" {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "project and title are required")
 		return
+	}
+	if input.External == "" && !input.Force {
+		candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if len(candidates) > 0 {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
+				"code":       "POSSIBLE_DUPLICATE",
+				"candidates": candidates,
+			})
+			return
+		}
 	}
 
 	tx, err := s.begin(r.Context())

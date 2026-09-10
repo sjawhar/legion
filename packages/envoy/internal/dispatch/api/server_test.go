@@ -329,7 +329,7 @@ func TestCreateIssueWithMissingOrBlankSpecSeedsPrimaryDocument(t *testing.T) {
 		{name: "whitespace", spec: &whitespace},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			input := map[string]string{"project": "TEST", "title": "Seeded issue"}
+			input := map[string]any{"project": "TEST", "title": "Seeded issue", "force": true}
 			if test.spec != nil {
 				input["spec"] = *test.spec
 			}
@@ -534,8 +534,8 @@ func TestExternalIssueResolutionAndAutoCreation(t *testing.T) {
 		t.Fatalf("map external repository: status=%d body=%s", response.Code, response.Body.String())
 	}
 	for number := 1; number <= 2; number++ {
-		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-			"project": "TEST", "title": "ordinary issue",
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "TEST", "title": "ordinary issue", "force": true,
 		}, "alice")
 		if response.Code != http.StatusCreated {
 			t.Fatalf("create issue %d: status=%d body=%s", number, response.Code, response.Body.String())

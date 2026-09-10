@@ -198,6 +198,16 @@ test("API client encodes list filters and artifact version query parameters", as
     "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
   ]);
 });
+test("API client searches with the documented query parameters", async () => {
+  const stub = stubFetch(() => Response.json({ results: [], took_ms: 1 }));
+  const api = createApiClient(stub.fetch);
+
+  await api.search("astrolabe", { project: "LEGION", limit: 5 });
+
+  expect(stub.requests.map(({ path }) => path)).toEqual([
+    "/api/v1/search?q=astrolabe&project=LEGION&limit=5",
+  ]);
+});
 
 test("API client exposes response status and server error code on failure", async () => {
   const stub = stubFetch(() =>
@@ -277,6 +287,7 @@ test("API client reaches every remaining documented endpoint", async () => {
 
   await api.listProjects();
   await api.listIssues();
+  await api.search("astrolabe");
   await api.createIssue({ project: "CORE", title: "Ship it" });
   await api.getIssue("CORE-1");
   await api.getInbox("CORE");
@@ -308,6 +319,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/projects"],
     ["GET", "/api/v1/issues"],
+    ["GET", "/api/v1/search?q=astrolabe"],
     ["POST", "/api/v1/issues"],
     ["GET", "/api/v1/issues/CORE-1"],
     ["GET", "/api/v1/inbox?project=CORE"],

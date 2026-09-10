@@ -333,9 +333,9 @@ function responseWithRegistration(
 
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
-test("declares all ten native Dispatch tools", () => {
-  expect(dispatchToolNames).toHaveLength(10);
-  expect(dispatchToolNames).toContain("dispatch_resolve_ask");
+test("declares all eleven native Dispatch tools", () => {
+  expect(dispatchToolNames).toHaveLength(11);
+  expect(dispatchToolNames).toContain("dispatch_search");
 });
 
 describe("envoy OMP extension", () => {
@@ -1105,6 +1105,59 @@ describe("envoy OMP extension", () => {
     });
   });
 
+  test("executes dispatch_search without an issue and returns rows in details", async () => {
+    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const requests: Array<{ readonly url: URL; readonly init: RequestInit | undefined }> = [];
+    const results = [
+      {
+        kind: "document",
+        issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
+        artifact: { slug: "spec", name: "spec.md" },
+        id: "artifact-2",
+        snippet: "<mark>astrolabe</mark>",
+        rank: 1,
+        href: "/issues/LEGION-2/spec?q=astrolabe",
+      },
+    ];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      requests.push({ url, init });
+      if (url.pathname !== "/api/v1/search") throw new Error(`unexpected request: ${url.pathname}`);
+      return new Response(JSON.stringify({ results, took_ms: 7 }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-search");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const search = fixture.tools.find((candidate) => candidate.name === "dispatch_search");
+    if (search === undefined) throw new Error("dispatch_search was not registered");
+
+    const result = await search.execute(
+      "call_search",
+      { query: "astrolabe" },
+      undefined,
+      undefined,
+      sessionContext("ses_live")
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url.pathname).toBe("/api/v1/search");
+    expect(requests[0]?.url.searchParams.get("q")).toBe("astrolabe");
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe(
+      "Bearer dispatch-token"
+    );
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: "1 result for \"astrolabe\" (7 ms)\nLEGION-2 [triage] Astrolabe - document spec.md: **astrolabe** -> http://127.0.0.1:8767/issues/LEGION-2/spec?q=astrolabe",
+      },
+    ]);
+    expect(result.isError).toBeUndefined();
+    expect(result.details).toEqual({ query: "astrolabe", results });
+    expect(result.details).not.toHaveProperty("topic");
+  });
   test("does not register Dispatch tools and reports the missing token once at session start", async () => {
     process.env.DISPATCH_URL = "http://127.0.0.1:8767";
     delete process.env.DISPATCH_TOKEN;

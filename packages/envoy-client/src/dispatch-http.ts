@@ -24,7 +24,7 @@ import type {
   IssueSummary,
   Message,
   ResolveAskInput,
-  TargetCandidate,
+  SearchResponse,
   Version,
 } from "@legion/contracts";
 
@@ -37,7 +37,7 @@ export class DispatchServiceError extends Error {
     readonly code: string,
     readonly status: number,
     message: string,
-    readonly candidates?: TargetCandidate[]
+    readonly candidates?: DispatchServiceErrorShape["candidates"]
   ) {
     super(message);
   }
@@ -56,6 +56,11 @@ export interface ListIssuesOptions {
   readonly status?: string;
   readonly parent?: string;
   readonly updated_since?: string;
+}
+
+export interface SearchOptions {
+  readonly project?: string;
+  readonly limit?: number;
 }
 
 /** JSON HTTP client for Dispatch's native-tool API. */
@@ -78,6 +83,10 @@ export class DispatchClient {
 
   async listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
     return this.#json("GET", ["api", "v1", "issues"], undefined, options);
+  }
+
+  async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
+    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
   }
 
   async getIssue(issue: string): Promise<IssueDetails> {

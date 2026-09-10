@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io/fs"
 	"net/url"
 	"os"
 	"testing"
@@ -115,12 +116,22 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_ask_id",
 		"refs_to",
 		"events_unpublished",
+		"issues_search",
+		"comments_search",
+		"asks_search",
+		"messages_search",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
 		from pg_indexes
 		where schemaname = current_schema()
 	`, expectedIndexes)
+
+	assertDatabaseObjects(t, ctx, store.Pool, `
+		select table_name
+		from information_schema.columns
+		where table_schema = current_schema() and column_name = 'search' and is_generated = 'ALWAYS'
+	`, []string{"issues", "artifact_versions", "comments", "asks", "messages"})
 
 	expectedConstraints := []string{
 		"users_pkey",
@@ -172,12 +183,16 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		where connamespace = current_schema()::regnamespace
 	`, expectedConstraints)
 
-	var migrations int
-	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&migrations); err != nil {
+	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	var recordedMigrations int
+	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&recordedMigrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 8 {
-		t.Errorf("recorded migrations: got %d, want 8", migrations)
+	if recordedMigrations != len(files) {
+		t.Errorf("recorded migrations: got %d, want %d", recordedMigrations, len(files))
 	}
 }
 

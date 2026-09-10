@@ -59,6 +59,7 @@ import {
   issueTabForRoute,
   parseIssuePath,
 } from "../refs/routes";
+import { firstHighlightTerm } from "../search/search-model";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
@@ -518,6 +519,13 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
   const artifactRouteSlug = artifactRoute?.slug;
   const query = new URLSearchParams(search);
   const commentId = query.get("comment") ?? undefined;
+  const highlightTerm = firstHighlightTerm(query.get("q") ?? "");
+  const from = Number(query.get("from"));
+  const to = Number(query.get("to"));
+  const highlight =
+    Number.isInteger(from) && Number.isInteger(to) && from >= 0 && to > from
+      ? { from, to }
+      : undefined;
   const issue = useQuery({
     queryKey: ["issue", route.key],
     queryFn: () => api.getIssue(route.key),
@@ -645,6 +653,8 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
           <ArtifactDocument
             artifact={primaryArtifact}
             commentId={commentId}
+            highlight={highlight}
+            highlightTerm={highlightTerm}
             isClosed={isClosed}
             issueKey={issueKey}
             onVersionChange={(version) => selectDocumentVersion(primaryArtifact, version)}
@@ -690,6 +700,8 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
           <ArtifactDocument
             artifact={selectedArtifact}
             commentId={commentId}
+            highlight={highlight}
+            highlightTerm={highlightTerm}
             isClosed={isClosed}
             issueKey={issueKey}
             onVersionChange={(version) => selectDocumentVersion(selectedArtifact, version)}

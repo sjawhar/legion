@@ -15,6 +15,7 @@ const expectedDispatchTools = [
   ["dispatch_doc_read", []],
   ["dispatch_artifact", ["issue", "name"]],
   ["dispatch_read", []],
+  ["dispatch_search", ["query"]],
 ] as const;
 
 type RegisteredTool = {
