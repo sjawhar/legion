@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
@@ -67,6 +67,10 @@ export function AskCard({
   getAskThread: getThread,
 }: AskCardProps): ReactNode {
   const queryClient = useQueryClient();
+  // The same open anchored ask can render simultaneously in more than one place (the issue
+  // board and the margin both show it) - useId keeps this instance's answer field id/label
+  // pairing unique across those mounts, instead of colliding on a shared ask.id-derived id.
+  const answerFieldId = `${useId()}-answer`;
   const [selected, setSelected] = useState<string[]>([]);
   const [answerText, setAnswerText] = useState("");
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
@@ -193,13 +197,13 @@ export function AskCard({
           )}
           <label
             className="block text-sm font-medium text-slate-700 dark:text-slate-300"
-            htmlFor={`ask-${ask.id}-answer`}
+            htmlFor={answerFieldId}
           >
             Your answer
             <textarea
               className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950"
               disabled={mutation.isPending}
-              id={`ask-${ask.id}-answer`}
+              id={answerFieldId}
               onChange={(event) => setAnswerText(event.target.value)}
               value={answerText}
             />
