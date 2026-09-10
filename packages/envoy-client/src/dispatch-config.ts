@@ -11,10 +11,6 @@ function normalizeDispatchUrl(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
-function deprecatedMcpUrl(url: string): string {
-  return normalizeDispatchUrl(url).replace(/\/mcp$/, "");
-}
-
 function parsedDispatchUrl(
   value: string,
   source: string
@@ -84,7 +80,6 @@ function readEnvoyFile(filePath: string): EnvoyFileResult {
 
 type DispatchEnvironment = {
   readonly DISPATCH_URL?: string;
-  readonly DISPATCH_MCP_URL?: string;
   readonly DISPATCH_TOKEN?: string;
   readonly HOME?: string;
 } & Record<string, string | undefined>;
@@ -100,17 +95,14 @@ export interface DispatchConfigResolution {
 /**
  * Load Dispatch's URL and bearer token from the shared envoy.json contract.
  *
- * DISPATCH_URL and DISPATCH_TOKEN override file settings. DISPATCH_MCP_URL
- * remains a temporary compatibility alias for the daemon passthrough; its
- * obsolete path suffix is removed before use. Dispatch tools are available
- * only when both a URL and a bearer token resolve.
+ * DISPATCH_URL and DISPATCH_TOKEN override file settings. Dispatch tools are
+ * available only when both a URL and a bearer token resolve.
  */
 export function resolveDispatchConfig(
   env: DispatchEnvironment,
   options: { readonly cwd?: string; readonly home?: string } = {}
 ): DispatchConfigResolution {
   const explicitUrl = env.DISPATCH_URL;
-  const deprecatedUrl = explicitUrl ? undefined : env.DISPATCH_MCP_URL;
 
   // env is the call's one source of truth: a caller that hands us an
   // environment with HOME set is read from there. os.homedir() alone is not a
@@ -133,11 +125,9 @@ export function resolveDispatchConfig(
   const rawUrl =
     explicitUrl !== undefined
       ? { value: explicitUrl, source: "DISPATCH_URL" }
-      : deprecatedUrl !== undefined
-        ? { value: deprecatedMcpUrl(deprecatedUrl), source: "DISPATCH_MCP_URL" }
-        : merged.enabled === true
-          ? { value: merged.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" }
-          : null;
+      : merged.enabled === true
+        ? { value: merged.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" }
+        : null;
   const url = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
   const token = env.DISPATCH_TOKEN ?? merged.token ?? null;
   const tokenSource = env.DISPATCH_TOKEN === undefined ? "dispatch.token" : "DISPATCH_TOKEN";

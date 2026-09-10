@@ -50,7 +50,6 @@ const originalEnvironment = {
   HOME: process.env.HOME,
   DISPATCH_URL: process.env.DISPATCH_URL,
   DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
-  DISPATCH_MCP_URL: process.env.DISPATCH_MCP_URL,
 } as const;
 // The envoy extension registers the dispatch tools whenever the developer's own
 // ~/.config/opencode/envoy.json enables dispatch; this file's zod stub is not a real schema
@@ -59,7 +58,6 @@ beforeEach(() => {
   process.env.HOME = "/nonexistent-home-for-legion-tests";
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;
-  delete process.env.DISPATCH_MCP_URL;
 });
 afterEach(() => {
   globalThis.fetch = originalFetch;

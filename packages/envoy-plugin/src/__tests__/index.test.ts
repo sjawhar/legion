@@ -80,7 +80,6 @@ describe("Dispatch tool gating", () => {
     const previous = { ...process.env };
     delete process.env.DISPATCH_URL;
     delete process.env.DISPATCH_TOKEN;
-    delete process.env.DISPATCH_MCP_URL;
     process.env.HOME = "/nonexistent-home-for-dispatch-gating";
     const warn = spyOn(logger, "warn").mockImplementation(() => {});
 
@@ -107,7 +106,6 @@ describe("Dispatch tool gating", () => {
     const previous = { ...process.env };
     process.env.DISPATCH_URL = "http://127.0.0.1:8766";
     delete process.env.DISPATCH_TOKEN;
-    delete process.env.DISPATCH_MCP_URL;
     process.env.HOME = "/nonexistent-home-for-dispatch-gating";
     const warn = spyOn(logger, "warn").mockImplementation(() => {});
 
