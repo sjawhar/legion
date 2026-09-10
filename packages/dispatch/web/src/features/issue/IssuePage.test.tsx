@@ -437,7 +437,9 @@ test("IssuePage highlights a historical quote from its comment deep link", async
         "SQLit"
       )
     );
-    expect(screen.getByRole("article")).not.toBeNull();
+    expect(
+      within(within(view.container).getByRole("tabpanel", { name: "Spec" })).getAllByRole("article")
+    ).toHaveLength(1);
   } finally {
     view.unmount();
     getArtifact.mockRestore();
