@@ -859,6 +859,55 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("spawns the controller at boot when notices are pending but no controller role claim exists, then drains once it claims the role", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const pendingPayload = JSON.stringify({ text: "@legion please investigate" });
+    state.controllerPendingNotices.push({ payloadJson: pendingPayload, eventId: "mention-1" });
+    const nats = new FakeNats();
+    const publications: Array<{ topic: string; payload: unknown }> = [];
+    let controllerSecret: string | undefined;
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      const options = daemonTestDependencies(nats, publications, (secret) => {
+        controllerSecret = secret;
+      });
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+        },
+      });
+
+      // No controller role claim existed at boot, so nothing would ever reach
+      // `/controller/ready` on its own -- boot itself had to spawn the controller directly.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(controllerSecret).toBeString();
+      expect(publications).toEqual([]);
+
+      const ready = await fetch(
+        `http://127.0.0.1:${daemon.server.port}/legion/v1/controller/ready`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ secret: controllerSecret, sessionId: "ses-controller" }),
+        }
+      );
+      expect(ready.status).toBe(200);
+
+      // Drained once the spawned controller actually claims the role.
+      expect(publications).toContainEqual({
+        topic: roleTopic(controllerToken(daemonConfig.project)),
+        payload: JSON.parse(pendingPayload),
+      });
+      expect(state.controllerPendingNotices).toEqual([]);
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("promotes queued persisted issues before boot completes when config raises the admission cap", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = { ...config(stateDir), admissionCap: 2 };
