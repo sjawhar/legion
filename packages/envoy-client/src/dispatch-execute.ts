@@ -1,4 +1,16 @@
 import { resolve as resolvePath } from "node:path";
+import type {
+  Actor,
+  Artifact,
+  Ask,
+  AskUrgency,
+  Comment,
+  CommentRead,
+  CreateAskInput,
+  EditOp,
+  Event,
+  IssueDetails,
+} from "@legion/contracts";
 import { ASK_URGENCIES, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
 import { z } from "zod";
 import type { DispatchConfigResolution } from "./dispatch-config";
@@ -10,20 +22,7 @@ import {
   resolveCwdRepo,
   resolveOrigin,
 } from "./dispatch-cwd";
-import {
-  type Actor,
-  type Artifact,
-  type Ask,
-  type AskInput,
-  type AskUrgency,
-  type Comment,
-  type CommentRead,
-  DispatchClient,
-  DispatchServiceError,
-  type EditOperation,
-  type Event,
-  type IssueDetails,
-} from "./dispatch-http";
+import { DispatchClient, DispatchServiceError } from "./dispatch-http";
 
 /**
  * Tool arguments as the model supplied them. The tool's Zod schema validates
@@ -363,7 +362,9 @@ export async function executeDispatchTool(
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const ask = await client.ask(issue(), {
         question: stringArg(args, "question"),
-        ...(Array.isArray(options) ? { options: options as NonNullable<AskInput["options"]> } : {}),
+        ...(Array.isArray(options)
+          ? { options: options as NonNullable<CreateAskInput["options"]> }
+          : {}),
         ...(multiple === undefined ? {} : { multiple }),
         ...(custom === undefined ? {} : { custom }),
         ...(urgency === undefined ? {} : { urgency }),
@@ -433,7 +434,7 @@ export async function executeDispatchTool(
     }
     case "dispatch_doc_edit": {
       const resolved = await resolveArtifact(client, issue(), stringArg(args, "artifact"));
-      const ops = args.ops as EditOperation[];
+      const ops = args.ops as EditOp[];
       const summary = optionalString(args, "summary");
       const edited = await client.docEdit(resolved.artifact.id, {
         ops,

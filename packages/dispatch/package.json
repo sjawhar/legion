@@ -26,6 +26,8 @@
     "vite": "^5"
   },
   "dependencies": {
+    "@legion/contracts": "workspace:*",
+
     "@codemirror/lang-markdown": "^6.5.2",
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.7.4",

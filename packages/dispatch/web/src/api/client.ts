@@ -1,6 +1,9 @@
 import type {
   AnswerAskInput,
   Artifact,
+  ArtifactDetails,
+  ArtifactText,
+  ArtifactUploadResponse,
   ArtifactVersionContent,
   ArtifactVersionText,
   Ask,
@@ -13,8 +16,10 @@ import type {
   CreateMessageInput,
   CreateVersionInput,
   EditArtifactInput,
+  EditArtifactResponse,
   Event,
   Issue,
+  IssueDetails,
   IssueSummary,
   Message,
   Project,
@@ -63,11 +68,6 @@ export interface ListEventsOptions {
 export interface CreateProjectInput {
   key: string;
   name: string;
-}
-
-interface UploadArtifactResponse {
-  artifact: Artifact;
-  version: Version;
 }
 
 function normalizeAsk(ask: Ask): Ask {
@@ -145,8 +145,8 @@ export class DispatchApiClient {
     return this.post<Issue>("/api/v1/issues", input);
   }
 
-  getIssue(key: string): Promise<Issue> {
-    return this.json<Issue>(`/api/v1/issues/${pathSegment(key)}`);
+  getIssue(key: string): Promise<IssueDetails> {
+    return this.json<IssueDetails>(`/api/v1/issues/${pathSegment(key)}`);
   }
 
   patchIssue(key: string, input: UpdateIssueInput): Promise<Issue> {
@@ -211,7 +211,7 @@ export class DispatchApiClient {
     return this.json<Artifact[]>(`/api/v1/issues/${pathSegment(key)}/artifacts`);
   }
 
-  async uploadArtifact(key: string, input: CreateArtifactInput): Promise<UploadArtifactResponse> {
+  async uploadArtifact(key: string, input: CreateArtifactInput): Promise<ArtifactUploadResponse> {
     const body = new FormData();
     body.set("name", input.name);
     if (input.primary !== undefined) {
@@ -225,7 +225,7 @@ export class DispatchApiClient {
     }
     body.set("file", input.file);
 
-    return this.json<UploadArtifactResponse>(`/api/v1/issues/${pathSegment(key)}/artifacts`, {
+    return this.json<ArtifactUploadResponse>(`/api/v1/issues/${pathSegment(key)}/artifacts`, {
       body,
       method: "POST",
     });
@@ -235,12 +235,12 @@ export class DispatchApiClient {
     return this.post<Issue>(`/api/v1/artifacts/${pathSegment(id)}/primary`, {});
   }
 
-  getArtifact(id: string): Promise<Artifact> {
-    return this.json<Artifact>(`/api/v1/artifacts/${pathSegment(id)}`);
+  getArtifact(id: string): Promise<ArtifactDetails> {
+    return this.json<ArtifactDetails>(`/api/v1/artifacts/${pathSegment(id)}`);
   }
 
-  getArtifactText(id: string): Promise<ArtifactVersionText> {
-    return this.json<ArtifactVersionText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
+  getArtifactText(id: string): Promise<ArtifactText> {
+    return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
   }
 
   async getArtifactVersion(id: string, version: number): Promise<ArtifactVersionContent> {
@@ -260,14 +260,8 @@ export class DispatchApiClient {
     return this.post<Version>(`/api/v1/artifacts/${pathSegment(id)}/versions`, input);
   }
 
-  editArtifact(
-    id: string,
-    input: EditArtifactInput
-  ): Promise<{ applied: number; version?: Version }> {
-    return this.post<{ applied: number; version?: Version }>(
-      `/api/v1/artifacts/${pathSegment(id)}/edits`,
-      input
-    );
+  editArtifact(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
+    return this.post<EditArtifactResponse>(`/api/v1/artifacts/${pathSegment(id)}/edits`, input);
   }
 
   getMyState(): Promise<UserState> {

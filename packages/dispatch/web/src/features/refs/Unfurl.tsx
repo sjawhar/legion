@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
+import type { ArtifactText, ArtifactVersionContent } from "../../api/types";
+
 import { type ComposerReference, composerReferences } from "../margin/Composer";
 import { parseDispatchReference } from "./routes";
 
@@ -31,7 +33,7 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
   const artifact = issue.data?.artifacts?.find(
     (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
   );
-  const text = useQuery({
+  const text = useQuery<ArtifactText | ArtifactVersionContent>({
     enabled: artifact?.kind === "doc",
     queryKey: ["artifact", artifact?.id, version ?? "text"],
     queryFn: () =>

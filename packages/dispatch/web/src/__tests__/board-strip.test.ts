@@ -11,7 +11,13 @@ function event(id: string): Event {
     id: seq,
     issue_key: "CORE-1",
     notify: false,
-    payload: {},
+    payload: {
+      author: { id: "alice", kind: "user" },
+      body: "Update",
+      created_at: "2026-09-09T00:00:00Z",
+      id: `message-${id}`,
+      issue_key: "CORE-1",
+    },
     seq,
     type: "message.created",
   };

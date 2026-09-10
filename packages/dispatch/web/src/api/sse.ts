@@ -24,8 +24,7 @@ export interface QueryInvalidator {
 }
 
 function artifactId(event: Event): string | undefined {
-  const id = event.payload.artifact_id;
-  return typeof id === "string" ? id : undefined;
+  return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
 }
 
 interface EventPages {
@@ -70,7 +69,7 @@ export function applyEventInvalidations(queryClient: QueryInvalidator, event: Ev
     return;
   }
 
-  if (event.type.startsWith("ask.")) {
+  if (event.type === "ask.opened" || event.type === "ask.answered") {
     queryClient.invalidateQueries({ queryKey: ["asks", event.issue_key] });
     if (typeof event.payload.id === "string") {
       queryClient.invalidateQueries({ queryKey: ["ask", event.payload.id] });

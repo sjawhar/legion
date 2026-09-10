@@ -1,182 +1,31 @@
-import type { ASK_URGENCIES, DOC_EDIT_OPS } from "@legion/contracts";
-import type { DispatchHost } from "./dispatch-cwd";
+import type {
+  Actor,
+  ArtifactDetails,
+  ArtifactText,
+  ArtifactUploadResponse,
+  ArtifactVersionText,
+  Ask,
+  Comment,
+  CommentRead,
+  CreateArtifactInput,
+  CreateAskInput,
+  CreateCommentInput,
+  CreateIssueInput,
+  CreateMessageInput,
+  CreateVersionInput,
+  DispatchServiceErrorShape,
+  EditArtifactInput,
+  EditArtifactResponse,
+  Event,
+  Issue,
+  IssueDetails,
+  IssueRead,
+  Message,
+  TargetCandidate,
+  Version,
+} from "@legion/contracts";
 
-/** Ask urgency and document edit operations come from the shared tool contract. */
-export type AskUrgency = (typeof ASK_URGENCIES)[number];
-export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
-
-export type Actor =
-  | { readonly kind: "user"; readonly id: string }
-  | {
-      readonly kind: "session";
-      readonly id: string;
-      readonly origin?: {
-        readonly host?: DispatchHost;
-        readonly machine?: string;
-        readonly cwd?: string;
-        readonly tmux?: string;
-        readonly pane?: string;
-        readonly session_title?: string;
-      };
-    };
-
-export interface Anchor {
-  readonly artifact_id: string;
-  readonly version: number;
-  readonly quote: string;
-  readonly from: number;
-  readonly to: number;
-  readonly orphaned: boolean;
-}
-
-export interface Version {
-  readonly number: number;
-  readonly named: boolean;
-  readonly summary: string | null;
-  readonly authors: Actor[];
-  readonly created_at: string;
-  readonly size?: number;
-  readonly mime?: string;
-  readonly sha256?: string;
-}
-
-export interface Artifact {
-  readonly id: string;
-  readonly issue_key: string;
-  readonly slug: string;
-  readonly name: string;
-  readonly kind: "doc" | "image" | "file";
-  readonly primary: boolean;
-  readonly created_by: Actor;
-  readonly created_at: string;
-  readonly versions: Version[];
-}
-
-export interface Issue {
-  readonly key: string;
-  readonly project: string;
-  readonly number: number;
-  readonly title: string;
-  readonly status: string;
-  readonly labels: string[];
-  readonly parent: string | null;
-  readonly external_links: {
-    readonly url: string;
-    readonly kind?: "github_issue" | "github_pr" | "url";
-  }[];
-  readonly route: string | null;
-  readonly created_by: Actor;
-  readonly created_at: string;
-  readonly updated_at: string;
-  readonly closed_at: string | null;
-  readonly primary_artifact_id: string;
-  readonly last_seq: number;
-}
-
-export interface IssueSummary
-  extends Pick<Issue, "key" | "title" | "status" | "parent" | "updated_at"> {
-  readonly open_asks: number;
-}
-
-export interface Ask {
-  readonly id: string;
-  readonly issue_key: string;
-  readonly author: Actor;
-  readonly question: string;
-  readonly options: { readonly label: string; readonly description?: string }[];
-  readonly multiple: boolean;
-  readonly custom: boolean;
-  readonly urgency: AskUrgency;
-  readonly anchor: Anchor | null;
-  readonly state: "open" | "answered";
-  readonly answer: {
-    /** Answering user's login: the server stores the acting actor's id, not an actor object. */
-    readonly user: string;
-    readonly selected: string[];
-    readonly text: string | null;
-    readonly at: string;
-  } | null;
-  readonly created_at: string;
-}
-
-export interface Comment {
-  readonly id: string;
-  readonly issue_key: string;
-  readonly author: Actor;
-  readonly body: string;
-  readonly anchor: Anchor | null;
-  readonly reply_to: string | null;
-  readonly resolved: boolean;
-  readonly suggestion: { readonly replace_with: string; readonly accepted: boolean | null } | null;
-  readonly created_at: string;
-}
-
-export interface Message {
-  readonly id: string;
-  readonly issue_key: string;
-  readonly author: Actor;
-  readonly body: string;
-  readonly created_at: string;
-}
-
-export type EventType =
-  | "issue.created"
-  | "issue.updated"
-  | "issue.closed"
-  | "artifact.created"
-  | "artifact.version"
-  | "ask.opened"
-  | "ask.answered"
-  | "comment.created"
-  | "comment.resolved"
-  | "suggestion.accepted"
-  | "suggestion.rejected"
-  | "message.created"
-  | "child.status";
-
-export interface Event {
-  readonly id: number;
-  readonly issue_key: string;
-  readonly seq: number;
-  readonly type: EventType;
-  readonly actor: Actor;
-  readonly notify: boolean;
-  readonly created_at: string;
-  /** Per-type JSON object; the shapes are validated where they are read (see delivery.ts). */
-  readonly payload: Record<string, unknown>;
-}
-
-export interface IssueDetails extends Issue {
-  readonly artifacts: Artifact[];
-  readonly open_asks: Ask[];
-  readonly children: { readonly key: string; readonly title: string; readonly status: string }[];
-}
-export interface CommentRead {
-  readonly comment: Comment;
-  readonly replies: Comment[];
-}
-
-export interface IssueRead {
-  readonly issue: IssueDetails;
-  readonly events: Event[];
-}
-
-export interface ArtifactText {
-  readonly markdown: string;
-  readonly version: number | null;
-}
-
-export interface TargetCandidate {
-  readonly from: number;
-  readonly to: number;
-  readonly context: string;
-}
-
-export interface DispatchServiceErrorShape {
-  readonly error?: string;
-  readonly code?: string;
-  readonly candidates?: TargetCandidate[];
-}
+export type { DispatchServiceErrorShape } from "@legion/contracts";
 
 export class DispatchServiceError extends Error {
   override readonly name = "DispatchServiceError";
@@ -189,67 +38,6 @@ export class DispatchServiceError extends Error {
   ) {
     super(message);
   }
-}
-
-export interface CreateIssueInput {
-  readonly project: string;
-  readonly title: string;
-  readonly parent?: string;
-  readonly external?: string;
-  readonly spec?: string;
-  readonly actor: Actor;
-}
-
-export type AnchorInput =
-  | {
-      readonly artifact: string;
-      readonly quote: string;
-      readonly occurrence?: number;
-      readonly from?: never;
-      readonly to?: never;
-    }
-  | {
-      readonly artifact: string;
-      readonly from: number;
-      readonly to: number;
-      readonly quote?: string;
-      readonly occurrence?: number;
-    };
-
-export interface AskInput {
-  readonly question: string;
-  readonly options?: { readonly label: string; readonly description?: string }[];
-  readonly multiple?: boolean;
-  readonly custom?: boolean;
-  readonly urgency?: AskUrgency;
-  readonly anchor?: AnchorInput;
-  readonly actor: Actor;
-}
-
-export interface CommentInput {
-  readonly body: string;
-  readonly anchor?: AnchorInput;
-  readonly reply_to?: string;
-  readonly suggestion?: { readonly replace_with: string };
-  readonly actor: Actor;
-}
-
-export interface ArtifactUploadInput {
-  readonly name: string;
-  readonly file: Blob;
-  readonly primary?: boolean;
-  readonly summary?: string;
-  readonly actor: Actor;
-}
-
-export interface EditOperation {
-  readonly op: DocEditOp;
-  readonly find?: string;
-  readonly with?: string;
-  readonly occurrence?: number;
-  readonly markdown?: string;
-  readonly after?: string;
-  readonly before?: string;
 }
 
 function asErrorShape(value: unknown): DispatchServiceErrorShape {
@@ -297,7 +85,7 @@ export class DispatchClient {
     return { issue, events };
   }
 
-  async ask(issue: string, input: AskInput): Promise<Ask> {
+  async ask(issue: string, input: CreateAskInput): Promise<Ask> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"],
@@ -305,7 +93,7 @@ export class DispatchClient {
     );
   }
 
-  async comment(issue: string, input: CommentInput): Promise<Comment> {
+  async comment(issue: string, input: CreateCommentInput): Promise<Comment> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
@@ -315,7 +103,7 @@ export class DispatchClient {
 
   async suggest(
     issue: string,
-    input: Omit<CommentInput, "body" | "suggestion"> & {
+    input: Omit<CreateCommentInput, "body" | "suggestion"> & {
       readonly body?: string;
       readonly replace_with: string;
     }
@@ -331,10 +119,7 @@ export class DispatchClient {
     );
   }
 
-  async message(
-    issue: string,
-    input: { readonly body: string; readonly actor: Actor }
-  ): Promise<Message> {
+  async message(issue: string, input: CreateMessageInput): Promise<Message> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"],
@@ -342,15 +127,12 @@ export class DispatchClient {
     );
   }
 
-  async artifact(
-    issue: string,
-    input: ArtifactUploadInput
-  ): Promise<{ artifact: Artifact; version: Version }> {
+  async artifact(issue: string, input: CreateArtifactInput): Promise<ArtifactUploadResponse> {
     const form = new FormData();
     form.set("name", input.name);
     if (input.primary !== undefined) form.set("primary", String(input.primary));
     if (input.summary !== undefined) form.set("summary", input.summary);
-    form.set("actor", JSON.stringify(input.actor));
+    if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
     return this.#form(
       "POST",
@@ -359,27 +141,24 @@ export class DispatchClient {
     );
   }
 
-  async getArtifact(id: string): Promise<Artifact> {
+  async getArtifact(id: string): Promise<ArtifactDetails> {
     return this.#json("GET", ["api", "v1", "artifacts", id]);
   }
 
-  async docRead(id: string, version?: number): Promise<ArtifactText> {
+  async docRead(id: string): Promise<ArtifactText>;
+  async docRead(id: string, version: number): Promise<ArtifactVersionText>;
+  async docRead(id: string, version?: number): Promise<ArtifactText | ArtifactVersionText>;
+  async docRead(id: string, version?: number): Promise<ArtifactText | ArtifactVersionText> {
     return version === undefined
       ? this.#json("GET", ["api", "v1", "artifacts", id, "text"])
       : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
   }
 
-  async docEdit(
-    id: string,
-    input: { readonly ops: EditOperation[]; readonly summary?: string; readonly actor: Actor }
-  ): Promise<{ applied: number; version: Version | null }> {
+  async docEdit(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
   }
 
-  async nameArtifactVersion(
-    id: string,
-    input: { readonly summary: string; readonly actor: Actor }
-  ): Promise<Version> {
+  async nameArtifactVersion(id: string, input: CreateVersionInput): Promise<Version> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
   }
 

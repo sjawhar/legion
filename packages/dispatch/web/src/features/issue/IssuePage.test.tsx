@@ -4,10 +4,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api, type ListEventsOptions } from "../../api/client";
-import type { Issue } from "../../api/types";
+import type { IssueDetails } from "../../api/types";
 import { IssuePage } from "./IssuePage";
 
-const issue: Issue = {
+const issue: IssueDetails = {
   artifacts: [
     {
       created_at: "2026-09-09T00:00:00Z",
@@ -40,11 +40,11 @@ const issue: Issue = {
   updated_at: "2026-09-09T00:00:00Z",
 };
 
-function issueWithExternalLink(url: string): Issue {
+function issueWithExternalLink(url: string): IssueDetails {
   return { ...issue, external_links: [{ url }] };
 }
 
-function stubIssuePage(nextIssue: Issue): () => void {
+function stubIssuePage(nextIssue: IssueDetails): () => void {
   const originalGetIssue = api.getIssue;
   const originalGetIssueEvents = api.getIssueEvents;
   const originalGetInbox = api.getInbox;
