@@ -382,7 +382,6 @@ export async function executeDispatchTool(
         : undefined;
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
-      const custom = optionalBoolean(args, "custom");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const ask = await client.ask(issue(), {
@@ -391,7 +390,6 @@ export async function executeDispatchTool(
           ? { options: options as NonNullable<CreateAskInput["options"]> }
           : {}),
         ...(multiple === undefined ? {} : { multiple }),
-        ...(custom === undefined ? {} : { custom }),
         ...(urgency === undefined ? {} : { urgency }),
         ...(anchored === undefined ? {} : { anchor: anchored }),
         actor,

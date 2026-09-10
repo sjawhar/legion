@@ -115,7 +115,6 @@ export interface Ask {
   readonly question: string;
   readonly options: AskOption[];
   readonly multiple: boolean;
-  readonly custom: boolean;
   readonly urgency: AskUrgency;
   readonly anchor: Anchor | null;
   readonly state: "open" | "answered";
@@ -281,7 +280,6 @@ export interface CreateAskInput {
   readonly question: string;
   readonly options?: AskOption[];
   readonly multiple?: boolean;
-  readonly custom?: boolean;
   readonly urgency?: AskUrgency;
   readonly anchor?: AnchorInput;
   readonly actor?: Actor;

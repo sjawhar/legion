@@ -167,6 +167,29 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   await expect(bobPage.getByText("First ask", { exact: true })).toHaveCount(0);
   await expect(bobPage.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
 
+  const textOnlyAsk = await createAsk(
+    secondIssue.key,
+    { options: [{ label: "Ship" }, { label: "Hold" }], question: "Text-only ask" },
+    session
+  );
+  await alicePage.goto("/");
+  const textOnlyCard = alicePage.getByTestId(`ask-${textOnlyAsk.id}`);
+  await textOnlyCard
+    .getByLabel("Your answer")
+    .fill("Neither option fits; going with a third path.");
+  await textOnlyCard.getByRole("button", { name: "Submit answer" }).click();
+  await expect(textOnlyCard).toHaveCount(0);
+  await expect
+    .poll(() => getAsk(textOnlyAsk.id))
+    .toMatchObject({
+      answer: {
+        selected: [],
+        text: "Neither option fits; going with a third path.",
+        user: "alice",
+      },
+      state: "answered",
+    });
+
   await bob.close();
   await alice.close();
 });

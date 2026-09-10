@@ -48,7 +48,6 @@ export const dispatchToolSpecs = [
         .describe("Optional choices, at most 8.")
         .optional(),
       multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
-      custom: z.boolean().describe("Whether a free-text answer is allowed.").optional(),
       urgency: z.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
       anchor: z
         .object({

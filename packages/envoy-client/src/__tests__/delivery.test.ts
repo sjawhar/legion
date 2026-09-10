@@ -50,7 +50,6 @@ const openAsk = {
   question: "Which API?",
   options: [{ label: "JSON" }, { label: "MCP" }],
   multiple: false,
-  custom: true,
   urgency: "med",
   anchor: null,
   state: "open",
@@ -124,6 +123,37 @@ describe("renderInbound dispatch events", () => {
           question: "Which API?",
           options: [{ label: "JSON" }, { label: "MCP" }],
           answer: { selected: ["JSON"], text: "Use JSON HTTP." },
+        },
+      },
+    });
+  });
+
+  test("renders ask.answered's free-text answer even with no selected option", () => {
+    const textOnlyAnswered = {
+      ...openAsk,
+      state: "answered",
+      answer: {
+        user: { kind: "user", id: "sami" },
+        selected: [],
+        text: "Neither; let's do a third thing.",
+        at: "2026-09-09T00:01:00Z",
+      },
+    };
+    const rendered = renderInbound(dispatchEvent("ask.answered", textOnlyAnswered), reader);
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+
+    expect(decoded.envoy).toEqual({
+      from: "dispatch",
+      at: "1970-01-01T00:00:00Z",
+      id: "dispatch-1",
+      dispatch: {
+        issue_key: "DSP-1",
+        type: "ask.answered",
+        actor: { kind: "session", id: "session-1" },
+        payload: {
+          question: "Which API?",
+          options: [{ label: "JSON" }, { label: "MCP" }],
+          answer: { selected: [], text: "Neither; let's do a third thing." },
         },
       },
     });

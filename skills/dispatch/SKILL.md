@@ -36,7 +36,6 @@ dispatch_ask({
   question,
   options?: { label, description? }[],
   multiple?,
-  custom?,
   urgency?,
   anchor?: { artifact, quote, occurrence? },
 })
@@ -191,7 +190,6 @@ dispatch_ask({
       description: "Narrows the release but requires another deployment test.",
     },
   ],
-  custom: false,
   urgency: "high",
   anchor: {
     artifact: "spec",
