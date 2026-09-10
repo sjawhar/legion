@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 
 import { api, isForbidden, isUnauthorized } from "./api/client";
@@ -11,7 +11,7 @@ import { Margin, MarginProvider } from "./features/margin/Margin";
 import { parseIssuePath } from "./features/refs/routes";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
-import { useDialog } from "./features/shell/useDialog";
+import { useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { Sidebar } from "./features/sidebar/Sidebar";
 
@@ -158,12 +158,12 @@ function ShellSkeleton(): ReactNode {
   return (
     <div
       aria-busy="true"
-      className="min-h-dvh bg-slate-50 text-slate-900 md:flex dark:bg-slate-950 dark:text-slate-100"
+      className="min-h-dvh bg-slate-50 text-slate-900 xl:flex dark:bg-slate-950 dark:text-slate-100"
     >
-      <header className="flex items-center border-b border-slate-200 bg-slate-950 px-3 text-slate-100 md:hidden">
+      <header className="flex items-center border-b border-slate-200 bg-slate-950 px-3 text-slate-100 xl:hidden">
         <span className="text-lg font-semibold">Dispatch</span>
       </header>
-      <aside className="hidden border-slate-200 bg-slate-950 p-5 text-slate-100 md:block md:min-h-dvh md:w-80 md:border-r">
+      <aside className="hidden border-slate-200 bg-slate-950 p-5 text-slate-100 xl:block xl:min-h-dvh xl:w-80 xl:border-r">
         <span className="text-lg font-semibold">Dispatch</span>
         <div aria-label="Loading navigation" className="mt-6 space-y-2" role="status">
           {[0, 1, 2, 3].map((row) => (
@@ -185,6 +185,63 @@ function ShellSkeleton(): ReactNode {
   );
 }
 
+function NavigationContents({
+  closeButtonRef,
+  compact,
+  onClose,
+  onSignOut,
+  signOutError,
+  signOutPending,
+  user,
+}: {
+  closeButtonRef: RefObject<HTMLButtonElement | null>;
+  compact: boolean;
+  onClose: () => void;
+  onSignOut: () => void;
+  signOutError: boolean;
+  signOutPending: boolean;
+  user: AuthenticatedUser;
+}): ReactNode {
+  return (
+    <>
+      <div className="flex items-center justify-between">
+        <Link className="text-lg font-semibold" onClick={onClose} to="/">
+          Dispatch
+        </Link>
+        {compact ? (
+          <button
+            aria-label="Close navigation"
+            className="rounded-lg px-3 py-2 text-sm font-medium hover:bg-slate-800"
+            onClick={onClose}
+            ref={closeButtonRef}
+            type="button"
+          >
+            Close
+          </button>
+        ) : null}
+      </div>
+      <p className="mt-3 text-sm text-slate-400">Signed in as {user.login}</p>
+      <button
+        className="mt-1 text-sm font-medium text-sky-300 hover:text-sky-200 disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={signOutPending}
+        onClick={onSignOut}
+        type="button"
+      >
+        Sign out
+      </button>
+      {signOutError ? (
+        <p className="mt-1 text-sm text-rose-400" role="alert">
+          Couldn&apos;t sign out.{" "}
+          <button className="font-medium underline" onClick={onSignOut} type="button">
+            Retry
+          </button>
+        </p>
+      ) : null}
+      <Sidebar onNavigate={onClose} user={user} />
+    </>
+  );
+}
+
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -193,10 +250,11 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const mainRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const isFirstRender = useRef(true);
+  const isCompactViewport = useMediaQuery("(max-width: 1279px)");
   const drawer = useDialog<HTMLElement>({
     initialFocusRef: closeButtonRef,
     onClose: () => setNavigationOpen(false),
-    open: navigationOpen,
+    open: navigationOpen && isCompactViewport,
   });
   const signOut = useMutation({
     mutationFn: () => api.logout(),
@@ -221,9 +279,21 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     mainRef.current?.focus();
   }, [pageIdentity]);
 
+  const navigation = (
+    <NavigationContents
+      closeButtonRef={closeButtonRef}
+      compact={isCompactViewport}
+      onClose={() => setNavigationOpen(false)}
+      onSignOut={() => signOut.mutate()}
+      signOutError={signOut.isError}
+      signOutPending={signOut.isPending}
+      user={user}
+    />
+  );
+
   return (
     <MarginProvider>
-      <div className="min-h-dvh bg-slate-50 text-slate-900 md:flex dark:bg-slate-950 dark:text-slate-100">
+      <div className="min-h-dvh bg-slate-50 text-slate-900 xl:flex dark:bg-slate-950 dark:text-slate-100">
         <a
           className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-slate-950 focus:px-4 focus:py-2 focus:text-slate-100"
           href="#main-content"
@@ -233,7 +303,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         {connection === "reconnecting" ? (
           <p
             aria-live="polite"
-            className="fixed right-4 bottom-20 z-40 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 shadow-lg md:bottom-4"
+            className="fixed right-4 bottom-20 z-40 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 shadow-lg xl:bottom-4"
             data-testid="connection-pill"
           >
             Reconnecting…
@@ -241,7 +311,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         ) : connection === "unavailable" ? (
           <p
             aria-live="polite"
-            className="fixed right-4 bottom-20 z-40 flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-800 shadow-lg md:bottom-4"
+            className="fixed right-4 bottom-20 z-40 flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-800 shadow-lg xl:bottom-4"
             data-testid="connection-pill"
           >
             Live updates unavailable
@@ -250,76 +320,50 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             </button>
           </p>
         ) : null}
-        <header className="flex items-center justify-between border-b border-slate-200 bg-slate-950 px-3 text-slate-100 md:hidden">
-          <Link className="text-lg font-semibold" to="/">
-            Dispatch
-          </Link>
-          <button
-            aria-expanded={navigationOpen}
-            aria-label="Open navigation"
-            className="rounded-lg px-3 py-2 text-sm font-medium hover:bg-slate-800"
-            onClick={() => setNavigationOpen(true)}
-            type="button"
-          >
-            Menu
-          </button>
-        </header>
-        {navigationOpen ? (
-          <div
-            aria-hidden="true"
-            className="fixed inset-0 z-20 bg-slate-950/50 md:hidden"
-            onClick={() => setNavigationOpen(false)}
-          />
-        ) : null}
-        {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: role/aria-modal apply only while navigationOpen makes this a dialog */}
-        <aside
-          aria-label="Navigation"
-          aria-modal={navigationOpen ? true : undefined}
-          className={`${
-            navigationOpen ? "fixed inset-y-0 left-0 z-30 w-80 max-w-[calc(100vw-2rem)]" : "hidden"
-          } border-b border-slate-200 bg-slate-950 p-5 text-slate-100 shadow-2xl md:static md:order-1 md:block md:min-h-dvh md:w-80 md:max-w-none md:border-r md:border-b-0 md:shadow-none`}
-          ref={drawer.containerRef}
-          role={navigationOpen ? "dialog" : undefined}
-        >
-          <div className="flex items-center justify-between md:block">
-            <Link className="text-lg font-semibold" onClick={() => setNavigationOpen(false)} to="/">
+        {isCompactViewport ? (
+          <header className="flex items-center justify-between border-b border-slate-200 bg-slate-950 px-3 text-slate-100">
+            <Link className="text-lg font-semibold" to="/">
               Dispatch
             </Link>
             <button
-              aria-label="Close navigation"
-              className="rounded-lg px-3 py-2 text-sm font-medium hover:bg-slate-800 md:hidden"
-              onClick={() => setNavigationOpen(false)}
-              ref={closeButtonRef}
+              aria-expanded={navigationOpen}
+              aria-label="Open navigation"
+              className="rounded-lg px-3 py-2 text-sm font-medium hover:bg-slate-800"
+              onClick={() => setNavigationOpen(true)}
               type="button"
             >
-              Close
+              Menu
             </button>
-          </div>
-          <p className="mt-3 text-sm text-slate-400">Signed in as {user.login}</p>
-          <button
-            className="mt-1 text-sm font-medium text-sky-300 hover:text-sky-200 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={signOut.isPending}
-            onClick={() => signOut.mutate()}
-            type="button"
+          </header>
+        ) : null}
+        {isCompactViewport && navigationOpen ? (
+          <>
+            <div
+              aria-hidden="true"
+              className="fixed inset-0 z-20 bg-slate-950/50"
+              onClick={() => setNavigationOpen(false)}
+            />
+            <aside
+              aria-label="Navigation"
+              aria-modal="true"
+              className="fixed inset-y-0 left-0 z-30 w-80 max-w-[calc(100vw-2rem)] border-b border-slate-200 bg-slate-950 p-5 text-slate-100 shadow-2xl"
+              ref={drawer.containerRef}
+              role="dialog"
+            >
+              {navigation}
+            </aside>
+          </>
+        ) : null}
+        {isCompactViewport ? null : (
+          <aside
+            aria-label="Navigation"
+            className="order-1 min-h-dvh w-80 max-w-none border-r border-slate-200 bg-slate-950 p-5 text-slate-100"
           >
-            Sign out
-          </button>
-          {signOut.isError ? (
-            <p className="mt-1 text-sm text-rose-400" role="alert">
-              Couldn&apos;t sign out.{" "}
-              <button
-                className="font-medium underline"
-                onClick={() => signOut.mutate()}
-                type="button"
-              >
-                Retry
-              </button>
-            </p>
-          ) : null}
-          <Sidebar onNavigate={() => setNavigationOpen(false)} user={user} />
-        </aside>
+            {navigation}
+          </aside>
+        )}
         <main
-          className="min-w-0 flex-1 p-6 pb-32 outline-none md:order-2 md:pb-6"
+          className="min-w-0 flex-1 p-6 pb-32 outline-none xl:order-2 xl:pb-6"
           id="main-content"
           ref={mainRef}
           tabIndex={-1}

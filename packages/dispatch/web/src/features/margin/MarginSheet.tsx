@@ -1,4 +1,5 @@
 import { type ReactNode, useRef } from "react";
+
 import { QueryError } from "../../components/QueryError";
 import { useDialog, useMediaQuery } from "../shell/useDialog";
 import { CommentsTab } from "./CommentsTab";
@@ -39,73 +40,74 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
     tab,
   } = model;
   const selectionValue = selection.value;
+  const isCompactViewport = useMediaQuery("(max-width: 1279px)");
   const sheetDragOrigin = useRef<number | undefined>(undefined);
   const sheetDragMoved = useRef(false);
-  const isPhoneViewport = useMediaQuery("(max-width: 767px)");
   const dialog = useDialog<HTMLElement>({
     onClose: () => sheet.toggle(false),
-    open: sheet.expanded && isPhoneViewport,
+    open: sheet.expanded && isCompactViewport,
   });
 
   return (
     <>
-      {sheet.expanded ? (
+      {sheet.expanded && isCompactViewport ? (
         <div
           aria-hidden="true"
-          className="fixed inset-0 z-[9] bg-slate-950/50 md:hidden"
+          className="fixed inset-0 z-[9] bg-slate-950/50"
           onClick={() => sheet.toggle(false)}
         />
       ) : null}
-      {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: aria-modal only applies while the expanded phone sheet makes this element role="dialog" */}
+      {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: aria-modal only applies while the compact review sheet is an open dialog */}
       <aside
-        aria-label={sheet.expanded && isPhoneViewport ? "Review panel" : undefined}
-        aria-modal={sheet.expanded && isPhoneViewport ? true : undefined}
+        aria-label={isCompactViewport ? "Review panel" : "Review margin"}
+        aria-modal={sheet.expanded && isCompactViewport ? true : undefined}
         className={`fixed inset-x-0 bottom-0 z-10 border-t border-slate-200 bg-white shadow-[0_-8px_24px_rgba(15,23,42,0.08)] ${
           issueKey === undefined
             ? "hidden"
             : sheet.expanded
               ? "max-h-[85dvh] overflow-y-auto p-4"
               : "h-16 overflow-hidden"
-        } md:static md:order-3 md:block md:h-auto md:max-h-none md:w-96 md:overflow-visible md:border-t-0 md:border-l md:p-4 md:shadow-none`}
+        } xl:static xl:order-3 xl:block xl:h-auto xl:max-h-none xl:w-96 xl:overflow-visible xl:border-t-0 xl:border-l xl:p-4 xl:shadow-none`}
         data-expanded={sheet.expanded ? "true" : "false"}
         data-testid="margin-sheet"
         ref={dialog.containerRef}
-        role={sheet.expanded && isPhoneViewport ? "dialog" : undefined}
+        role={sheet.expanded && isCompactViewport ? "dialog" : undefined}
       >
-        <div
-          aria-hidden="true"
-          className="mx-auto mb-1 h-1 w-10 rounded-full bg-slate-300 md:hidden"
-        />
-        <button
-          aria-expanded={sheet.expanded}
-          aria-label={sheet.expanded ? "Close review panel" : "Open review panel"}
-          className="flex h-16 w-full items-center justify-between px-4 text-left text-sm font-semibold text-slate-800 md:hidden"
-          onClick={() => {
-            if (sheetDragMoved.current) {
-              sheetDragMoved.current = false;
-              return;
-            }
-            sheet.toggle();
-          }}
-          onPointerDown={(event) => {
-            sheetDragOrigin.current = event.clientY;
-          }}
-          onPointerUp={(event) => {
-            const origin = sheetDragOrigin.current;
-            sheetDragOrigin.current = undefined;
-            if (origin === undefined || Math.abs(event.clientY - origin) < 12) {
-              return;
-            }
-            sheetDragMoved.current = true;
-            sheet.toggle(event.clientY < origin);
-          }}
-          type="button"
-        >
-          <span>Review panel</span>
-          <span className="font-normal text-slate-500">
-            {openAskCount} open {openAskCount === 1 ? "ask" : "asks"}
-          </span>
-        </button>
+        {isCompactViewport ? (
+          <>
+            <div aria-hidden="true" className="mx-auto mb-1 h-1 w-10 rounded-full bg-slate-300" />
+            <button
+              aria-expanded={sheet.expanded}
+              aria-label={sheet.expanded ? "Close review panel" : "Open review panel"}
+              className="flex h-16 w-full items-center justify-between px-4 text-left text-sm font-semibold text-slate-800"
+              onClick={() => {
+                if (sheetDragMoved.current) {
+                  sheetDragMoved.current = false;
+                  return;
+                }
+                sheet.toggle();
+              }}
+              onPointerDown={(event) => {
+                sheetDragOrigin.current = event.clientY;
+              }}
+              onPointerUp={(event) => {
+                const origin = sheetDragOrigin.current;
+                sheetDragOrigin.current = undefined;
+                if (origin === undefined || Math.abs(event.clientY - origin) < 12) {
+                  return;
+                }
+                sheetDragMoved.current = true;
+                sheet.toggle(event.clientY < origin);
+              }}
+              type="button"
+            >
+              <span>Review panel</span>
+              <span className="font-normal text-slate-500">
+                {openAskCount} open {openAskCount === 1 ? "ask" : "asks"}
+              </span>
+            </button>
+          </>
+        ) : null}
         {selectionValue === undefined || visibleArtifact === undefined || isClosed ? null : (
           <SelectionMenu
             onAction={(kind) => {
@@ -116,7 +118,7 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
             selection={selectionValue}
           />
         )}
-        <div className={sheet.expanded ? "px-4 pb-4 md:px-0 md:pb-0" : "hidden md:block"}>
+        <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
           <div className="flex border-b border-slate-200" role="tablist">
             {(["comments", "artifacts", "pinned"] as MarginTab[]).map((name) => (
               <button
@@ -159,12 +161,12 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
           ) : null}
           {tab.value === "comments" && visibleArtifact !== undefined ? (
             <CommentsTab
-              artifactSlug={visibleArtifact.slug}
-              asksPending={asksPending}
               actionErrorId={actionErrorId}
               answeredAsksPending={answeredAsksPending}
-              commentsPending={commentsPending}
+              artifactSlug={visibleArtifact.slug}
               commentsError={commentsError}
+              asksPending={asksPending}
+              commentsPending={commentsPending}
               composer={composer}
               hoveredItemId={selection.hoveredItemId}
               isClosed={isClosed}
@@ -172,12 +174,12 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
               items={comments}
               list={commentListRef}
               onAction={actions.onAction}
+              onCloseComposer={actions.closeComposer}
+              onReply={actions.onReply}
               onRetryAction={actions.onRetryAction}
               onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
               onRetryComments={actions.onRetryComments}
               pendingActionId={pendingActionId}
-              onCloseComposer={actions.closeComposer}
-              onReply={actions.onReply}
               selectedItemId={selection.selectedItemId}
             />
           ) : null}
