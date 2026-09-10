@@ -108,9 +108,8 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     event.type === "ask.resolved"
   ) {
     keys.push(["asks", event.issue_key]);
-    if (typeof event.payload.id === "string") {
-      keys.push(["ask", event.payload.id]);
-      if (event.type === "ask.resolved") keys.push(["ask-thread", event.payload.id]);
+    if (event.type === "ask.resolved" && typeof event.payload.id === "string") {
+      keys.push(["ask-thread", event.payload.id]);
     }
     return keys;
   }

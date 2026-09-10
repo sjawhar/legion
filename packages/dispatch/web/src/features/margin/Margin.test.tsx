@@ -175,6 +175,7 @@ test("Margin hides an open composer when its issue closes", async () => {
   });
   queryClient.setQueryData(["issue", issue.key], issue);
   queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], []);
 
@@ -218,6 +219,7 @@ test("Margin hides an open composer when navigating to a different artifact", as
     key === "CORE-2" ? secondIssue : issue
   );
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listComments = spyOn(api, "listComments").mockResolvedValue([]);
 
@@ -245,6 +247,7 @@ test("Margin hides an open composer when navigating to a different artifact", as
     view.unmount();
     getIssue.mockRestore();
     getInbox.mockRestore();
+    listIssueAsks.mockRestore();
     getMyState.mockRestore();
     listComments.mockRestore();
   }
@@ -256,6 +259,7 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
   });
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
@@ -305,6 +309,7 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
     window.matchMedia = originalMatchMedia;
     getIssue.mockRestore();
     getInbox.mockRestore();
+    listIssueAsks.mockRestore();
     getMyState.mockRestore();
     listComments.mockRestore();
     scrollTo.mockRestore();
@@ -317,6 +322,7 @@ test("margin item listeners reattach after the comments tab remounts", async () 
   });
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
 
@@ -343,6 +349,7 @@ test("margin item listeners reattach after the comments tab remounts", async () 
     view.unmount();
     getIssue.mockRestore();
     getInbox.mockRestore();
+    listIssueAsks.mockRestore();
     getMyState.mockRestore();
     listComments.mockRestore();
   }
@@ -354,6 +361,7 @@ test("margin item listeners attach after navigating from a route with no review 
   });
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
 
@@ -380,12 +388,13 @@ test("margin item listeners attach after navigating from a route with no review 
     view.unmount();
     getIssue.mockRestore();
     getInbox.mockRestore();
+    listIssueAsks.mockRestore();
     getMyState.mockRestore();
     listComments.mockRestore();
   }
 });
 
-test("Margin surfaces and retries a failed fetch for an answered anchored ask", async () => {
+test("Margin surfaces and retries a failed fetch for the issue's asks", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -393,13 +402,12 @@ test("Margin surfaces and retries a failed fetch for an answered anchored ask", 
     },
   });
   queryClient.setQueryData(["issue", issue.key], issue);
-  queryClient.setQueryData(["inbox"], [anchoredAsk]);
+  queryClient.setQueryData(["inbox"], []);
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], [comment]);
-  // AskCard's own reply-thread query (`["ask-thread", id]`) also calls `api.getAsk` as soon as
-  // the card mounts, so the initial resolved value must cover that fetch before the
-  // reject/retry sequence below exercises `useAnsweredAsks`'s missing-ask fallback query.
-  const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask: anchoredAsk, replies: [] });
+  const listIssueAsks = spyOn(api, "listIssueAsks")
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue([anchoredAsk]);
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
@@ -411,29 +419,105 @@ test("Margin surfaces and retries a failed fetch for an answered anchored ask", 
   );
 
   try {
-    await screen.findByTestId("ask-ask-1");
-    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(1));
-    getAsk.mockRejectedValueOnce(new Error("offline")).mockResolvedValue({
-      ask: {
-        ...anchoredAsk,
-        answer: { at: "2026-09-09T00:05:00Z", selected: ["Ship"], text: null, user: "alice" },
-        state: "answered",
-      },
-      replies: [],
-    });
-    act(() => {
-      queryClient.setQueryData(["inbox"], []);
-    });
-
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Could not load an answered ask.");
+    expect(alert.textContent).toContain("Could not load this document's asks.");
     expect(screen.getByTestId("margin-comment-comment-1")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(3));
-    expect((await screen.findByTestId("ask-ask-1")).textContent).toContain("alice answered");
+    await screen.findByTestId("ask-ask-1");
+    expect(listIssueAsks).toHaveBeenCalledTimes(2);
   } finally {
     view.unmount();
-    getAsk.mockRestore();
+    listIssueAsks.mockRestore();
+  }
+});
+
+test("a viewer who mounts after the answer sees the answered anchored ask", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  const answeredAsk: Ask = {
+    anchor: {
+      artifact_id: "artifact-1",
+      from: 10,
+      orphaned: false,
+      quote: "brown",
+      to: 15,
+      version: 1,
+    },
+    answer: {
+      at: "2026-09-10T00:01:00Z",
+      selected: [],
+      text: "Because it is precise.",
+      user: "alice",
+    },
+    author: { id: "session-1", kind: "session" },
+    created_at: "2026-09-10T00:00:00Z",
+    id: "ask-answered",
+    issue_key: issue.key,
+    multiple: false,
+    options: [],
+    question: "Why brown?",
+    state: "answered",
+    urgency: "med",
+  };
+  // Anchored earlier in the document than the answered ask above, but created later - if the
+  // margin ordered by recency instead of anchor position, this would render second instead
+  // of first.
+  const openAsk: Ask = {
+    anchor: {
+      artifact_id: "artifact-1",
+      from: 0,
+      orphaned: false,
+      quote: "The",
+      to: 3,
+      version: 1,
+    },
+    answer: null,
+    author: { id: "session-1", kind: "session" },
+    created_at: "2026-09-10T00:02:00Z",
+    id: "ask-open",
+    issue_key: issue.key,
+    multiple: false,
+    options: [],
+    question: "Why the?",
+    state: "open",
+    urgency: "med",
+  };
+  // This viewer's tab never had either ask open in its inbox or query cache - unlike a tab
+  // that was present when they were created, both queries start empty.
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([answeredAsk, openAsk]);
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const card = await screen.findByTestId(`ask-${answeredAsk.id}`);
+    expect(listIssueAsks).toHaveBeenCalledWith(issue.key, "all");
+    expect(card.textContent).toContain("alice answered");
+    expect(card.textContent).toContain("Because it is precise.");
+    expect(
+      Array.from(
+        screen
+          .getByLabelText("Margin review items")
+          .querySelectorAll<HTMLElement>("[data-margin-item]")
+      ).map((item) => item.dataset.marginItem)
+    ).toEqual([openAsk.id, answeredAsk.id]);
+  } finally {
+    view.unmount();
+    listIssueAsks.mockRestore();
   }
 });
 
@@ -457,7 +541,8 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
     suggestion: null,
   };
   queryClient.setQueryData(["issue", issue.key], issue);
-  queryClient.setQueryData(["inbox"], [anchoredAsk]);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], [anchoredAsk]);
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], [askReply]);
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask: anchoredAsk, replies: [askReply] });

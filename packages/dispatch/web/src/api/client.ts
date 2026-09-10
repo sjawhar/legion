@@ -213,6 +213,13 @@ export class DispatchApiClient {
     return normalizeAsk(await this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input));
   }
 
+  async listIssueAsks(key: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
+    const asks = await this.json<Ask[]>(
+      pathWithQuery(`/api/v1/issues/${pathSegment(key)}/asks`, { state })
+    );
+    return asks.map(normalizeAsk);
+  }
+
   async answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
     return normalizeAsk(await this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input));
   }

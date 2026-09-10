@@ -111,7 +111,7 @@ export function useMarginItems(tab: MarginTab) {
     queryKey: ["events", issueKey, "margin-pinned", pinnedIds],
     queryFn: () => api.getIssueEvents(issueKey ?? "", { ids: pinnedIds }),
   });
-  const answeredAsks = useAnsweredAsks(asks.data, issueKey, visibleArtifact?.id);
+  const answeredAsks = useAnsweredAsks(issueKey, visibleArtifact?.id);
   const anchoredAsks = answeredAsks.asks;
   const items = useMemo<MarginItem[]>(() => {
     const anchoredItems = anchoredAsks.map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
@@ -130,6 +130,19 @@ export function useMarginItems(tab: MarginTab) {
         const rightRoot = right[0];
         if (leftRoot === undefined || rightRoot === undefined) {
           return 0;
+        }
+        const leftAnchor = leftRoot.kind === "ask" ? leftRoot.ask.anchor : leftRoot.comment.anchor;
+        const rightAnchor =
+          rightRoot.kind === "ask" ? rightRoot.ask.anchor : rightRoot.comment.anchor;
+        // Every anchored ask is always anchored (unanchored asks never enter this list, see
+        // useAnsweredAsks), so this puts anchored asks and anchored comments in document
+        // reading order; a general, unanchored comment sorts after any anchored item, most
+        // recent first among its own kind.
+        if (leftAnchor !== null && rightAnchor !== null) {
+          return leftAnchor.from - rightAnchor.from || leftAnchor.to - rightAnchor.to;
+        }
+        if (leftAnchor !== null || rightAnchor !== null) {
+          return leftAnchor !== null ? -1 : 1;
         }
         const leftCreatedAt =
           leftRoot.kind === "ask" ? leftRoot.ask.created_at : leftRoot.comment.created_at;

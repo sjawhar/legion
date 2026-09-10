@@ -304,6 +304,32 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	return ask, nil
 }
 
+// listIssueAsks returns every ask on an issue, filtered by state: "open" or
+// "answered" match only that state; "all" (the default) returns every ask
+// regardless of state, including resolved ones - the margin treats a
+// resolved ask like an answered one for placement, so it needs the same
+// single query to see both. There is no state=resolved filter; nothing
+// currently needs to list resolved asks on their own.
+func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		state = "all"
+	}
+	if state != "all" && state != "open" && state != "answered" {
+		writeError(w, "INVALID_ASK_STATE", http.StatusBadRequest, "state must be all, open, or answered")
+		return
+	}
+	asks, err := s.loadIssueAsks(r.Context(), s.deps.Store.Pool, r.PathValue("key"), state)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, asks)
+}
+
 func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -329,6 +355,54 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
 		from asks where id = $1
 	`, id))
+}
+
+// listIssueAsksColumns are the columns every ask-listing query selects, in scan order.
+const listIssueAsksColumns = `id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at`
+
+// listIssueAsksQueryAll, listIssueAsksQueryOpen, and listIssueAsksQueryAnswered are three
+// distinct constant query strings rather than one query with a parameterized state predicate.
+// pgx caches a prepared statement per distinct SQL text and, after repeated executions,
+// Postgres may switch that statement from a custom plan (built for the bound parameter
+// values) to a cheaper generic plan that ignores them - which would let a state=$2 predicate
+// silently drop the sequential-scan-avoiding asks_open(issue_key) where state = 'open'
+// partial index for the open case. Baking the state literal into the SQL text instead means
+// the open query's plan is always eligible for that index, regardless of which plan kind
+// Postgres picks (see TestListIssueAsksOpenQueryUsesAsksOpenIndex).
+const (
+	listIssueAsksQueryAll = `select ` + listIssueAsksColumns + `
+		from asks where issue_key = $1 order by created_at, id`
+	listIssueAsksQueryOpen = `select ` + listIssueAsksColumns + `
+		from asks where issue_key = $1 and state = 'open' order by created_at, id`
+	listIssueAsksQueryAnswered = `select ` + listIssueAsksColumns + `
+		from asks where issue_key = $1 and state = 'answered' order by created_at, id`
+)
+
+// loadIssueAsks returns an issue's asks, oldest first, filtered by state ("all",
+// "open", or "answered"). Both the open-asks-on-issue-detail loader and the
+// GET /issues/{key}/asks?state= endpoint share this one query shape.
+func (s *server) loadIssueAsks(ctx context.Context, q queryer, key, state string) ([]model.Ask, error) {
+	query := listIssueAsksQueryAll
+	switch state {
+	case "open":
+		query = listIssueAsksQueryOpen
+	case "answered":
+		query = listIssueAsksQueryAnswered
+	}
+	rows, err := q.Query(ctx, query, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	asks := []model.Ask{}
+	for rows.Next() {
+		ask, err := scanAsk(rows)
+		if err != nil {
+			return nil, err
+		}
+		asks = append(asks, ask)
+	}
+	return asks, rows.Err()
 }
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {

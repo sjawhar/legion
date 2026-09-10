@@ -359,3 +359,62 @@ test("margin ask composer sends option choices that the inbox records as a selec
     await alice.close();
   }
 });
+
+test("a viewer who opens the issue after an anchored ask is answered sees it in the margin", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "SEES", name: "Sees answered asks" });
+  const issue = await createIssue({
+    project: "SEES",
+    spec: initialMarkdown,
+    title: "Answered ask visibility",
+  });
+  const ask = await createAsk(
+    issue.key,
+    {
+      anchor: { artifact: "spec", from: 10, to: 15 },
+      question: "Why brown?",
+    },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    await alicePage.goto(`/issues/${issue.key}`);
+    await alicePage.getByRole("tab", { name: "Spec" }).click();
+    await setSheet(alicePage, testInfo.project.name, true);
+    const aliceCard = alicePage
+      .getByRole("region", { name: "Margin review items" })
+      .getByTestId(`ask-${ask.id}`);
+    await expect(aliceCard).toContainText("brown");
+    await aliceCard.getByLabel("Your answer").fill("Because it is precise.");
+    await aliceCard.getByRole("button", { name: "Submit answer" }).click();
+    await expect.poll(() => getAsk(ask.id)).toMatchObject({ ask: { state: "answered" } });
+    await setSheet(alicePage, testInfo.project.name, false);
+
+    // Bob's browser context has never had this issue open: no inbox history, no prior
+    // query cache. He still sees the answered anchored ask in the margin.
+    const bobPage = await bob.newPage();
+    await bobPage.goto(`/issues/${issue.key}`);
+    await bobPage.getByRole("tab", { name: "Spec" }).click();
+    await setSheet(bobPage, testInfo.project.name, true);
+    const bobCard = bobPage
+      .getByRole("region", { name: "Margin review items" })
+      .getByTestId(`ask-${ask.id}`);
+    await expect(bobCard).toBeVisible();
+    await expect(bobCard).toContainText("brown");
+    await expect(bobCard).toContainText("Why brown?");
+    await expect(bobCard).toContainText("alice answered");
+    await expect(bobCard).toContainText("Because it is precise.");
+    await expect(bobCard.locator("time")).toHaveAttribute("datetime", /.+/);
+    await bobPage.screenshot({
+      path: testInfo.outputPath("fresh-viewer-answered-anchored-ask.png"),
+      fullPage: true,
+    });
+  } finally {
+    await alice.close();
+    await bob.close();
+  }
+});

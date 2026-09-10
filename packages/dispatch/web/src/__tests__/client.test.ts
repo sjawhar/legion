@@ -247,7 +247,10 @@ test("isRetryableQueryError exempts auth outcomes (401, 403) but retries a trans
 });
 test("API client reaches every remaining documented endpoint", async () => {
   const stub = stubFetch((request) => {
-    if (request.path.startsWith("/api/v1/inbox")) {
+    if (
+      request.path.startsWith("/api/v1/inbox") ||
+      request.path.startsWith("/api/v1/issues/CORE-1/asks?")
+    ) {
       return Response.json([]);
     }
     if (request.path === "/api/v1/asks/ask-1") {
@@ -279,6 +282,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.getIssue("CORE-1");
   await api.getInbox("CORE");
   await api.createAsk("CORE-1", { question: "Ship?" });
+  await api.listIssueAsks("CORE-1");
   await api.getAsk("ask-1");
   await api.createComment("CORE-1", { body: "Looks good" });
   await api.resolveComment("comment-1");
@@ -311,6 +315,7 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/api/v1/issues/CORE-1"],
     ["GET", "/api/v1/inbox?project=CORE"],
     ["POST", "/api/v1/issues/CORE-1/asks"],
+    ["GET", "/api/v1/issues/CORE-1/asks?state=all"],
     ["GET", "/api/v1/asks/ask-1"],
     ["POST", "/api/v1/issues/CORE-1/comments"],
     ["POST", "/api/v1/comments/comment-1/resolve"],

@@ -45,6 +45,7 @@ const originalApi = {
   getIssue: api.getIssue,
   getMyState: api.getMyState,
   listComments: api.listComments,
+  listIssueAsks: api.listIssueAsks,
   listIssues: api.listIssues,
   whoAmI: api.whoAmI,
 };
@@ -88,6 +89,7 @@ function renderShellAt(width: number): void {
   api.getMyState = async () => ({ "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false } });
   api.getIssue = async () => issue;
   api.getInbox = async () => [];
+  api.listIssueAsks = async () => [];
   api.listComments = async () => [];
   globalThis.EventSource = TestEventSource as unknown as typeof EventSource;
 

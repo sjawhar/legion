@@ -247,6 +247,105 @@ func TestAnchoredAskAnswerAndInbox(t *testing.T) {
 	}
 }
 
+func TestListIssueAsksFiltersByState(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask states", "The quick brown fox")
+	otherIssue := createInteractionIssue(t, handler, "OTHER", "Unrelated issue", "A spec")
+
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"anchor":   map[string]any{"artifact": "spec", "quote": "quick"},
+		"question": "Keep this answer?",
+		"actor":    sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create answered ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	answeredAsk := decodeBody[model.Ask](t, created)
+
+	open := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"anchor":   map[string]any{"artifact": "spec", "quote": "fox"},
+		"question": "Keep this open?",
+		"actor":    sessionActor(),
+	})
+	if open.Code != http.StatusCreated {
+		t.Fatalf("create open ask: status=%d body=%s", open.Code, open.Body.String())
+	}
+	openAsk := decodeBody[model.Ask](t, open)
+
+	resolved := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Still worth asking?", "actor": sessionActor(),
+	})
+	if resolved.Code != http.StatusCreated {
+		t.Fatalf("create resolved ask: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	resolvedAsk := decodeBody[model.Ask](t, resolved)
+
+	otherOpen := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+otherIssue.Key+"/asks", map[string]any{
+		"question": "Unrelated to the first issue?", "actor": sessionActor(),
+	})
+	if otherOpen.Code != http.StatusCreated {
+		t.Fatalf("create ask on other issue: status=%d body=%s", otherOpen.Code, otherOpen.Body.String())
+	}
+
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+answeredAsk.ID+"/answer", map[string]any{
+		"text": "Yes.",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("answer ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+resolvedAsk.ID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "No longer relevant.", "actor": sessionActor(),
+	}); response.Code != http.StatusOK {
+		t.Fatalf("resolve ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	assertAsks := func(target, login string, want ...string) []model.Ask {
+		t.Helper()
+		var response *httptest.ResponseRecorder
+		if login == "" {
+			response = sessionRequest(t, handler, http.MethodGet, target, nil)
+		} else {
+			response = dispatchRequest(t, handler, http.MethodGet, target, nil, login)
+		}
+		if response.Code != http.StatusOK {
+			t.Fatalf("list asks %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
+		got := decodeBody[[]model.Ask](t, response)
+		if len(got) != len(want) {
+			t.Fatalf("list asks %s = %#v, want %d asks", target, got, len(want))
+		}
+		byID := make(map[string]model.Ask, len(got))
+		for _, ask := range got {
+			byID[ask.ID] = ask
+		}
+		for _, id := range want {
+			if _, ok := byID[id]; !ok {
+				t.Fatalf("list asks %s = %#v, want to contain %q", target, got, id)
+			}
+		}
+		return got
+	}
+
+	all := assertAsks("/api/v1/issues/"+issue.Key+"/asks?state=all", "bob", answeredAsk.ID, openAsk.ID, resolvedAsk.ID)
+	for _, ask := range all {
+		if ask.ID == answeredAsk.ID && (ask.State != "answered" || ask.Answer == nil || ask.Anchor == nil) {
+			t.Fatalf("answered anchored ask = %#v, want persisted answer and anchor", ask)
+		}
+		if ask.ID == resolvedAsk.ID && (ask.State != "resolved" || ask.Resolution == nil) {
+			t.Fatalf("resolved ask = %#v, want persisted resolution", ask)
+		}
+	}
+	// state=open and state=answered match only that exact state - a resolved ask is neither.
+	assertAsks("/api/v1/issues/"+issue.Key+"/asks?state=open", "bob", openAsk.ID)
+	assertAsks("/api/v1/issues/"+issue.Key+"/asks?state=answered", "bob", answeredAsk.ID)
+	// A bearer session (no human login) can read the list too.
+	assertAsks("/api/v1/issues/"+issue.Key+"/asks?state=all", "", answeredAsk.ID, openAsk.ID, resolvedAsk.ID)
+
+	invalid := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks?state=bogus", nil, "bob")
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_ASK_STATE"`) {
+		t.Fatalf("list asks with invalid state: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
 func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answer lock order", "A spec")

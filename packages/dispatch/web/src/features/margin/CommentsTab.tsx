@@ -218,7 +218,7 @@ export function CommentsTab({
         >
           {onRetryAnsweredAsk === undefined ? null : (
             <QueryError
-              message="Could not load an answered ask."
+              message="Could not load this document's asks."
               onRetry={onRetryAnsweredAsk}
               retrying={answeredAsksPending}
             />

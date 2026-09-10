@@ -301,23 +301,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 // listing carries only a count; the detail response carries the asks themselves
 // so agents, which cannot read the human inbox, can see what is waiting.
 func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]model.Ask, error) {
-	rows, err := q.Query(ctx, `
-		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
-		from asks where issue_key = $1 and state = 'open' order by created_at, id
-	`, key)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	asks := []model.Ask{}
-	for rows.Next() {
-		ask, err := scanAsk(rows)
-		if err != nil {
-			return nil, err
-		}
-		asks = append(asks, ask)
-	}
-	return asks, rows.Err()
+	return s.loadIssueAsks(ctx, q, key, "open")
 }
 
 func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
