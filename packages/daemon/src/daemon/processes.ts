@@ -1745,23 +1745,54 @@ export class ProcessManager {
       priorSessionFile,
       "resurrecting"
     );
-    if (
-      this.deps.state.trees[tree.root] !== tree ||
-      tree.status === "lingering" ||
-      tree.status === "closed" ||
-      !this.deps.state.admission.active.includes(tree.root) ||
-      this.deps.state.issues[tree.root]?.status !== "todo"
-    ) {
-      if (this.deps.state.trees[tree.root] === tree) tree.locator = locator;
+    // Abort only for a genuine human park/close, never for this daemon's own `in_progress` echo
+    // (including a delayed one landing mid-launch) or a resurrect in flight -- both of those
+    // MUST proceed to a running root. `tree.status` "lingering"/"closed" already reflects a park
+    // or close the reducer's own linger effect applied while this launch was in flight (that
+    // effect only fires when `tree.status` already read "active" at the time it ran); the issue
+    // going `backlog`/`icebox`/`done` covers the window where it can't have fired yet (a
+    // resurrect's tree still reads "dead" here, so the reducer saw no "active" tree to linger).
+    const treeReplaced = this.deps.state.trees[tree.root] !== tree;
+    const issueStatus = this.deps.state.issues[tree.root]?.status;
+    const humanParked =
+      issueStatus === "backlog" || issueStatus === "icebox" || issueStatus === "done";
+    if (treeReplaced || tree.status === "lingering" || tree.status === "closed" || humanParked) {
+      if (!treeReplaced) {
+        tree.locator = locator;
+        if (humanParked && tree.status !== "lingering" && tree.status !== "closed") {
+          // The reducer's own park/close effect never ran for this tree (see above), so nothing
+          // has released this admission slot or lingered it yet -- replicate `beginLinger`'s own
+          // rollback here rather than leave an admitted slot with a doomed pane and no locator.
+          tree.status = "lingering";
+          tree.lingerUntil = new Date(
+            this.deps.now() + this.deps.config.lingerHours * HOUR_MS
+          ).toISOString();
+          this.clearTreePhases(tree.root);
+          await this.releaseSlot(tree.root);
+        }
+      }
       try {
         await this.stopProcessSerialized(
           roleToken(this.deps.state.project, tree.root, "architect"),
           locator,
           this.workerStopTimeoutMs
         );
-        if (this.deps.state.trees[tree.root] === tree) delete tree.locator;
+        if (!treeReplaced) delete tree.locator;
       } catch (error) {
-        console.error(`[legion] failed to retire stale root pane for ${tree.root}:`, error);
+        const paneId = locator.tmuxPaneId ?? locator.tmuxWindowId;
+        console.error(
+          `[legion] failed to retire stale root pane ${paneId} for ${tree.root}:`,
+          error
+        );
+        // Mirrors closeTreeLocked's own stop-failure convention: never let a pane that might
+        // still be alive settle into a terminal tree state (e.g. "closed") nothing ever revisits
+        // again. An immediately-expired lingerUntil makes the next periodic sweep retry the stop
+        // through the ordinary closeTree path; the locator stays in place (set above) so that
+        // retry has something to target.
+        if (!treeReplaced) {
+          tree.status = "lingering";
+          tree.lingerUntil = new Date(this.deps.now()).toISOString();
+        }
       }
       return;
     }

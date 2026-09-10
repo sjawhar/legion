@@ -815,6 +815,122 @@ describe("ProcessManager", () => {
     expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
   });
 
+  it("proceeds to a running root when a delayed in_progress echo lands mid-launch", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Racing root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.admission.active.push(root);
+    const launchStarted = Promise.withResolvers<void>();
+    const launchGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          launchStarted.resolve();
+          await launchGate.promise;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const spawning = processes.spawnRoot(root);
+    await launchStarted.promise;
+    // This daemon's own earlier `writeStatus(..., "in_progress")` lands through Dispatch's echo
+    // while this launch is still in flight -- the launch's own write hasn't run yet.
+    state.issues[root].status = "in_progress";
+    launchGate.resolve();
+
+    await spawning;
+
+    expect(managedState.trees[root]).toMatchObject({ status: "active" });
+    expect(managedState.trees[root]?.locator).toBeDefined();
+    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
+  });
+
+  it("resurrects a dead root whose Dispatch status is in_progress instead of treating it as a human park", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+
+    await processes.resurrect(root);
+
+    expect(managedState.trees[root]).toMatchObject({ status: "active" });
+    expect(managedState.trees[root]?.locator).toBeDefined();
+    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+  });
+
+  it("marks a closed tree lingering again when its stale-pane retirement fails, instead of stranding an unreapable locator", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Racing root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.admission.active.push(root);
+    const launchStarted = Promise.withResolvers<void>();
+    const launchGate = Promise.withResolvers<void>();
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          launchStarted.resolve();
+          await launchGate.promise;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 1, stderr: "tmux: server not responding" };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const spawning = processes.spawnRoot(root);
+    await launchStarted.promise;
+    // A concurrent close finishes for this exact tree before the post-launch check runs.
+    state.trees[root].status = "closed";
+    launchGate.resolve();
+
+    await spawning;
+
+    expect(managedState.trees[root]).toMatchObject({
+      status: "lingering",
+      lingerUntil: "2026-08-24T00:00:00.000Z",
+    });
+    expect(managedState.trees[root]?.locator).toMatchObject({ tmuxPaneId: "%1" });
+  });
+
   it("records a failed Dispatch status write in pendingStatusWrites without throwing, for both spawn and close", async () => {
     const stateDir = await temporaryDir();
     let sessionExists = false;
@@ -840,12 +956,18 @@ describe("ProcessManager", () => {
     await processes.spawnRoot(root);
 
     expect(managedState.trees[root]?.status).toBe("active");
-    expect(managedState.pendingStatusWrites[root]).toEqual({ status: "in_progress" });
+    expect(managedState.pendingStatusWrites[root]).toEqual({
+      status: "in_progress",
+      statusAtRecord: "todo",
+    });
 
     await processes.closeTree(root);
 
     expect(managedState.trees[root]?.status).toBe("closed");
-    expect(managedState.pendingStatusWrites[root]).toEqual({ status: "done" });
+    expect(managedState.pendingStatusWrites[root]).toEqual({
+      status: "done",
+      statusAtRecord: "todo",
+    });
   });
   it("gives collision-prone issue paths distinct escaped cosmetic window names", async () => {
     const stateDir = await temporaryDir();
