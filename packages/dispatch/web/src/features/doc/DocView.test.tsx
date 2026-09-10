@@ -235,13 +235,38 @@ test("DocView replaces an earlier historical highlight before marking the curren
 });
 
 test("DocView clears and remaps a historical anchor when Markdown changes", () => {
-  const highlight = { from: 0, to: 6 };
+  const highlight = { from: 0, to: 5 };
   const { container, rerender } = render(<DocView highlight={highlight} markdown="First" />);
 
   expect(container.querySelector(".dispatch-anchor-history")?.textContent).toBe("First");
 
-  rerender(<DocView highlight={highlight} markdown="Second" />);
+  rerender(<DocView highlight={highlight} markdown="Other" />);
 
   expect(container.querySelectorAll(".dispatch-anchor-history")).toHaveLength(1);
-  expect(container.querySelector(".dispatch-anchor-history")?.textContent).toBe("Second");
+  expect(container.querySelector(".dispatch-anchor-history")?.textContent).toBe("Other");
+});
+
+test("DocView shows the orphan affordance when a historical range no longer maps", () => {
+  const { container } = render(
+    <DocView highlight={{ from: 12, to: 17 }} markdown="Current text" />
+  );
+
+  expect(within(container).getByRole("status").textContent).toContain("Text changed.");
+  expect(container.querySelector("mark.dispatch-anchor-history")).toBeNull();
+});
+
+test("DocView rejects a historical range that extends beyond its mapped text", () => {
+  const { container } = render(<DocView highlight={{ from: 0, to: 20 }} markdown="SQLite" />);
+
+  expect(within(container).getByRole("status").textContent).toContain("Text changed.");
+  expect(container.querySelector("mark.dispatch-anchor-history")).toBeNull();
+});
+
+test("DocView rejects a historical range that crosses Markdown blocks", () => {
+  const { container } = render(
+    <DocView highlight={{ from: 0, to: 13 }} markdown={"First\n\nSecond"} />
+  );
+
+  expect(within(container).getByRole("status").textContent).toContain("Text changed.");
+  expect(container.querySelector("mark.dispatch-anchor-history")).toBeNull();
 });

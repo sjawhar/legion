@@ -659,6 +659,7 @@ function IssueDetail({
           artifactRoute?.version === undefined ? (
             <DocEditor
               artifact={selectedArtifact}
+              highlight={highlight}
               isClosed={isClosed}
               key={selectedArtifact.id}
               user={user}

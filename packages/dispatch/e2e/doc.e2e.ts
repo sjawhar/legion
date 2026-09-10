@@ -142,3 +142,31 @@ test("the spec renders as a formatted document by default, with no click require
     await alice.close();
   }
 });
+
+test("a current-spec deep link renders its historical range in preview", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "LINK", name: "Linked documents" });
+  const issue = await createIssue({
+    project: "LINK",
+    spec: "SQLite is local",
+    title: "Deep link highlight",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec?from=0&to=5`);
+
+    await expect(page.getByRole("button", { exact: true, name: "Edit" })).toBeVisible();
+    const highlight = page.locator("mark.dispatch-anchor-history");
+    await expect(highlight).toBeVisible();
+    await expect(highlight).toHaveText("SQLit");
+    await page.screenshot({
+      path: testInfo.outputPath("spec-deep-link-highlight.png"),
+      fullPage: true,
+    });
+  } finally {
+    await alice.close();
+  }
+});

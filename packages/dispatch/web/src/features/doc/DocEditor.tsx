@@ -11,11 +11,12 @@ import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
 import { useMargin } from "../margin/Margin";
 import { anchorDecorationExtension, setActiveAnchorIds, setAnchorDecorations } from "./anchors";
-import { DocView, quoteOccurrence } from "./DocView";
+import { DocView, type DocViewHighlight, quoteOccurrence } from "./DocView";
 import { VersionDiff } from "./VersionDiff";
 
 interface DocEditorProps {
   artifact: Artifact;
+  highlight?: DocViewHighlight;
   isClosed: boolean;
   user: AuthenticatedUser;
 }
@@ -48,7 +49,7 @@ export function DocEditor(props: DocEditorProps): ReactNode {
   return <DocEditorContent key={props.artifact.id} {...props} />;
 }
 
-function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNode {
+function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProps): ReactNode {
   const host = useRef<HTMLDivElement>(null);
   const isClosedRef = useRef(isClosed);
   const providerRef = useRef<HocuspocusProvider | null>(null);
@@ -292,7 +293,9 @@ function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNo
 
   const selectVersion = (value: string) => {
     setSelectedVersion(value === "" ? null : Number(value));
-    setMode(value === "" ? "edit" : "preview");
+    if (value !== "") {
+      setMode("preview");
+    }
     setShowDiff(false);
   };
   const requestNamedVersion = () => {
@@ -392,6 +395,7 @@ function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNo
         )
       ) : mode === "preview" ? (
         <DocView
+          highlight={highlight}
           markdown={liveMarkdown}
           onSelectionChange={(next) => {
             setSelection(

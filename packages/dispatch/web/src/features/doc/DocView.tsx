@@ -336,7 +336,33 @@ function clearHistoricalHighlights(root: HTMLElement): void {
   root.normalize();
 }
 
-function highlightRange(root: HTMLElement, highlight: DocViewHighlight): void {
+function mapsEntireHighlightRange(root: HTMLElement, highlight: DocViewHighlight): boolean {
+  let mappedTo = highlight.from;
+  for (const block of root.querySelectorAll<HTMLElement>("[data-dispatch-segments]")) {
+    for (const segment of sourceSegments(block)) {
+      if (
+        segment.to <= mappedTo ||
+        segment.from >= highlight.to ||
+        segment.to - segment.from !== segment.renderedTo - segment.renderedFrom
+      ) {
+        continue;
+      }
+      if (segment.from > mappedTo) {
+        return false;
+      }
+      mappedTo = Math.min(segment.to, highlight.to);
+      if (mappedTo === highlight.to) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function highlightRange(root: HTMLElement, highlight: DocViewHighlight): boolean {
+  if (!mapsEntireHighlightRange(root, highlight)) {
+    return false;
+  }
   for (const block of root.querySelectorAll<HTMLElement>("[data-dispatch-segments]")) {
     const segments = sourceSegments(block);
     const textNodes: Array<{ length: number; text: Text }> = [];
@@ -373,6 +399,7 @@ function highlightRange(root: HTMLElement, highlight: DocViewHighlight): void {
       }
     }
   }
+  return true;
 }
 
 const components: Components = {
@@ -410,6 +437,7 @@ interface DocViewProps {
 
 export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps): ReactNode {
   const root = useRef<HTMLElement>(null);
+  const [historicalHighlightMissing, setHistoricalHighlightMissing] = useState(false);
   const [selectionUnsupported, setSelectionUnsupported] = useState(false);
   const highlightedMarkdown = useRef(markdown);
   useEffect(() => {
@@ -422,9 +450,8 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
     if (markdownChanged || highlight !== undefined) {
       clearHistoricalHighlights(article);
     }
-    if (highlight !== undefined) {
-      highlightRange(article, highlight);
-    }
+    const historicalRangeMapped = highlight === undefined || highlightRange(article, highlight);
+    setHistoricalHighlightMissing(!historicalRangeMapped);
     return () => clearHistoricalHighlights(article);
   }, [highlight, markdown]);
 
@@ -448,6 +475,11 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
       {selectionUnsupported ? (
         <p className="mb-2 text-sm text-amber-800" role="status">
           This selection cannot be anchored. Select text within one Markdown block.
+        </p>
+      ) : null}
+      {historicalHighlightMissing ? (
+        <p className="mb-2 text-sm text-amber-800" role="status">
+          Text changed. The selected range no longer exists in this document.
         </p>
       ) : null}
       <article

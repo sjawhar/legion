@@ -236,3 +236,84 @@ test("DocEditor resets version mode and diff state for a different artifact", as
     globalThis.WebSocket = originalWebSocket;
   }
 });
+
+test("DocEditor renders a deep-linked historical range in preview", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["artifact", artifact.id], artifact);
+  queryClient.setQueryData(["artifact", artifact.id, "text"], {
+    markdown: "Read the current specification",
+    version: 1,
+  });
+
+  try {
+    const rendered = render(
+      <QueryClientProvider client={queryClient}>
+        <DocEditor
+          artifact={artifact}
+          highlight={{ from: 9, to: 16 }}
+          isClosed={false}
+          user={{ login: "alice" }}
+        />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() =>
+      expect(rendered.container.querySelector("mark.dispatch-anchor-history")?.textContent).toBe(
+        "current"
+      )
+    );
+    rendered.unmount();
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
+test("DocEditor keeps preview mode when Version changes back to Current", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+  const version = {
+    authors: [{ id: "alice", kind: "user" as const }],
+    created_at: "2026-09-09T00:00:00Z",
+    named: false,
+    number: 1,
+    summary: null,
+  };
+  const artifactWithVersion = { ...artifact, versions: [version] };
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["artifact", artifact.id], artifactWithVersion);
+  queryClient.setQueryData(["artifact", artifact.id, "text"], {
+    markdown: "Current document",
+    version: 2,
+  });
+  queryClient.setQueryData(["artifact", artifact.id, "version", 1], {
+    markdown: "Historical document",
+    version: 1,
+  });
+
+  try {
+    const rendered = render(
+      <QueryClientProvider client={queryClient}>
+        <DocEditor artifact={artifactWithVersion} isClosed={false} user={{ login: "alice" }} />
+      </QueryClientProvider>
+    );
+    const documentEditor = within(rendered.container);
+
+    fireEvent.change(documentEditor.getByLabelText("Version"), { target: { value: "1" } });
+    await documentEditor.findByTestId("version-view");
+    fireEvent.change(documentEditor.getByLabelText("Version"), { target: { value: "" } });
+
+    expect(documentEditor.getByRole("button", { name: "Edit" })).not.toBeNull();
+    await waitFor(() =>
+      expect(documentEditor.getByRole("article").textContent).toContain("Current document")
+    );
+    rendered.unmount();
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
