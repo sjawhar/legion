@@ -199,6 +199,7 @@ function config(stateDir: string): DaemonConfig {
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
+    ompLaunchPrefix: [],
     dispatchProject: "LEGSMOKE",
     repos: ["acme/widgets"],
     repo: "acme/widgets",
@@ -908,14 +909,77 @@ describe("startDaemon", () => {
         "sh",
         "-c",
         expect.stringContaining(
-          '/tools/omp models --no-extensions --extension "$1" --json >/dev/null'
+          'exec /tools/omp models --no-extensions --extension "$1" --json >/dev/null'
         ),
         "sh",
       ]);
+      expect(probeCommand?.[2]).toStartWith("exec ");
       expect(probeCommand?.at(-1)).toContain("legion-omp-probe-");
       expect(loadedState).toBeFalse();
       expect(natsCreated).toBeFalse();
     } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("prepends the configured omp_launch_prefix to both startup capability probes", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig: DaemonConfig = {
+      ...config(stateDir),
+      ompLaunchPrefix: ["secrets", "ANTHROPIC_API_KEY", "--"],
+    };
+    const nats = new FakeNats();
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const probeCommands: string[][] = [];
+
+    const daemon = await startDaemon(daemonConfig, {
+      deps: {
+        loadState: async () => state,
+        saveState: async () => {},
+        createNatsTransport: async () => nats,
+        runner: async (command) => {
+          if (command[0] === "sh") probeCommands.push(command);
+          return {
+            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+        resolveDaemonEnvironment: async () => daemonEnvironment,
+        statPrompt: async () => {},
+        readPluginManifest: async () => validLegionPluginManifest,
+        envoyPublish: async () => {},
+        dispatchClient: fakeDispatchClient(),
+        tokenManager: {
+          getToken: async () => ({
+            token: "test-token",
+            expiresAt: "2026-08-25T00:00:00.000Z",
+            gitIdentity: {
+              name: "legion-implement[bot]",
+              email: "1+legion-implement[bot]@users.noreply.github.com",
+            },
+          }),
+        },
+        setTimeout: () => 1 as never,
+        clearTimeout: () => {},
+        setInterval: () => 1 as never,
+        clearInterval: () => {},
+        onSignal: () => {},
+        exit: () => {},
+        now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+      },
+    });
+
+    try {
+      expect(probeCommands).toHaveLength(2);
+      expect(probeCommands[0]?.[2]).toStartWith(
+        'exec secrets ANTHROPIC_API_KEY -- /tools/omp models --no-extensions --extension "$1"'
+      );
+      expect(probeCommands[1]?.[2]).toStartWith(
+        'exec secrets ANTHROPIC_API_KEY -- /tools/omp models --extension "$1"'
+      );
+    } finally {
+      await daemon.stop();
+      await nats.close();
       await rm(stateDir, { recursive: true, force: true });
     }
   });
@@ -990,6 +1054,79 @@ describe("startDaemon", () => {
       );
       expect(loadedState).toBeFalse();
       expect(natsCreated).toBeFalse();
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("names the real cause when the configured launch prefix itself fails the plugin-load probe, instead of blaming a disabled/unregistered plugin", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig: DaemonConfig = {
+      ...config(stateDir),
+      ompLaunchPrefix: ["secrets", "ANTHROPIC_API_KEY", "--"],
+    };
+    let shProbeCalls = 0;
+
+    try {
+      let caughtError: unknown;
+      try {
+        await startDaemon(daemonConfig, {
+          deps: {
+            runner: async (command) => {
+              if (command[0] !== "sh") {
+                throw new Error(`Unexpected command: ${command.join(" ")}`);
+              }
+              shProbeCalls += 1;
+              if (shProbeCalls === 1) {
+                // First sh-shaped probe: verifyOmpAgentsCapability.
+                return {
+                  stdout: "LEGION_OMP_AGENTS=available",
+                  stderr: "",
+                  exitCode: 0,
+                };
+              }
+              // Second sh-shaped probe: verifyLegionPluginLoaded. The launch prefix itself
+              // fails here (e.g. `secrets` denying a key) — never reaches omp, so the marker
+              // never appears and the exit is nonzero.
+              return {
+                stdout: "",
+                stderr: "secrets: ANTHROPIC_API_KEY: access denied\n",
+                exitCode: 1,
+              };
+            },
+            dispatchClient: fakeDispatchClient(),
+            resolveDaemonEnvironment: async () => daemonEnvironment,
+            readPluginManifest: async () => validLegionPluginManifest,
+            tokenManager: {
+              getToken: async () => ({
+                token: "test-token",
+                expiresAt: "2099-01-01T00:00:00.000Z",
+                gitIdentity: {
+                  name: "legion-implementer[bot]",
+                  email: "1+legion-implementer[bot]@users.noreply.github.com",
+                },
+              }),
+            },
+            loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+            createNatsTransport: async () => {
+              throw new Error("NATS must not start after a failed plugin load check");
+            },
+          },
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(Error);
+      const message = (caughtError as Error).message;
+      // Names the launch failure directly — exit code, the launch command (prefix + omp path),
+      // and the probe's own stderr — never the plugin-registration diagnosis a genuinely
+      // disabled/unregistered plugin gets.
+      expect(message).toContain("OMP launch probe failed (exit 1)");
+      expect(message).toContain("secrets ANTHROPIC_API_KEY -- /tools/omp");
+      expect(message).toContain("secrets: ANTHROPIC_API_KEY: access denied");
+      expect(message).not.toContain("disabled or unregistered");
+      expect(message).not.toContain("omp plugin list");
     } finally {
       await rm(stateDir, { recursive: true, force: true });
     }

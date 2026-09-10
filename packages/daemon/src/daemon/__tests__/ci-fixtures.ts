@@ -143,6 +143,7 @@ export function config(): DaemonConfig {
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
+    ompLaunchPrefix: [],
     dispatchProject: "LEGSMOKE",
     repos: ["acme/widgets"],
     repo: "acme/widgets",

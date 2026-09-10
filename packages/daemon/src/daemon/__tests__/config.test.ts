@@ -423,6 +423,97 @@ describe("daemon config", () => {
     expect(withoutEither.workerBootRegistrationDeadlineIntervals).toBe(3);
   });
 
+  it("resolves ompLaunchPrefix: YAML beats env, env beats the empty default", () => {
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "envoy_url: http://listener:9020",
+        "dispatch_project: ACME",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "repos:",
+        "  - acme/widgets",
+        "app_logins:",
+        "  - legion-implement[bot]",
+        "omp_launch_prefix:",
+        "  - secrets",
+        "  - ANTHROPIC_API_KEY",
+        "  - --",
+        "gates:",
+        "  design: off",
+        "  merge: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+
+    const fromYaml = resolveDaemonConfig({ configFile: file });
+    expect(fromYaml.config.ompLaunchPrefix).toEqual(["secrets", "ANTHROPIC_API_KEY", "--"]);
+
+    // Config-file value wins over env, matching every other lifecycle setting's precedence
+    // (`resolveValue`: cli > config > env > default).
+    const fileBeatsEnv = resolveDaemonConfig({
+      configFile: file,
+      env: { LEGION_OMP_LAUNCH_PREFIX: "other-wrapper --" },
+    });
+    expect(fileBeatsEnv.config.ompLaunchPrefix).toEqual(["secrets", "ANTHROPIC_API_KEY", "--"]);
+
+    const { config: fromEnvOnly } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_OMP_LAUNCH_PREFIX: 'secrets ANTHROPIC_API_KEY GEMINI_API_KEY "OPENAI_API_KEY" --',
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(fromEnvOnly.ompLaunchPrefix).toEqual([
+      "secrets",
+      "ANTHROPIC_API_KEY",
+      "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
+      "--",
+    ]);
+
+    const { config: withoutEither } = resolveDaemonConfig({
+      env: requiredEnv,
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(withoutEither.ompLaunchPrefix).toEqual([]);
+  });
+
+  it("rejects an omp_launch_prefix entry that is not a non-empty string, from either source", () => {
+    expect(() =>
+      loadConfigFromFile(
+        ["project: acme/7", "omp_launch_prefix:", "  - secrets", "  - ''"].join("\n"),
+        "/tmp/legion-config"
+      )
+    ).toThrow("omp_launch_prefix must be an array of non-empty strings");
+
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_OMP_LAUNCH_PREFIX: "secrets ''" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(
+      "LEGION_OMP_LAUNCH_PREFIX must not contain an empty argument (e.g. a bare '' or \"\")"
+    );
+  });
+
+  it("rejects a trailing unescaped backslash in LEGION_OMP_LAUNCH_PREFIX", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_OMP_LAUNCH_PREFIX: "secrets\\" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow("LEGION_OMP_LAUNCH_PREFIX has a trailing unescaped backslash");
+  });
+
   it("rejects the retired dispatch_mcp_url key from the YAML loader shape with a helpful message", () => {
     expect(() =>
       loadConfigFromFile(

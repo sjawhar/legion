@@ -160,6 +160,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
+    ompLaunchPrefix: [],
     dispatchProject: "LEGSMOKE",
     repo: "sjawhar/legion",
     repos: ["sjawhar/legion"],
@@ -1214,6 +1215,61 @@ describe("ProcessManager", () => {
       `cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
     ]);
     expect(windows.map((command) => command.includes(`PATH=${panePath}`))).toEqual([true, true]);
+  });
+
+  it("prepends the configured omp_launch_prefix before the OMP invocation for root and controller windows", async () => {
+    const stateDir = await temporaryDir();
+    const ompInvocation = "/opt/oh-my-pi/18.0.3/omp";
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir, { ompLaunchPrefix: ["secrets", "ANTHROPIC_API_KEY", "--"] }),
+      ompInvocation,
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    await processes.ensureController();
+
+    const windows = commands.filter((command) => command[1] === "new-window");
+    for (const command of windows) {
+      expect(command.at(-1)).toContain(
+        `-- secrets ANTHROPIC_API_KEY -- ${ompInvocation} --mode rpc`
+      );
+    }
+    expect(windows).toHaveLength(2);
+  });
+
+  it("prepends the configured omp_launch_prefix before the OMP invocation for a phase worker's window", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const stateDir = await temporaryDir();
+    const ompInvocation = "/opt/oh-my-pi/18.0.3/omp";
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir, { ompLaunchPrefix: ["secrets", "ANTHROPIC_API_KEY", "--"] }),
+      ompInvocation,
+    });
+
+    await processes.spawnWorker(root, child, "implementer", "implement it");
+
+    const windows = commands.filter(
+      (command) => command[1] === "new-window" || command[1] === "split-window"
+    );
+    expect(windows.length).toBeGreaterThan(0);
+    for (const command of windows) {
+      expect(command.at(-1)).toContain(
+        `-- secrets ANTHROPIC_API_KEY -- ${ompInvocation} --mode rpc`
+      );
+    }
   });
 
   it("rolls back a failed tmux launch instead of retaining an active tree or admission slot", async () => {

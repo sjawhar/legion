@@ -66,6 +66,15 @@ mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp
 
 Launch the daemon normally with `bun run ...`, not inside that scoped `mise x` command. At startup it obtains the complete `mise env --json` environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and uses `mise where` to turn the default invocation into the pinned OMP binary path. All daemon subprocesses use those absolute paths; root and controller panes receive the complete `PATH` and execute that same OMP path.
 
+Set `omp_launch_prefix` in `legion.yaml` (an array) or `LEGION_OMP_LAUNCH_PREFIX` (a single
+shell-words string, e.g. `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --`) to an argv
+prefix the daemon prepends to every OMP invocation it builds — root, worker, and controller panes,
+and the two startup capability probes below. This is how a daemon that itself carries no provider
+credentials (they live in secretsd, not the daemon's own environment) gets them into the pane
+process: the prefix's own exec — `secrets KEY... -- <omp invocation>` — resolves them *inside* the
+pane, never on the daemon's environment or a pane's tmux `-e` argv. Empty by default (nothing is
+prepended). See `withOmpLaunchPrefix` in `processes.ts`.
+
 Every root, worker, and controller pane also receives `DISPATCH_URL` and `DISPATCH_TOKEN` when
 `dispatch_url` is configured: `DISPATCH_URL` is the configured service base URL (no `/mcp` suffix),
 and `DISPATCH_TOKEN` is read from the `DISPATCH_TOKEN` environment variable (required whenever
@@ -75,6 +84,6 @@ unset; those panes fall back to their own `envoy.json` dispatch config. The daem
 retired `DISPATCH_MCP_URL` alias and strips it from every child process it spawns, pane or
 otherwise.
 
-Before loading state, opening core NATS, or serving the API, the daemon probes the exact resolved OMP executable with an isolated extension and refuses startup unless it confirms `pi.agents`. It also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
+Before loading state, opening core NATS, or serving the API, the daemon probes the exact resolved OMP executable with an isolated extension and refuses startup unless it confirms `pi.agents`. Both this probe and the plugin-load probe below run through the same configured `omp_launch_prefix` as a spawned pane — one launch path, never a probe-only shortcut that could pass with credentials a real pane would lack. It also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 
 Before loading state, opening core NATS, or serving the API, the daemon also reads the installed `@sjawhar/pi-legion-envoy` plugin's manifest (`~/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json`, or the active `OMP_PROFILE`/`PI_PROFILE`'s profile root, or an existing `$XDG_DATA_HOME/omp` root — the same precedence OMP's own `DirResolver` uses) and refuses startup unless `omp.extensions` lists `dist/legion.js`. The daemon never passes `--extension` to spawned sessions; they load `envoy.ts`/`legion.ts` solely from this installed plugin, so a version that doesn't ship `dist/legion.js` would silently spawn sessions with no Legion tooling. The required version is `legion.minPluginVersion` in `package.json`.

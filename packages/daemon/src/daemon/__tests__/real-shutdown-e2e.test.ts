@@ -156,6 +156,7 @@ function config(
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "bun",
+    ompLaunchPrefix: [],
     dispatchProject: "LEGSMOKE",
     repo: "sjawhar/legion",
     repos: ["sjawhar/legion"],
