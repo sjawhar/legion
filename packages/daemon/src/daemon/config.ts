@@ -303,7 +303,10 @@ function parseShellWords(value: string | undefined, field: string): string[] | u
       hasCurrent = true;
       continue;
     }
-    if (char === "\\" && index + 1 < value.length) {
+    if (char === "\\") {
+      if (index + 1 >= value.length) {
+        throw new Error(`${field} has a trailing unescaped backslash`);
+      }
       index += 1;
       current += value[index] as string;
       hasCurrent = true;

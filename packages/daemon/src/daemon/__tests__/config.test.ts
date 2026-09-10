@@ -503,6 +503,17 @@ describe("daemon config", () => {
     );
   });
 
+  it("rejects a trailing unescaped backslash in LEGION_OMP_LAUNCH_PREFIX", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_OMP_LAUNCH_PREFIX: "secrets\\" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow("LEGION_OMP_LAUNCH_PREFIX has a trailing unescaped backslash");
+  });
+
   it("rejects the retired dispatch_mcp_url key from the YAML loader shape with a helpful message", () => {
     expect(() =>
       loadConfigFromFile(
