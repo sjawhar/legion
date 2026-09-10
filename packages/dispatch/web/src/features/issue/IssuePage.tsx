@@ -13,7 +13,6 @@ import { ApiError, api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import type {
   Artifact,
-  AuthenticatedUser,
   Event,
   ExternalLink,
   Issue,
@@ -500,7 +499,7 @@ function IssueHeader({
     </header>
   );
 }
-export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
+export function IssuePage(): ReactNode {
   const { pathname, search } = useLocation();
   const route = parseIssuePath(pathname, search);
   if (route === undefined) {
@@ -509,27 +508,16 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
   // key={route.key}: switching to a different issue remounts IssueDetail
   // fresh (discarding any unsaved local drafts); switching tabs within the
   // same issue keeps route.key unchanged, so it only re-renders.
-  return <IssueDetail key={route.key} route={route} user={user} />;
+  return <IssueDetail key={route.key} route={route} />;
 }
 
-function IssueDetail({
-  route,
-  user,
-}: {
-  route: DispatchRoute;
-  user: AuthenticatedUser;
-}): ReactNode {
+function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
   const { search } = useLocation();
   const artifactRoute = route.kind === "artifact" ? route : undefined;
   const navigate = useNavigate();
   const artifactRouteSlug = artifactRoute?.slug;
   const query = new URLSearchParams(search);
-  const from = Number(query.get("from"));
-  const to = Number(query.get("to"));
-  const highlight =
-    Number.isInteger(from) && Number.isInteger(to) && from >= 0 && to > from
-      ? { from, to }
-      : undefined;
+  const commentId = query.get("comment") ?? undefined;
   const issue = useQuery({
     queryKey: ["issue", route.key],
     queryFn: () => api.getIssue(route.key),
@@ -656,11 +644,10 @@ function IssueDetail({
         {activatedTabs.spec && !(artifactRoute !== undefined && !isPrimaryArtifactRoute) ? (
           <ArtifactDocument
             artifact={primaryArtifact}
-            highlight={highlight}
+            commentId={commentId}
             isClosed={isClosed}
             issueKey={issueKey}
             onVersionChange={(version) => selectDocumentVersion(primaryArtifact, version)}
-            user={user}
             version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
           />
         ) : null}
@@ -702,11 +689,10 @@ function IssueDetail({
         {selectedArtifact?.kind === "doc" ? (
           <ArtifactDocument
             artifact={selectedArtifact}
-            highlight={highlight}
+            commentId={commentId}
             isClosed={isClosed}
             issueKey={issueKey}
             onVersionChange={(version) => selectDocumentVersion(selectedArtifact, version)}
-            user={user}
             version={artifactRoute?.version}
           />
         ) : null}

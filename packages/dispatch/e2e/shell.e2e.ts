@@ -93,12 +93,6 @@ test("the spec preview renders headings and ordered lists with real typography",
   const page = await context.newPage();
   await page.goto(`/issues/${issue.key}`);
   await page.getByRole("tab", { name: "Spec" }).click();
-  // The document may now default to the rendered preview for readers; only toggle if
-  // the editor is still showing source (a visible "Preview" button).
-  const previewToggle = page.getByRole("button", { name: "Preview" });
-  if ((await previewToggle.count()) > 0) {
-    await previewToggle.click();
-  }
 
   await expect(page.getByRole("heading", { level: 1, name: "Title" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 2, name: "Section" })).toBeVisible();

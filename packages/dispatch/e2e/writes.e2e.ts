@@ -1,6 +1,7 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, listComments } from "./api";
+import { selectPreviewText } from "./preview";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -8,17 +9,6 @@ const session = {
   actor: { kind: "session" as const, id: "e2e-writes", origin: { tmux: "dispatch:1.5" } },
   as: "agent" as const,
 };
-
-async function selectEditorRange(editor: Locator, from: number, length: number): Promise<void> {
-  await editor.click();
-  await editor.press("Control+Home");
-  for (let index = 0; index < from; index += 1) {
-    await editor.press("ArrowRight");
-  }
-  for (let index = 0; index < length; index += 1) {
-    await editor.press("Shift+ArrowRight");
-  }
-}
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -110,9 +100,7 @@ test("double-clicking Submit posts exactly one comment", async ({ browser }) => 
   const page = await context.newPage();
   await page.goto(`/issues/${issue.key}`);
   await page.getByRole("tab", { name: "Spec" }).click();
-  await page.getByRole("button", { exact: true, name: "Edit" }).click();
-  const editor = page.getByRole("textbox", { name: "Document editor" });
-  await selectEditorRange(editor, 10, 5);
+  await selectPreviewText(page, "brown");
   await page.getByRole("button", { exact: true, name: "Comment" }).click();
   const composer = page.getByRole("form", { name: "Comment composer" });
   await composer.getByLabel("Comment").fill("dup check");
@@ -140,7 +128,7 @@ test("Resolve shows a pending state before settling", async ({ browser }, testIn
   });
   const comment = await createComment(
     issue.key,
-    { anchor: { artifact: "spec", from: 10, to: 15 }, body: "note" },
+    { anchor: { artifact: "spec", quote: "brown" }, body: "note" },
     session
   );
 

@@ -1,9 +1,10 @@
-import { expect, spyOn, test } from "bun:test";
-import { EditorView } from "@codemirror/view";
-import { HocuspocusProvider } from "@hocuspocus/provider";
+import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { useEffect } from "react";
+
 import type { Artifact } from "../../api/types";
+import { MarginProvider, useMargin } from "../margin/Margin";
 import { DocEditor } from "./DocEditor";
 
 const artifact: Artifact = {
@@ -18,102 +19,111 @@ const artifact: Artifact = {
   versions: [],
 };
 
-class WebSocketStub {
-  binaryType = "arraybuffer";
-  identifier = 0;
-  readyState = 0;
+let receivedSelection:
+  | {
+      artifact?: string;
+      artifactId?: string;
+      canSuggest?: boolean;
+      occurrence?: number;
+      quote?: string;
+    }
+  | undefined;
 
-  addEventListener(..._args: unknown[]): void {}
-
-  close(): void {
-    this.readyState = 3;
-  }
-
-  removeEventListener(..._args: unknown[]): void {}
-
-  send(..._args: unknown[]): void {}
+function SelectionObserver() {
+  const { selection } = useMargin();
+  useEffect(() => {
+    receivedSelection = selection;
+  }, [selection]);
+  return null;
 }
 
-test("DocEditor destroys its room provider when it unmounts", () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+function createQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
-  const destroyProvider = spyOn(HocuspocusProvider.prototype, "destroy");
-  const destroyEditor = spyOn(EditorView.prototype, "destroy");
+}
+
+function renderDocEditor({
+  artifact: document = artifact,
+  highlight,
+  isClosed = false,
+  queryClient = createQueryClient(),
+}: {
+  artifact?: Artifact;
+  highlight?: { from: number; to: number };
+  isClosed?: boolean;
+  queryClient?: QueryClient;
+} = {}) {
+  queryClient.setQueryData(["artifact", document.id], document);
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MarginProvider>
+        <DocEditor artifact={document} highlight={highlight} isClosed={isClosed} />
+        <SelectionObserver />
+      </MarginProvider>
+    </QueryClientProvider>
+  );
+}
+
+test("DocEditor renders the live text and reports a quote selection", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["artifact", artifact.id, "text"], {
+    markdown: "The quick brown fox",
+    version: 1,
+  });
+  receivedSelection = undefined;
+  const view = renderDocEditor({ queryClient });
 
   try {
-    const { unmount } = render(
-      <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifact} isClosed={false} user={{ kind: "user", login: "alice" }} />
-      </QueryClientProvider>
+    const article = await within(view.container).findByRole("article");
+    expect(article.textContent).toContain("The quick brown fox");
+    const text = article.querySelector("p")?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) {
+      throw new Error("DocEditor test fixture needs a text paragraph.");
+    }
+    const range = document.createRange();
+    range.setStart(text, 10);
+    range.setEnd(text, 15);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent.mouseUp(article);
+
+    await waitFor(() =>
+      expect(receivedSelection).toMatchObject({
+        artifact: artifact.id,
+        artifactId: artifact.id,
+        canSuggest: true,
+        occurrence: 0,
+        quote: "brown",
+      })
     );
-    unmount();
-    expect(destroyProvider).toHaveBeenCalledTimes(1);
-    expect(destroyEditor).toHaveBeenCalledTimes(1);
   } finally {
-    destroyProvider.mockRestore();
-    destroyEditor.mockRestore();
-    globalThis.WebSocket = originalWebSocket;
+    view.unmount();
   }
 });
 
-test("DocEditor makes a closed document visibly read-only", () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+test("DocEditor shows the closed-issue notice with the rendered document", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["artifact", artifact.id, "text"], {
+    markdown: "Closed document",
+    version: 1,
   });
+  const view = renderDocEditor({ isClosed: true, queryClient });
 
   try {
-    const { container, unmount } = render(
-      <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifact} isClosed={true} user={{ kind: "user", login: "alice" }} />
-      </QueryClientProvider>
+    expect(
+      within(view.container).getByText("This issue is closed. Its document is read-only.")
+    ).not.toBeNull();
+    expect((await within(view.container).findByRole("article")).textContent).toContain(
+      "Closed document"
     );
-    expect(screen.getByText("This issue is closed. Its document is read-only.")).not.toBeNull();
-    expect(container.querySelector(".cm-content")?.getAttribute("contenteditable")).toBe("false");
-    unmount();
   } finally {
-    globalThis.WebSocket = originalWebSocket;
+    view.unmount();
   }
 });
 
-test("DocEditor preserves the room when the issue closes", () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  const providerConfiguration = spyOn(HocuspocusProvider.prototype, "setConfiguration");
-  const destroy = spyOn(HocuspocusProvider.prototype, "destroy");
-
-  try {
-    const { rerender, unmount } = render(
-      <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifact} isClosed={false} user={{ kind: "user", login: "alice" }} />
-      </QueryClientProvider>
-    );
-    rerender(
-      <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifact} isClosed={true} user={{ kind: "user", login: "alice" }} />
-      </QueryClientProvider>
-    );
-
-    expect(providerConfiguration).toHaveBeenCalledTimes(1);
-    expect(destroy).not.toHaveBeenCalled();
-    unmount();
-  } finally {
-    providerConfiguration.mockRestore();
-    destroy.mockRestore();
-    globalThis.WebSocket = originalWebSocket;
-  }
-});
-
-test("DocEditor uses an empty synchronized document in preview and version diffs", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+test("DocEditor compares a selected version with the current live text", async () => {
   const version = {
     authors: [{ id: "alice", kind: "user" as const }],
     created_at: "2026-09-09T00:00:00Z",
@@ -122,74 +132,36 @@ test("DocEditor uses an empty synchronized document in preview and version diffs
     summary: null,
   };
   const artifactWithVersion = { ...artifact, versions: [version] };
-  let provider: HocuspocusProvider | undefined;
-  const originalSetConfiguration = HocuspocusProvider.prototype.setConfiguration;
-  const captureProvider = spyOn(
-    HocuspocusProvider.prototype,
-    "setConfiguration"
-  ).mockImplementation(function (this: HocuspocusProvider, configuration) {
-    provider = this;
-    return originalSetConfiguration.call(this, configuration);
-  });
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
-  });
-  queryClient.setQueryData(["artifact", artifact.id], artifactWithVersion);
+  const queryClient = createQueryClient();
   queryClient.setQueryData(["artifact", artifact.id, "text"], {
-    markdown: "Use SQLite",
-    version: 1,
+    markdown: "Use Postgres",
+    version: 2,
   });
   queryClient.setQueryData(["artifact", artifact.id, "version", 1], {
     markdown: "Use SQLite",
     version: 1,
   });
-  let unmount: (() => void) | undefined;
+  const view = renderDocEditor({ artifact: artifactWithVersion, queryClient });
 
   try {
-    const rendered = render(
-      <QueryClientProvider client={queryClient}>
-        <DocEditor
-          artifact={artifactWithVersion}
-          isClosed={false}
-          user={{ kind: "user", login: "alice" }}
-        />
-      </QueryClientProvider>
+    const documentEditor = within(view.container);
+    await waitFor(() =>
+      expect(documentEditor.getByRole("article").textContent).toContain("Use Postgres")
     );
-    unmount = rendered.unmount;
-    const documentEditor = within(rendered.container);
-    await waitFor(() => expect(provider).toBeDefined());
-    const documentProvider = provider;
-    if (documentProvider === undefined) {
-      throw new Error("DocEditor did not create a document provider.");
-    }
-    const ytext = documentProvider.document.getText("content");
-    act(() => {
-      ytext.insert(0, "Use SQLite");
-      documentProvider.synced = true;
-      ytext.delete(0, ytext.length);
-    });
-
-    expect(documentEditor.getByRole("button", { name: "Edit" })).not.toBeNull();
-    await waitFor(() => expect(documentEditor.queryByText("Use SQLite")).toBeNull());
-
     fireEvent.change(documentEditor.getByLabelText("Version"), { target: { value: "1" } });
     await documentEditor.findByTestId("version-view");
     fireEvent.click(documentEditor.getByRole("button", { name: "Diff vs current" }));
     await waitFor(() => {
       const diff = documentEditor.getByTestId("version-diff");
-      expect(diff.querySelector("del")?.textContent).toContain("Use SQLite");
-      expect(diff.querySelector("ins")).toBeNull();
+      expect(diff.querySelector("del")?.textContent).toContain("SQLite");
+      expect(diff.querySelector("ins")?.textContent).toContain("Postgres");
     });
   } finally {
-    unmount?.();
-    captureProvider.mockRestore();
-    globalThis.WebSocket = originalWebSocket;
+    view.unmount();
   }
 });
 
 test("DocEditor resets version mode and diff state for a different artifact", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
   const version = {
     authors: [{ id: "alice", kind: "user" as const }],
     created_at: "2026-09-09T00:00:00Z",
@@ -205,25 +177,22 @@ test("DocEditor resets version mode and diff state for a different artifact", as
     slug: "second",
     versions: [],
   };
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["artifact", firstArtifact.id, "text"], {
+    markdown: "First version",
+    version: 1,
   });
-  queryClient.setQueryData(["artifact", firstArtifact.id], firstArtifact);
   queryClient.setQueryData(["artifact", firstArtifact.id, "version", 1], {
     markdown: "First version",
     version: 1,
   });
+  queryClient.setQueryData(["artifact", secondArtifact.id, "text"], {
+    markdown: "Second version",
+    version: 1,
+  });
+  const rendered = renderDocEditor({ artifact: firstArtifact, queryClient });
 
   try {
-    const rendered = render(
-      <QueryClientProvider client={queryClient}>
-        <DocEditor
-          artifact={firstArtifact}
-          isClosed={false}
-          user={{ kind: "user", login: "alice" }}
-        />
-      </QueryClientProvider>
-    );
     const editor = within(rendered.container);
     fireEvent.change(editor.getByLabelText("Version"), { target: { value: "1" } });
     await editor.findByTestId("version-view");
@@ -231,62 +200,47 @@ test("DocEditor resets version mode and diff state for a different artifact", as
 
     rendered.rerender(
       <QueryClientProvider client={queryClient}>
-        <DocEditor
-          artifact={secondArtifact}
-          isClosed={false}
-          user={{ kind: "user", login: "alice" }}
-        />
+        <MarginProvider>
+          <DocEditor artifact={secondArtifact} isClosed={false} />
+          <SelectionObserver />
+        </MarginProvider>
       </QueryClientProvider>
     );
 
     expect((editor.getByLabelText("Version") as HTMLSelectElement).value).toBe("");
-    expect(editor.getByRole("button", { name: "Edit" })).not.toBeNull();
     expect(editor.queryByTestId("version-view")).toBeNull();
     expect(editor.queryByTestId("version-diff")).toBeNull();
-    rendered.unmount();
+    await waitFor(() =>
+      expect(editor.getByRole("article").textContent).toContain("Second version")
+    );
   } finally {
-    globalThis.WebSocket = originalWebSocket;
+    rendered.unmount();
   }
 });
 
-test("DocEditor renders a deep-linked historical range in preview", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
-  });
-  queryClient.setQueryData(["artifact", artifact.id], artifact);
+test("DocEditor renders a deep-linked historical range", async () => {
+  const queryClient = createQueryClient();
   queryClient.setQueryData(["artifact", artifact.id, "text"], {
     markdown: "Read the current specification",
     version: 1,
   });
+  const rendered = renderDocEditor({
+    highlight: { from: 9, to: 16 },
+    queryClient,
+  });
 
   try {
-    const rendered = render(
-      <QueryClientProvider client={queryClient}>
-        <DocEditor
-          artifact={artifact}
-          highlight={{ from: 9, to: 16 }}
-          isClosed={false}
-          user={{ kind: "user", login: "alice" }}
-        />
-      </QueryClientProvider>
-    );
-
     await waitFor(() =>
       expect(rendered.container.querySelector("mark.dispatch-anchor-history")?.textContent).toBe(
         "current"
       )
     );
-    rendered.unmount();
   } finally {
-    globalThis.WebSocket = originalWebSocket;
+    rendered.unmount();
   }
 });
 
-test("DocEditor keeps preview mode when Version changes back to Current", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+test("DocEditor shows the current document when Version changes back to Current", async () => {
   const version = {
     authors: [{ id: "alice", kind: "user" as const }],
     created_at: "2026-09-09T00:00:00Z",
@@ -295,10 +249,7 @@ test("DocEditor keeps preview mode when Version changes back to Current", async 
     summary: null,
   };
   const artifactWithVersion = { ...artifact, versions: [version] };
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
-  });
-  queryClient.setQueryData(["artifact", artifact.id], artifactWithVersion);
+  const queryClient = createQueryClient();
   queryClient.setQueryData(["artifact", artifact.id, "text"], {
     markdown: "Current document",
     version: 2,
@@ -307,29 +258,17 @@ test("DocEditor keeps preview mode when Version changes back to Current", async 
     markdown: "Historical document",
     version: 1,
   });
+  const rendered = renderDocEditor({ artifact: artifactWithVersion, queryClient });
 
   try {
-    const rendered = render(
-      <QueryClientProvider client={queryClient}>
-        <DocEditor
-          artifact={artifactWithVersion}
-          isClosed={false}
-          user={{ kind: "user", login: "alice" }}
-        />
-      </QueryClientProvider>
-    );
     const documentEditor = within(rendered.container);
-
     fireEvent.change(documentEditor.getByLabelText("Version"), { target: { value: "1" } });
     await documentEditor.findByTestId("version-view");
     fireEvent.change(documentEditor.getByLabelText("Version"), { target: { value: "" } });
-
-    expect(documentEditor.getByRole("button", { name: "Edit" })).not.toBeNull();
     await waitFor(() =>
       expect(documentEditor.getByRole("article").textContent).toContain("Current document")
     );
-    rendered.unmount();
   } finally {
-    globalThis.WebSocket = originalWebSocket;
+    rendered.unmount();
   }
 });

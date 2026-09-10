@@ -379,7 +379,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <Suspense fallback={<IssuePageFallback />}>
             <Routes>
               <Route element={<InboxPage />} path="/" />
-              <Route element={<IssuePage user={user} />} path="/issues/:key/*" />
+              <Route element={<IssuePage />} path="/issues/:key/*" />
               <Route element={<SettingsPage />} path="/settings" />
               <Route element={<NotFoundPage />} path="*" />
             </Routes>

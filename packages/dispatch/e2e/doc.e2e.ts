@@ -1,14 +1,13 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  createComment,
   createIssue,
-  createMessage,
   createProject,
   editArtifact,
   getArtifact,
   getArtifactVersion,
 } from "./api";
-import { enterEditMode } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -22,7 +21,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("document edits synchronize, version, and compare across users", async ({
+test("document versions and comparison stay current across users", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -39,78 +38,50 @@ test("document edits synchronize, version, and compare across users", async ({
     const alicePage = await alice.newPage();
     await alicePage.goto(`/issues/${issue.key}`);
     await alicePage.getByRole("tab", { name: "Spec" }).click();
-    await enterEditMode(alicePage);
-    const aliceEditor = alicePage.getByRole("textbox", { name: "Document editor" });
-    await expect(aliceEditor).toContainText("Use SQLite");
-    await aliceEditor.click();
-    await aliceEditor.press("Control+End");
-    await aliceEditor.press("Enter");
-    await aliceEditor.type("hello");
-
-    await expect
-      .poll(async () => {
-        const version = (await getArtifact(artifactId)).versions.find(({ number }) => number === 2);
-        return version;
-      })
-      .toMatchObject({ authors: [{ id: "alice", kind: "user" }], named: false, number: 2 });
-    await expect
-      .poll(() => getArtifactVersion(artifactId, 2).then(({ markdown }) => markdown))
-      .toContain("hello");
+    const aliceDocument = alicePage.getByRole("article");
+    await expect(aliceDocument).toContainText("Use SQLite");
 
     const bobPage = await bob.newPage();
     await bobPage.goto(`/issues/${issue.key}`);
     await bobPage.getByRole("tab", { name: "Spec" }).click();
-    await enterEditMode(bobPage);
-    const bobEditor = bobPage.getByRole("textbox", { name: "Document editor" });
-    await expect(bobEditor).toContainText("hello");
-    await bobEditor.click();
-    const bobCaret = alicePage.locator(".cm-ySelectionCaret");
-    await expect(bobCaret).toContainText("bob");
-    await bobCaret.hover();
-    await expect(bobCaret.locator(".cm-ySelectionInfo")).toHaveCSS("opacity", "1");
-    await alicePage.screenshot({
-      path: testInfo.outputPath("live-document-edit.png"),
-      fullPage: true,
-    });
+    const bobDocument = bobPage.getByRole("article");
+    await expect(bobDocument).toContainText("Use SQLite");
 
     await editArtifact(
       artifactId,
       { ops: [{ find: "SQLite", op: "replace", with: "Postgres" }] },
       session
     );
-    await expect(aliceEditor).toContainText("Postgres");
-    await expect(bobEditor).toContainText("Postgres");
-    // A summary-less API edit still records an unnamed version and its event.
+    await expect(aliceDocument).toContainText("Postgres");
+    await expect(bobDocument).toContainText("Postgres");
     await expect
       .poll(async () => {
-        const version = (await getArtifact(artifactId)).versions.find(({ number }) => number === 3);
+        const version = (await getArtifact(artifactId)).versions.find(({ number }) => number === 2);
         return version;
       })
-      .toMatchObject({ named: false, number: 3, summary: null });
+      .toMatchObject({ named: false, number: 2, summary: null });
     await expect
-      .poll(() => getArtifactVersion(artifactId, 3).then(({ markdown }) => markdown))
+      .poll(() => getArtifactVersion(artifactId, 2).then(({ markdown }) => markdown))
       .toContain("Postgres");
 
     alicePage.once("dialog", (dialog) => dialog.accept("Decided Postgres"));
     await alicePage.getByRole("button", { name: "Name version" }).click();
     await expect
       .poll(async () => {
-        const version = (await getArtifact(artifactId)).versions.find(({ number }) => number === 4);
+        const version = (await getArtifact(artifactId)).versions.find(({ number }) => number === 3);
         return version;
       })
-      .toMatchObject({ named: true, number: 4, summary: "Decided Postgres" });
+      .toMatchObject({ named: true, number: 3, summary: "Decided Postgres" });
 
     const versionPicker = alicePage.getByRole("combobox", { name: "Version" });
-    await expect(versionPicker).toContainText("Version 4 — Decided Postgres");
-    await versionPicker.selectOption("2");
+    await expect(versionPicker).toContainText("Version 3 — Decided Postgres");
+    await versionPicker.selectOption("1");
     await expect(alicePage.getByTestId("version-view")).toContainText("Use SQLite");
     await alicePage.getByRole("button", { name: "Diff vs current" }).click();
-    await expect(alicePage.getByTestId("version-diff").locator("del")).toContainText("Use SQLite");
-    await expect(alicePage.getByTestId("version-diff").locator("ins")).toContainText(
-      "Use Postgres"
-    );
+    await expect(alicePage.getByTestId("version-diff").locator("del")).toContainText("SQLite");
+    await expect(alicePage.getByTestId("version-diff").locator("ins")).toContainText("Postgres");
     await alicePage.screenshot({
-      path: testInfo.outputPath("document-version-diff.png"),
+      path: testInfo.outputPath("rendered-document-version-diff.png"),
       fullPage: true,
     });
   } finally {
@@ -150,22 +121,27 @@ test("the spec renders as a formatted document by default, with no click require
   }
 });
 
-test("a current-spec deep link renders its historical range in preview", async ({
-  browser,
-}, testInfo) => {
+test("a document-version link renders its anchored quote", async ({ browser }, testInfo) => {
   await createProject({ key: "LINK", name: "Linked documents" });
   const issue = await createIssue({
     project: "LINK",
     spec: "SQLite is local",
     title: "Deep link highlight",
   });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "SQLit" }, body: "Use the embedded store." },
+    session
+  );
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/spec?from=0&to=5`);
+    await page.goto(
+      `/issues/${issue.key}/artifacts/spec?v=1&comment=${encodeURIComponent(comment.id)}`
+    );
 
-    await expect(page.getByRole("button", { exact: true, name: "Edit" })).toBeVisible();
+    await expect(page.getByRole("article")).toBeVisible();
     const highlight = page.locator("mark.dispatch-anchor-history");
     await expect(highlight).toBeVisible();
     await expect(highlight).toHaveText("SQLit");
@@ -173,58 +149,6 @@ test("a current-spec deep link renders its historical range in preview", async (
       path: testInfo.outputPath("spec-deep-link-highlight.png"),
       fullPage: true,
     });
-  } finally {
-    await alice.close();
-  }
-});
-
-test("tab round-trips preserve document connection, text, and log scroll position", async ({
-  browser,
-}) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({
-    project: "CORE",
-    spec: "# Keep this document",
-    title: "Mounted panels",
-  });
-  for (let index = 0; index < 30; index += 1) {
-    await createMessage(issue.key, { body: `Existing message ${index}` }, session);
-  }
-
-  const alice = await asUser(browser, "alice");
-  const page = await alice.newPage();
-  let documentConnections = 0;
-  page.on("websocket", (websocket) => {
-    if (new URL(websocket.url()).pathname.startsWith("/ws/")) {
-      documentConnections += 1;
-    }
-  });
-
-  try {
-    await page.goto(`/issues/${issue.key}/spec`);
-    await enterEditMode(page);
-    const editor = page.getByRole("textbox", { name: "Document editor" });
-    await editor.click();
-    await editor.press("Control+End");
-    await editor.press("Enter");
-    await editor.type("stay mounted");
-    await expect(editor).toContainText("stay mounted");
-    await expect.poll(() => documentConnections).toBe(1);
-
-    await page.getByRole("tab", { name: "Log" }).click();
-    await expect(page.getByRole("tab", { name: "Log" })).toBeFocused();
-    await expect(page.getByText("Existing message 29")).toBeVisible();
-    await page.evaluate(() => window.scrollTo(0, 500));
-    const scrollPosition = await page.evaluate(() => window.scrollY);
-    expect(scrollPosition).toBeGreaterThan(0);
-
-    await page.getByRole("tab", { name: "Log" }).press("ArrowLeft");
-    await expect(editor).toContainText("stay mounted");
-    await page.getByRole("tab", { name: "Spec" }).press("ArrowRight");
-    await expect(page.getByText("Existing message 29")).toBeVisible();
-
-    await expect.poll(() => documentConnections).toBe(1);
-    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollPosition);
   } finally {
     await alice.close();
   }

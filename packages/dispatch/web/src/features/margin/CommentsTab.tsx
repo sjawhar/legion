@@ -1,7 +1,7 @@
 import type { ReactNode, RefObject } from "react";
 import { Link } from "react-router-dom";
 
-import type { Anchor, Ask, Comment } from "../../api/types";
+import type { Ask, Comment } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   borderDefault,
@@ -57,7 +57,7 @@ interface CommentsTabProps {
   list: RefObject<HTMLDivElement | null>;
   onAction: (id: string, action: MarginItemAction) => void;
   onCloseComposer: () => void;
-  onReply: (comment: Comment, threadAnchor: Anchor | null) => void;
+  onReply: (comment: Comment) => void;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
@@ -70,7 +70,6 @@ function CommentCard({
   artifactSlug,
   comment,
   depth,
-  threadAnchor,
   onAction,
   onReply,
   onRetryAction,
@@ -81,9 +80,8 @@ function CommentCard({
   artifactSlug: string;
   comment: Comment;
   depth: number;
-  threadAnchor: Anchor | null;
   onAction: (id: string, action: MarginItemAction) => void;
-  onReply: (comment: Comment, threadAnchor: Anchor | null) => void;
+  onReply: (comment: Comment) => void;
   onRetryAction: () => void;
   pendingAction: boolean;
   selected: boolean;
@@ -114,7 +112,7 @@ function CommentCard({
               kind: "artifact",
               slug: artifactSlug,
               version: anchor.version,
-            })}&from=${anchor.from}&to=${anchor.to}`}
+            })}&comment=${comment.id}`}
           >
             View original text
           </Link>
@@ -188,7 +186,7 @@ function CommentCard({
         {comment.resolved ? null : (
           <button
             className={`font-medium ${linkText} ${linkHoverText}`}
-            onClick={() => onReply(comment, threadAnchor)}
+            onClick={() => onReply(comment)}
             type="button"
           >
             Reply
@@ -299,7 +297,6 @@ export function CommentsTab({
                       artifactSlug={artifactSlug}
                       comment={item.comment}
                       depth={item.depth}
-                      threadAnchor={item.threadAnchor}
                       onAction={onAction}
                       onReply={onReply}
                       onRetryAction={onRetryAction}

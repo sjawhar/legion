@@ -1,5 +1,4 @@
-import { afterAll, expect, spyOn, test } from "bun:test";
-import { HocuspocusProvider } from "@hocuspocus/provider";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -7,29 +6,6 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 import { api, type ListEventsOptions } from "../../api/client";
 import type { Ask, IssueDetails } from "../../api/types";
 import { IssuePage } from "./IssuePage";
-
-class WebSocketStub {
-  binaryType = "arraybuffer";
-  identifier = 0;
-  readyState = 0;
-
-  addEventListener(..._args: unknown[]): void {}
-
-  close(): void {
-    this.readyState = 3;
-  }
-
-  removeEventListener(..._args: unknown[]): void {}
-
-  send(..._args: unknown[]): void {}
-}
-
-const originalWebSocket = globalThis.WebSocket;
-globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
-
-afterAll(() => {
-  globalThis.WebSocket = originalWebSocket;
-});
 
 const issue: IssueDetails = {
   artifacts: [
@@ -114,10 +90,7 @@ function renderIssuePage(path = "/issues/CORE-1", navigateTo?: string) {
         <CurrentRoute />
         {navigateTo === undefined ? null : <Link to={navigateTo}>Navigate to test route</Link>}
         <Routes>
-          <Route
-            path="/issues/:key/*"
-            element={<IssuePage user={{ kind: "user", login: "alice" }} />}
-          />
+          <Route path="/issues/:key/*" element={<IssuePage />} />
         </Routes>
       </QueryClientProvider>
     </MemoryRouter>
@@ -147,10 +120,7 @@ test("IssuePage reads newest events when looking for active sessions", async () 
       <MemoryRouter initialEntries={["/issues/CORE-1/log"]}>
         <QueryClientProvider client={queryClient}>
           <Routes>
-            <Route
-              path="/issues/:key/*"
-              element={<IssuePage user={{ kind: "user", login: "alice" }} />}
-            />
+            <Route path="/issues/:key/*" element={<IssuePage />} />
           </Routes>
         </QueryClientProvider>
       </MemoryRouter>
@@ -278,27 +248,38 @@ test("IssuePage renders a not-found view for an unrecognized tab suffix without 
   }
 });
 
-test("IssuePage keeps the document provider alive while switching tabs", async () => {
+test("IssuePage keeps the Spec mounted across tabs", async () => {
   const restore = stubIssuePage(issue);
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
-  const destroyProvider = spyOn(HocuspocusProvider.prototype, "destroy");
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...issue.artifacts[0],
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "The mounted specification",
+    version: 1,
+  });
   const view = renderIssuePage("/issues/CORE-1/spec");
 
   try {
     await screen.findByRole("tab", { name: "Spec", selected: true });
-    await waitFor(() => expect(document.querySelector(".cm-editor")).not.toBeNull());
+    await waitFor(() =>
+      expect(within(view.container).getByRole("article").textContent).toContain(
+        "The mounted specification"
+      )
+    );
 
     fireEvent.click(screen.getByRole("tab", { name: "Log" }));
     await screen.findByRole("tab", { name: "Log", selected: true });
     fireEvent.click(screen.getByRole("tab", { name: "Spec" }));
     await screen.findByRole("tab", { name: "Spec", selected: true });
 
-    expect(destroyProvider).not.toHaveBeenCalled();
+    expect(within(view.container).getByRole("article").textContent).toContain(
+      "The mounted specification"
+    );
   } finally {
     view.unmount();
-    destroyProvider.mockRestore();
-    globalThis.WebSocket = originalWebSocket;
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
     restore();
   }
 });
@@ -374,10 +355,7 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
         <QueryClientProvider client={queryClient}>
           <Link to="/issues/CORE-2">Go to CORE-2</Link>
           <Routes>
-            <Route
-              path="/issues/:key/*"
-              element={<IssuePage user={{ kind: "user", login: "alice" }} />}
-            />
+            <Route path="/issues/:key/*" element={<IssuePage />} />
           </Routes>
         </QueryClientProvider>
       </MemoryRouter>
@@ -409,29 +387,11 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
   }
 });
 
-class IssuePageWebSocketStub {
-  binaryType = "arraybuffer";
-  identifier = 0;
-  readyState = 0;
-
-  addEventListener(..._args: unknown[]): void {}
-
-  close(): void {
-    this.readyState = 3;
-  }
-
-  removeEventListener(..._args: unknown[]): void {}
-
-  send(..._args: unknown[]): void {}
-}
-
-test("IssuePage highlights a current spec range from its deep-link URL", async () => {
+test("IssuePage highlights a historical quote from its comment deep link", async () => {
   const primaryArtifact = issue.artifacts?.[0];
   if (primaryArtifact === undefined) {
     throw new Error("IssuePage test fixture needs a primary document.");
   }
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = IssuePageWebSocketStub as unknown as typeof WebSocket;
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...primaryArtifact,
@@ -441,7 +401,36 @@ test("IssuePage highlights a current spec range from its deep-link URL", async (
     markdown: "SQLite is local",
     version: 1,
   });
-  const view = renderIssuePage("/issues/CORE-1/spec?from=0&to=5");
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "SQLite is local",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  const listComments = spyOn(api, "listComments").mockResolvedValue([
+    {
+      anchor: {
+        artifact_id: primaryArtifact.id,
+        from: 0,
+        orphaned: false,
+        quote: "SQLit",
+        to: 5,
+        version: 1,
+      },
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "Check the storage engine.",
+      created_at: "2026-09-09T00:00:00Z",
+      id: "comment-1",
+      issue_key: issue.key,
+      reply_to: null,
+      resolved: false,
+      suggestion: null,
+    },
+  ]);
+  const view = renderIssuePage("/issues/CORE-1/artifact/spec?v=1&comment=comment-1");
 
   try {
     await waitFor(() =>
@@ -449,33 +438,61 @@ test("IssuePage highlights a current spec range from its deep-link URL", async (
         "SQLit"
       )
     );
-    expect(screen.getByRole("button", { name: "Edit" })).not.toBeNull();
+    expect(screen.getByRole("article")).not.toBeNull();
   } finally {
     view.unmount();
     getArtifact.mockRestore();
     getArtifactText.mockRestore();
+    getArtifactVersion.mockRestore();
+    listComments.mockRestore();
     restore();
-    globalThis.WebSocket = originalWebSocket;
   }
 });
 
-test("IssuePage shows the orphan affordance for an unmapped current spec deep link", async () => {
+test("IssuePage reports an ambiguous historical quote as changed text", async () => {
   const primaryArtifact = issue.artifacts?.[0];
   if (primaryArtifact === undefined) {
     throw new Error("IssuePage test fixture needs a primary document.");
   }
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = IssuePageWebSocketStub as unknown as typeof WebSocket;
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...primaryArtifact,
     referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
-    markdown: "SQLite is local",
+    markdown: "SQLite and SQLite",
     version: 1,
   });
-  const view = renderIssuePage("/issues/CORE-1/spec?from=20&to=25");
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "SQLite and SQLite",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  const listComments = spyOn(api, "listComments").mockResolvedValue([
+    {
+      anchor: {
+        artifact_id: primaryArtifact.id,
+        from: 0,
+        orphaned: false,
+        quote: "SQLit",
+        to: 5,
+        version: 1,
+      },
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "Check the storage engine.",
+      created_at: "2026-09-09T00:00:00Z",
+      id: "comment-1",
+      issue_key: issue.key,
+      reply_to: null,
+      resolved: false,
+      suggestion: null,
+    },
+  ]);
+  const view = renderIssuePage("/issues/CORE-1/artifact/spec?v=1&comment=comment-1");
 
   try {
     await within(view.container).findByText(
@@ -486,8 +503,9 @@ test("IssuePage shows the orphan affordance for an unmapped current spec deep li
     view.unmount();
     getArtifact.mockRestore();
     getArtifactText.mockRestore();
+    getArtifactVersion.mockRestore();
+    listComments.mockRestore();
     restore();
-    globalThis.WebSocket = originalWebSocket;
   }
 });
 
