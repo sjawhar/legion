@@ -108,6 +108,52 @@ describe("resolveDaemonEnvironment", () => {
     expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_MCP_URL");
   });
 
+  it("strips dispatch env keys from the bootstrap `mise env`/`mise where` calls that predate createDaemonRunner", async () => {
+    const received: Array<{ command: string[]; options?: Parameters<CommandRunner>[1] }> = [];
+    const environment = await resolveDaemonEnvironment(
+      `mise x ${OMP_PIN} -- omp`,
+      dependencies({
+        env: {
+          PATH: "/narrow/bin",
+          DISPATCH_TOKEN: "leaked-bootstrap-token",
+          DISPATCH_URL: "http://leaked-bootstrap",
+          DISPATCH_MCP_URL: "http://leaked-bootstrap/mcp",
+        },
+        run: async (command, options) => {
+          received.push({ command, options });
+          if (command.join(" ") === "/tools/mise env --json") {
+            return {
+              stdout: JSON.stringify({ PATH: "/full/bin:/usr/bin", HOME: "/home/legion" }),
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          if (command.join(" ") === `/tools/mise where ${OMP_PIN}`) {
+            return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
+          }
+          throw new Error(`Unexpected startup command: ${command.join(" ")}`);
+        },
+      })
+    );
+
+    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_TOKEN");
+
+    const miseEnvCall = received.find(
+      (call) => call.command.join(" ") === "/tools/mise env --json"
+    );
+    const miseWhereCall = received.find(
+      (call) => call.command.join(" ") === `/tools/mise where ${OMP_PIN}`
+    );
+    // Neither bootstrap call relied on inheriting the daemon's raw ambient process environment
+    // (an omitted `options` — before this fix, both calls passed none at all): each now receives
+    // an explicit `env` with the dispatch keys already gone, even though `deps.env` carried them.
+    expect(miseEnvCall?.options?.env).toEqual({ PATH: "/narrow/bin" });
+    expect(miseWhereCall?.options?.env).toEqual({
+      PATH: "/full/bin:/usr/bin",
+      HOME: "/home/legion",
+    });
+  });
+
   it("refuses unpinned OMP invocations without an explicit executable override", async () => {
     await expect(resolveDaemonEnvironment("omp", dependencies())).rejects.toThrow(
       "[legion] OMP invocation must be 'mise x <tool> -- omp'. Set LEGION_OMP_PATH to an absolute executable path."

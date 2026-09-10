@@ -301,6 +301,55 @@ describe("daemon config", () => {
     ).toThrow("dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)");
   });
 
+  it("strips DISPATCH_TOKEN/DISPATCH_URL/DISPATCH_MCP_URL from a private_key_command child's environment", () => {
+    const saved = {
+      DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
+      DISPATCH_URL: process.env.DISPATCH_URL,
+      DISPATCH_MCP_URL: process.env.DISPATCH_MCP_URL,
+    };
+    // Set directly on process.env (not resolveDaemonConfig's env param):
+    // executePrivateKeyCommand reads process.env for its spawnSync call, so this is what
+    // actually exercises the leak path pre-fix.
+    process.env.DISPATCH_TOKEN = "leaked-private-key-command-token";
+    process.env.DISPATCH_URL = "http://leaked-private-key-command";
+    process.env.DISPATCH_MCP_URL = "http://leaked-private-key-command/mcp";
+    try {
+      const file = loadConfigFromFile(
+        [
+          "project: acme/7",
+          "repos:",
+          "  - acme/widgets",
+          "nats_urls:",
+          "  - nats://one:4222",
+          "github_apps:",
+          "  implement:",
+          '    app_id: "1"',
+          '    private_key_command: "env"',
+          "gates:",
+          "  design: off",
+          "  merge: off",
+        ].join("\n"),
+        "/tmp/legion-config"
+      );
+      const { config } = resolveDaemonConfig({ configFile: file });
+      // `env`'s stdout (the operator's real private_key_command form) becomes the "private key"
+      // here — a dump of the child's actual environment, one KEY=VALUE per line.
+      const dump = config.githubApps.implement?.privateKey ?? "";
+
+      expect(dump).not.toContain("DISPATCH_TOKEN=");
+      expect(dump).not.toContain("DISPATCH_URL=");
+      expect(dump).not.toContain("DISPATCH_MCP_URL=");
+      expect(dump).toContain("PATH=");
+    } finally {
+      if (saved.DISPATCH_TOKEN === undefined) delete process.env.DISPATCH_TOKEN;
+      else process.env.DISPATCH_TOKEN = saved.DISPATCH_TOKEN;
+      if (saved.DISPATCH_URL === undefined) delete process.env.DISPATCH_URL;
+      else process.env.DISPATCH_URL = saved.DISPATCH_URL;
+      if (saved.DISPATCH_MCP_URL === undefined) delete process.env.DISPATCH_MCP_URL;
+      else process.env.DISPATCH_MCP_URL = saved.DISPATCH_MCP_URL;
+    }
+  });
+
   it("rejects missing NATS configuration instead of inventing a transport", () => {
     expect(() => loadConfig({ LEGION_ID: "acme/7" })).toThrow("ENVOY_NATS_URL");
   });

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
+import { stripDispatchEnv } from "./environment";
 
 export type GitHubAppRole = "implement" | "review";
 
@@ -288,7 +289,10 @@ function readStringRecord(value: unknown, field: string): Record<string, string>
 }
 
 function executePrivateKeyCommand(command: string, field: string): string {
-  const result = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+  const result = spawnSync("sh", ["-c", command], {
+    encoding: "utf8",
+    env: stripDispatchEnv(process.env),
+  });
   if (result.error || result.status !== 0) {
     const status = result.status === null ? "unknown" : String(result.status);
     const stderr = result.stderr?.trim();
