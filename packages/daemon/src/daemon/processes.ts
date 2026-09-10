@@ -473,10 +473,12 @@ export class ProcessManager {
         const claim = existing && "issue" in existing ? existing : undefined;
 
         if (claim?.locator) {
-          if (!claim.sessionId) {
-            // Booting: launchWorker opened the pane but /worker/started has not yet registered
-            // this generation's session. Never launch a second pane while a boot is in flight —
-            // queue the task and let /worker/ready deliver it once the worker registers.
+          if (!claim.sessionId || claim.readyConfirmedAt === undefined) {
+            // Booting or started-but-unconfirmed: launchWorker opened the pane, but either
+            // /worker/started has not yet registered this generation's session, or it has and
+            // /worker/ready has not yet durably confirmed the boot. Never launch a second pane
+            // or probe/prompt the socket while a boot's readiness is still unconfirmed — queue
+            // the task and let /worker/ready deliver it once the worker's boot is confirmed.
             claim.pendingAssignment = task;
             await this.deps.saveState();
             return { status: "resumed", roleToken: token };

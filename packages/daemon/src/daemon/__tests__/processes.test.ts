@@ -2562,6 +2562,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -2677,6 +2678,7 @@ describe("ProcessManager", () => {
       issue: child,
       role,
       sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
         tmuxSession: "legion-omp",
@@ -2722,6 +2724,7 @@ describe("ProcessManager", () => {
       issue: child,
       role,
       sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
         tmuxSession: "legion-omp",
@@ -2837,6 +2840,7 @@ describe("ProcessManager", () => {
       issue: child,
       role,
       sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       launchFailures: 2,
       locator: {
@@ -3957,6 +3961,7 @@ describe("ProcessManager", () => {
       issue: child,
       role,
       sessionId: "ses_sub_architect",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
         tmuxSession: "legion-omp",
@@ -4633,6 +4638,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -4797,6 +4803,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 2,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -4870,6 +4877,49 @@ describe("ProcessManager", () => {
     expect(claim.pendingAssignment).toBe("verify #55");
   });
 
+  it("queues a same-role spawn against a started-but-unconfirmed claim as resumed-pending, never probing or prompting its socket", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      status: "in_progress",
+      children: [],
+    };
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      // readyConfirmedAt deliberately absent: /worker/started registered the session, but
+      // /worker/ready has not yet durably confirmed the boot. This claim must be queued exactly
+      // like the sessionId-less booting case, never probed or prompted as if already live.
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    let connectCalls = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => {
+        connectCalls += 1;
+        throw new Error("must not probe an unconfirmed boot's socket");
+      },
+    });
+
+    const result = await processes.spawnWorker(root, root, "tester", "verify #55");
+
+    expect(result).toEqual({ status: "resumed", roleToken: token });
+    expect(connectCalls).toBe(0);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.pendingAssignment).toBe("verify #55");
+    expect(claim.readyConfirmedAt).toBeUndefined();
+  });
+
   it("respawns with --resume when a worker's claimed socket is dead, splitting into its own persisted window", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
@@ -4894,6 +4944,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5101,6 +5152,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5186,6 +5238,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5289,6 +5342,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5365,6 +5419,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
       sessionId: "ses_original",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
         tmuxSession: "legion-omp",
