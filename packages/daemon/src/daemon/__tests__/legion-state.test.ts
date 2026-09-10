@@ -103,9 +103,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v20 state with a valid project and admission capacity", () => {
+  it("initializes empty v21 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 20,
+      version: 21,
       project: "omp",
       issues: {},
       trees: {},
@@ -471,7 +471,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates a controller-held-events-free v17 state through v18, v19, and v20", async () => {
+  it("migrates a controller-held-events-free v17 state through v18, v19, v20, and v21", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -485,7 +485,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(20);
+    expect(migrated.version).toBe(21);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -574,7 +574,7 @@ describe("legion state", () => {
     }
   });
 
-  it("converts a tree-less, issue-less v18 state to v19 (and onward to v20), preserving its controller notices", async () => {
+  it("converts a tree-less, issue-less v18 state to v19 (and onward to v21), preserving its controller notices", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-gates-"));
     const file = path.join(tempDir, "state.json");
     const notice = {
@@ -603,7 +603,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(20);
+    expect(migrated.version).toBe(21);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -658,7 +658,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(20);
+      expect(migrated.version).toBe(21);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -668,6 +668,72 @@ describe("legion state", () => {
       expect(migrated.roles[controllerToken(initialState.project)]).toEqual(
         current.roles[controllerToken(initialState.project)]
       );
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("migrates v20 state to v21 by backfilling readyConfirmedAt for active root trees with a locator, leaving queued/no-locator and already-confirmed trees untouched", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v20-"));
+    const file = path.join(tempDir, "state.json");
+    const current = newLegionState(initialState.project, initialState.cap);
+    const confirmedIssue = "LEGION-1";
+    const noLocatorIssue = "LEGION-2";
+    const queuedIssue = "LEGION-3";
+    const alreadyConfirmedIssue = "LEGION-4";
+    const locator = { tmuxSession: "legion-omp", tmuxWindowId: "@42" };
+    current.trees = {
+      [confirmedIssue]: {
+        // active + a recorded locator, no readyConfirmedAt: the pre-v21 meaning of "a root
+        // actually launched and is presumably running fine" this migration backfills.
+        root: confirmedIssue,
+        generation: 1,
+        locator,
+        status: "active",
+        launchFailures: 0,
+      },
+      [noLocatorIssue]: {
+        // active but no locator at all: nothing worth protecting from a fresh deadline, left
+        // untouched.
+        root: noLocatorIssue,
+        generation: 1,
+        status: "active",
+        launchFailures: 0,
+      },
+      [queuedIssue]: {
+        // not active: untouched regardless of any locator.
+        root: queuedIssue,
+        generation: 0,
+        locator,
+        status: "queued",
+        launchFailures: 0,
+      },
+      [alreadyConfirmedIssue]: {
+        // Already carries readyConfirmedAt (persisted by an already-patched daemon): never
+        // overwritten by this migration's own timestamp.
+        root: alreadyConfirmedIssue,
+        generation: 1,
+        locator,
+        status: "active",
+        launchFailures: 0,
+        readyConfirmedAt: 1_700_000_000_000,
+      },
+    };
+    await writeFile(file, JSON.stringify({ ...current, version: 20 }), "utf8");
+
+    const migrationTimestamp = 1_726_000_000_000;
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(migrationTimestamp);
+    try {
+      const migrated = await loadState(file, initialState);
+
+      expect(migrated.version).toBe(21);
+      expect(migrated.trees[confirmedIssue]).toEqual({
+        ...current.trees[confirmedIssue],
+        readyConfirmedAt: migrationTimestamp,
+      });
+      expect(migrated.trees[noLocatorIssue]).toEqual(current.trees[noLocatorIssue]);
+      expect(migrated.trees[queuedIssue]).toEqual(current.trees[queuedIssue]);
+      expect(migrated.trees[alreadyConfirmedIssue]).toEqual(current.trees[alreadyConfirmedIssue]);
     } finally {
       dateNowSpy.mockRestore();
     }

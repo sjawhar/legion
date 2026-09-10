@@ -74,6 +74,13 @@ export async function handleProcessReady(
 ): Promise<Response> {
   const tree = ctx.requireTree(body);
   ctx.auth.requireArchitectCapability(body, tree);
+  const generation = requiredNumber(body, "generation");
+  const treeState = ctx.deps.state.trees[tree];
+  if (!treeState || treeState.generation !== generation) {
+    throw new HttpError(409, "Stale process generation");
+  }
+  ctx.deps.processManager.confirmRootReady(tree, generation);
+  await ctx.save();
   await ctx.deps.onTreeReady?.(tree);
   // The root architect's own bootstrap is itself blocked awaiting this HTTP response — it
   // cannot start its RPC dispatcher, and therefore cannot answer a `negotiate_protocol`

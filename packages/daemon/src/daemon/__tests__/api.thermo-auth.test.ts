@@ -82,6 +82,7 @@ function startApi(
       reportRootExit: () => {},
       closeTree: () => {},
       markTreeReady: () => {},
+      confirmRootReady: () => {},
       markControllerReady: () => {},
       cancelBootWatchdog: () => {},
       spawnWorker: async () => ({ status: "spawned" as const, roleToken: "stub-role-token" }),

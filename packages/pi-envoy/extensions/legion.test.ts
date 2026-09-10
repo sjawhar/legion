@@ -472,7 +472,7 @@ describe("Legion OMP extension", () => {
       },
       {
         path: "/legion/v1/process/ready",
-        body: { tree, sessionId: "ses_root", secret: "root-secret" },
+        body: { tree, sessionId: "ses_root", secret: "root-secret", generation: 3 },
       },
       {
         path: "/legion/v1/merge-gate",
@@ -575,7 +575,7 @@ describe("Legion OMP extension", () => {
       { path: "/v1/roles/set", body: { session_id: "ses_root", role: token } },
       {
         path: "/legion/v1/process/ready",
-        body: { tree, sessionId: "ses_root", secret: "root-secret" },
+        body: { tree, sessionId: "ses_root", secret: "root-secret", generation: 3 },
       },
     ]);
   });

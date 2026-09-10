@@ -60,7 +60,7 @@ export const LegionDaemonApi = {
     }),
   },
   ProcessReady: {
-    request: architectCapability,
+    request: architectCapability.extend({ generation: z.number().int() }),
     response: z.object({}),
   },
   MergeGate: {
@@ -184,7 +184,7 @@ type OutputOf<T extends z.ZodType> = z.output<T>;
 
 export type DaemonStateResponse = OutputOf<typeof LegionDaemonApi.State.response>;
 export type ControllerReadyInput = InputOf<typeof LegionDaemonApi.ControllerReady.request>;
-export type ArchitectCapabilityInput = InputOf<typeof LegionDaemonApi.ProcessReady.request>;
+export type ArchitectCapabilityInput = InputOf<typeof architectCapability>;
 export type ProcessStartedInput = InputOf<typeof LegionDaemonApi.ProcessStarted.request>;
 export type ProcessStartedResponse = OutputOf<typeof LegionDaemonApi.ProcessStarted.response>;
 export type ProcessReadyInput = InputOf<typeof LegionDaemonApi.ProcessReady.request>;
