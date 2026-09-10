@@ -605,15 +605,18 @@ function migrateV15State(state: unknown): unknown {
   return { ...state, version: 16, workerAdmission: { queue: [] } };
 }
 
-/** v16 -> v17: drops the held-event plumbing entirely — `tree.heldEvents`, top-level
- * `controllerHeldEvents`, and `tree.recoveryEvents` (a dead-architect exception's queued
- * redelivery — held-event replay under another name) — now that a missed wake is recovered by
- * resuming the worker/controller/root and delivering a state-derived catch-up, never by
- * replaying a queued raw event. Never touches `workerAdmission`, added by the v15->v16 step
- * immediately above. */
+/** v16 -> v17: drops the tree-scoped held-event plumbing — `tree.heldEvents` and
+ * `tree.recoveryEvents` (a dead-architect exception's queued redelivery — held-event replay
+ * under another name) — now that a missed wake is recovered by resuming the worker/root and
+ * delivering a state-derived catch-up, never by replaying a queued raw event.
+ * `controllerHeldEvents` is left untouched here and converted by the v17->v18 step immediately
+ * below: unlike every other held event, a controller-bound one has no other source of truth to
+ * recover it from (see `ControllerPendingNotice`'s own doc comment), so it is carried forward
+ * rather than dropped. Never touches `workerAdmission`, added by the v15->v16 step immediately
+ * above. */
 function migrateV16State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 16) return state;
-  const { controllerHeldEvents: _droppedControllerHeldEvents, trees, ...rest } = state;
+  const { trees, ...rest } = state;
   const migratedTrees = recordValue(trees)
     ? Object.fromEntries(
         Object.entries(trees).map(([key, tree]) => {
@@ -630,11 +633,27 @@ function migrateV16State(state: unknown): unknown {
   return { ...rest, version: 17, trees: migratedTrees };
 }
 
-/** v17 -> v18: adds `controllerPendingNotices` (see its own doc comment) -- an empty array for
- * every existing state, since nothing before this version ever recorded one. */
+/** v17 -> v18: adds `controllerPendingNotices` (see its own doc comment), converting any v16
+ * `controllerHeldEvents` entry the v16->v17 step above carried forward unconverted —
+ * `{role, payloadJson, heldAt, eventId}` — onto its final `{payloadJson, eventId}` shape. `role`
+ * and `heldAt` have no counterpart here: every notice's role is always the controller by
+ * construction, and durability never depended on when it was originally held, only that it still
+ * is. A state with no `controllerHeldEvents` at all (every state before v16 ever added one) gets
+ * an empty array, same as before. */
 function migrateV17State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 17) return state;
-  return { ...state, version: 18, controllerPendingNotices: [] };
+  const { controllerHeldEvents, ...rest } = state;
+  const controllerPendingNotices = Array.isArray(controllerHeldEvents)
+    ? controllerHeldEvents
+        .filter(
+          (held): held is { payloadJson: string; eventId: string } =>
+            recordValue(held) &&
+            typeof held.payloadJson === "string" &&
+            typeof held.eventId === "string"
+        )
+        .map(({ payloadJson, eventId }) => ({ payloadJson, eventId }))
+    : [];
+  return { ...rest, version: 18, controllerPendingNotices };
 }
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;

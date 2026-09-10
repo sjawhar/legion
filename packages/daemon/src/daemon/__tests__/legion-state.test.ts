@@ -494,7 +494,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates v16 state to v17 by dropping the held-event plumbing (heldEvents, controllerHeldEvents, recoveryEvents), preserving workerAdmission and phases", async () => {
+  it("migrates v16 state to v18: drops the tree-scoped held-event plumbing (heldEvents, recoveryEvents) but converts controllerHeldEvents into controllerPendingNotices, preserving workerAdmission and phases", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -504,18 +504,35 @@ describe("legion state", () => {
       sessionId: "ses_123",
       completed: { summary: "implemented the thing", at: "2026-09-01T00:00:00.000Z" },
     };
+    // A controller-bound event has no other source of truth to recover it from, so migrating a
+    // v16 `controllerHeldEvents` entry must convert it into `controllerPendingNotices` rather
+    // than drop it like every other held-event field.
+    current.controllerPendingNotices = [
+      { payloadJson: '{"text":"@legion please investigate"}', eventId: "evt-controller" },
+    ];
+    const { controllerPendingNotices: _omitNotices, ...currentWithoutNotices } = current;
     const v16Input = {
-      ...current,
+      ...currentWithoutNotices,
       version: 16,
       controllerHeldEvents: [
-        { role: "controller", eventId: "evt-controller", subject: "s.controller", payload: "{}" },
+        {
+          role: "controller",
+          payloadJson: '{"text":"@legion please investigate"}',
+          heldAt: "2026-09-01T00:00:00.000Z",
+          eventId: "evt-controller",
+        },
       ],
       trees: {
         ...current.trees,
         [issue]: {
           ...current.trees[issue],
           heldEvents: [
-            { role: "architect", eventId: "evt-architect", subject: "s.architect", payload: "{}" },
+            {
+              role: "architect",
+              payloadJson: "{}",
+              heldAt: "2026-09-01T00:00:00.000Z",
+              eventId: "evt-architect",
+            },
           ],
           recoveryEvents: [
             {
@@ -532,8 +549,9 @@ describe("legion state", () => {
     const loaded = await loadState(file, initialState);
 
     expect(loaded).toEqual(current);
-    // The held-event plumbing being dropped is orthogonal to a queued admission retry and a
-    // completed-but-unrouted phase, both of which pre-date v16->v17 and must survive it intact.
+    // The held-event plumbing being dropped (or, for the controller, converted) is orthogonal
+    // to a queued admission retry and a completed-but-unrouted phase, both of which pre-date
+    // v16->v17 and must survive it intact.
     expect(loaded.workerAdmission).toEqual({
       queue: [roleToken(initialState.project, issue, "implementer")],
     });
@@ -544,7 +562,7 @@ describe("legion state", () => {
     });
   });
 
-  it("migrates v17 state to v18 by adding an empty controllerPendingNotices array", async () => {
+  it("migrates v17 state to v18 by adding an empty controllerPendingNotices array when there is no carried-forward controllerHeldEvents entry to convert", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -555,6 +573,26 @@ describe("legion state", () => {
     const loaded = await loadState(file, initialState);
 
     expect(loaded).toEqual(current);
+    expect(loaded.controllerPendingNotices).toEqual([]);
+  });
+
+  it("discards a malformed v16 controllerHeldEvents entry during migration instead of carrying garbage into controllerPendingNotices", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-malformed-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v16Input = {
+      ...currentWithoutNotices,
+      version: 16,
+      controllerHeldEvents: [
+        // Missing `payloadJson` entirely -- not a shape this migration can convert.
+        { role: "controller", heldAt: "2026-09-01T00:00:00.000Z", eventId: "evt-malformed" },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
     expect(loaded.controllerPendingNotices).toEqual([]);
   });
 
