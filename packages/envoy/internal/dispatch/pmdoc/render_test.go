@@ -147,7 +147,7 @@ func plain(markdown string) string {
 	return strings.Join(strings.Fields(markdown), " ")
 }
 
-func TestRenderTableEscapedPipeMapsToDocumentText(t *testing.T) {
+func TestRenderTableEscapedPipeMapsToFlattenedText(t *testing.T) {
 	doc, err := Parse("| a\\|b |\n| :--- |\n| body |\n")
 	if err != nil {
 		t.Fatal(err)

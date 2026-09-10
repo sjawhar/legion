@@ -112,3 +112,15 @@ a {
 .dispatch-doc[data-read-only="true"] .dispatch-action-bar {
   display: none;
 }
+
+::highlight(dispatch-search) {
+  background-color: #fee685; /* amber-200 */
+  color: #0f172b; /* slate-900 */
+}
+
+@media (prefers-color-scheme: dark) {
+  ::highlight(dispatch-search) {
+    background-color: #973c00; /* amber-800 */
+    color: #f1f5f9; /* slate-100 */
+  }
+}

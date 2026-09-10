@@ -33,12 +33,14 @@ function createQueryClient(): QueryClient {
 function renderProofDocument({
   document = artifact,
   fake = fakeDocumentRuntime({ text: "The live document" }),
+  highlightTerm,
   isClosed = false,
   queryClient = createQueryClient(),
   version,
 }: {
   document?: Artifact;
   fake?: FakeDocumentRuntime;
+  highlightTerm?: string;
   isClosed?: boolean;
   queryClient?: QueryClient;
   version?: number;
@@ -68,7 +70,9 @@ function renderProofDocument({
     margin.current = useMargin();
     return null;
   };
-  const renderDocument = (next: { isClosed?: boolean; version?: number } = {}) => (
+  const renderDocument = (
+    next: { highlightTerm?: string; isClosed?: boolean; version?: number } = {}
+  ) => (
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <DocumentRuntime.Provider value={fake.runtime}>
@@ -77,6 +81,7 @@ function renderProofDocument({
             <ProofDocument
               artifact={document}
               highlight={undefined}
+              highlightTerm={next.highlightTerm ?? highlightTerm}
               isClosed={next.isClosed ?? isClosed}
               issueKey="CORE-1"
               onVersionChange={onVersionChange}
@@ -92,7 +97,7 @@ function renderProofDocument({
   return {
     ...fake,
     margin,
-    rerender(next: { isClosed?: boolean; version?: number }) {
+    rerender(next: { highlightTerm?: string; isClosed?: boolean; version?: number }) {
       view.rerender(renderDocument(next));
     },
     view,
@@ -122,6 +127,68 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
     expect(editors[0]?.root.getAttribute("role")).toBe("textbox");
   } finally {
     view.unmount();
+  }
+});
+
+test("ProofDocument highlights a routed search term again after route and document changes", async () => {
+  class TestHighlight {
+    readonly ranges: Range[];
+
+    constructor(...ranges: Range[]) {
+      this.ranges = ranges;
+    }
+  }
+  const styleApi = window as unknown as {
+    CSS?: { highlights?: Map<string, TestHighlight> };
+    Highlight?: typeof TestHighlight;
+  };
+  const originalCss = Object.getOwnPropertyDescriptor(styleApi, "CSS");
+  const originalHighlight = Object.getOwnPropertyDescriptor(styleApi, "Highlight");
+  const highlights = new Map<string, TestHighlight>();
+  Object.defineProperties(styleApi, {
+    CSS: { configurable: true, value: { highlights } },
+    Highlight: { configurable: true, value: TestHighlight },
+  });
+  const { connections, editors, margin, rerender, sync, view } = renderProofDocument({
+    fake: fakeDocumentRuntime({ text: "The astrolabe reads altitude." }),
+    highlightTerm: "astrolabe",
+  });
+
+  try {
+    sync();
+    await waitFor(() => expect(margin.current?.documentBridge).toBeDefined());
+    await waitFor(() => {
+      const highlight = highlights.get("dispatch-search");
+      expect(highlight?.ranges.map((range) => range.toString())).toEqual(["astrolabe"]);
+    });
+
+    editors[0]?.root.replaceChildren(document.createTextNode("The sextant reads altitude."));
+    rerender({ highlightTerm: "sextant" });
+    await waitFor(() => {
+      const highlight = highlights.get("dispatch-search");
+      expect(highlight?.ranges.map((range) => range.toString())).toEqual(["sextant"]);
+    });
+    const routeHighlight = highlights.get("dispatch-search");
+
+    editors[0]?.root.replaceChildren(document.createTextNode("The compass reads altitude."));
+    act(() => connections[0]?.doc.getXmlFragment("prosemirror").delete(0, 1));
+    await waitFor(() => {
+      const highlight = highlights.get("dispatch-search");
+      expect(highlight).not.toBe(routeHighlight);
+      expect(highlight?.ranges).toEqual([]);
+    });
+  } finally {
+    view.unmount();
+    if (originalHighlight === undefined) {
+      delete styleApi.Highlight;
+    } else {
+      Object.defineProperty(styleApi, "Highlight", originalHighlight);
+    }
+    if (originalCss === undefined) {
+      delete styleApi.CSS;
+    } else {
+      Object.defineProperty(styleApi, "CSS", originalCss);
+    }
   }
 });
 

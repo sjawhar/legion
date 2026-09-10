@@ -268,7 +268,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // The phone project (iphone) never fetches the bare `/api/v1/issues` list —
   // its sidebar sits behind a drawer that starts closed — so its budget is 9.
   // Asserted exactly (not a ceiling) so a panel that starts eagerly fetching
-  // before its tab is ever opened — e.g. Spec's DocEditor or Children — trips
+  // before its tab is ever opened — e.g. Spec's ProofDocument or Children — trips
   // this immediately instead of only breaking some looser upper bound.
   expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 9 : 10);
 

@@ -42,7 +42,7 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	if err := doc.Validate(); err != nil {
 		return Range{}, err
 	}
-	text := buildDocumentText(doc)
+	text := buildFlattenedText(doc)
 	matches := exactQuoteMatches(text, quote)
 	if len(matches) == 0 {
 		matches = normalizedQuoteMatches(text, quote)
@@ -133,12 +133,12 @@ func Size(doc *Node) int {
 	return nodeSize(doc)
 }
 
-type documentText struct {
+type flattenedText struct {
 	value     string
 	positions []int
 }
 
-func buildDocumentText(doc *Node) documentText {
+func buildFlattenedText(doc *Node) flattenedText {
 	var out strings.Builder
 	var positions []int
 	lastEnd := -1
@@ -164,7 +164,7 @@ func buildDocumentText(doc *Node) documentText {
 		lastEnd = end
 		return true
 	})
-	return documentText{value: out.String(), positions: positions}
+	return flattenedText{value: out.String(), positions: positions}
 }
 
 type quoteMatch struct {
@@ -173,7 +173,7 @@ type quoteMatch struct {
 	textTo   int
 }
 
-func exactQuoteMatches(text documentText, quote string) []quoteMatch {
+func exactQuoteMatches(text flattenedText, quote string) []quoteMatch {
 	needle := utf16.Encode([]rune(quote))
 	var matches []quoteMatch
 	for _, offset := range findAllUnits(utf16.Encode([]rune(text.value)), needle) {
@@ -194,7 +194,7 @@ type range16 struct {
 	to   int
 }
 
-func normalizedQuoteMatches(text documentText, quote string) []quoteMatch {
+func normalizedQuoteMatches(text flattenedText, quote string) []quoteMatch {
 	normalizedText, textSpans := normalizedRanges(text.value)
 	normalizedQuote, quoteSpans := normalizedRanges(quote)
 	if normalizedQuote == "" || len(textSpans) == 0 || len(quoteSpans) == 0 {

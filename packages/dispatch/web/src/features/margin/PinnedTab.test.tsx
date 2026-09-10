@@ -22,7 +22,7 @@ const messageEvent: Event = {
   type: "message.created",
 };
 
-test("PinnedTab renders pinned event bodies as Markdown", () => {
+test("PinnedTab renders pinned event bodies as Markdown", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
@@ -33,7 +33,7 @@ test("PinnedTab renders pinned event bodies as Markdown", () => {
   );
 
   try {
-    expect(screen.getByRole("list")).not.toBeNull();
+    expect(await screen.findByRole("list")).not.toBeNull();
     expect(screen.getByRole("listitem").textContent).toBe("item");
   } finally {
     view.unmount();

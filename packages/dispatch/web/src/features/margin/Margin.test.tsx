@@ -334,9 +334,7 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
   const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
-  const scrollIntoView = spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(
-    () => {}
-  );
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -373,7 +371,7 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
       expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
         "true"
       );
-      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
     });
     const card = screen.getByTestId("margin-comment-comment-1");
     fireEvent.click(card);
@@ -386,7 +384,7 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
     listIssueAsks.mockRestore();
     getMyState.mockRestore();
     listComments.mockRestore();
-    scrollIntoView.mockRestore();
+    scrollTo.mockRestore();
   }
 });
 
@@ -978,9 +976,7 @@ test("focusItemForMark selects and scrolls the matching card and opens the sheet
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], [comment]);
   const originalMatchMedia = window.matchMedia;
-  const scrollIntoView = spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(
-    () => {}
-  );
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
   window.matchMedia = (() =>
     ({
       addEventListener: () => {},
@@ -1008,13 +1004,13 @@ test("focusItemForMark selects and scrolls the matching card and opens the sheet
     fireEvent.click(screen.getByRole("button", { name: "Focus mark" }));
     await waitFor(() => {
       expect(card.getAttribute("aria-current")).toBe("true");
-      expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+      expect(scrollTo).toHaveBeenCalledTimes(1);
       expect(screen.getByTestId("margin-sheet").getAttribute("data-expanded")).toBe("true");
     });
   } finally {
     view.unmount();
     window.matchMedia = originalMatchMedia;
-    scrollIntoView.mockRestore();
+    scrollTo.mockRestore();
   }
 });
 

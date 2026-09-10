@@ -60,6 +60,28 @@ services:
       # Signing key and optional app.json credentials.
       - dispatch-data:/home/envoy/.local/share/dispatch
 
+
+  # Acceptance run of the Playwright suite against the deployed image (never the production
+  # database): `docker compose --profile acceptance up -d dispatch-acceptance`, then
+  # `bun run e2e:deployed` in packages/dispatch with the environment README.md lists.
+  dispatch-acceptance:
+    profiles: ["acceptance"]
+    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
+    network_mode: host
+    entrypoint: ["/usr/local/bin/envoy-dispatch"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HOME: /home/envoy
+      DATABASE_URL: postgres://postgres:${DISPATCH_PG_PASSWORD:?set DISPATCH_PG_PASSWORD}@127.0.0.1:${DISPATCH_PG_PORT:-55432}/dispatch_acceptance?sslmode=disable
+      DISPATCH_LISTEN_HOST: 127.0.0.1
+      DISPATCH_PORT: "8767"
+      DISPATCH_AGENT_TOKEN: ${DISPATCH_ACCEPTANCE_TOKEN:-acceptance-token}
+      DISPATCH_ALLOWED_LOGINS: alice,bob
+      DISPATCH_IDENTITY: header:X-Dispatch-User
+      DISPATCH_NATS_DISABLED: "1"
+      DISPATCH_TEST_HOOKS: "1"
   pg-backup:
     image: eeshugerman/postgres-backup-s3@sha256:cfcaa57732c13d0724312a2eea1ad3e385f5ed049de3c626d1ef28ecc13cdddb
     network_mode: host

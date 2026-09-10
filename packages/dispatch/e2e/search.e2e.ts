@@ -1,6 +1,14 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createMessage,
+  createProject,
+  e2eAgentToken,
+} from "./api";
+import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -95,9 +103,22 @@ test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to 
     await expect(page).toHaveURL(
       new RegExp(`/issues/${fixture.firstIssueKey}/spec\\?q=${searchTerm}$`)
     );
-    const highlightedTerm = page.locator("mark[data-dispatch-search-hit]");
-    await expect(highlightedTerm).toHaveText(searchTerm);
-    await expect(highlightedTerm).toBeInViewport();
+    const editor = documentEditor(page);
+    await expect(editor).toContainText(searchTerm);
+    await expect(editor).toBeInViewport();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          // Playwright's TypeScript context lacks CSS Highlight API declarations.
+          const css = CSS as unknown as { highlights?: Map<string, Highlight> };
+          const highlights = css.highlights?.get("dispatch-search");
+          return (
+            highlights !== undefined &&
+            [...highlights].some((range) => range.toString() === "astrolabe")
+          );
+        })
+      )
+      .toBe(true);
     await expect(dialog).toHaveCount(0);
 
     await page.keyboard.press("Meta+k");
@@ -239,7 +260,7 @@ test("the agent issue API returns POSSIBLE_DUPLICATE and force creates the issue
       project: "CORE",
       title: "Astrolabe navigation instruments rollout",
     },
-    headers: { Authorization: "Bearer e2e-token" },
+    headers: { Authorization: `Bearer ${e2eAgentToken}` },
   });
   expect(duplicate.status()).toBe(409);
   await expect(duplicate.json()).resolves.toMatchObject({
@@ -259,7 +280,7 @@ test("the agent issue API returns POSSIBLE_DUPLICATE and force creates the issue
       project: "CORE",
       title: "Astrolabe navigation instruments rollout",
     },
-    headers: { Authorization: "Bearer e2e-token" },
+    headers: { Authorization: `Bearer ${e2eAgentToken}` },
   });
   expect(forced.status()).toBe(201);
   await expect(forced.json()).resolves.toMatchObject({ key: "CORE-2" });

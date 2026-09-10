@@ -50,8 +50,19 @@ can compose a text role onto a background role its own registration never checke
 pre-hydration `:root` fallback and Proof editor variables, both outside the `dark:` className
 mechanism) equal the exact OKLCH-computed value of the palette swatch their trailing
 `/* swatch-name */` comment names. Adding a new color pairing means adding a registered
-composite to `classes.ts`, not inventing a shade inline. The Proof editor inherits its theme
-through palette-pinned CSS variables scoped under `.dispatch-doc .proof-editor`.
+composite to `classes.ts`, not inventing a shade inline. The document editor
+(`@sjawhar/proof-editor`) themes itself through CSS variables scoped to `.proof-editor`;
+`styles.css` maps them to palette swatches under `.dispatch-doc .proof-editor` for both schemes,
+and those literals are what `styles-css-pin.test.ts` pins.
+
+## Document editor
+
+`features/doc/` adapts `@sjawhar/proof-editor` to Dispatch: it owns the Hocuspocus/Yjs
+connection, accessible editor attributes, selected-version presentation, CSS Custom Highlight API
+search highlights, and the bridge between Proof marks and margin cards. `DocumentRuntime` supplies
+the connection and editor creation seams; happy-dom tests use its doubles from
+`web/src/__tests__/document-runtime.ts`, while `e2e/editor.ts` drives the real editor in
+Playwright. Library capability gaps belong in `sjawhar/proof-sdk`, not host-side workarounds.
 
 ## Commands
 

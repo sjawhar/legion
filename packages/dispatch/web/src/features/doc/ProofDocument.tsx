@@ -17,6 +17,7 @@ import { VersionView } from "./VersionView";
 export interface ProofDocumentProps {
   artifact: Artifact;
   highlight: Highlight | undefined;
+  highlightTerm?: string;
   isClosed: boolean;
   issueKey: string;
   onVersionChange(version: number | null): void;
@@ -45,9 +46,43 @@ function removeMarkFromDocument(editor: EditorHandle, markId: string): void {
   }
 }
 
+interface SearchHighlightSupport {
+  readonly CSS?: {
+    readonly highlights?: {
+      set(name: string, highlight: unknown): void;
+    };
+  };
+  readonly Highlight?: new (...ranges: Range[]) => unknown;
+}
+
+function setSearchHighlights(root: HTMLElement, query: string): void {
+  const { CSS, Highlight } = window as unknown as SearchHighlightSupport;
+  if (CSS?.highlights === undefined || Highlight === undefined) {
+    return;
+  }
+  const ranges: Range[] = [];
+  if (query !== "") {
+    const lowerQuery = query.toLowerCase();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      const text = node.nodeValue ?? "";
+      const lowerText = text.toLowerCase();
+      for (let start = lowerText.indexOf(lowerQuery); start !== -1; ) {
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, start + query.length);
+        ranges.push(range);
+        start = lowerText.indexOf(lowerQuery, start + query.length);
+      }
+    }
+  }
+  CSS.highlights.set("dispatch-search", new Highlight(...ranges));
+}
+
 export function ProofDocument({
   artifact,
   highlight,
+  highlightTerm = "",
   isClosed,
   issueKey: _issueKey,
   onVersionChange,
@@ -58,6 +93,7 @@ export function ProofDocument({
   const editorRef = useRef<EditorHandle | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
   const userRef = useRef(user);
+  const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [showDiff, setShowDiff] = useState(false);
   const { connect, createEditor } = useContext(DocumentRuntime);
@@ -73,6 +109,7 @@ export function ProofDocument({
   hoverItemForMarkRef.current = hoverItemForMark;
   registerDocumentRef.current = registerDocument;
   setMarkPositionsRef.current = setMarkPositions;
+  highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
   const artifactQuery = useQuery({
     queryKey: ["artifact", artifact.id],
@@ -182,6 +219,7 @@ export function ProofDocument({
           }
           editor = handle;
           editorRef.current = handle;
+          setSearchHighlights(handle.view.dom, highlightTermRef.current);
           if (import.meta.env.VITE_DISPATCH_E2E === "1") {
             inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
           }
@@ -198,6 +236,15 @@ export function ProofDocument({
           project();
           marks.observe(project);
           const fragment = document.doc.getXmlFragment("prosemirror");
+          let searchFrame = 0;
+          const refreshSearchHighlights = () => {
+            cancelAnimationFrame(searchFrame);
+            searchFrame = requestAnimationFrame(() => {
+              setSearchHighlights(handle.view.dom, highlightTermRef.current);
+            });
+          };
+          refreshSearchHighlights();
+          fragment.observeDeep(refreshSearchHighlights);
           let frame = 0;
           const publishPositions = () => {
             cancelAnimationFrame(frame);
@@ -209,8 +256,10 @@ export function ProofDocument({
           fragment.observeDeep(publishPositions);
           disposeEditorBindings = () => {
             cancelAnimationFrame(frame);
+            cancelAnimationFrame(searchFrame);
             marks.unobserve(project);
             fragment.unobserveDeep(publishPositions);
+            fragment.unobserveDeep(refreshSearchHighlights);
             registerDocumentRef.current(undefined);
           };
         });
@@ -234,6 +283,13 @@ export function ProofDocument({
   useEffect(() => {
     editorRef.current?.setReadOnly(isClosed);
   }, [isClosed]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (editor !== undefined) {
+      setSearchHighlights(editor.view.dom, highlightTerm);
+    }
+  }, [highlightTerm]);
 
   const requestNamedVersion = () => {
     const summary = window.prompt("What changed in this version?");

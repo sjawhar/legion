@@ -14,9 +14,10 @@ repository-to-project settings page at `/settings`; TanStack Query and SSE keep
 the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content
-has Spec, Log, Children, and Artifacts tabs; the margin holds Comments and Pinned.
-Below the `xl` breakpoint, navigation is a drawer and the margin is a bottom
-sheet. Controls use 44 px minimum touch targets.
+has Spec, Log, Children, and Artifacts tabs; the Spec document renders and edits through
+`@sjawhar/proof-editor`, with Yjs presence and margin-linked marks. The margin holds Comments and
+Pinned. Below the `xl` breakpoint, navigation is a drawer and the margin is a bottom sheet.
+Controls use 44 px minimum touch targets.
 
 ## Development
 
@@ -49,15 +50,24 @@ cd packages/dispatch
 bun run e2e
 ```
 
-Run the same tests against a deployed server with the deployment's database and
-agent bearer token:
+## Acceptance run against the deployed image
+
+The `acceptance` Compose profile runs Playwright against a locally built Dispatch image with an
+isolated Postgres database. It uses header identity for `alice` and `bob`, an acceptance-only
+agent token, disabled NATS, and port 8767; it never starts the production `dispatch` service.
 
 ```bash
-cd packages/dispatch
-PLAYWRIGHT_BASE_URL=https://dispatch.example \
-PLAYWRIGHT_DATABASE_URL='postgres://…' \
-E2E_AGENT_TOKEN='<agent-bearer-token>' \
-bun run e2e
+cd packages/envoy/deploy/compose
+DISPATCH_PG_PASSWORD=dispatch DISPATCH_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose build dispatch
+DISPATCH_PG_PASSWORD=dispatch DISPATCH_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose --profile acceptance up -d dispatch-acceptance
+cd ../../../dispatch
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:8767 \
+PLAYWRIGHT_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55516/dispatch_acceptance?sslmode=disable' \
+E2E_AGENT_TOKEN=acceptance-token \
+bun run e2e:deployed
+cd ../envoy/deploy/compose
+DISPATCH_PG_PASSWORD=dispatch DISPATCH_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose --profile acceptance down
+docker rmi ghcr.io/sjawhar/legion/envoy:pr4-local
 ```
 
 `e2e/seed.ts` truncates its database before each scenario. Always set

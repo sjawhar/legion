@@ -273,7 +273,7 @@ jobs:
         run: bun run gen:go
         working-directory: packages/contracts
       - name: Install pmdoc fixture generator dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
       - name: Check pmdoc fixtures are up to date
         run: bun run check

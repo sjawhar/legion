@@ -99,7 +99,7 @@ function AnsweredAsk({
   ask,
 }: {
   artifactSlug: string | undefined;
-  ask: Ask & { answer: NonNullable<Ask["answer"]> };
+  ask: Ask;
 }): ReactNode {
   const { answer } = ask;
   return (

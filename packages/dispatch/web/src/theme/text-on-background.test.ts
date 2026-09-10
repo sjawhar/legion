@@ -175,13 +175,12 @@ function findCompositeReferences(node: ts.Node, out: Set<string>): void {
 
 /** Resolves an expression into every mutually exclusive set of composite identifiers it could
  * produce at runtime. A `cond ? a : b` ternary contributes two alternative branches rather than
- * one flattened union — `DocEditor.tsx` picks exactly one of `statusConnected`/`statusConnecting`
- * /`statusOffline`'s `.bg`+`.text` per render, and treating all three as simultaneously present
- * would fabricate nonsense cross-pairs (`statusConnected.text` next to `statusOffline.bg`) that
- * can never actually render together. A template literal's `${...}` spans, by contrast, are all
- * present together, so their branch sets combine multiplicatively (cross product). Anything else
- * (a function call, a plain string) collapses to a single branch via `findCompositeReferences`,
- * which is the best this static analysis can do for it. */
+ * one flattened union — only the active branch appears in a rendered component, so treating both
+ * as simultaneously present would fabricate a pairing that can never render. A template literal's
+ * `${...}` spans, by contrast, are all present together, so their branch sets combine
+ * multiplicatively (cross product). Anything else (a function call, a plain string) collapses to
+ * a single branch via `findCompositeReferences`, which is the best this static analysis can do.
+ */
 function resolveBranches(node: ts.Node): Set<string>[] {
   if (ts.isConditionalExpression(node)) {
     return [...resolveBranches(node.whenTrue), ...resolveBranches(node.whenFalse)];

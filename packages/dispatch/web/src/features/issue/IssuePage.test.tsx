@@ -83,8 +83,8 @@ function CurrentRoute() {
   return <output data-testid="current-route">{`${location.pathname}${location.search}`}</output>;
 }
 
-function renderIssuePage(path = "/issues/CORE-1", navigateTo?: string, documentText?: string) {
-  const runtime = fakeDocumentRuntime({ text: documentText });
+function renderIssuePage(path = "/issues/CORE-1", navigateTo?: string, seedText?: string) {
+  const runtime = fakeDocumentRuntime({ text: seedText });
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
