@@ -1249,14 +1249,6 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 	secondSuggestionID := decodeBody[struct {
 		ID string `json:"id"`
 	}](t, secondSuggestion).ID
-	document := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-		"name": "notes.md",
-	}, "notes.md", "text/markdown", []byte("notes"), "alice")
-	documentID := decodeBody[struct {
-		Artifact struct {
-			ID string `json:"id"`
-		} `json:"artifact"`
-	}](t, document).Artifact.ID
 	issueDetail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
 	artifactList := decodeBody[struct {
 		Artifacts []struct {
@@ -1264,17 +1256,15 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 			Slug string `json:"slug"`
 		} `json:"artifacts"`
 	}](t, issueDetail)
-	var documentSlug, primarySlug string
+	var primarySlug string
 	for _, artifact := range artifactList.Artifacts {
-		switch artifact.ID {
-		case documentID:
-			documentSlug = artifact.Slug
-		case issue.PrimaryArtifactID:
+		if artifact.ID == issue.PrimaryArtifactID {
 			primarySlug = artifact.Slug
+			break
 		}
 	}
-	if documentSlug == "" || primarySlug == "" {
-		t.Fatalf("resolve artifact slugs: document=%q primary=%q", documentSlug, primarySlug)
+	if primarySlug == "" {
+		t.Fatal("resolve primary artifact slug")
 	}
 
 	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
@@ -1322,14 +1312,12 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 	assertClosed("upload", multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 		"name": "later.md",
 	}, "later.md", "text/markdown", []byte("later"), "alice"))
-	assertClosed("primary selection", dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+documentID+"/primary", map[string]any{}, "alice"))
 	assertClosed("document edit", sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
 	}))
 	assertClosed("named version", sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]any{
 		"summary": "checkpoint", "actor": sessionActor(),
 	}))
-	assertClosed("primary selection (slug)", dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts/"+documentSlug+"/primary", map[string]any{}, "alice"))
 	assertClosed("document edit (slug)", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts/"+primarySlug+"/edits", map[string]any{
 		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
 	}))

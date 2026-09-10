@@ -151,7 +151,6 @@ export class DispatchClient {
 
     const form = new FormData();
     form.set("name", input.name);
-    if (input.primary !== undefined) form.set("primary", String(input.primary));
     if (input.summary !== undefined) form.set("summary", input.summary);
     if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);

@@ -70,7 +70,6 @@ describe("DispatchClient", () => {
     await client.artifact("DSP-1", {
       name: "spec.md",
       file: new Blob(["# Spec"], { type: "text/markdown" }),
-      primary: true,
       summary: "Initial spec",
       actor,
     });
@@ -149,7 +148,7 @@ describe("DispatchClient", () => {
     const artifactBody = requests[7]?.init.body as FormData;
     expect(artifactBody).toBeInstanceOf(FormData);
     expect(artifactBody.get("name")).toBe("spec.md");
-    expect(artifactBody.get("primary")).toBe("true");
+    expect(artifactBody.get("primary")).toBeNull();
     expect(artifactBody.get("summary")).toBe("Initial spec");
     expect(artifactBody.get("actor")).toBe(JSON.stringify(actor));
     expect((artifactBody.get("file") as Blob).type).toBe("text/markdown");

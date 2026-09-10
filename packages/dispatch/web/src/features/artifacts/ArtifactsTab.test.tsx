@@ -84,3 +84,54 @@ test("ArtifactsTab compares selected blob versions side by side", async () => {
     getArtifact.mockRestore();
   }
 });
+
+test("artifacts tab renders no make-primary control", async () => {
+  const artifacts: Artifact[] = [
+    {
+      ...artifact,
+      id: "artifact-spec",
+      kind: "doc",
+      name: "spec.md",
+      primary: true,
+      slug: "spec",
+      versions: artifact.versions.slice(0, 1),
+    },
+    {
+      ...artifact,
+      id: "artifact-notes",
+      kind: "doc",
+      name: "notes.md",
+      primary: false,
+      slug: "notes-md",
+      versions: artifact.versions.slice(0, 1),
+    },
+    artifact,
+  ];
+  const listArtifacts = spyOn(api, "listArtifacts").mockResolvedValue(artifacts);
+  const getArtifact = spyOn(api, "getArtifact").mockImplementation(async (id) => {
+    const artifact = artifacts.find((candidate) => candidate.id === id);
+    if (!artifact) throw new Error(`missing artifact ${id}`);
+    return { ...artifact, referenced_by: [] };
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+
+  try {
+    render(
+      <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+        <QueryClientProvider client={queryClient}>
+          <ArtifactsTab />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+
+    await screen.findByTestId("artifact-spec");
+    expect(screen.getByTestId("artifact-spec").textContent).toContain("Primary");
+    expect(screen.queryByRole("button", { name: /make primary/i })).toBeNull();
+    expect(screen.queryByText(/Not\s+primary/)).toBeNull();
+  } finally {
+    listArtifacts.mockRestore();
+    getArtifact.mockRestore();
+  }
+});

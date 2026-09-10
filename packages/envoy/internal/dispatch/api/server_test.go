@@ -628,7 +628,7 @@ func TestExternalIssueExplicitMappingTakesPrecedenceOverDefaultProject(t *testin
 	}
 }
 
-func TestArtifactVersionsAndPrimaryDocument(t *testing.T) {
+func TestArtifactVersions(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -673,10 +673,6 @@ func TestArtifactVersionsAndPrimaryDocument(t *testing.T) {
 	if version.Version.Number != 2 {
 		t.Fatalf("second image version: got %d, want 2", version.Version.Number)
 	}
-	notDocument := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "a.png", "primary": "true"}, "a.png", "image/png", []byte("image"), "alice")
-	if notDocument.Code != http.StatusBadRequest || !strings.Contains(notDocument.Body.String(), `"code":"PRIMARY_NOT_DOC"`) {
-		t.Fatalf("image as primary: status=%d body=%s", notDocument.Code, notDocument.Body.String())
-	}
 
 	notes := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "notes.md", "text/markdown", []byte("# Notes"), "alice")
 	if notes.Code != http.StatusCreated {
@@ -696,19 +692,6 @@ func TestArtifactVersionsAndPrimaryDocument(t *testing.T) {
 		t.Fatalf("read replaced document: status=%d body=%s", text.Code, text.Body.String())
 	}
 
-	primary := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+uploaded.Artifact.ID+"/primary", map[string]any{}, "alice")
-	if primary.Code != http.StatusOK {
-		t.Fatalf("select notes as primary: status=%d body=%s", primary.Code, primary.Body.String())
-	}
-	changed := decodeBody[struct {
-		PrimaryArtifactID string `json:"primary_artifact_id"`
-	}](t, primary)
-	if changed.PrimaryArtifactID != uploaded.Artifact.ID {
-		t.Fatalf("primary artifact: got %q, want %q", changed.PrimaryArtifactID, uploaded.Artifact.ID)
-	}
-	if changed.PrimaryArtifactID == issue.PrimaryArtifactID {
-		t.Fatal("previous primary artifact remained selected")
-	}
 }
 
 func agentRequest(t *testing.T, handler http.Handler, method, target string, body any, token string) *httptest.ResponseRecorder {
@@ -1221,7 +1204,7 @@ func TestArtifactUploadRecognizesParameterizedMarkdown(t *testing.T) {
 		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
 	}
 	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-		"name": "notes.md", "primary": "true",
+		"name": "notes.md",
 	}, "notes.md", "text/markdown; charset=utf-8", []byte("# Notes"), "alice")
 	if response.Code != http.StatusCreated {
 		t.Fatalf("upload parameterized Markdown: status=%d body=%s", response.Code, response.Body.String())
@@ -1330,87 +1313,6 @@ func TestArtifactSlugsDisambiguateNormalizedNameCollisions(t *testing.T) {
 	}](t, versioned)
 	if first.Artifact.Slug != "report-md" || second.Artifact.Slug != "report-md-2" || version.Version.Number != 2 {
 		t.Fatalf("artifact collision result: got slugs %q, %q and version %d; want report-md, report-md-2, 2", first.Artifact.Slug, second.Artifact.Slug, version.Version.Number)
-	}
-}
-
-func TestConcurrentPrimarySelectionsSerialize(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Issue",
-	}, "alice")
-	issue := decodeBody[struct {
-		Key               string `json:"key"`
-		PrimaryArtifactID string `json:"primary_artifact_id"`
-	}](t, created)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
-	}
-	firstDocument := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-		"name": "first.md",
-	}, "first.md", "text/markdown", []byte("# First"), "alice")
-	secondDocument := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-		"name": "second.md",
-	}, "second.md", "text/markdown", []byte("# Second"), "alice")
-	if firstDocument.Code != http.StatusCreated || secondDocument.Code != http.StatusCreated {
-		t.Fatalf("create documents: first=%d second=%d", firstDocument.Code, secondDocument.Code)
-	}
-	first := decodeBody[struct {
-		Artifact struct {
-			ID string `json:"id"`
-		} `json:"artifact"`
-	}](t, firstDocument)
-	second := decodeBody[struct {
-		Artifact struct {
-			ID string `json:"id"`
-		} `json:"artifact"`
-	}](t, secondDocument)
-
-	lock, err := database.Pool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin primary lock: %v", err)
-	}
-	defer func() { _ = lock.Rollback(context.Background()) }()
-	var lockedID string
-	if err := lock.QueryRow(context.Background(), `select id::text from artifacts where id = $1 for update`, issue.PrimaryArtifactID).Scan(&lockedID); err != nil {
-		t.Fatalf("lock current primary: %v", err)
-	}
-	responses := make(chan *httptest.ResponseRecorder, 2)
-	go func() {
-		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+first.Artifact.ID+"/primary", map[string]any{}, "alice")
-	}()
-	waitForDatabaseLocks(t, database, 1)
-	go func() {
-		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+second.Artifact.ID+"/primary", map[string]any{}, "alice")
-	}()
-	waitForDatabaseLocks(t, database, 2)
-	if err := lock.Commit(context.Background()); err != nil {
-		t.Fatalf("release primary lock: %v", err)
-	}
-	for range 2 {
-		response := awaitResponse(t, responses)
-		if response.Code != http.StatusOK {
-			t.Fatalf("concurrent primary selection: status=%d body=%s", response.Code, response.Body.String())
-		}
-	}
-	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
-	issueDetail := decodeBody[struct {
-		Artifacts []struct {
-			Primary bool `json:"primary"`
-		} `json:"artifacts"`
-	}](t, detail)
-	primaryCount := 0
-	for _, artifact := range issueDetail.Artifacts {
-		if artifact.Primary {
-			primaryCount++
-		}
-	}
-	if primaryCount != 1 {
-		t.Fatalf("primary artifacts: got %d, want exactly one", primaryCount)
 	}
 }
 

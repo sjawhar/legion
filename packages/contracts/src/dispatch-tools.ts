@@ -214,7 +214,6 @@ export const dispatchToolSpecs = [
       name: z.string().describe("Artifact filename shown in Dispatch."),
       path: z.string().describe("Local path to the file to upload.").optional(),
       content: z.string().describe("Inline text to store as a Markdown document.").optional(),
-      primary: z.boolean().describe("Make this document the issue primary artifact.").optional(),
       summary: z.string().describe("Optional version summary.").optional(),
     }),
     validation: {

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 import type { Artifact, Version } from "../../api/types";
 import {
@@ -79,17 +79,6 @@ export function ArtifactHeader({
           <h2 className={`truncate text-lg font-semibold ${textPrimaryOnSurface}`}>
             {artifact.name}
           </h2>
-          <div
-            className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-sm ${textSecondaryOnSurface}`}
-          >
-            <span>{artifact.primary ? "Primary" : "Not primary"}</span>
-            <Link
-              className={`font-medium underline ${linkText} ${linkHoverText}`}
-              to={buildIssuePath({ key: artifact.issue_key, kind: "spec" })}
-            >
-              Back to primary spec
-            </Link>
-          </div>
         </div>
         {showVersionPicker ? (
           <label

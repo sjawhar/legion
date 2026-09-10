@@ -420,7 +420,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_artifact",
-      args: { issue: "DSP-42", name: "spec.md", content: "# Spec\n", primary: true },
+      args: { issue: "DSP-42", name: "spec.md", content: "# Spec\n" },
       cwd: "/workspace",
       host: "omp",
       sessionId: "session-42",
@@ -433,12 +433,13 @@ describe("executeDispatchTool", () => {
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 1 });
     expect(requests).toHaveLength(1);
     expect(requests[0]?.init.headers).toMatchObject({ "Content-Type": "application/json" });
-    expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({
+    const body = JSON.parse(requests[0]?.init.body as string);
+    expect(body).toMatchObject({
       name: "spec.md",
       content: "# Spec\n",
-      primary: true,
       actor: { kind: "session", id: "session-42" },
     });
+    expect(body).not.toHaveProperty("primary");
   });
 
   test.each([

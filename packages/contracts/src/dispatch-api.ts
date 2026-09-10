@@ -339,7 +339,6 @@ export interface CreateMessageInput {
 
 interface CreateArtifactOptions {
   readonly name: string;
-  readonly primary?: boolean;
   readonly summary?: string;
   readonly actor?: Actor;
 }

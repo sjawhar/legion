@@ -266,15 +266,11 @@ export class DispatchApiClient {
         actor: input.actor,
         content: input.content,
         name: input.name,
-        primary: input.primary,
         summary: input.summary,
       });
     }
     const body = new FormData();
     body.set("name", input.name);
-    if (input.primary !== undefined) {
-      body.set("primary", String(input.primary));
-    }
     if (input.summary !== undefined) {
       body.set("summary", input.summary);
     }
@@ -287,10 +283,6 @@ export class DispatchApiClient {
       body,
       method: "POST",
     });
-  }
-
-  makeArtifactPrimary(id: string): Promise<Issue> {
-    return this.post<Issue>(`/api/v1/artifacts/${pathSegment(id)}/primary`, {});
   }
 
   getArtifact(id: string): Promise<ArtifactDetails> {

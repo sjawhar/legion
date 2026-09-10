@@ -85,7 +85,7 @@ test("API client uploads inline artifact content as JSON and files as multipart"
   const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
   const api = createApiClient(stub.fetch);
 
-  await api.uploadArtifact("CORE-1", { content: "# Spec\n", name: "spec.md", primary: true });
+  await api.uploadArtifact("CORE-1", { content: "# Spec\n", name: "spec.md" });
   await api.uploadArtifact("CORE-1", {
     file: new File(["spec"], "spec.md", { type: "text/markdown" }),
     name: "spec.md",
@@ -97,7 +97,6 @@ test("API client uploads inline artifact content as JSON and files as multipart"
   expect(JSON.parse(String(inline?.init?.body))).toEqual({
     content: "# Spec\n",
     name: "spec.md",
-    primary: true,
   });
   expect(multipart?.init?.body).toBeInstanceOf(FormData);
   expect((multipart?.init?.body as FormData | undefined)?.get("name")).toBe("spec.md");
@@ -293,9 +292,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.uploadArtifact("CORE-1", {
     file: new File(["spec"], "spec.md", { type: "text/markdown" }),
     name: "spec.md",
-    primary: true,
   });
-  await api.makeArtifactPrimary("artifact-1");
   await api.getArtifact("artifact-1");
   await api.getArtifactText("artifact-1");
   await api.getArtifactVersion("artifact-1", 3);
@@ -324,7 +321,6 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["POST", "/api/v1/issues/CORE-1/messages"],
     ["GET", "/api/v1/issues/CORE-1/artifacts"],
     ["POST", "/api/v1/issues/CORE-1/artifacts"],
-    ["POST", "/api/v1/artifacts/artifact-1/primary"],
     ["GET", "/api/v1/artifacts/artifact-1"],
     ["GET", "/api/v1/artifacts/artifact-1/text"],
     ["GET", "/api/v1/artifacts/artifact-1/versions/3"],

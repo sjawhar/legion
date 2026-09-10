@@ -29,9 +29,7 @@ async function openArtifacts(page: Page) {
   await page.getByRole("tab", { name: "Artifacts" }).click();
 }
 
-test("artifacts upload, version, primary selection, references, and phone layout", async ({
-  page,
-}, testInfo) => {
+test("artifacts upload, versions, references, and phone layout", async ({ page }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -49,11 +47,6 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await expect(diagram).toContainText("diagram.png");
   await expect(diagram).toContainText("1 version");
   await expect(diagram.getByRole("img", { name: "diagram.png version 1" })).toBeVisible();
-  await expect(diagram.getByRole("button", { name: "Make primary" })).toBeDisabled();
-  await expect(diagram.getByRole("button", { name: "Make primary" })).toHaveAttribute(
-    "title",
-    "Only documents can be primary"
-  );
 
   await upload.setInputFiles(diagramPath);
   await expect(diagram).toContainText("2 versions");
@@ -78,10 +71,10 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await upload.setInputFiles(notesPath);
   const notes = page.getByTestId("artifact-notes-md");
   await expect(notes).toContainText("notes.md");
-  await notes.getByRole("button", { name: "Make primary" }).click();
-  await expect(notes).toContainText("Primary");
-  await expect(page.getByTestId("artifact-spec")).toContainText("Not primary");
-
+  await expect(page.getByRole("button", { name: /make primary/i })).toHaveCount(0);
+  await notes.getByRole("link", { name: "notes.md" }).click();
+  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/notes-md`);
+  await expect(page.getByRole("heading", { name: "Review notes" })).toBeVisible();
   if (testInfo.project.name === "iphone") {
     const reviewPanel = page.getByRole("button", { name: /review panel/i });
     if ((await reviewPanel.getAttribute("aria-expanded")) === "true") {
@@ -91,7 +84,7 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await page.getByRole("tab", { name: "Spec" }).click();
   await enterEditMode(page);
   await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
-    "These notes replace the initial spec."
+    "The original document."
   );
 
   await createComment(issue.key, {
@@ -137,11 +130,7 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await expect(spec.getByLabel("Referenced by")).toContainText("spec.md");
   await spec.getByLabel("Referenced by").getByRole("link", { name: "spec.md" }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/spec`);
-  await expect(page.getByRole("heading", { name: "spec.md" })).toBeVisible();
-  await expect(page.getByText("Not primary")).toBeVisible();
-  await expect(page.getByRole("link", { name: "Back to primary spec" })).toBeVisible();
-  await expect(page.getByLabel("Version")).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath("non-primary-document.png"), fullPage: true });
+  await expect(page.getByRole("heading", { name: "Initial spec" })).toBeVisible();
 
   if (testInfo.project.name === "iphone") {
     await page.goto("/");
