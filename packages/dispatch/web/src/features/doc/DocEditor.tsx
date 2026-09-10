@@ -4,11 +4,12 @@ import { EditorView } from "@codemirror/view";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { yCollab } from "y-codemirror.next";
 import * as Y from "yjs";
 
 import { api } from "../../api/client";
-import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
+import type { Artifact, AuthenticatedUser, Comment, Version } from "../../api/types";
 import {
   calloutWarningBg,
   calloutWarningBorder,
@@ -16,6 +17,8 @@ import {
   card,
   dangerText,
   inputClasses,
+  linkHoverText,
+  linkText,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
@@ -24,9 +27,12 @@ import {
   statusConnecting,
   statusOffline,
   textMutedOnSurface,
+  textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { useMargin } from "../margin/Margin";
+import { buildIssuePath } from "../refs/routes";
+import { Timestamp } from "../refs/Timestamp";
 import { anchorDecorationExtension, setActiveAnchorIds, setAnchorDecorations } from "./anchors";
 import { DocView, type DocViewHighlight, quoteOccurrence } from "./DocView";
 import { VersionDiff } from "./VersionDiff";
@@ -35,6 +41,9 @@ interface DocEditorProps {
   artifact: Artifact;
   highlight?: DocViewHighlight;
   isClosed: boolean;
+  issueKey?: string;
+  onVersionChange?: (version: number | null) => void;
+  selectedVersion?: number | null;
   user: AuthenticatedUser;
 }
 
@@ -62,11 +71,36 @@ function editorAccess(isClosed: boolean) {
   return [EditorState.readOnly.of(isClosed), EditorView.editable.of(!isClosed)];
 }
 
+function historicalHighlight(
+  markdown: string,
+  highlight: DocViewHighlight | undefined,
+  anchor: Comment["anchor"] | undefined
+): DocViewHighlight | undefined {
+  if (highlight === undefined || anchor === null || anchor === undefined) {
+    return highlight;
+  }
+  if (markdown.slice(highlight.from, highlight.to) === anchor.quote) {
+    return highlight;
+  }
+  const from = markdown.indexOf(anchor.quote);
+  return from === -1 || markdown.indexOf(anchor.quote, from + 1) !== -1
+    ? highlight
+    : { from, to: from + anchor.quote.length };
+}
+
 export function DocEditor(props: DocEditorProps): ReactNode {
   return <DocEditorContent key={props.artifact.id} {...props} />;
 }
 
-function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProps): ReactNode {
+function DocEditorContent({
+  artifact,
+  highlight,
+  isClosed,
+  issueKey,
+  onVersionChange,
+  selectedVersion: controlledSelectedVersion,
+  user,
+}: DocEditorProps): ReactNode {
   const host = useRef<HTMLDivElement>(null);
   const isClosedRef = useRef(isClosed);
   const providerRef = useRef<HocuspocusProvider | null>(null);
@@ -112,7 +146,16 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
   const [content, setContent] = useState("");
   const [synced, setSynced] = useState(false);
   const [mode, setMode] = useState<EditorMode>("preview");
-  const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
+  const [localSelectedVersion, setLocalSelectedVersion] = useState<number | null>(null);
+  const selectedVersion =
+    onVersionChange === undefined ? localSelectedVersion : (controlledSelectedVersion ?? null);
+  const setSelectedVersion = (version: number | null) => {
+    if (onVersionChange === undefined) {
+      setLocalSelectedVersion(version);
+      return;
+    }
+    onVersionChange(version);
+  };
   const [showDiff, setShowDiff] = useState(false);
 
   const artifactQuery = useQuery({
@@ -127,6 +170,11 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
     enabled: selectedVersion !== null,
     queryKey: ["artifact", artifact.id, "version", selectedVersion],
     queryFn: () => api.getArtifactVersion(artifact.id, selectedVersion ?? 0),
+  });
+  const comments = useQuery({
+    enabled: issueKey !== undefined && selectedVersion !== null,
+    queryKey: ["comments", issueKey, artifact.id, "version"],
+    queryFn: () => api.listComments(issueKey ?? "", artifact.id),
   });
   const nameVersion = useMutation({
     mutationFn: (summary: string) => api.createArtifactVersion(artifact.id, { summary }),
@@ -151,6 +199,24 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
   const versions = [...(artifactQuery.data?.versions ?? artifact.versions)].sort(
     (left, right) => right.number - left.number
   );
+  const selectedVersionMeta =
+    selectedVersion === null
+      ? undefined
+      : versions.find((version) => version.number === selectedVersion);
+  const selectedAnchor =
+    selectedVersion === null
+      ? undefined
+      : comments.data?.find(
+          (comment) =>
+            comment.anchor?.artifact_id === artifact.id &&
+            comment.anchor.version === selectedVersion &&
+            comment.anchor.from === highlight?.from &&
+            comment.anchor.to === highlight?.to
+        )?.anchor;
+  const selectedHighlight =
+    selectedVersion === null || selectedMarkdown === undefined
+      ? undefined
+      : historicalHighlight(selectedMarkdown, highlight, selectedAnchor);
 
   useEffect(() => {
     const parent = host.current;
@@ -425,15 +491,45 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
         className={mode === "edit" && selectedVersion === null ? "min-h-96" : "hidden"}
         ref={host}
       />
-      {selectedVersion !== null && selectedMarkdown === undefined ? (
+      {selectedVersion !== null && versionTextQuery.isError ? (
+        <section aria-label={`Document version ${selectedVersion}`} className="space-y-3">
+          <p className={`text-sm ${dangerText}`}>
+            No version {selectedVersion} of {artifact.name}.
+          </p>
+          <Link
+            className={`font-medium underline ${linkText} ${linkHoverText}`}
+            to={
+              artifact.primary
+                ? buildIssuePath({ key: artifact.issue_key, kind: "spec" })
+                : buildIssuePath({
+                    key: artifact.issue_key,
+                    kind: "artifact",
+                    slug: artifact.slug,
+                  })
+            }
+          >
+            View current version
+          </Link>
+        </section>
+      ) : selectedVersion !== null && selectedMarkdown === undefined ? (
         <p className={`text-sm ${textMutedOnSurface}`}>Loading version…</p>
       ) : selectedVersion !== null && selectedMarkdown !== undefined ? (
         showDiff ? (
           <VersionDiff after={liveMarkdown} before={selectedMarkdown} />
         ) : (
-          <div data-testid="version-view">
-            <DocView markdown={selectedMarkdown} />
-          </div>
+          <section aria-label={`Document version ${selectedVersion}`} className="space-y-3">
+            <h2 className={`text-lg font-semibold ${textPrimaryOnSurface}`}>
+              Version {selectedVersion}
+              {selectedVersionMeta?.created_at === undefined ? null : (
+                <span className={`ml-2 text-sm font-normal ${textMutedOnSurface}`}>
+                  <Timestamp at={selectedVersionMeta.created_at} />
+                </span>
+              )}
+            </h2>
+            <div data-testid="version-view">
+              <DocView highlight={selectedHighlight} markdown={selectedMarkdown} />
+            </div>
+          </section>
         )
       ) : mode === "preview" ? (
         <DocView

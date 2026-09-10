@@ -9,7 +9,7 @@ import { pinnedEventIds } from "../issue/log-model";
 import { parseIssuePath } from "../refs/routes";
 import { useAnsweredAsks } from "./useAnsweredAsks";
 
-export type MarginTab = "artifacts" | "comments" | "pinned";
+export type MarginTab = "comments" | "pinned";
 export type MarginItemAction = "accept" | "reject" | "resolve";
 export type MarginItem =
   | { ask: Ask; depth: number; kind: "ask" }
@@ -235,7 +235,6 @@ export function useMarginItems(tab: MarginTab) {
     retryComments: () => void comments.refetch(),
     retryIssue: () => void issue.refetch(),
     retryItem: () => actionGuard.retryLast(action),
-    routeArtifactSlug,
     routeItemId,
     visibleArtifact,
   };

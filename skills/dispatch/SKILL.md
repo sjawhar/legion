@@ -12,6 +12,38 @@ The server enforces high signal: an ask question is at most 800 characters with 
 options; comment and message bodies are at most 2,000 characters; an artifact is at most 25 MiB.
 It refuses over-limit input; it never truncates it. GitHub threads and markers no longer exist.
 
+## Writing a spec
+
+A spec is a decision record for the human who decides and the implementer who builds, not a
+transcript of your thinking. Use exactly these document headings in this order.
+
+| Section | Required content | Form |
+| --- | --- | --- |
+| **Decisions needed** | Only decisions requiring human authority, taste, or risk appetite. Each states one question, two or three options with tradeoffs, and a recommendation. Every item is an anchored `dispatch_ask`. Answered items move into Requirements with provenance, then leave this section. No other section asks the reader anything. Empty means `None.` | One decision per line; anchor each ask to that line. |
+| **Acceptance** | Every outcome names its check and user-facing surface. An outcome without a verification method is not acceptance criteria. | Numbered lines; browser scenario, API call, or CLI command. |
+| **Requirements** | Provenance is a verbatim human quote or `inferred: <reasoning>`; readers treat inferred requirements as hypotheses. Do not restate the prompt in prose. | `requirement \| provenance` table. |
+| **Design** | State the files, components, routes, and data flow that change. | Facts, not narrative; diagrams only for genuine structure. |
+| **Errors** | Name the behaviour for every error condition; never specify a silent fallback. | `condition \| behaviour` table. |
+| **Testing** | Map every acceptance line to the proof that exercises it. | Suite or scenario. |
+| **Rejected** | Record each considered alternative and why it was rejected so it is not proposed again. | One alternative per line. |
+
+### Rules
+
+- Every sentence is a fact, decision, or risk; delete the rest.
+- Use tables over prose and keep one idea per line.
+- Do not use Overview, Background, Introduction, Summary, or Conclusion sections.
+- Do not hedge with “might” or “could consider.”
+- Do not use TBD, TODO, or placeholders; an open item is a Decision needed.
+- Keep each section to one screen; work that exceeds one screen per section is two specs.
+- Update the spec in place as decisions land. The spec is the record; comments are the discussion.
+
+### Self-review
+
+- [ ] No placeholders remain.
+- [ ] No sections conflict.
+- [ ] The spec covers one implementation plan's worth of work.
+- [ ] Every requirement has exactly one reading.
+
 ## Your issue
 
 Every session works on an issue. Legion pre-fills `issue` from `LEGION_ISSUE`: use a native issue key
@@ -26,6 +58,7 @@ dispatch_issue({ project, title, parent?, external?, spec? })
 ```
 It returns `details` `{ issue, topic }`. Use `dispatch_issue` only to create an issue; never use
 it to park a question.
+When `spec` is supplied, follow [Writing a spec](#writing-a-spec).
 
 ## Asking
 
@@ -65,6 +98,7 @@ answer. Use `reply_to_ask` on `dispatch_comment` to reply under your own ask; it
 exclusive with `reply_to`.
 
 ## The spec is where narrative goes
+Write and update primary documents according to [Writing a spec](#writing-a-spec).
 
 Read the current document before changing it:
 

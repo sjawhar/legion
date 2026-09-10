@@ -25,13 +25,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-async function openArtifacts(page: Page, isPhone: boolean) {
-  if (isPhone) {
-    const reviewPanel = page.getByRole("button", { name: /review panel/i });
-    if ((await reviewPanel.getAttribute("aria-expanded")) !== "true") {
-      await reviewPanel.click();
-    }
-  }
+async function openArtifacts(page: Page) {
   await page.getByRole("tab", { name: "Artifacts" }).click();
 }
 
@@ -47,7 +41,7 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await createAsk(issue.key, { question: "Can this ship?" });
 
   await page.goto(`/issues/${issue.key}`);
-  await openArtifacts(page, testInfo.project.name === "iphone");
+  await openArtifacts(page);
 
   const upload = page.getByLabel("Upload artifact");
   await upload.setInputFiles(diagramPath);
@@ -63,7 +57,16 @@ test("artifacts upload, version, primary selection, references, and phone layout
 
   await upload.setInputFiles(diagramPath);
   await expect(diagram).toContainText("2 versions");
-  await diagram.getByRole("button", { name: "Show all versions" }).click();
+  const showAllVersions = diagram.getByRole("button", { name: "Show all versions" });
+  if (testInfo.project.name === "iphone") {
+    const [tabBox, versionsBox] = await Promise.all([
+      page.getByRole("tab", { name: "Artifacts" }).boundingBox(),
+      showAllVersions.boundingBox(),
+    ]);
+    expect(tabBox?.height).toBeGreaterThanOrEqual(44);
+    expect(versionsBox?.height).toBeGreaterThanOrEqual(44);
+  }
+  await showAllVersions.click();
   await expect(diagram).toContainText("Version 1");
   await expect(diagram).toContainText("Version 2");
   await expect(diagram).toContainText("SHA-256");
@@ -98,8 +101,11 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await createComment(issue.key, {
     body: `See dispatch://${issue.key}/artifact/diagram-png before deciding.`,
   });
+  await createComment(issue.key, {
+    body: `See dispatch://${issue.key}/artifact/spec before deciding.`,
+  });
   await page.reload();
-  await openArtifacts(page, testInfo.project.name === "iphone");
+  await openArtifacts(page);
   await expect(diagram.getByLabel("Referenced by")).toContainText("Comment");
   await expect(diagram.getByLabel("Referenced by")).toContainText("diagram.png");
   const documentRequests: string[] = [];
@@ -110,8 +116,13 @@ test("artifacts upload, version, primary selection, references, and phone layout
   });
   await diagram.getByLabel("Referenced by").getByRole("link", { name: "diagram.png" }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/diagram-png`);
-  await expect(page.getByTestId("artifact-diagram-png")).toHaveClass(/ring-2/);
-  expect(documentRequests).toEqual([]);
+  const artifactsPanel = page.getByRole("tabpanel", { name: "Artifacts" });
+  await expect(artifactsPanel.getByRole("img", { name: "diagram.png version 2" })).toBeVisible();
+  await expect(artifactsPanel.getByTestId("artifact-header")).toHaveClass(/ring-2/);
+  await page.screenshot({ path: testInfo.outputPath("image-artifact.png"), fullPage: true });
+
+  await openArtifacts(page);
+  await page.screenshot({ path: testInfo.outputPath("artifacts-tab.png"), fullPage: true });
 
   await expect(notes.getByLabel("Referenced by")).toContainText("notes.md");
   await notes.getByLabel("Referenced by").getByRole("link", { name: "notes.md" }).click();
@@ -120,7 +131,17 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await expect(page.getByRole("region", { name: "Document version 1" })).toContainText(
     "Review notes"
   );
-  await page.screenshot({ path: testInfo.outputPath("artifacts-tab.png"), fullPage: true });
+
+  await openArtifacts(page);
+  const spec = page.getByTestId("artifact-spec");
+  await expect(spec.getByLabel("Referenced by")).toContainText("spec.md");
+  await spec.getByLabel("Referenced by").getByRole("link", { name: "spec.md" }).click();
+  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/spec`);
+  await expect(page.getByRole("heading", { name: "spec.md" })).toBeVisible();
+  await expect(page.getByText("Not primary")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Back to primary spec" })).toBeVisible();
+  await expect(page.getByLabel("Version")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("non-primary-document.png"), fullPage: true });
 
   if (testInfo.project.name === "iphone") {
     await page.goto("/");

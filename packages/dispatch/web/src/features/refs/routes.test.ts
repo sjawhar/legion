@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   buildDispatchReference,
   buildIssuePath,
+  issueTabForRoute,
   parseDispatchReference,
   parseIssuePath,
 } from "./routes";
@@ -37,6 +38,41 @@ test("artifact route parser accepts the canonical and legacy browser forms", () 
     kind: "artifact",
     slug: "design",
   });
+});
+
+test("artifacts tab has its own issue route", () => {
+  expect(parseIssuePath(browserPath("issues/CORE-1/artifacts"))).toEqual({
+    key: "CORE-1",
+    kind: "artifacts",
+  });
+  expect(buildIssuePath({ key: "CORE-1", kind: "artifacts" })).toBe("/issues/CORE-1/artifacts");
+});
+
+test("artifact routes select Artifacts unless they name the primary document", () => {
+  expect(
+    issueTabForRoute(
+      { key: "CORE-1", kind: "artifact", slug: "diagram" },
+      { kind: "image", primary: false }
+    )
+  ).toBe("artifacts");
+  expect(
+    issueTabForRoute(
+      { key: "CORE-1", kind: "artifact", slug: "spec" },
+      { kind: "doc", primary: true }
+    )
+  ).toBe("spec");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "issue" }, undefined)).toBe("log");
+  expect(issueTabForRoute({ id: "ask-1", key: "CORE-1", kind: "ask" }, undefined)).toBe("log");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "spec" }, undefined)).toBe("spec");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "log" }, undefined)).toBe("log");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "children" }, undefined)).toBe("children");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "artifacts" }, undefined)).toBe("artifacts");
+  expect(
+    issueTabForRoute(
+      { key: "CORE-1", kind: "artifact", slug: "diagram", version: 2 },
+      { kind: "image", primary: false }
+    )
+  ).toBe("artifacts");
 });
 
 test("reference builders preserve dispatch version syntax while emitting canonical browser paths", () => {

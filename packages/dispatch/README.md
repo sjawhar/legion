@@ -13,9 +13,10 @@ the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
 repository-to-project settings page at `/settings`; TanStack Query and SSE keep
 the issue, Inbox, documents, and sidebar current.
 
-The desktop shell has a sidebar, issue content, and review margin. Below the `md`
-breakpoint, navigation is a drawer and the margin is a bottom sheet. Controls use
-44 px minimum touch targets.
+The desktop shell has a sidebar, issue content, and review margin. Issue content
+has Spec, Log, Children, and Artifacts tabs; the margin holds Comments and Pinned.
+Below the `xl` breakpoint, navigation is a drawer and the margin is a bottom
+sheet. Controls use 44 px minimum touch targets.
 
 ## Development
 

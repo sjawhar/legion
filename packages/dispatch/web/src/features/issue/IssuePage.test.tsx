@@ -2,7 +2,7 @@ import { afterAll, expect, spyOn, test } from "bun:test";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import { api, type ListEventsOptions } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
@@ -85,13 +85,20 @@ function stubIssuePage(nextIssue: IssueDetails): () => void {
   };
 }
 
-function renderIssuePage(path = "/issues/CORE-1") {
+function CurrentRoute() {
+  const location = useLocation();
+  return <output data-testid="current-route">{`${location.pathname}${location.search}`}</output>;
+}
+
+function renderIssuePage(path = "/issues/CORE-1", navigateTo?: string) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
   return render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
+        <CurrentRoute />
+        {navigateTo === undefined ? null : <Link to={navigateTo}>Navigate to test route</Link>}
         <Routes>
           <Route
             path="/issues/:key/*"
@@ -466,5 +473,291 @@ test("IssuePage shows the orphan affordance for an unmapped current spec deep li
     getArtifactText.mockRestore();
     restore();
     globalThis.WebSocket = originalWebSocket;
+  }
+});
+
+test("IssuePage renders an image artifact in the Artifacts tab", async () => {
+  const imageArtifact = {
+    created_at: "2026-09-09T01:00:00Z",
+    created_by: { id: "alice", kind: "user" as const },
+    id: "artifact-image",
+    issue_key: "CORE-1",
+    kind: "image" as const,
+    name: "diagram.png",
+    primary: false,
+    slug: "diagram-png",
+    versions: [
+      {
+        authors: [{ id: "alice", kind: "user" as const }],
+        created_at: "2026-09-09T01:00:00Z",
+        mime: "image/png",
+        named: false,
+        number: 1,
+        sha256: "image-sha",
+        size: 10,
+        summary: null,
+      },
+    ],
+  };
+  const restore = stubIssuePage({ ...issue, artifacts: [...issue.artifacts, imageArtifact] });
+  const view = renderIssuePage("/issues/CORE-1/artifacts/diagram-png");
+
+  try {
+    await screen.findByRole("tab", { name: "Artifacts", selected: true });
+    expect(screen.getByRole("img", { name: "diagram.png version 1" })).not.toBeNull();
+    expect(screen.getByTestId("artifact-header").className).toContain("ring-2");
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage does not mount an image as the hidden Spec document", async () => {
+  const imageArtifact = {
+    created_at: "2026-09-09T01:00:00Z",
+    created_by: { id: "alice", kind: "user" as const },
+    id: "artifact-image",
+    issue_key: "CORE-1",
+    kind: "image" as const,
+    name: "diagram.png",
+    primary: false,
+    slug: "diagram-png",
+    versions: [
+      {
+        authors: [{ id: "alice", kind: "user" as const }],
+        created_at: "2026-09-09T01:00:00Z",
+        mime: "image/png",
+        named: false,
+        number: 1,
+        sha256: "image-sha",
+        size: 10,
+        summary: null,
+      },
+    ],
+  };
+  const restore = stubIssuePage({ ...issue, artifacts: [...issue.artifacts, imageArtifact] });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Primary",
+    version: 1,
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec", "/issues/CORE-1/artifacts/diagram-png");
+
+  try {
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    await waitFor(() => expect(getArtifactText).toHaveBeenCalledWith("artifact-1"));
+    getArtifactText.mockClear();
+    fireEvent.click(screen.getByRole("link", { name: "Navigate to test route" }));
+    await screen.findByRole("img", { name: "diagram.png version 1" });
+    expect(getArtifactText).not.toHaveBeenCalledWith("artifact-image");
+  } finally {
+    view.unmount();
+    getArtifactText.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage labels a non-primary document and links back to the primary spec", async () => {
+  const documentArtifact = {
+    created_at: "2026-09-09T01:00:00Z",
+    created_by: { id: "alice", kind: "user" as const },
+    id: "artifact-design",
+    issue_key: "CORE-1",
+    kind: "doc" as const,
+    name: "design.md",
+    primary: false,
+    slug: "design",
+    versions: [
+      {
+        authors: [{ id: "alice", kind: "user" as const }],
+        created_at: "2026-09-09T01:00:00Z",
+        mime: "text/markdown",
+        named: true,
+        number: 1,
+        sha256: "document-sha",
+        size: 10,
+        summary: "Initial design",
+      },
+    ],
+  };
+  const restore = stubIssuePage({ ...issue, artifacts: [...issue.artifacts, documentArtifact] });
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...documentArtifact,
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Design",
+    version: 1,
+  });
+  const view = renderIssuePage("/issues/CORE-1/artifacts/design");
+
+  try {
+    await screen.findByRole("tab", { name: "Artifacts", selected: true });
+    expect(screen.getByRole("heading", { name: "design.md" })).not.toBeNull();
+    expect(screen.getByText("Not primary")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Back to primary spec" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/spec"
+    );
+    expect(screen.queryByLabelText("Artifact version")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("current-route").textContent).toBe(
+        "/issues/CORE-1/artifacts/design?v=1"
+      )
+    );
+  } finally {
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage shows an unavailable image version instead of the latest image", async () => {
+  const imageArtifact = {
+    created_at: "2026-09-09T01:00:00Z",
+    created_by: { id: "alice", kind: "user" as const },
+    id: "artifact-image",
+    issue_key: "CORE-1",
+    kind: "image" as const,
+    name: "diagram.png",
+    primary: false,
+    slug: "diagram-png",
+    versions: [
+      {
+        authors: [{ id: "alice", kind: "user" as const }],
+        created_at: "2026-09-09T01:00:00Z",
+        mime: "image/png",
+        named: false,
+        number: 1,
+        sha256: "image-sha",
+        size: 10,
+        summary: null,
+      },
+    ],
+  };
+  const restore = stubIssuePage({ ...issue, artifacts: [...issue.artifacts, imageArtifact] });
+  const view = renderIssuePage("/issues/CORE-1/artifacts/diagram-png?v=999");
+
+  try {
+    await screen.findByRole("tab", { name: "Artifacts", selected: true });
+    expect(screen.getByText("Version 999 is not available for this artifact.")).not.toBeNull();
+    expect(screen.queryByRole("img", { name: "diagram.png version 1" })).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage explains when an artifact slug does not exist", async () => {
+  const restore = stubIssuePage(issue);
+  const view = renderIssuePage("/issues/CORE-1/artifacts/missing");
+
+  try {
+    await screen.findByText("No artifact missing on CORE-1.");
+    expect(screen.getByRole("link", { name: "View artifacts" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/artifacts"
+    );
+    expect(screen.getByRole("tablist", { name: "Issue detail" })).not.toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage hides the Artifacts panel after switching to Spec", async () => {
+  const restore = stubIssuePage(issue);
+  const view = renderIssuePage("/issues/CORE-1/artifacts");
+
+  try {
+    await screen.findByRole("tab", { name: "Artifacts", selected: true });
+    fireEvent.click(screen.getByRole("tab", { name: "Spec" }));
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    const artifactsPanel = view.container.querySelector<HTMLDivElement>("#issue-artifacts-panel");
+    expect(artifactsPanel?.hidden).toBe(true);
+    expect(artifactsPanel?.getAttribute("aria-hidden")).toBe("true");
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage encodes primary-document version selection in the artifact route", async () => {
+  const primaryArtifact = issue.artifacts[0];
+  if (primaryArtifact === undefined) {
+    throw new Error("IssuePage test fixture needs a primary document.");
+  }
+  const versionedIssue = {
+    ...issue,
+    artifacts: [
+      {
+        ...primaryArtifact,
+        versions: [
+          {
+            authors: [{ id: "alice", kind: "user" as const }],
+            created_at: "2026-09-09T01:00:00Z",
+            mime: "text/markdown",
+            named: true,
+            number: 1,
+            sha256: "primary-sha",
+            size: 10,
+            summary: "Initial spec",
+          },
+        ],
+      },
+    ],
+  };
+  const restore = stubIssuePage(versionedIssue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...versionedIssue.artifacts[0],
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Primary",
+    version: 1,
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByLabelText("Version");
+    fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("current-route").textContent).toBe(
+        "/issues/CORE-1/artifacts/spec?v=1"
+      )
+    );
+  } finally {
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage shows a failed historical document version", async () => {
+  const restore = stubIssuePage(issue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...issue.artifacts[0],
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Primary",
+    version: 1,
+  });
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockRejectedValue(
+    new Error("missing version")
+  );
+  const view = renderIssuePage("/issues/CORE-1/artifacts/spec?v=999");
+
+  try {
+    await screen.findByText("No version 999 of spec.md.");
+    expect(screen.getByRole("link", { name: "View current version" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/spec"
+    );
+  } finally {
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getArtifactVersion.mockRestore();
+    restore();
   }
 });

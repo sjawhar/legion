@@ -32,6 +32,37 @@ const listIssuesQuery = `
 	order by i.updated_at desc, i.key desc
 `
 
+const defaultIssueSpecMarkdown = `## Decisions needed
+
+_List only decisions requiring human authority, taste, or risk appetite, with options, tradeoffs, and a recommendation._
+
+None.
+
+## Acceptance
+
+_List numbered outcomes that name the check and user-facing surface that verifies each one._
+
+## Requirements
+
+_Use a requirement | provenance table with verbatim human quotes or inferred reasoning._
+
+## Design
+
+_List the files, components, routes, and data flow that change._
+
+## Errors
+
+_Use a condition | behaviour table; do not specify silent fallbacks._
+
+## Testing
+
+_Map every acceptance line to the suite or scenario that proves it._
+
+## Rejected
+
+_List each considered alternative and the reason it was rejected._
+`
+
 func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -212,10 +243,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	markdown := ""
-	if input.Spec != nil {
+	markdown := defaultIssueSpecMarkdown
+	if input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		markdown = *input.Spec
 	}
+
 	authors, err := encodeJSON([]model.Actor{actor})
 	if err != nil {
 		s.writeHandlerError(w, err)

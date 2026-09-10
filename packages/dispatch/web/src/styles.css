@@ -47,6 +47,9 @@ a {
 }
 
 @media (max-width: 1279px) {
+  html {
+    scroll-padding-bottom: 5rem;
+  }
   button,
   a,
   input:not([type="checkbox"]):not([type="radio"]),

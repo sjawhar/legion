@@ -32,11 +32,8 @@ import { VersionDiff } from "../doc/VersionDiff";
 import { buildIssuePath, parseIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { Unfurl } from "../refs/Unfurl";
+import { artifactVersionUrl, formatArtifactBytes } from "./ArtifactHeader";
 import { Upload } from "./Upload";
-
-function artifactVersionUrl(artifactID: string, version: number): string {
-  return `/api/v1/artifacts/${encodeURIComponent(artifactID)}/versions/${version}`;
-}
 
 function kindIcon(kind: Artifact["kind"]): ReactNode {
   const common = {
@@ -87,19 +84,6 @@ function versionName(version: Version): string {
   return `Version ${version.number}${version.summary === null ? "" : ` — ${version.summary}`}`;
 }
 
-function formatBytes(bytes: number | undefined): string {
-  if (bytes === undefined) {
-    return "Size unavailable";
-  }
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export function BlobVersionComparison({
   after,
   before,
@@ -116,7 +100,9 @@ export function BlobVersionComparison({
           <p className={`text-xs font-medium ${textMutedOnSurfaceMuted}`}>
             From · Version {before.number}
           </p>
-          <p className={`mt-1 text-sm ${textSecondaryOnSurface}`}>{formatBytes(before.size)}</p>
+          <p className={`mt-1 text-sm ${textSecondaryOnSurface}`}>
+            {formatArtifactBytes(before.size)}
+          </p>
           <p className={`mt-1 break-all text-xs ${textMutedOnSurfaceMuted}`}>
             SHA-256 {before.sha256}
           </p>
@@ -125,7 +111,9 @@ export function BlobVersionComparison({
           <p className={`text-xs font-medium ${textMutedOnSurfaceMuted}`}>
             To · Version {after.number}
           </p>
-          <p className={`mt-1 text-sm ${textSecondaryOnSurface}`}>{formatBytes(after.size)}</p>
+          <p className={`mt-1 text-sm ${textSecondaryOnSurface}`}>
+            {formatArtifactBytes(after.size)}
+          </p>
           <p className={`mt-1 break-all text-xs ${textMutedOnSurfaceMuted}`}>
             SHA-256 {after.sha256}
           </p>
@@ -199,9 +187,22 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
         <div className={`flex min-w-0 items-center gap-2 ${textSecondaryOnSurface}`}>
           {kindIcon(artifact.kind)}
           <div className="min-w-0">
-            <h2 className={`truncate font-semibold ${textPrimaryOnSurface}`}>{artifact.name}</h2>
+            <h2 className={`truncate font-semibold ${textPrimaryOnSurface}`}>
+              <Link
+                className={`underline ${linkText} ${linkHoverText}`}
+                to={buildIssuePath({
+                  key: artifact.issue_key,
+                  kind: "artifact",
+                  slug: artifact.slug,
+                })}
+              >
+                {artifact.name}
+              </Link>
+            </h2>
             <p className={`text-xs ${textMutedOnSurface}`}>
-              {artifact.slug} · {versions.length} {versions.length === 1 ? "version" : "versions"}
+              {artifact.kind} · {artifact.slug} · {versions.length}{" "}
+              {versions.length === 1 ? "version" : "versions"} · Created{" "}
+              <Timestamp at={artifact.created_at} />
             </p>
           </div>
         </div>
@@ -215,7 +216,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
           <div className="flex flex-col items-end gap-1">
             <span className={`text-xs font-medium ${textMutedOnSurface}`}>Not primary</span>
             <button
-              className={`rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
               disabled={makePrimary.isPending}
               onClick={() => makePrimary.mutate()}
               type="button"
@@ -226,7 +227,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
         ) : (
           <span title="Only documents can be primary">
             <button
-              className={`cursor-not-allowed rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textDisabled}`}
+              className={`min-h-11 cursor-not-allowed rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textDisabled}`}
               disabled
               title="Only documents can be primary"
               type="button"
@@ -251,7 +252,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
           <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Versions</h3>
           {versions.length > namedVersions.length ? (
             <button
-              className={`text-sm font-medium ${linkText} ${linkHoverText}`}
+              className={`min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
               onClick={() => setShowAllVersions((current) => !current)}
               type="button"
             >
@@ -270,7 +271,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
               >
                 <span className={textSecondaryOnSurface}>{versionName(version)}</span>
                 <a
-                  className={`font-medium ${linkText} ${linkHoverText}`}
+                  className={`inline-flex min-h-11 items-center font-medium ${linkText} ${linkHoverText}`}
                   download=""
                   href={artifactVersionUrl(artifact.id, version.number)}
                 >
@@ -280,7 +281,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
                   <Timestamp at={version.created_at} />
                   {artifact.kind === "doc"
                     ? null
-                    : ` · ${formatBytes(version.size)} · SHA-256 ${version.sha256 ?? "unavailable"}`}
+                    : ` · ${formatArtifactBytes(version.size)} · SHA-256 ${version.sha256 ?? "unavailable"}`}
                 </span>
               </li>
             ))}
@@ -296,7 +297,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
               From
               <select
                 aria-label={`Compare ${artifact.name} from`}
-                className={`mt-1 block w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
+                className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
                 onChange={(event) => setBefore(Number(event.target.value))}
                 value={beforeVersion}
               >
@@ -311,7 +312,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
               To
               <select
                 aria-label={`Compare ${artifact.name} to`}
-                className={`mt-1 block w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
+                className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
                 onChange={(event) => setAfter(Number(event.target.value))}
                 value={afterVersion}
               >

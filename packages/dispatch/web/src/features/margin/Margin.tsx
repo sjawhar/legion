@@ -158,10 +158,10 @@ function useMarginSheet(): MarginSheetModel {
     retryComments,
     retryIssue,
     retryItem,
-    routeArtifactSlug,
     routeItemId,
     visibleArtifact,
   } = useMarginItems(tab);
+
   const sheetExpanded = issueKey !== undefined && expandedIssueKey === issueKey;
   const toggleSheet = useCallback(
     (expanded?: boolean) => {
@@ -184,19 +184,6 @@ function useMarginSheet(): MarginSheetModel {
       setComposer(undefined);
     }
   }, [composer, isClosed, visibleArtifact?.id]);
-  useEffect(() => {
-    if (
-      routeArtifactSlug === undefined ||
-      visibleArtifact === undefined ||
-      visibleArtifact.kind === "doc"
-    ) {
-      return;
-    }
-    setTab("artifacts");
-    if (window.matchMedia("(max-width: 1279px)").matches) {
-      setExpandedIssueKey(issueKey);
-    }
-  }, [issueKey, routeArtifactSlug, visibleArtifact]);
   useEffect(() => {
     if (routeItemId !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
       setExpandedIssueKey(issueKey);
@@ -295,12 +282,8 @@ function useMarginSheet(): MarginSheetModel {
   };
 }
 
-interface MarginProps {
-  ArtifactsTabSlot?: () => ReactNode;
-}
-
-export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
+export function Margin(): ReactNode {
   const model = useMarginSheet();
 
-  return <MarginSheet ArtifactsTabSlot={ArtifactsTabSlot} model={model} />;
+  return <MarginSheet model={model} />;
 }
