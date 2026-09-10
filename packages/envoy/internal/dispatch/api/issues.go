@@ -280,7 +280,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 // so agents, which cannot read the human inbox, can see what is waiting.
 func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]model.Ask, error) {
 	rows, err := q.Query(ctx, `
-		select id::text, issue_key, author, question, options, multiple, custom, urgency, anchor, state, answer, created_at
+		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, created_at
 		from asks where issue_key = $1 and state = 'open' order by created_at, id
 	`, key)
 	if err != nil {

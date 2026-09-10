@@ -54,7 +54,6 @@ test("API client normalizes server asks with null options", async () => {
         answer: null,
         author: { id: "agent", kind: "session" },
         created_at: "2026-09-09T00:00:00Z",
-        custom: true,
         id: "ask-1",
         issue_key: "CORE-1",
         multiple: false,

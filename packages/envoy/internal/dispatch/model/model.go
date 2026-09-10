@@ -124,7 +124,6 @@ type Ask struct {
 	Question  string      `json:"question"`
 	Options   []AskOption `json:"options"`
 	Multiple  bool        `json:"multiple"`
-	Custom    bool        `json:"custom"`
 	Urgency   string      `json:"urgency"`
 	Anchor    *Anchor     `json:"anchor"`
 	State     string      `json:"state"`

@@ -24,7 +24,6 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		Question string             `json:"question"`
 		Options  []model.AskOption  `json:"options"`
 		Multiple *bool              `json:"multiple"`
-		Custom   *bool              `json:"custom"`
 		Urgency  string             `json:"urgency"`
 		Anchor   *model.AnchorInput `json:"anchor"`
 		Actor    *model.Actor       `json:"actor"`
@@ -53,16 +52,8 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	if input.Multiple != nil {
 		multiple = *input.Multiple
 	}
-	custom := true
-	if input.Custom != nil {
-		custom = *input.Custom
-	}
 	if input.Options == nil {
 		input.Options = []model.AskOption{}
-	}
-	if !custom && len(input.Options) == 0 {
-		writeError(w, "INVALID_ASK", http.StatusBadRequest, "non-custom asks require answer options")
-		return
 	}
 	seenOptions := make(map[string]struct{}, len(input.Options))
 	for index := range input.Options {
@@ -124,10 +115,10 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	var ask model.Ask
 	if err := tx.QueryRow(r.Context(), `
-		insert into asks (issue_key, author, question, options, multiple, custom, urgency, anchor)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		insert into asks (issue_key, author, question, options, multiple, urgency, anchor)
+		values ($1, $2, $3, $4, $5, $6, $7)
 		returning id::text, created_at
-	`, issueKey, author, input.Question, options, multiple, custom, urgency, anchorJSON).Scan(&ask.ID, &ask.CreatedAt); err != nil {
+	`, issueKey, author, input.Question, options, multiple, urgency, anchorJSON).Scan(&ask.ID, &ask.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -136,7 +127,6 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	ask.Question = input.Question
 	ask.Options = input.Options
 	ask.Multiple = multiple
-	ask.Custom = custom
 	ask.Urgency = urgency
 	ask.Anchor = anchor
 	ask.State = "open"
@@ -223,8 +213,8 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "selected answers must be ask option labels")
 		return
 	}
-	if len(input.Selected) == 0 && (!ask.Custom || !hasText) {
-		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "answer requires a selected option or custom text")
+	if len(input.Selected) == 0 && !hasText {
+		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "answer requires a selected option or free-text answer")
 		return
 	}
 	answer := model.AskAnswer{User: actor.ID, Selected: input.Selected, Text: input.Text, At: time.Now().UTC()}
@@ -266,14 +256,14 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
 	return scanAsk(q.QueryRow(ctx, `
-		select id::text, issue_key, author, question, options, multiple, custom, urgency, anchor, state, answer, created_at
+		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, created_at
 		from asks where id = $1
 	`, id))
 }
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
 	return scanAsk(tx.QueryRow(ctx, `
-		select id::text, issue_key, author, question, options, multiple, custom, urgency, anchor, state, answer, created_at
+		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, created_at
 		from asks where id = $1 for update
 	`, id))
 }
@@ -282,7 +272,7 @@ func scanAsk(row pgx.Row) (model.Ask, error) {
 	var ask model.Ask
 	var author, options, anchor, answer []byte
 	if err := row.Scan(
-		&ask.ID, &ask.IssueKey, &author, &ask.Question, &options, &ask.Multiple, &ask.Custom, &ask.Urgency, &anchor, &ask.State, &answer, &ask.CreatedAt,
+		&ask.ID, &ask.IssueKey, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency, &anchor, &ask.State, &answer, &ask.CreatedAt,
 	); err != nil {
 		return model.Ask{}, err
 	}

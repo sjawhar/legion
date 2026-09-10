@@ -16,7 +16,7 @@ export interface AskCardProps {
 export function AskCard({ ask, answerAsk: answer = answerAsk }: AskCardProps): ReactNode {
   const queryClient = useQueryClient();
   const [selected, setSelected] = useState<string[]>([]);
-  const [customText, setCustomText] = useState("");
+  const [answerText, setAnswerText] = useState("");
   const [optimisticallyAnswered, setOptimisticallyAnswered] = useState(false);
   const mutation = useMutation({
     mutationFn: (input: AnswerAskInput) => answer(ask.id, input),
@@ -43,10 +43,10 @@ export function AskCard({ ask, answerAsk: answer = answerAsk }: AskCardProps): R
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const text = customText.trim();
+    const text = answerText.trim();
     mutation.mutate(text === "" ? { selected } : { selected, text });
   };
-  const canSubmit = selected.length > 0 || (ask.custom && customText.trim() !== "");
+  const canSubmit = selected.length > 0 || answerText.trim() !== "";
   const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
 
   if (ask.state === "answered" || optimisticallyAnswered) {
@@ -128,20 +128,18 @@ export function AskCard({ ask, answerAsk: answer = answerAsk }: AskCardProps): R
             })}
           </fieldset>
         )}
-        {ask.custom ? (
-          <label
-            className="block text-sm font-medium text-slate-700"
-            htmlFor={`ask-${ask.id}-custom`}
-          >
-            Your answer
-            <textarea
-              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:border-sky-500"
-              id={`ask-${ask.id}-custom`}
-              onChange={(event) => setCustomText(event.target.value)}
-              value={customText}
-            />
-          </label>
-        ) : null}
+        <label
+          className="block text-sm font-medium text-slate-700"
+          htmlFor={`ask-${ask.id}-answer`}
+        >
+          Your answer
+          <textarea
+            className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:border-sky-500"
+            id={`ask-${ask.id}-answer`}
+            onChange={(event) => setAnswerText(event.target.value)}
+            value={answerText}
+          />
+        </label>
         <button
           className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white enabled:hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
           disabled={!canSubmit || mutation.isPending}

@@ -11,7 +11,6 @@ function ask(overrides: Partial<Ask> = {}): Ask {
     answer: null,
     author: { kind: "session", id: "session-1" },
     created_at: "2026-09-09T00:00:00Z",
-    custom: false,
     id: "ask-1",
     issue_key: "CORE-1",
     multiple: false,
@@ -43,8 +42,13 @@ test("AskCard submits the selected single option", async () => {
     />
   );
 
+  expect(screen.getByLabelText("Your answer")).toBeTruthy();
+  const submit = screen.getByRole("button", { name: "Submit answer" });
+  expect(submit.hasAttribute("disabled")).toBe(true);
+
   fireEvent.click(screen.getByRole("radio", { name: "Ship" }));
-  fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
+  expect(submit.hasAttribute("disabled")).toBe(false);
+  fireEvent.click(submit);
 
   await waitFor(() => expect(submitted).toEqual([{ id: "ask-1", input: { selected: ["Ship"] } }]));
 });
@@ -68,18 +72,17 @@ test("AskCard submits every checked multiple option", async () => {
   await waitFor(() => expect(submitted).toEqual([{ selected: ["Docs", "Tests"] }]));
 });
 
-test("AskCard submits custom text without inventing a selected option", async () => {
+test("AskCard submits free-text without inventing a selected option", async () => {
   const submitted: Array<{ selected: string[]; text?: string }> = [];
   renderCard(
     <AskCard
-      ask={ask({ custom: true })}
+      ask={ask()}
       answerAsk={async (_id, input) => {
         submitted.push(input);
         return ask({ state: "answered" });
       }}
     />
   );
-
   fireEvent.change(screen.getByLabelText("Your answer"), {
     target: { value: "Take the third path" },
   });
