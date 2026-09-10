@@ -184,3 +184,80 @@ fi
   exit 1
 }
 printf 'PASS: missing-token error names the exact secrets-wrapped invocation\n'
+
+checkpoint_nine_root_file="${temporary_dir}/checkpoint-nine-root.json"
+checkpoint_nine_children_file="${temporary_dir}/checkpoint-nine-children.json"
+export CHECKPOINT_NINE_ROOT_FILE="$checkpoint_nine_root_file"
+export CHECKPOINT_NINE_CHILDREN_FILE="$checkpoint_nine_children_file"
+
+# Overwrites the shared fake curl (every earlier checkpoint invocation above has already run and
+# asserted) so checkpoint 9's root/children Dispatch-status fixtures are independently settable.
+cat >"${fake_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+request="$*"
+printf '%s\n' "$request" >>"$CURL_LOG"
+case "$request" in
+  *"/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1"*)
+    printf '%s' "$(<"$CHECKPOINT_NINE_CHILDREN_FILE")"
+    ;;
+  *"/api/v1/issues/LEGSMOKE-1"*)
+    printf '%s' "$(<"$CHECKPOINT_NINE_ROOT_FILE")"
+    ;;
+  *)
+    printf 'unexpected curl request: %s\n' "$request" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${fake_bin}/curl"
+printf 'envoy\n' >"${smoke_dir}/webhook-mode"
+
+printf '{"key":"LEGSMOKE-1","status":"done"}' >"$checkpoint_nine_root_file"
+printf '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"done"}]' >"$checkpoint_nine_children_file"
+PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 9 >"$output_file" 2>&1
+[[ "$(<"$output_file")" == *'CHECKPOINT 9 OK: root issue and all its children are done'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 9 passes when the root issue and every child are done\n'
+
+printf '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"done"},{"key":"LEGSMOKE-3","parent":"LEGSMOKE-1","status":"in_progress"}]' >"$checkpoint_nine_children_file"
+if PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 9 >"$output_file" 2>&1; then
+  printf 'expected checkpoint 9 to fail when a child issue is not done\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 9 FAILED: LEGSMOKE-1 has a child issue that is not done'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 9 fails with a clear message when a child issue is not done\n'
+
+printf '{"key":"LEGSMOKE-1","status":"in_progress"}' >"$checkpoint_nine_root_file"
+printf '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"done"}]' >"$checkpoint_nine_children_file"
+if PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 9 >"$output_file" 2>&1; then
+  printf 'expected checkpoint 9 to fail when the root issue is not done\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 9 FAILED: Dispatch issue LEGSMOKE-1 is not done'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 9 fails with a clear message when the root issue is not done\n'

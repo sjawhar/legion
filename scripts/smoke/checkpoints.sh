@@ -96,11 +96,6 @@ dispatch_root_key() {
   smoke_root_issue
 }
 
-issue_number() {
-  local key="$1"
-  printf '%s\n' "${key##*#}"
-}
-
 tree_window() {
   local key="$1"
   local owner="${key%%/*}"
@@ -362,19 +357,16 @@ checkpoint_eight() {
 
 checkpoint_nine() {
   local root
-  local issue
+  local dispatch_issue_state
+  local children
 
-  require_env SMOKE_ARCHITECT_LOGIN
-  require_env SMOKE_SIGNOFF_FRAGMENT
-  root="$(root_key)"
-  issue="$(gh issue view "$(issue_number "$root")" -R "$SMOKE_REPO" --json state,comments)"
-  jq -e '.state == "CLOSED"' >/dev/null <<<"$issue" || fail "root issue is not closed"
-  jq -e --arg architect "$SMOKE_ARCHITECT_LOGIN" --arg signoff "$SMOKE_SIGNOFF_FRAGMENT" '
-    any(.comments[]; .author.login == $architect and (.body | contains($signoff)))
-  ' >/dev/null <<<"$issue" || fail "root lacks an architect-attributed sign-off comment"
-  state | jq -e --arg root "$root" '.trees[$root].status == "lingering"' >/dev/null ||
-    fail "${root} is not lingering"
-  printf 'CHECKPOINT 9 OK: architect signed off and root is lingering\n'
+  root="$(dispatch_root_key)"
+  dispatch_issue_state="$(dispatch_issue "$root")"
+  jq -e '.status == "done"' >/dev/null <<<"$dispatch_issue_state" || fail "Dispatch issue ${root} is not done"
+  children="$(dispatch_children "$root")"
+  jq -e 'all(.[]; .status == "done")' >/dev/null <<<"$children" ||
+    fail "${root} has a child issue that is not done"
+  printf 'CHECKPOINT 9 OK: root issue and all its children are done\n'
 }
 
 checkpoint_ten() {

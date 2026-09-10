@@ -142,7 +142,7 @@ Then post the comment and run checkpoint 10. The command captures the daemon-log
 | 6 | `SMOKE_ARCHITECT_WINDOW`, `SMOKE_VERDICT_FRAGMENT`, `SMOKE_RAW_CHECK_FRAGMENT` | One architect verdict appears in the pane; raw check noise is absent. |
 | 7 | `SMOKE_BRANCH_PROTECTION=1`, `SMOKE_PR`, `SMOKE_RETRO_COMMIT`, `SMOKE_REVIEWER_LOGIN` | Reviewer `.legion` deletion precedes its approval; retro is durable; final PR diff has no `.legion` path; records the pre-merge base for checkpoint 8. |
 | 8 | `SMOKE_BRANCH_PROTECTION=1`, `SMOKE_PR`, `SMOKE_HUMAN_LOGIN` | Current head has human approval; merge is squash-shaped onto checkpoint 7's recorded base; main has no `.legion` tree. |
-| 9 | `SMOKE_ROOT_ISSUE`, `SMOKE_ARCHITECT_LOGIN`, `SMOKE_SIGNOFF_FRAGMENT` | Architect sign-off closes a lingering root. |
+| 9 | `SMOKE_ROOT_ISSUE` optional | Dispatch reports the root issue and all its children as `done`. |
 | 10 | `arm-revival`, `SMOKE_WORKER_WINDOW`, `SMOKE_ARCHITECT_WINDOW`, `SMOKE_COMMENT_FRAGMENT` | Daemon logs `no_holder → probe → revive` after the arm point; the worker receives the comment without architect consumption. |
 | 11 | `SMOKE_RESURRECTION_ISSUE`, `SMOKE_RESURRECTION_ROLE`, `SMOKE_RESURRECTION_WORKER_SESSION`, `SMOKE_WORKER_WINDOW`, `SMOKE_CATCHUP_FRAGMENT` | Second live issue advances exactly one generation and its specific revived worker receives catch-up. |
 | 12 | `SMOKE_ROOT_ISSUE`, `SMOKE_QUEUED_ISSUE` | The lingering root released its slot and the queued issue was promoted. |
