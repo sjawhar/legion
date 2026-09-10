@@ -20,6 +20,9 @@ LEGION_APP_LOGINS="${LEGION_APP_LOGINS:-legion-implementer[bot],legion-reviewer[
 readonly LEGION_APP_LOGINS
 readonly webhook_events="${SMOKE_WEBHOOK_EVENTS:-issues,issue_comment,sub_issues,pull_request,pull_request_review,check_run}"
 readonly webhook_forwarder_url="https://webhook-forwarder.github.com/hook"
+# Identifies this rig as the acting session on every Dispatch write it makes directly (bearer
+# callers must supply `actor.kind == "session"` -- see `requireActor` in the Dispatch server).
+readonly smoke_actor_id="legion-smoke-$(date -u +%Y%m%dT%H%M%SZ)"
 
 fail() {
   printf 'error: %s\n' "$*" >&2
@@ -321,7 +324,7 @@ ensure_root_issue() {
   response="$(curl --fail --silent --show-error \
     -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
     -H 'Content-Type: application/json' \
-    -d "$(jq -nc --arg project "$smoke_dispatch_project" --arg title "$title" '{project: $project, title: $title}')" \
+    -d "$(jq -nc --arg project "$smoke_dispatch_project" --arg title "$title" --arg actor "$smoke_actor_id" '{project: $project, title: $title, actor: {kind: "session", id: $actor, origin: {session_title: "Legion smoke rig"}}}')" \
     "${DISPATCH_URL%/}/api/v1/issues")" ||
     fail "could not create Dispatch root issue in ${smoke_dispatch_project}"
   key="$(jq -er '.key' <<<"$response")" || fail "Dispatch issue creation response lacked a key: ${response}"
@@ -576,7 +579,6 @@ main() {
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config
-  ensure_root_issue
   (
     cd "${repo_root}/packages/envoy"
     go build -o out/envoy-listener ./cmd/listener
@@ -635,6 +637,11 @@ main() {
       bun run "${repo_root}/scripts/smoke/envoy-bridge.ts"
     wait_for_envoy_bridge
   fi
+  # The daemon only admits issues whose events it has ingested; resync skips unknown keys, so
+  # this must run after the daemon (and, in envoy mode, the bridge that relays Dispatch issue
+  # events to it) are both confirmed ready -- never before, or a fresh rig's root issue is
+  # created but never triaged.
+  ensure_root_issue
   case "${SMOKE_BRANCH_PROTECTION:-}" in
     1)
       configure_branch_protection

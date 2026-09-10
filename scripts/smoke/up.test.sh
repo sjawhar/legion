@@ -12,7 +12,10 @@ headers_file="$(mktemp)"
 body_file="$(mktemp)"
 response_file="$(mktemp)"
 gh_call_file="$(mktemp)"
-trap 'rm -f "$source_file" "$warning_file" "$assertion_file" "$headers_file" "$body_file" "$response_file" "$gh_call_file"; rm -rf "$fake_bin"' EXIT
+order_log="$(mktemp)"
+actor_body_file="$(mktemp)"
+main_output_file="$(mktemp)"
+trap 'rm -f "$source_file" "$warning_file" "$assertion_file" "$headers_file" "$body_file" "$response_file" "$gh_call_file" "$order_log" "$actor_body_file" "$main_output_file"; rm -rf "$fake_bin"' EXIT
 export SMOKE_DIR="${fake_bin}/smoke"
 
 sed '$d' "$up_script" >"$source_file"
@@ -248,3 +251,108 @@ fi
 }
 
 printf 'PASS: records a created Dispatch root issue and reuses it on a later rerun\n'
+
+export SMOKE_ORDER_LOG="$order_log"
+export SMOKE_ACTOR_BODY_FILE="$actor_body_file"
+
+cat >"${fake_bin}/go" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${fake_bin}/go"
+
+# Overwrites the shared fake curl (unused by any later test -- this is the file's last section)
+# so the root-issue POST's actual `-d` body is captured for the actor assertion below.
+cat >"${fake_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+body=""
+url=""
+while (($#)); do
+  case "$1" in
+    -d | --data | --data-binary)
+      body="$2"
+      shift 2
+      ;;
+    -H | --header)
+      shift 2
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+case "$url" in
+  */api/v1/issues)
+    printf 'curl:issues-create\n' >>"$SMOKE_ORDER_LOG"
+    printf '%s' "$body" >"$SMOKE_ACTOR_BODY_FILE"
+    printf '{"key":"LEGSMOKE-42"}'
+    ;;
+  *)
+    printf 'unexpected curl request: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${fake_bin}/curl"
+
+# Stubs every other main() dependency so the boot sequence runs with no real daemon, tmux pane,
+# Docker container, or Go build -- only relative call order and the root-issue POST body matter
+# here (`ensure_root_issue` itself, and its underlying curl invocation, are left real).
+require_command() { :; }
+assert_port_free() { :; }
+ensure_nats() { printf 'ensure_nats\n' >>"$order_log"; }
+start_process() {
+  printf 'start_process:%s\n' "$1" >>"$order_log"
+  : >"${SMOKE_DIR}/${1}.log"
+}
+wait_for_json() { printf 'wait_for_json:%s\n' "$1" >>"$order_log"; }
+assert_webhook_round_trip() { printf 'assert_webhook_round_trip\n' >>"$order_log"; }
+wait_for_envoy_bridge() { printf 'wait_for_envoy_bridge\n' >>"$order_log"; }
+
+rm -f "${SMOKE_DIR}/root-issue"
+export SMOKE_REPO="sjawhar/legion-smoke"
+export SMOKE_PROJECT="sjawhar/24"
+export GITHUB_WEBHOOK_SECRET="legion-smoke-secret"
+export GH_AGENT_APP_PRIVATE_KEY_B64="dummy"
+export GH_REVIEW_APP_PRIVATE_KEY_B64="dummy"
+export DISPATCH_URL="http://dispatch.test"
+export DISPATCH_TOKEN="test-dispatch-token"
+export SMOKE_WEBHOOK_MODE="envoy"
+
+if ! main >"$main_output_file" 2>&1; then
+  printf 'expected up.sh main() to succeed; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+
+[[ "$(<"$main_output_file")" == *'RIG READY'* ]] || {
+  printf 'expected up.sh main() to finish with RIG READY; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+
+daemon_ready_line="$(grep -n '^wait_for_json:Legion daemon$' "$order_log" | head -1 | cut -d: -f1)"
+bridge_ready_line="$(grep -n '^wait_for_envoy_bridge$' "$order_log" | head -1 | cut -d: -f1)"
+root_issue_line="$(grep -n '^curl:issues-create$' "$order_log" | head -1 | cut -d: -f1)"
+
+[[ -n "$daemon_ready_line" && -n "$bridge_ready_line" && -n "$root_issue_line" ]] || {
+  printf 'expected daemon-ready, bridge-ready, and root-issue-create markers in the call order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+((daemon_ready_line < root_issue_line)) || {
+  printf 'expected the daemon-ready wait before the root-issue POST; call order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+((bridge_ready_line < root_issue_line)) || {
+  printf 'expected the envoy-bridge-ready wait before the root-issue POST; call order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+
+printf 'PASS: creates the Dispatch root issue only after the daemon and envoy bridge report ready\n'
+
+jq -e '.actor.kind == "session" and (.actor.id | type == "string" and length > 0)' >/dev/null "$actor_body_file" || {
+  printf 'expected the root-issue creation request to carry actor.kind == "session"; body:\n%s\n' "$(<"$actor_body_file")" >&2
+  exit 1
+}
+
+printf 'PASS: root-issue creation request carries a session actor for the bearer-authenticated POST\n'
