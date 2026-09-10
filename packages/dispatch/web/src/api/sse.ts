@@ -2,11 +2,19 @@ import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
 import {
+  type AttemptOutcome,
   EventStreamHttpError,
+  initialStreamState,
+  type QueryKey,
   readEventStream,
-  reconnectDelayMs,
+  type StreamApplicationEvent,
+  type StreamEffect,
   type StreamEvent,
+  type StreamState,
+  type StreamTimer,
+  type StreamTransitionEvent,
   setConnectionState,
+  transition,
 } from "./live";
 import type { Event, EventType } from "./types";
 
@@ -121,17 +129,6 @@ export function applyEventInvalidations(queryClient: QueryInvalidator, event: Ev
   }
 }
 
-function invalidateAfterReconnect(queryClient: QueryInvalidator): void {
-  // A gap in the stream (dropped connection, tab asleep, server restart, the replay
-  // cap closing the stream) can hide events. Refetch everything a live event would
-  // have touched so nothing missed while disconnected stays stale.
-  queryClient.invalidateQueries({ queryKey: ["issues"] });
-  queryClient.invalidateQueries({ queryKey: ["inbox"] });
-  queryClient.invalidateQueries({ queryKey: ["user-state"] });
-  queryClient.invalidateQueries({ queryKey: ["issue"] });
-  queryClient.invalidateQueries({ queryKey: ["events"] });
-}
-
 // Trailing debounce for burst invalidation: a cold-start replay or a flurry of events
 // on one issue invalidates each affected key once after 100ms of quiet, not once per
 // event.
@@ -141,223 +138,197 @@ const INVALIDATION_DEBOUNCE_MS = 100;
 // only caller that ever sets it is a test proving the watchdog reconnects a
 // connection that goes silent without erroring — production code always uses the
 // default 45s.
+
 export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
   const queryClient = useQueryClient();
-  const lastId = useRef(0);
+  const stateRef = useRef<StreamState>(initialStreamState);
+  const resourcesRef = useRef<{
+    controller: AbortController | undefined;
+    invalidationTimer: number | undefined;
+    pendingInvalidations: Map<string, QueryKey>;
+    reconnectTimer: number | undefined;
+    watchdogTimer: number | undefined;
+  }>({
+    controller: undefined,
+    invalidationTimer: undefined,
+    pendingInvalidations: new Map(),
+    reconnectTimer: undefined,
+    watchdogTimer: undefined,
+  });
 
   useEffect(() => {
-    let cancelled = false;
-    let controller: AbortController | undefined;
-    let watchdogTimer: number | undefined;
-    let reconnectTimer: number | undefined;
-    let invalidationTimer: number | undefined;
-    let attempt = 0;
-    let forceImmediateReconnect = false;
-    // True once a terminal (non-auth, non-transient) 4xx has been seen: the
-    // connection is done for good until the user reloads, so both a future
-    // connect() call and every visibility/online/offline handler must no-op.
-    let terminalFailure = false;
-    // True once the stream has opened successfully at least once: distinct from
-    // `attempt`, which forceReconnect() resets to 0 before every forced retry —
-    // using `attempt > 0` here would miss a genuine reconnect whenever online or
-    // visibilitychange fires the retry, since that reset always runs first.
-    let hasOpenedOnce = false;
+    const resources = resourcesRef.current;
 
-    const pendingInvalidations = new Map<string, readonly unknown[]>();
-
-    const clearWatchdog = () => {
-      if (watchdogTimer !== undefined) {
-        window.clearTimeout(watchdogTimer);
-        watchdogTimer = undefined;
+    const clearTimer = (timer: StreamTimer) => {
+      switch (timer) {
+        case "watchdog":
+          if (resources.watchdogTimer !== undefined) {
+            window.clearTimeout(resources.watchdogTimer);
+            resources.watchdogTimer = undefined;
+          }
+          return;
+        case "reconnect":
+          if (resources.reconnectTimer !== undefined) {
+            window.clearTimeout(resources.reconnectTimer);
+            resources.reconnectTimer = undefined;
+          }
+          return;
+        case "invalidation":
+          if (resources.invalidationTimer !== undefined) {
+            window.clearTimeout(resources.invalidationTimer);
+            resources.invalidationTimer = undefined;
+          }
       }
     };
-    const armWatchdog = () => {
-      clearWatchdog();
-      watchdogTimer = window.setTimeout(() => controller?.abort(), watchdogMs);
+
+    const dispatch = (event: StreamTransitionEvent) => {
+      const { effects, state } = transition(stateRef.current, event);
+      stateRef.current = state;
+      for (const effect of effects) {
+        runEffect(effect);
+      }
     };
 
-    const flushInvalidations = () => {
-      invalidationTimer = undefined;
-      const keys = [...pendingInvalidations.values()];
-      pendingInvalidations.clear();
-      for (const key of keys) {
-        queryClient.invalidateQueries({ queryKey: key });
+    const receive = (streamId: number, raw: StreamEvent) => {
+      let application: StreamApplicationEvent | undefined;
+      if (raw.event !== undefined && raw.event in knownEventTypes) {
+        const event = JSON.parse(raw.data) as Event;
+        application = { event, queryKeys: eventQueryKeys(event) };
       }
-    };
-    const scheduleInvalidations = (keys: readonly (readonly unknown[])[]) => {
-      for (const key of keys) {
-        pendingInvalidations.set(JSON.stringify(key), key);
-      }
-      if (invalidationTimer !== undefined) {
-        window.clearTimeout(invalidationTimer);
-      }
-      invalidationTimer = window.setTimeout(flushInvalidations, INVALIDATION_DEBOUNCE_MS);
+      dispatch({ application, id: raw.id, kind: "stream-event", streamId });
     };
 
-    const receive = (raw: StreamEvent) => {
-      if (raw.id !== undefined) {
-        const numericId = Number(raw.id);
-        // The server now forwards live events regardless of id (a lower id can
-        // commit after a higher one is already visible), so an out-of-order
-        // delivery must never move the reconnect cursor backward — take the max.
-        if (Number.isFinite(numericId) && numericId > lastId.current) {
-          lastId.current = numericId;
-        }
-      }
-      if (raw.event === undefined || !(raw.event in knownEventTypes)) {
-        return;
-      }
-      const event = JSON.parse(raw.data) as Event;
-      prependEventToLog(queryClient, event);
-      scheduleInvalidations(eventQueryKeys(event));
-    };
-
-    const connect = () => {
-      // The invariant this whole hook relies on: at most one of {an active
-      // controller, a pending reconnect timer} exists at any moment. Refusing to
-      // start a second stream here — on top of clearing any pending timer below —
-      // means a stale timer firing after a forced reconnect already started a new
-      // attempt can never open a second, duplicate subscription.
-      if (cancelled || controller !== undefined || terminalFailure) {
-        return;
-      }
-      if (reconnectTimer !== undefined) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = undefined;
-      }
-      const attemptController = new AbortController();
-      controller = attemptController;
-      let authFailureStatus: number | undefined;
-      let terminalStatus: number | undefined;
-
-      const run = async () => {
-        // The very first connection (lastId still at its initial 0) omits since
-        // entirely: the server now subscribes to the broker before resolving its
-        // own current head, so opening cold here can never race a separate
-        // head-lookup request the way a client-computed since= used to. Any
-        // later reconnect that already observed a real event id resumes from it.
-        const url =
-          lastId.current > 0 ? `/api/v1/events?since=${lastId.current}` : "/api/v1/events";
+    const run = async (
+      controller: AbortController,
+      since: number,
+      streamId: number
+    ): Promise<AttemptOutcome> => {
+      try {
+        const url = since > 0 ? `/api/v1/events?since=${since}` : "/api/v1/events";
         await readEventStream(url, {
-          onChunk: armWatchdog,
-          onEvent: receive,
-          onOpen: () => {
-            if (cancelled) {
+          onChunk: () => dispatch({ kind: "chunk", streamId }),
+          onEvent: (event) => receive(streamId, event),
+          onOpen: () => dispatch({ kind: "opened", streamId }),
+          signal: controller.signal,
+        });
+        return { kind: "closed" };
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return { kind: "closed" };
+        }
+        if (error instanceof EventStreamHttpError) {
+          if (error.status === 401 || error.status === 403) {
+            return { kind: "auth" };
+          }
+          if (isTerminalHttpStatus(error.status)) {
+            return { kind: "terminal", status: error.status };
+          }
+        }
+        return { kind: "transient", error };
+      }
+    };
+
+    const runEffect = (effect: StreamEffect) => {
+      switch (effect.kind) {
+        case "set-connection-state":
+          setConnectionState(effect.state);
+          return;
+        case "open-stream": {
+          const controller = new AbortController();
+          resources.controller = controller;
+          void run(controller, effect.since, effect.streamId).then((outcome) => {
+            dispatch({ kind: "attempt-finished", outcome, streamId: effect.streamId });
+          });
+          return;
+        }
+        case "clear-stream":
+          resources.controller = undefined;
+          return;
+        case "start-watchdog": {
+          clearTimer("watchdog");
+          const streamId = stateRef.current.streamId;
+          const timer = window.setTimeout(() => {
+            if (resources.watchdogTimer !== timer) {
               return;
             }
-            const wasReconnecting = hasOpenedOnce;
-            hasOpenedOnce = true;
-            attempt = 0;
-            setConnectionState("connected");
-            armWatchdog();
-            if (wasReconnecting) {
-              invalidateAfterReconnect(queryClient);
-            }
-          },
-          signal: attemptController.signal,
-        });
-      };
-
-      run()
-        .catch((error: unknown) => {
-          if (error instanceof EventStreamHttpError) {
-            if (error.status === 401 || error.status === 403) {
-              authFailureStatus = error.status;
-            } else if (isTerminalHttpStatus(error.status)) {
-              terminalStatus = error.status;
-            }
-          }
-          // Anything else (network error, aborted, 5xx, 408/429, or the server
-          // simply closing the stream) reconnects below.
-        })
-        .finally(() => {
-          controller = undefined;
-          clearWatchdog();
-          if (cancelled) {
-            return;
-          }
-          if (authFailureStatus !== undefined) {
-            // The session is gone, not the connection — "Reconnecting" would be
-            // misleading, and retrying cannot succeed until the user signs back in.
-            setConnectionState("connected");
-            queryClient.invalidateQueries({ queryKey: ["whoami"] });
-            return;
-          }
-          if (terminalStatus !== undefined) {
-            // The request itself can never succeed unchanged; backing off and
-            // retrying forever would just spin instead of ever recovering. This
-            // is terminal until the user reloads — detach every handler so a
-            // later visibilitychange/online/offline can't reopen the stream.
-            terminalFailure = true;
-            setConnectionState("unavailable");
-            document.removeEventListener("visibilitychange", handleVisibilityChange);
-            window.removeEventListener("online", handleOnline);
-            window.removeEventListener("offline", handleOffline);
-            return;
-          }
-          if (forceImmediateReconnect) {
-            forceImmediateReconnect = false;
-            connect();
-            return;
-          }
-          setConnectionState("reconnecting");
-          const delay = reconnectDelayMs(attempt);
-          attempt += 1;
-          reconnectTimer = window.setTimeout(connect, delay);
-        });
-    };
-
-    // Forces a fresh attempt outside the normal backoff schedule: used when the tab
-    // regains visibility or the OS reports the network is back, so the user does not
-    // wait out an in-progress backoff delay to recover.
-    const forceReconnect = () => {
-      if (cancelled || terminalFailure) {
-        return;
-      }
-      attempt = 0;
-      if (controller === undefined) {
-        if (reconnectTimer !== undefined) {
-          window.clearTimeout(reconnectTimer);
-          reconnectTimer = undefined;
+            resources.watchdogTimer = undefined;
+            dispatch({ kind: "watchdog", streamId });
+          }, watchdogMs);
+          resources.watchdogTimer = timer;
+          return;
         }
-        connect();
-        return;
+        case "clear-timers":
+          for (const timer of effect.timers) {
+            clearTimer(timer);
+          }
+          if (effect.timers.includes("invalidation")) {
+            resources.pendingInvalidations.clear();
+          }
+          return;
+        case "schedule-reconnect": {
+          const timer = window.setTimeout(() => {
+            if (resources.reconnectTimer !== timer) {
+              return;
+            }
+            resources.reconnectTimer = undefined;
+            dispatch({ kind: "reconnect-timer" });
+          }, effect.delayMs);
+          resources.reconnectTimer = timer;
+          return;
+        }
+        case "apply-event":
+          prependEventToLog(queryClient, effect.event);
+          for (const key of effect.queryKeys) {
+            resources.pendingInvalidations.set(JSON.stringify(key), key);
+          }
+          return;
+        case "schedule-invalidations": {
+          const timer = window.setTimeout(() => {
+            if (resources.invalidationTimer !== timer) {
+              return;
+            }
+            resources.invalidationTimer = undefined;
+            dispatch({ kind: "flush-invalidations" });
+          }, INVALIDATION_DEBOUNCE_MS);
+          resources.invalidationTimer = timer;
+          return;
+        }
+        case "flush-invalidations":
+          for (const key of resources.pendingInvalidations.values()) {
+            queryClient.invalidateQueries({ queryKey: key });
+          }
+          resources.pendingInvalidations.clear();
+          return;
+        case "invalidate":
+          for (const key of effect.queryKeys) {
+            queryClient.invalidateQueries({ queryKey: key });
+          }
+          return;
+        case "abort-stream":
+          resources.controller?.abort();
+          return;
+        case "register-listeners":
+          document.addEventListener("visibilitychange", handleVisibilityChange);
+          window.addEventListener("online", handleOnline);
+          window.addEventListener("offline", handleOffline);
+          return;
+        case "remove-listeners":
+          document.removeEventListener("visibilitychange", handleVisibilityChange);
+          window.removeEventListener("online", handleOnline);
+          window.removeEventListener("offline", handleOffline);
+          return;
       }
-      forceImmediateReconnect = true;
-      controller.abort();
     };
+
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        forceReconnect();
+        dispatch({ kind: "force-reconnect" });
       }
     };
-    const handleOnline = () => forceReconnect();
-    const handleOffline = () => {
-      // The browser's own signal that the network is down: tear down a connection
-      // that would otherwise sit open (still receiving heartbeats from a proxy or
-      // local buffer) without ever telling the app it lost its route to the server.
-      controller?.abort();
-    };
+    const handleOnline = () => dispatch({ kind: "force-reconnect" });
+    const handleOffline = () => dispatch({ kind: "offline" });
 
-    connect();
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("online", handleOnline);
-    window.addEventListener("offline", handleOffline);
-
-    return () => {
-      cancelled = true;
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("online", handleOnline);
-      window.removeEventListener("offline", handleOffline);
-      clearWatchdog();
-      if (reconnectTimer !== undefined) {
-        window.clearTimeout(reconnectTimer);
-      }
-      if (invalidationTimer !== undefined) {
-        window.clearTimeout(invalidationTimer);
-      }
-      controller?.abort();
-      setConnectionState("connected");
-    };
+    dispatch({ kind: "start" });
+    return () => dispatch({ kind: "stop" });
   }, [queryClient, watchdogMs]);
 }
