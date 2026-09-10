@@ -824,6 +824,40 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("drains a pending controller notice at boot when the controller role claim was already live (no /controller/ready needed)", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const controller = controllerToken(daemonConfig.project);
+    state.roles[controller] = { role: "controller", sessionId: "ses-controller" };
+    const pendingPayload = JSON.stringify({ text: "@legion please investigate" });
+    state.controllerPendingNotices.push({ payloadJson: pendingPayload, eventId: "mention-1" });
+    const nats = new FakeNats();
+    const publications: Array<{ topic: string; payload: unknown }> = [];
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      const options = daemonTestDependencies(nats, publications, () => {});
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+        },
+      });
+
+      // Delivered without any `/controller/ready` call: the persisted role claim already shows
+      // the controller live, so boot itself drains the notice a crash stranded before the
+      // original request that recorded it ever got to drain it.
+      expect(publications).toContainEqual({
+        topic: roleTopic(controller),
+        payload: JSON.parse(pendingPayload),
+      });
+      expect(state.controllerPendingNotices).toEqual([]);
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("promotes queued persisted issues before boot completes when config raises the admission cap", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = { ...config(stateDir), admissionCap: 2 };

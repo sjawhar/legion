@@ -1637,6 +1637,60 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("retries a failed controller-notice publish with backoff instead of giving up after one attempt", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const published: string[] = [];
+    let attempts = 0;
+    const pump = startEventPump({
+      ...deps(state, nats, async (_topic, payloadJson) => {
+        attempts += 1;
+        if (attempts < 3) throw new Error("envoy unavailable");
+        published.push(payloadJson);
+      }),
+      controllerNoticeRetryDelayMs: () => 1,
+    });
+    const payloadJson = JSON.stringify({ text: "@legion please investigate" });
+    state.controllerPendingNotices.push({ payloadJson, eventId: "mention-1" });
+
+    await pump.drainControllerNotices();
+
+    expect(attempts).toBe(3);
+    expect(published).toEqual([payloadJson]);
+    expect(state.controllerPendingNotices).toEqual([]);
+    pump.stop();
+  });
+
+  it("stops retrying a failed controller-notice publish once the pump stops, without lingering", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    let attempts = 0;
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        attempts += 1;
+        throw new Error("envoy unavailable");
+      }),
+      controllerNoticeRetryDelayMs: () => 50,
+    });
+    state.controllerPendingNotices.push({
+      payloadJson: JSON.stringify({ text: "first" }),
+      eventId: "mention-1",
+    });
+
+    const drainPromise = pump.drainControllerNotices();
+    await Promise.resolve();
+    await Promise.resolve();
+    const attemptsBeforeStop = attempts;
+    pump.stop();
+
+    await drainPromise;
+
+    // The retry loop noticed `stop()` and exited instead of waiting out its 50ms backoff or
+    // retrying again — no attempt after the one already in flight when `stop()` ran.
+    expect(attempts).toBe(attemptsBeforeStop);
+    expect(state.controllerPendingNotices).toHaveLength(1);
+  });
+
   it("does not ack when a GitHub mention's publish rejects", async () => {
     const { state } = stateForIssue();
     const nats = new FakeNats();

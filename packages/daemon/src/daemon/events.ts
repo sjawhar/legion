@@ -6,6 +6,7 @@ import {
   roleTopic,
 } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
+import { createCancellableSleep } from "./cancellable-sleep";
 import type { DaemonConfig } from "./config";
 import type { LegionState } from "./legion-state";
 import type { DurableMessageControl, NatsTransport } from "./nats-transport";
@@ -129,6 +130,9 @@ export interface EventPumpDeps {
    * message runs against clean state.
    */
   fatal?(error: unknown): void | Promise<void>;
+  /** Overridable for tests; the real bounded backoff (`drainControllerNoticesLocked`'s doc
+   * comment) is 1s doubling to a 60s ceiling, which no test should have to wait out for real. */
+  controllerNoticeRetryDelayMs?(attempt: number): number;
   config: DaemonConfig;
 }
 
@@ -328,14 +332,17 @@ export interface EventPump {
   publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void>;
   /**
    * Delivers every `controllerPendingNotices` entry, in order, to the controller's role topic —
-   * called once the controller has just claimed its role (`/controller/ready`), so the publish
-   * should now succeed. Removes each notice, by identity, only after Envoy acks its publication
-   * (at-most-once, same discipline the deleted held-event queue once used for its own
-   * redelivery). Stops at the first failure, leaving the remainder queued for the next
-   * `/controller/ready` rather than skipping ahead or dropping any of them. Serialized: two
-   * overlapping calls (a second `/controller/ready` arriving while the first drain is still
-   * awaiting a publish) run one at a time, never interleaved, so neither double-publishes an
-   * entry nor drops one to a race against the other's removal.
+   * called once the controller has just claimed its role (`/controller/ready`) and once more at
+   * boot if a controller role claim was already live when the daemon started (see `index.ts`'s
+   * boot sequence), so the publish should now succeed. Removes each notice, by identity, only
+   * after Envoy acks its publication (at-most-once, same discipline the deleted held-event queue
+   * once used for its own redelivery). A failed publish retries the same notice with a bounded
+   * backoff (1s doubling to a 60s ceiling) rather than giving up after one attempt; the retry
+   * loop stops only once the queue empties or the pump itself stops (`stop()` cancels any wait in
+   * progress). Serialized: two overlapping calls (a second `/controller/ready` arriving while the
+   * first drain, including any retry backoff, is still in progress) run one at a time, never
+   * interleaved, so neither double-publishes an entry nor drops one to a race against the other's
+   * removal.
    */
   drainControllerNotices(): Promise<void>;
   stop(): void;
@@ -513,21 +520,40 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   // resolving so one caller's failure never wedges every later drain behind a permanently
   // rejected chain link.
   let controllerNoticeQueue: Promise<void> = Promise.resolve();
+  // Set once `stop()` runs; checked by the retry loop below so a sustained Envoy outage never
+  // keeps retrying past the pump's own shutdown, and cancels any wait currently in flight so the
+  // loop wakes immediately instead of lingering for the rest of its current backoff.
+  let controllerDrainDisposed = false;
+  const controllerDrainSleep = createCancellableSleep();
+
+  const defaultControllerNoticeRetryDelayMs = (attempt: number): number =>
+    Math.min(1_000 * 2 ** attempt, 60_000);
 
   const drainControllerNoticesLocked = async (): Promise<void> => {
     const role = controllerToken(deps.state.project);
-    while (deps.state.controllerPendingNotices.length > 0) {
+    // Bounded backoff for a retried publish, doubling from 1s to a 60s ceiling by default -- the
+    // same doubling-to-a-ceiling shape as `runWithRestart`'s own durable-consumer backoff
+    // (nats-transport.ts), just faster off the mark since a stuck retry here blocks nothing else
+    // (no reconnect storm to pace against). Overridable via `deps.controllerNoticeRetryDelayMs`
+    // so a test never has to wait out a real 1s-plus backoff.
+    const retryDelayMs = deps.controllerNoticeRetryDelayMs ?? defaultControllerNoticeRetryDelayMs;
+    let attempt = 0;
+    while (deps.state.controllerPendingNotices.length > 0 && !controllerDrainDisposed) {
       const notice = deps.state.controllerPendingNotices[0];
       if (!notice) break;
       try {
         await deps.envoyPublish(roleTopic(role), notice.payloadJson);
       } catch (error) {
+        const delayMs = retryDelayMs(attempt);
         console.error(
-          `[legion] failed to deliver pending controller notice ${notice.eventId}, leaving it queued for the next /controller/ready:`,
+          `[legion] failed to deliver pending controller notice ${notice.eventId}, retrying in ${delayMs}ms:`,
           error
         );
-        return;
+        attempt += 1;
+        await controllerDrainSleep.sleep(delayMs);
+        continue;
       }
+      attempt = 0;
       // By identity, not position: the entry just published is exactly this `notice` object,
       // wherever it now sits in the array (an unrelated append while this publish was in flight
       // would otherwise make a positional `shift()` remove the wrong entry).
@@ -887,6 +913,8 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       if (failures.length > 0) throw new AggregateError(failures, "Event pump processing failed");
     },
     stop(): void {
+      controllerDrainDisposed = true;
+      controllerDrainSleep.cancel();
       for (const unsubscribe of unsubscribers) unsubscribe();
     },
   };
