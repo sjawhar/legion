@@ -1,0 +1,41 @@
+{
+  "id": 232,
+  "issue_key": "LEGSMOKE-3",
+  "seq": 3,
+  "type": "ask.answered",
+  "actor": {
+    "kind": "user",
+    "id": "sjawhar"
+  },
+  "notify": true,
+  "created_at": "2026-09-10T02:20:00.000000Z",
+  "payload": {
+    "anchor": null,
+    "answer": {
+      "at": "2026-09-10T02:20:00.000000Z",
+      "selected": ["Approve"],
+      "text": null,
+      "user": "sjawhar"
+    },
+    "author": {
+      "id": "legion-daemon:LEGSMOKE",
+      "kind": "session"
+    },
+    "created_at": "2026-09-10T02:14:14.078484Z",
+    "custom": true,
+    "id": "36e95e78-81d5-4da3-ae7b-789a16640bd9",
+    "issue_key": "LEGSMOKE-3",
+    "multiple": false,
+    "options": [
+      {
+        "label": "Approve"
+      },
+      {
+        "label": "Reject"
+      }
+    ],
+    "question": "Approve the design?",
+    "state": "answered",
+    "urgency": "med"
+  }
+}

@@ -1,6 +1,10 @@
 import { ROLE_TOPIC_PREFIX } from "./subject";
 
-export type IssueKey = `${string}/${string}#${number}`;
+/** A Legion issue key: a Dispatch key (`^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-7`) going forward,
+ * or a legacy `owner/repo#number` GitHub issue key on state a pre-Dispatch daemon has not yet
+ * migrated. Not a template-literal union: both shapes are plain strings, distinguished at parse
+ * time (see `roleToken`/`parseRoleToken`). */
+export type IssueKey = string;
 
 export const LEGION_ROLES = [
   "architect",
@@ -22,6 +26,12 @@ export interface ParsedRoleToken {
 const ENVOY_ROLE_TOKEN = /^[a-z0-9][a-z0-9_-]*$/;
 const PROJECT_TOKEN = /^[a-z0-9]+$/;
 const ISSUE_PART = /^[a-z0-9._-]+$/;
+/** A Dispatch issue key: matches `IssueKey`'s Dispatch shape (uppercase project, then a numeric
+ * suffix). Distinguishes a Dispatch key from a legacy `owner/repo#number` key in `roleToken` and
+ * `parseRoleToken`, which encode each shape differently. */
+const DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
+const DISPATCH_ROLE_PART =
+  /^([a-z0-9]+)-([0-9]+)-(architect|planner|implementer|tester|reviewer|merger)$/;
 
 export function isLegionRole(role: string): role is LegionRole {
   return LEGION_ROLES.some((candidate) => candidate === role);
@@ -98,6 +108,12 @@ export function sanitizeToken(part: string): string {
 export function roleToken(project: string, issue: IssueKey, role: LegionRole): string {
   assertLegionProjectToken(project);
 
+  const dispatchMatch = DISPATCH_KEY_PATTERN.exec(issue);
+  if (dispatchMatch) {
+    const [, dispatchProject, number] = dispatchMatch;
+    return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
+  }
+
   const parsedIssue = parseIssueKey(issue);
   if (!parsedIssue) throw new Error(`Invalid IssueKey: ${issue}`);
 
@@ -114,9 +130,10 @@ export function roleTopic(token: string): string {
 }
 
 /**
- * Role tokens preserve the complete lowercased owner/repository identity. The
- * separator is the only `__` sequence; `_u`, `_d`, and `_h` encode underscore,
- * dot, and hyphen within either component.
+ * Role tokens preserve the complete lowercased issue identity. A Dispatch key encodes as
+ * `<project>-<number>-<role>` (its project component is already `[A-Z][A-Z0-9]*`, so lowercasing
+ * it needs no further escaping); a legacy `owner/repo#number` key keeps the `__`-separated
+ * encoding below. The two are unambiguous: only the legacy encoding ever contains `__`.
  */
 export function parseRoleToken(
   project: string,
@@ -129,6 +146,18 @@ export function parseRoleToken(
 
   const rest = token.slice(prefix.length);
   if (rest === "controller") return { controller: true };
+
+  if (!rest.includes("__")) {
+    const dispatchMatch = DISPATCH_ROLE_PART.exec(rest);
+    if (!dispatchMatch) return undefined;
+    const [, dispatchProject, numberPart, role] = dispatchMatch;
+    if (!dispatchProject || !numberPart || !role || !isLegionRole(role)) return undefined;
+    return {
+      project,
+      issue: `${dispatchProject.toUpperCase()}-${numberPart}`,
+      role,
+    };
+  }
 
   const match =
     /^([a-z0-9_]+)__([a-z0-9_]+)-(\d+)-(architect|planner|implementer|tester|reviewer|merger)$/.exec(

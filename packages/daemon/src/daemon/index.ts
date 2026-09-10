@@ -415,6 +415,9 @@ async function startDaemonLocked(
     onProbe: async (tree) => {
       if ((await processManager.probe(tree)) === "dead") await processManager.resurrect(tree);
     },
+    onAdmit: (issue) => {
+      processManager.admit(issue);
+    },
     onApprovalStatus: (effect) =>
       setApprovalStatus(effect, {
         runner,
@@ -452,9 +455,9 @@ async function startDaemonLocked(
   const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 
   const emitResync = async (): Promise<void> => {
-    // Serialized against durable GitHub messages: resync reads/writes the
-    // same PrState CI fields a durable checks settlement does, so the two
-    // must not interleave (see events.ts's queue doc comment).
+    // Serialized against the shared durable mutation lane: resync reads/writes the same PrState
+    // CI fields a durable Dispatch/GitHub checks-settlement message does, so the two must not
+    // interleave (see events.ts's queue doc comment).
     const payload = await eventPump.runExclusive(() =>
       runResync({
         state,

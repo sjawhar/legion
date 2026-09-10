@@ -1,0 +1,32 @@
+{
+  "id": 229,
+  "issue_key": "LEGSMOKE-1",
+  "seq": 15,
+  "type": "issue.closed",
+  "actor": {
+    "kind": "session",
+    "id": "legion-daemon:LEGSMOKE"
+  },
+  "notify": false,
+  "created_at": "2026-09-10T02:14:04.030819Z",
+  "payload": {
+    "closed_at": "2026-09-10T02:14:04.030819Z",
+    "created_at": "2026-09-10T02:13:55.925399Z",
+    "created_by": {
+      "id": "legion-daemon:LEGSMOKE",
+      "kind": "session"
+    },
+    "external_links": [],
+    "key": "LEGSMOKE-1",
+    "labels": [],
+    "last_seq": 15,
+    "number": 1,
+    "parent": null,
+    "primary_artifact_id": "d4a3e0aa-8dc2-41ba-9ebb-46268e7c71ce",
+    "project": "LEGSMOKE",
+    "route": null,
+    "status": "done",
+    "title": "T20 fixture capture — root",
+    "updated_at": "2026-09-10T02:14:04.030819Z"
+  }
+}

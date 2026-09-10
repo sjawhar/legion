@@ -12,6 +12,21 @@ import type { CheckRunRef } from "../state/types";
 /** Which read last set a fence's timestamp: a real GitHub webhook, or the daemon's own resync (board GraphQL/CI-status/merge-gate) read. At an identical clock a resync read is GitHub's authoritative source of truth and wins a tie against a disagreeing webhook observation. */
 export type UpdateSource = "webhook" | "resync";
 
+/** Legion's issue lifecycle, verbatim from Dispatch's `IssueStatuses`
+ * (packages/envoy/internal/dispatch/model/model.go). */
+export const ISSUE_STATUSES = [
+  "triage",
+  "icebox",
+  "backlog",
+  "todo",
+  "in_progress",
+  "testing",
+  "needs_review",
+  "retro",
+  "done",
+] as const;
+export type IssueStatus = (typeof ISSUE_STATUSES)[number];
+
 export interface IssueNode {
   key: IssueKey;
   title: string;
@@ -22,10 +37,23 @@ export interface IssueNode {
   labels: string[];
   backlogMarker?: string;
   finalCommentRef?: string;
-  /** The GitHub payload's `updated_at` (or, for a sub_issue event, `parent_issue.updated_at`) from the last event applied to this issue — a freshness fence, mirroring `PrState.headUpdatedAt`, against an out-of-order redelivery. */
-  updatedAt?: number;
-  /** The source of `updatedAt`'s last write; see `UpdateSource`. */
-  updatedAtSource?: UpdateSource;
+  /** The issue's Dispatch lifecycle status, set from `issue.created`/`issue.updated` events.
+   * Absent on an issue this daemon has not yet observed through the Dispatch lane. */
+  status?: IssueStatus;
+  /** The highest Dispatch event `seq` this daemon has applied to this issue, across every event
+   * type keyed on it (`issue.created`/`updated`/`closed` on itself, `child.status` delivered to
+   * it as a parent, `ask.answered` against its own design gate) — the at-most-once fence:
+   * `reduceDispatchEvent` drops any incoming event with `seq <= lastAppliedSeq` before mutating
+   * state or emitting an effect, and stamps this to the incoming `seq` after processing every
+   * event it does not drop, including a no-op one, so a redelivered no-op can't be reprocessed
+   * either. `child.status`/`ask.answered` against an issue this daemon has never created a node
+   * for stay unfenced by this field, but that is harmless: their own reducers are already no-ops
+   * without a node (`child.status`'s target) or a registered gate (`ask.answered`'s), so there is
+   * nothing for a redelivery to corrupt. Undefined until this issue's first Dispatch event is
+   * applied — Dispatch's own `Issue.last_seq` is the source this daemon is fencing against, so a
+   * millisecond-precision `updated_at` comparison is neither needed nor safe (same-millisecond
+   * redeliveries are indistinguishable by clock alone; this replaces that former fence). */
+  lastAppliedSeq?: number;
 }
 
 export interface TmuxWindowLocator {
@@ -116,20 +144,16 @@ export interface SpawnCapability {
   role: string;
 }
 
-/** A controller-bound event with no other source of truth to recover it from once the
- * controller becomes reachable again -- unlike the deleted general held-event queue (every
- * other durable effect is derivable from state and recovers via its own catch-up: a worker's
- * `workerCatchup`, the controller's own resync re-emission on `/controller/ready`), a Slack
- * mention's specific text has no state to re-derive it from. Recorded only by
- * `publishControllerDirect`'s 404-no-holder path and drained once, in order, by
- * `/controller/ready` (see `handleControllerReady` and `EventPump.drainControllerNotices`). */
+/** A controller-bound notification whose text cannot be re-derived from durable state once the
+ * controller reconnects. It is queued on a 404 no-holder response and drained in order by
+ * `/controller/ready`. */
 export interface ControllerPendingNotice {
   payloadJson: string;
   eventId: string;
 }
 
 export interface LegionState {
-  version: 18;
+  version: 19;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -153,6 +177,10 @@ export interface LegionState {
   >;
   controllerCapabilityHash?: string;
   controllerPendingNotices: ControllerPendingNotice[];
+  /** The design gate per root issue: `designAskId` is the `dispatch_ask` id the architect
+   * registered via `/legion/v1/gates/register`; `designApproved` is set to that same ask id once
+   * `ask.answered` selects `Approve` for it. Both absent before the architect opens the gate. */
+  gates: Record<IssueKey, { designAskId?: string; designApproved?: string }>;
 }
 
 export interface LegionStateInit {
@@ -160,13 +188,19 @@ export interface LegionStateInit {
   cap: number;
 }
 
-const ISSUE_KEY_PATTERN = /^[^/#]+\/[^/#]+#\d+$/;
+/** The legacy `owner/repo#number` GitHub issue key: still accepted by `IssueKeySchema` because
+ * existing daemon state may carry it until reducers/resync stop producing it. */
+const LEGACY_ISSUE_KEY_PATTERN = /^[^/#]+\/[^/#]+#\d+$/;
+/** The Dispatch issue key going forward (`^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-7`). */
+export const ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 const REPOSITORY_PATTERN = /^[^/]+\/[^/]+$/;
 const ENVOY_ROLE_TOKEN_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 
 const IssueKeySchema = z.custom<IssueKey>(
-  (value) => typeof value === "string" && ISSUE_KEY_PATTERN.test(value),
-  { message: "Expected owner/repo#number issue key" }
+  (value) =>
+    typeof value === "string" &&
+    (LEGACY_ISSUE_KEY_PATTERN.test(value) || ISSUE_KEY_PATTERN.test(value)),
+  { message: "Expected an owner/repo#number or a Dispatch PROJECT-number issue key" }
 );
 const RepositorySchema = z.custom<`${string}/${string}`>(
   (value) => typeof value === "string" && REPOSITORY_PATTERN.test(value),
@@ -189,8 +223,8 @@ const IssueNodeSchema = z
     labels: z.array(GateLabelSchema),
     backlogMarker: z.string().optional(),
     finalCommentRef: z.string().optional(),
-    updatedAt: z.number().optional(),
-    updatedAtSource: z.enum(["webhook", "resync"]).optional(),
+    status: z.enum(ISSUE_STATUSES).optional(),
+    lastAppliedSeq: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -300,7 +334,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(18),
+    version: z.literal(19),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -338,6 +372,14 @@ const LegionStateSchema = z
       .regex(/^[a-f0-9]{64}$/)
       .optional(),
     controllerPendingNotices: z.array(ControllerPendingNoticeSchema).default([]),
+    gates: z
+      .record(
+        IssueKeySchema,
+        z
+          .object({ designAskId: z.string().optional(), designApproved: z.string().optional() })
+          .strict()
+      )
+      .default({}),
   })
   .strict();
 
@@ -349,7 +391,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 18,
+    version: 19,
     project,
     issues: {},
     trees: {},
@@ -362,6 +404,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     workerAdmission: { queue: [] },
     phases: {},
     controllerPendingNotices: [],
+    gates: {},
   };
 }
 
@@ -639,17 +682,10 @@ function migrateV16State(state: unknown): unknown {
  * and `heldAt` have no counterpart here: every notice's role is always the controller by
  * construction, and durability never depended on when it was originally held, only that it still
  * is. Merged with (never overwriting) any `controllerPendingNotices` already present on the raw
- * state -- a state that reached this step more than once (e.g. an interrupted earlier migration
- * attempt) must never lose whichever notices that first pass already converted -- and deduped by
- * `eventId` against both the already-present notices and every earlier entry converted in this
- * same pass: a `controllerHeldEvents` array can itself carry the same underlying event more than
- * once (e.g. two redeliveries recorded before either drained), and each already-accepted eventId
- * is folded into the same dedupe set as it converts, so a later duplicate is skipped too, not
- * only ones matching an already-present notice. A malformed entry (missing a
- * `payloadJson`/`eventId` string pair) is logged and discarded rather than silently dropped or
- * carried forward broken. A state with no
- * `controllerHeldEvents` at all (every state before v16 ever added one) gets an empty array,
- * same as before. */
+ * state and deduped by `eventId` against both already-present notices and earlier converted
+ * entries. A malformed entry (missing a `payloadJson`/`eventId` string pair) is logged and
+ * discarded rather than carried forward broken. A state with no `controllerHeldEvents` gets an
+ * empty array, same as before. */
 function migrateV17State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 17) return state;
   const { controllerHeldEvents, controllerPendingNotices: existingNotices, ...rest } = state;
@@ -683,6 +719,20 @@ function migrateV17State(state: unknown): unknown {
     : convertedNotices;
   return { ...rest, version: 18, controllerPendingNotices };
 }
+
+/** v18 -> v19: switches issue lifecycle state to Dispatch. Pre-Dispatch trees and issues cannot
+ * be represented safely, so they are rejected rather than discarded. */
+function migrateV18State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 18) return state;
+  if (
+    (recordValue(state.trees) && Object.keys(state.trees).length > 0) ||
+    (recordValue(state.issues) && Object.keys(state.issues).length > 0)
+  ) {
+    throw new Error("Cannot migrate a Legion state with active trees to the Dispatch lifecycle");
+  }
+  return { ...state, version: 19, gates: {} };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -696,22 +746,28 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV17State(
-    migrateV16State(
-      migrateV15State(
-        migrateV14State(
-          migrateV13State(
-            migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
-          )
-        )
-      )
-    )
-  );
+  // Ordered oldest-to-newest: each migration is a no-op unless `state.version` matches the one
+  // it upgrades from, so this reduce applies exactly the same chain the prior nested-call form
+  // did, just as an auditable list instead of a call pyramid.
+  const migrations: Array<(state: unknown) => unknown> = [
+    migrateV5State,
+    migrateV6State,
+    migrateV7State,
+    migrateV8State,
+    migrateV12State,
+    migrateV13State,
+    migrateV14State,
+    migrateV15State,
+    migrateV16State,
+    migrateV17State,
+    migrateV18State,
+  ];
+  const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 18) {
+  if (version !== 19) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

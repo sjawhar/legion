@@ -1,5 +1,7 @@
 import {
   controllerToken,
+  DISPATCH_ISSUE_TOPIC_PREFIX,
+  dispatchIssueSubject,
   EnvelopeSchema,
   type IssueKey,
   parseRoleToken,
@@ -8,6 +10,7 @@ import {
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import { createCancellableSleep } from "./cancellable-sleep";
 import type { DaemonConfig } from "./config";
+import { DispatchDecodeFailure, dispatchIssueEvent } from "./dispatch-events";
 import type { LegionState } from "./legion-state";
 import type { DurableMessageControl, NatsTransport } from "./nats-transport";
 import {
@@ -16,6 +19,7 @@ import {
   type EnvelopeJson,
   effectiveOutcome,
   type LegionEventPayload,
+  reduceDispatchEvent,
   reduceGithubEvent,
   refreshCiIdentity,
   settleCiVerdict,
@@ -25,7 +29,7 @@ import {
 const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
 const EXCEPTION_TOPIC = "notifications.envoy.exceptions.notifications.role.";
 /** JetStream stream carrying durable notifications; mirrors packages/envoy/internal/bus/nats.go:18. */
-const GITHUB_STREAM = "ENVOY_NOTIFICATIONS";
+const NOTIFICATION_STREAM = "ENVOY_NOTIFICATIONS";
 /** Fixed nak delay for a durable delivery that fails for a reason that may be transient (see processDurableMessage). */
 const DURABLE_NAK_DELAY_MS = 30_000;
 
@@ -33,6 +37,7 @@ const DURABLE_NAK_DELAY_MS = 30_000;
 const MAX_TERM_REASON_BYTES = 1_024;
 const TERM_REASON_ELLIPSIS = "…";
 const textEncoder = new TextEncoder();
+const DISPATCH_DURABLE_SUBJECT = dispatchIssueSubject("*", ">");
 
 /** Truncates `reason` so its UTF-8 byte length, including the appended ellipsis, never exceeds `MAX_TERM_REASON_BYTES`. */
 export function truncateTermReason(reason: string): string {
@@ -110,6 +115,8 @@ export interface EventPumpDeps {
   onLinger(tree: IssueKey): Promise<void>;
   onProbe(tree: IssueKey): Promise<void>;
   onApprovalStatus(effect: Extract<Effect, { kind: "approval-status" }>): Promise<void>;
+  onAdmit(issue: IssueKey): void;
+
   /**
    * Called when a durable effect's role has no live holder (Envoy 404).
    * State is already durable and correct by this point — the effect is a
@@ -322,11 +329,12 @@ function exceptionInfo(
 export interface EventPump {
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
   /**
-   * Runs `fn` serialized against every durable GitHub message: enqueued
-   * after every earlier operation on this queue settles, and before any
-   * later one starts. Used to run resync exclusively of the durable lane
-   * (see the queue's doc comment in events.ts) — not for ordinary event
-   * handling, which already goes through the queue internally.
+   * Runs `fn` serialized against the shared durable-mutation lane: enqueued after every earlier
+   * operation on this queue settles, and before any later one starts. Dispatch issue events,
+   * GitHub check settlement, and resync all share this one lane (see the queue's own doc
+   * comment further down in this file) — GitHub mentions are the separate durable exception,
+   * published directly outside it. Used to run resync exclusively of the lane; ordinary event
+   * handling already goes through it internally.
    */
   runExclusive<T>(fn: () => Promise<T>): Promise<T>;
   publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void>;
@@ -435,12 +443,13 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    * died), recovered by that worker's own catch-up on resume, never by holding or retrying the
    * event. Inside one (`recoveries` supplied by `applyDurableEvent`) it only records the info;
    * the recovery itself runs once, best-effort, after that transaction's own save commits (see
-   * `applyDurableEvent`). Anything else propagates: for the durable GitHub lane the caller's
-   * dispatch-then-save transaction treats it as fatal (this effect is not yet durable, and
-   * continuing with a live-state mutation whose full effect set didn't get applied would leave
-   * dirty memory serving other events); for a local caller (resync, or any other effect
-   * dispatched outside the durable lane) it simply fails that caller's own request. Shared by
-   * both lanes - there is no separate held/retry path.
+   * `applyDurableEvent`). Anything else propagates: for a durable transaction (Dispatch issue
+   * events and GitHub check settlement alike) the caller's dispatch-then-save transaction treats
+   * it as fatal (this effect is not yet durable, and continuing with a live-state mutation whose
+   * full effect set didn't get applied would leave dirty memory serving other events); for a
+   * local caller (resync, or any other effect dispatched outside a durable transaction) it
+   * simply fails that caller's own request. Shared by every source - there is no separate
+   * held/retry path.
    */
   const publisher = (
     eventId: string,
@@ -508,9 +517,9 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     }
   };
 
-  // Serializes `drainControllerNotices` the same way `githubQueue` serializes durable GitHub
-  // messages/resync -- a dedicated queue, not that one, since this drain never touches a
-  // `PrState` or anything `githubQueue` protects and chaining onto it would add unrelated
+  // Serializes `drainControllerNotices` the same way `durableQueue` serializes every durable
+  // mutation (Dispatch issue events, GitHub check settlement, resync) -- a dedicated queue, not
+  // that one, since this drain never touches a `PrState` or anything `durableQueue` protects and
   // cross-blocking. Two overlapping `/controller/ready` calls are a real possibility (nothing
   // prevents a second controller-ready delivery while the first drain is still awaiting a
   // publish); without this, interleaved reads of the same head entry would publish it twice, and
@@ -595,6 +604,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         await effectPublisher.publishController(effect.payload);
       else if (effect.kind === "linger") await deps.onLinger(effect.tree);
       else if (effect.kind === "probe") await deps.onProbe(effect.tree);
+      else if (effect.kind === "admit") deps.onAdmit(effect.issue);
       else if (effect.kind === "approval-status") await deps.onApprovalStatus(effect);
       else {
         const unhandled: never = effect;
@@ -611,7 +621,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   };
 
   /**
-   * Runs a github-sourced reducer once, directly against the live state
+   * Runs a reducer once (Dispatch or GitHub-sourced alike), directly against the live state
    * (mutating it in place, same as always), dispatches every derived
    * effect, then durably saves. This is the whole transaction, and its
    * order is deliberate: dispatching before saving means every effect
@@ -750,6 +760,25 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         controllerToken(deps.state.project),
         typeof envelope.payload === "string" ? envelope.payload : "{}"
       );
+    } else if (subject.startsWith(DISPATCH_ISSUE_TOPIC_PREFIX)) {
+      const [subjectKey] = subject.slice(DISPATCH_ISSUE_TOPIC_PREFIX.length).split(".");
+      if (!subjectKey) {
+        throw new DispatchDecodeFailure(`Dispatch durable subject has no issue key: ${subject}`);
+      }
+      if (!subjectKey.startsWith(`${deps.config.dispatchProject}-`)) return;
+      // Decoded and cross-checked here, before `applyDurableEvent` ever calls a reducer: a
+      // malformed inner Event or a subject/payload key mismatch is poison the daemon can log and
+      // move past (see `DispatchDecodeFailure`), not a `DurableReducerFailure` that would also
+      // restart the process for a message no redelivery can ever fix.
+      const event = dispatchIssueEvent(envelope);
+      if (event.key !== subjectKey) {
+        throw new DispatchDecodeFailure(
+          `Dispatch durable subject key ${subjectKey} disagrees with event issue_key ${event.key}`
+        );
+      }
+      await applyDurableEvent(subject, envelope, (state) =>
+        reduceDispatchEvent(state, event, deps.config)
+      );
     } else {
       const rawPayload = recordPayload(envelope);
       if (
@@ -804,6 +833,9 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    * - A reducer throw (`DurableReducerFailure`) is poison too — termed,
    *   then fatal (the reducer may have partially mutated live state
    *   before throwing; see `applyDurableEvent`'s doc comment).
+   * - A malformed Dispatch inner Event or a subject/payload key mismatch
+   *   (`DispatchDecodeFailure`) is poison only, never fatal: decoded before
+   *   any reducer runs, so live state was never touched.
    * - Any other failure from a reducer-derived event (`DurableFatalFailure`
    *   — a non-404 effect dispatch or a rejected `saveState`) is fatal:
    *   logged once, then `deps.fatal`, with no ack or nak — the broker
@@ -859,6 +891,10 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         await runFatal(error);
         return;
       }
+      if (error instanceof DispatchDecodeFailure) {
+        poisonMessage(subject, control, error.message, envelope.event_id);
+        return;
+      }
       if (error instanceof DurableFatalFailure) {
         console.error(
           `[legion] durable message fatally failed on ${subject} event_id=${envelope.event_id} (stream_seq=${control.streamSequence} delivery_seq=${control.deliverySequence}): ${error.message}`
@@ -878,22 +914,16 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     control.ack();
   };
 
-  // Durable GitHub messages and resync (see `runExclusive`, used by
-  // index.ts's resync scheduler) run one at a time, in delivery order,
-  // through a single promise chain: both mutate the same `PrState` CI
-  // fields (durable checks via writeCiFence/settleCiVerdict, resync via
-  // reconcilePrs's GitHub read), so interleaving them could publish an
-  // older resync-derived verdict after a newer durable settlement, or vice
-  // versa. The core-NATS lanes below (mention/exception) stay concurrent
-  // with this queue and with each other: they only ever touch role claims
-  // and tree status/locators (via `onException`), never a `PrState`, and
-  // no writer ever replaces or restores another writer's in-flight object,
-  // so that remaining overlap is safe without serialization.
-  let githubQueue: Promise<void> = Promise.resolve();
+  // Every durable state mutation and the resync scheduler run serially through this promise
+  // chain. Dispatch issue events, GitHub check settlement, and their resync counterparts all
+  // update LegionState and can derive effects from the same issue/PR records, so interleaving
+  // them could persist an older derived state after a newer event. Core-NATS mention and
+  // exception lanes remain concurrent because they do not enter the durable save transaction.
+  let durableQueue: Promise<void> = Promise.resolve();
 
   const runExclusive = <T>(fn: () => Promise<T>): Promise<T> => {
-    const result = githubQueue.then(fn);
-    githubQueue = result.then(
+    const result = durableQueue.then(fn);
+    durableQueue = result.then(
       () => {},
       () => {}
     );
@@ -903,9 +933,17 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
 
   const unsubscribers = [
     deps.nats.consumeDurable(
-      GITHUB_STREAM,
+      NOTIFICATION_STREAM,
       githubDurable,
       githubFilterSubjects,
+      (subject, data, control) => {
+        runExclusive(() => processDurableMessage(subject, data, control));
+      }
+    ),
+    deps.nats.consumeDurable(
+      NOTIFICATION_STREAM,
+      `legion-${deps.config.dispatchProject}-dispatch`,
+      [DISPATCH_DURABLE_SUBJECT],
       (subject, data, control) => {
         runExclusive(() => processDurableMessage(subject, data, control));
       }

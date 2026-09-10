@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, formatIssueKey, roleToken, roleTopic } from "@legion/contracts";
+import { controllerToken, formatIssueKey, roleTopic } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
@@ -201,6 +201,7 @@ function config(stateDir: string): DaemonConfig {
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
+    dispatchProject: "LEGSMOKE",
     boardProjectIds: ["PVT_board"],
     repos: ["acme/widgets"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
@@ -360,152 +361,6 @@ describe("startDaemon", () => {
     ]);
   });
 
-  it("heals missed board items and executes reconciled human approval wakes through the event pump", async () => {
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
-    const daemonConfig = config(stateDir);
-    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
-    const approvalIssue = formatIssueKey("acme", "widgets", 43);
-    const architect = roleToken(daemonConfig.project, approvalIssue, "architect");
-    state.issues[approvalIssue] = {
-      key: approvalIssue,
-      title: "Awaiting approval",
-      state: "open",
-      children: [],
-      released: true,
-      labels: ["needs-approval"],
-    };
-    state.trees[approvalIssue] = {
-      root: approvalIssue,
-      generation: 1,
-      status: "active",
-      launchFailures: 0,
-    };
-    state.roles[architect] = { issue: approvalIssue, role: "architect" };
-    const published: Array<{ topic: string; payload: unknown }> = [];
-    const logs: string[] = [];
-    const originalLog = console.log;
-    let resync: (() => void) | undefined;
-    let resyncComplete: Promise<void> | undefined;
-    let saves = 0;
-    let daemon: daemonIndex.DaemonHandle | undefined;
-    console.log = (...values: unknown[]) => logs.push(values.join(" "));
-
-    try {
-      daemon = await startDaemon(daemonConfig, {
-        deps: {
-          loadState: async () => state,
-          saveState: async () => {
-            saves += 1;
-          },
-          createNatsTransport: async () => new FakeNats(),
-          runner: async () => ({
-            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
-            stderr: "",
-            exitCode: 0,
-          }),
-          resolveDaemonEnvironment: async () => daemonEnvironment,
-          statPrompt: async () => {},
-          readPluginManifest: async () => validLegionPluginManifest,
-          envoyPublish: async (topic, payload) => {
-            published.push({ topic, payload: JSON.parse(payload) });
-          },
-          fetchGitHubProjectItems: async () => ({
-            items: [
-              {
-                content: {
-                  type: "Issue",
-                  number: 42,
-                  title: "Recovered issue",
-                  repository: "acme/widgets",
-                  updated_at: "2026-08-24T00:00:00.000Z",
-                },
-                status: "Todo",
-                labels: [],
-              },
-              {
-                content: {
-                  type: "Issue",
-                  number: 43,
-                  title: "Awaiting approval",
-                  repository: "acme/widgets",
-                  updated_at: "2026-08-24T00:00:00.000Z",
-                },
-                status: "Todo",
-                labels: ["human-approved"],
-              },
-            ],
-            excludedNullContentItems: 0,
-          }),
-          tokenManager: {
-            getToken: async () => ({
-              token: "test-token",
-              expiresAt: "2026-08-25T00:00:00.000Z",
-              gitIdentity: {
-                name: "legion-implement[bot]",
-                email: "1+legion-implement[bot]@users.noreply.github.com",
-              },
-            }),
-          },
-          setTimeout: (callback) => {
-            resync = () => {
-              resyncComplete = Promise.resolve().then(callback);
-            };
-            return 1 as never;
-          },
-          clearTimeout: () => {},
-          setInterval: () => 1 as never,
-          clearInterval: () => {},
-          onSignal: () => {},
-          exit: () => {},
-          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
-        },
-      });
-
-      if (!resync) throw new Error("Daemon did not schedule resync");
-      resync();
-      if (!resyncComplete) throw new Error("Daemon did not start resync");
-      await resyncComplete;
-
-      const issue = formatIssueKey("acme", "widgets", 42);
-      expect(state.issues[issue]).toMatchObject({
-        key: issue,
-        title: "Recovered issue",
-        state: "open",
-        released: true,
-      });
-      expect(state.issues[approvalIssue]?.labels).toEqual(["human-approved"]);
-      expect(published).toEqual([
-        {
-          topic: roleTopic(controllerToken(daemonConfig.project)),
-          payload: { type: "triage", issue, preexistingChildren: [] },
-        },
-        {
-          topic: roleTopic(architect),
-          payload: { type: "human-approved" },
-        },
-        {
-          topic: roleTopic(controllerToken(daemonConfig.project)),
-          payload: {
-            type: "resync",
-            anomalies: [],
-            healed: 1,
-            reconciledLabels: 2,
-            excludedNullContentItems: 0,
-            ciFetchFailures: 0,
-            ciFetchFailureDetails: [],
-          },
-        },
-      ]);
-      expect(saves).toBeGreaterThan(0);
-      expect(logs).toContain(
-        "[legion] resync complete: anomalies=0 healed=1 reconciled-labels=2 excluded-null-content-items=0 ciFetchFailures=0"
-      );
-    } finally {
-      await daemon?.stop();
-      console.log = originalLog;
-      await rm(stateDir, { recursive: true, force: true });
-    }
-  });
   it("does not resolve until boot-time admission reconciliation, including its tmux orphan reap, has settled", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
@@ -1076,6 +931,7 @@ describe("startDaemon", () => {
       expect(await response.json()).toEqual({ project: "acme1" });
       expect(nats.subscriptions.map((subscription) => subscription.subject)).toEqual([
         "notifications.github.acme.widgets.>",
+        "notifications.dispatch.issue.*.>",
         "notifications.slack.*.*.mention",
         "notifications.envoy.exceptions.notifications.role.>",
       ]);

@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { DISPATCH_ISSUE_TOPIC_PREFIX, dispatchIssueSubject, dispatchToolSpecs } from "@legion/contracts";
+import {
+  DISPATCH_ISSUE_TOPIC_PREFIX,
+  dispatchIssueSubject,
+  dispatchToolSpecs,
+} from "@legion/contracts";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
@@ -907,7 +911,11 @@ describe("envoy OMP extension", () => {
         roleClaims.push({ session_id: body.session_id, soft: body.soft });
         if (body.soft === true) {
           return Response.json(
-            { error: "role pr-queue is held by ses_fork_child", role: "pr-queue", holder: "ses_fork_child" },
+            {
+              error: "role pr-queue is held by ses_fork_child",
+              role: "pr-queue",
+              holder: "ses_fork_child",
+            },
             { status: 409 }
           );
         }

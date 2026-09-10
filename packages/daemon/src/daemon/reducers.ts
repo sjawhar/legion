@@ -1,25 +1,31 @@
-import {
-  formatIssueKey,
-  type IssueKey,
-  isLegionRole,
-  type LegionRole,
-  roleToken,
-} from "@legion/contracts";
+import { type IssueKey, isLegionRole, type LegionRole, roleToken } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
-import type { IssueNode, LegionState, PrState, TreeState, UpdateSource } from "./legion-state";
+import type { DispatchIssueEvent } from "./dispatch-events";
+import {
+  ISSUE_STATUSES,
+  type IssueNode,
+  type IssueStatus,
+  type LegionState,
+  type PrState,
+  type TreeState,
+  type UpdateSource,
+} from "./legion-state";
+
+export type { DispatchIssueEvent } from "./dispatch-events";
 
 export interface LegionEventPayload {
   type: string;
   [key: string]: unknown;
 }
 
-/** An effect a reducer derives from one event. For a durable GitHub event, every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). */
+/** An effect a reducer derives from one event. For a durable event (Dispatch issue events and GitHub check settlement alike), every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). */
 export type Effect =
   | { kind: "publish"; role: string; payload: LegionEventPayload }
   | { kind: "controller"; payload: LegionEventPayload }
   | { kind: "probe"; tree: IssueKey }
   | { kind: "linger"; tree: IssueKey }
-  | { kind: "approval-status"; repo: string; pr: number; sha: string };
+  | { kind: "approval-status"; repo: string; pr: number; sha: string }
+  | { kind: "admit"; issue: IssueKey };
 
 export interface EnvelopeJson {
   event_id: string;
@@ -361,13 +367,6 @@ export interface ClosedTreeActivityPayload extends LegionEventPayload {
   event: LegionEventPayload;
 }
 
-const SURVIVING_LABELS: Record<string, true> = {
-  "needs-approval": true,
-  "human-approved": true,
-  "legion-child": true,
-  "legion-backlog": true,
-};
-
 function asRecord(value: unknown): JsonRecord | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as JsonRecord)
@@ -400,52 +399,6 @@ function repository(payload: JsonRecord): string | undefined {
   return stringValue(asRecord(payload.repository)?.full_name) ?? stringValue(payload.repo);
 }
 
-function keyFor(repo: string, number: number): IssueKey | undefined {
-  const [owner, name, ...extra] = repo.split("/");
-  if (!owner || !name || extra.length > 0) return undefined;
-  return formatIssueKey(owner, name, number);
-}
-
-function labels(value: unknown): string[] {
-  const source = Array.isArray(value) ? value : asRecord(value)?.nodes;
-  if (!Array.isArray(source)) return [];
-  const result: string[] = [];
-  for (const label of source) {
-    const name = typeof label === "string" ? label : stringValue(asRecord(label)?.name);
-    if (name && SURVIVING_LABELS[name] && !result.includes(name)) result.push(name);
-  }
-  return result;
-}
-
-// Dispatch threads are human Q&A artifacts (GitHub sub-issues labeled
-// "dispatch-thread"), never Legion work items. Checked against the raw
-// payload — deliberately not via labels()/SURVIVING_LABELS, whose output
-// persists into IssueNode.labels and must stay within the GateLabelSchema
-// enum in legion-state.ts.
-function isDispatchThread(rawLabels: unknown): boolean {
-  const source = Array.isArray(rawLabels) ? rawLabels : asRecord(rawLabels)?.nodes;
-  if (!Array.isArray(source)) return false;
-  return source.some((label) => {
-    const name = typeof label === "string" ? label : stringValue(asRecord(label)?.name);
-    return name === "dispatch-thread";
-  });
-}
-
-function childKeys(repo: string, raw: JsonRecord): IssueKey[] {
-  const subIssues = raw.sub_issues;
-  const values = Array.isArray(subIssues) ? subIssues : asRecord(subIssues)?.nodes;
-  if (!Array.isArray(values)) return [];
-  const result: IssueKey[] = [];
-  for (const value of values) {
-    const record = asRecord(value);
-    if (isDispatchThread(record?.labels)) continue;
-    const number = numberValue(record?.number);
-    const key = number === undefined ? undefined : keyFor(repo, number);
-    if (key && !result.includes(key)) result.push(key);
-  }
-  return result;
-}
-
 function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
   let current = key;
   const visited = new Set<IssueKey>();
@@ -458,23 +411,6 @@ function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
     current = parent;
   }
   return undefined;
-}
-
-/**
- * Routes an event to an explicit role token. The daemon does not hold events
- * at the reducer level: release and liveness gating happen where the event
- * is actually delivered (the event pump's per-publish active check, and the
- * delivery-exception path when no subscriber is holding the role).
- */
-function routeToken(
-  state: LegionState,
-  issue: IssueKey,
-  token: string,
-  payload: LegionEventPayload,
-  _envelope: EnvelopeJson
-): Effect[] {
-  if (!treeFor(state, issue)) return [];
-  return [{ kind: "publish", role: token, payload }];
 }
 
 /**
@@ -541,42 +477,6 @@ function openChildren(state: LegionState, parent: IssueNode): number {
   return parent.children.filter((key) => state.issues[key]?.state === "open").length;
 }
 
-function boardEvent(payload: JsonRecord, config: ReducerConfig): boolean {
-  const project = asRecord(payload.project);
-  const item = asRecord(payload.projects_v2_item);
-  const id =
-    stringValue(project?.id) ??
-    stringValue(payload.project_node_id) ??
-    stringValue(item?.project_node_id) ??
-    stringValue(asRecord(item?.project)?.id);
-  return id !== undefined && config.boardProjectIds.includes(id);
-}
-
-function addNode(
-  state: LegionState,
-  key: IssueKey,
-  raw: JsonRecord,
-  released: boolean,
-  parent?: IssueKey
-): IssueNode {
-  const prior = state.issues[key];
-  const node: IssueNode = {
-    key,
-    title: stringValue(raw.title) ?? prior?.title ?? key,
-    state: stringValue(raw.state) === "closed" ? "closed" : "open",
-    children: prior?.children ?? [],
-    released: prior?.released ?? released,
-    labels: labels(raw.labels),
-    ...(prior?.finalCommentRef ? { finalCommentRef: prior.finalCommentRef } : {}),
-    ...(prior?.updatedAt !== undefined ? { updatedAt: prior.updatedAt } : {}),
-    ...(prior?.updatedAtSource !== undefined ? { updatedAtSource: prior.updatedAtSource } : {}),
-  };
-  const ancestor = parent ?? prior?.parent;
-  if (ancestor) node.parent = ancestor;
-  state.issues[key] = node;
-  return node;
-}
-
 function filtered(comment: JsonRecord, config: ReducerConfig): boolean {
   const author = stringValue(asRecord(comment.user)?.login) ?? stringValue(comment.author);
   return (
@@ -585,9 +485,14 @@ function filtered(comment: JsonRecord, config: ReducerConfig): boolean {
   );
 }
 
-function issueForBranch(repo: string, branch: string): IssueKey | undefined {
-  const match = /^legion\/issue-(\d+)$/.exec(branch);
-  return match ? keyFor(repo, Number(match[1])) : undefined;
+function issueForBranch(branch: string): IssueKey | undefined {
+  const match = /^legion\/([A-Z][A-Z0-9]*-[0-9]+)$/.exec(branch);
+  return match?.[1];
+}
+
+function issueForPrBody(body: string): IssueKey | undefined {
+  const match = /^Dispatch: ([A-Z][A-Z0-9]*-[0-9]+)$/m.exec(body);
+  return match?.[1];
 }
 
 function updatedAt(raw: JsonRecord): number | undefined {
@@ -623,11 +528,13 @@ function registerPr(
   repo: string,
   number: number,
   branch: string | undefined,
+  body: string | undefined,
   sha: string | undefined,
   headUpdatedAt: number | undefined,
   source: UpdateSource
 ): PrState | undefined {
-  const key = (branch ? issueForBranch(repo, branch) : undefined) ?? keyFor(repo, number);
+  const key =
+    (branch ? issueForBranch(branch) : undefined) ?? (body ? issueForPrBody(body) : undefined);
   if (!key || !state.issues[key] || !sha) return undefined;
   const prKey = `${repo}#${number}`;
   const pr: PrState = {
@@ -670,6 +577,7 @@ function registerPrFenced(
   repo: string,
   number: number,
   branch: string | undefined,
+  body: string | undefined,
   sha: string | undefined,
   headUpdatedAt: number | undefined,
   source: UpdateSource
@@ -687,7 +595,7 @@ function registerPrFenced(
   if (headUpdatedAt !== undefined && tombstonedAt !== undefined && headUpdatedAt <= tombstonedAt) {
     return undefined;
   }
-  const pr = registerPr(state, repo, number, branch, sha, headUpdatedAt, source);
+  const pr = registerPr(state, repo, number, branch, body, sha, headUpdatedAt, source);
   if (pr) delete state.prTombstones[prKey];
   return pr;
 }
@@ -712,272 +620,6 @@ function removeBranchMappings(state: LegionState, prKey: string): void {
   }
 }
 
-function ingress(
-  state: LegionState,
-  payload: JsonRecord,
-  config: ReducerConfig,
-  source: UpdateSource
-): Effect[] | undefined {
-  const raw = asRecord(payload.issue) ?? asRecord(asRecord(payload.projects_v2_item)?.content);
-  const action = stringValue(payload.action);
-  if (!raw || !boardEvent(payload, config) || (action !== "opened" && action !== "created"))
-    return undefined;
-  const repo = repository(payload);
-  const number = numberValue(raw.number);
-  if (!repo || number === undefined) return [];
-  const key = keyFor(repo, number);
-  if (!key) return [];
-  if (isDispatchThread(raw.labels)) return [];
-  const currentLabels = labels(raw.labels);
-  if (currentLabels.includes("legion-child") || currentLabels.includes("legion-backlog")) return [];
-
-  const existing = state.issues[key];
-  const rawUpdatedAt = updatedAt(raw);
-  if (
-    supersededBy(
-      { updatedAt: rawUpdatedAt, source },
-      { updatedAt: existing?.updatedAt, source: existing?.updatedAtSource ?? "webhook" }
-    )
-  ) {
-    console.debug(
-      `[legion] ignored stale ingress event for ${key}: issue.updated_at is older than the last applied event`
-    );
-    return [];
-  }
-  // A tree already exists: this issue was already triaged once, so a
-  // redelivered or duplicate "opened"/"created" webhook must not re-triage
-  // it or clobber children/labels/state a newer event has already applied.
-  if (state.trees[key]) return [];
-
-  const preexistingChildren = childKeys(repo, raw);
-  const node = addNode(state, key, raw, true);
-  node.children = preexistingChildren;
-  if (rawUpdatedAt !== undefined) {
-    node.updatedAt = rawUpdatedAt;
-    node.updatedAtSource = source;
-  }
-  const rawSubIssues = raw.sub_issues;
-  const values = Array.isArray(rawSubIssues) ? rawSubIssues : asRecord(rawSubIssues)?.nodes;
-  if (Array.isArray(values)) {
-    for (const value of values) {
-      const child = asRecord(value);
-      if (isDispatchThread(child?.labels)) continue;
-      const childNumber = numberValue(child?.number);
-      const childKey = childNumber === undefined ? undefined : keyFor(repo, childNumber);
-      if (child && childKey) addNode(state, childKey, child, false, key);
-    }
-  }
-  return [
-    {
-      kind: "controller",
-      payload: { type: "triage", issue: key, preexistingChildren },
-    },
-  ];
-}
-
-function subIssue(
-  state: LegionState,
-  payload: JsonRecord,
-  envelope: EnvelopeJson,
-  source: UpdateSource
-): Effect[] | undefined {
-  const rawParent = asRecord(payload.parent_issue);
-  const rawChild = asRecord(payload.sub_issue);
-  if (!rawParent || !rawChild) return undefined;
-  const repo = repository(payload);
-  const parentNumber = numberValue(rawParent.number);
-  const childNumber = numberValue(rawChild.number);
-  if (!repo || parentNumber === undefined || childNumber === undefined) return [];
-  const parentKey = keyFor(repo, parentNumber);
-  const childKey = keyFor(repo, childNumber);
-  const parent = parentKey ? state.issues[parentKey] : undefined;
-  if (!parentKey || !childKey || !parent) return [];
-
-  const parentUpdatedAt = updatedAt(rawParent);
-  if (parentUpdatedAt === undefined) {
-    throw new Error(
-      `sub_issue event for ${parentKey} is missing a parseable parent_issue.updated_at (GitHub always sends one; payload is malformed)`
-    );
-  }
-  if (
-    supersededBy(
-      { updatedAt: parentUpdatedAt, source },
-      { updatedAt: parent.updatedAt, source: parent.updatedAtSource ?? "webhook" }
-    )
-  ) {
-    console.debug(
-      `[legion] ignored stale sub_issue event for ${parentKey}: parent_issue.updated_at is older than the last applied event`
-    );
-    return [];
-  }
-
-  if (payload.action === "sub_issue_added") {
-    // Never adopt a dispatch thread as a child (see isDispatchThread).
-    if (isDispatchThread(rawChild.labels)) return [];
-    const known = parent.children.includes(childKey);
-    if (!known) parent.children.push(childKey);
-    const child = state.issues[childKey] ?? addNode(state, childKey, rawChild, false, parentKey);
-    child.parent = parentKey;
-    if (parentUpdatedAt !== undefined) {
-      parent.updatedAt = parentUpdatedAt;
-      parent.updatedAtSource = source;
-    }
-    if (known || treeFor(state, parentKey)?.status !== "active") return [];
-    return routeActive(
-      state,
-      parentKey,
-      {
-        type: "child-adopted",
-        child: childKey,
-        remaining: openChildren(state, parent),
-      },
-      envelope
-    );
-  }
-
-  if (payload.action !== "sub_issue_removed" || !parent.children.includes(childKey)) return [];
-  const child = state.issues[childKey];
-  const wasOpen = child?.state === "open";
-  parent.children = parent.children.filter((key) => key !== childKey);
-  if (child?.parent === parentKey) delete child.parent;
-  if (parentUpdatedAt !== undefined) {
-    parent.updatedAt = parentUpdatedAt;
-    parent.updatedAtSource = source;
-  }
-  const result = routeActive(
-    state,
-    parentKey,
-    {
-      type: "child-removed",
-      child: childKey,
-      remaining: openChildren(state, parent),
-    },
-    envelope
-  );
-  if (wasOpen && openChildren(state, parent) === 0) {
-    result.push(...routeActive(state, parentKey, { type: "children-complete" }, envelope));
-  }
-  return result;
-}
-
-function issueEvent(
-  state: LegionState,
-  payload: JsonRecord,
-  envelope: EnvelopeJson,
-  source: UpdateSource
-): Effect[] | undefined {
-  const raw = asRecord(payload.issue);
-  if (!raw || payload.comment !== undefined || raw.pull_request !== undefined) return undefined;
-  const repo = repository(payload);
-  const number = numberValue(raw.number);
-  const key = repo && number !== undefined ? keyFor(repo, number) : undefined;
-  const node = key ? state.issues[key] : undefined;
-  if (!key || !node) return [];
-
-  const issueUpdatedAt = updatedAt(raw);
-  if (issueUpdatedAt === undefined) {
-    throw new Error(
-      `issue event for ${key} is missing a parseable updated_at (GitHub always sends one; payload is malformed)`
-    );
-  }
-  if (
-    supersededBy(
-      { updatedAt: issueUpdatedAt, source },
-      { updatedAt: node.updatedAt, source: node.updatedAtSource ?? "webhook" }
-    )
-  ) {
-    console.debug(
-      `[legion] ignored stale issue event for ${key}: issue.updated_at is older than the last applied event`
-    );
-    return [];
-  }
-
-  if (payload.action === "labeled" || payload.action === "unlabeled") {
-    const label = stringValue(asRecord(payload.label)?.name);
-    if (!label || !SURVIVING_LABELS[label]) return [];
-    if (payload.action === "labeled") {
-      if (node.labels.includes(label)) return [];
-      node.labels.push(label);
-      node.updatedAt = issueUpdatedAt;
-      node.updatedAtSource = source;
-      return label === "human-approved"
-        ? routeActive(state, key, { type: "human-approved" }, envelope)
-        : [];
-    }
-    if (!node.labels.includes(label)) return [];
-    node.labels = node.labels.filter((value) => value !== label);
-    node.updatedAt = issueUpdatedAt;
-    node.updatedAtSource = source;
-    return [];
-  }
-
-  if (payload.action === "closed") {
-    const parent = node.parent ? state.issues[node.parent] : undefined;
-    const wasOpen = node.state === "open";
-    node.state = "closed";
-    node.updatedAt = issueUpdatedAt;
-    node.updatedAtSource = source;
-    if (!parent || !node.parent) {
-      return state.trees[key]?.status === "active" ? [{ kind: "linger", tree: key }] : [];
-    }
-    if (!wasOpen) return [];
-    const result = routeActive(
-      state,
-      node.parent,
-      {
-        type: "child-closed",
-        child: key,
-        completion: stringValue(raw.state_reason) ?? "closed",
-        remaining: openChildren(state, parent),
-        finalCommentRef:
-          stringValue(raw.final_comment_ref) ??
-          stringValue(payload.final_comment_ref) ??
-          node.finalCommentRef ??
-          null,
-      },
-      envelope
-    );
-    if (openChildren(state, parent) === 0) {
-      result.push(...routeActive(state, node.parent, { type: "children-complete" }, envelope));
-    }
-    return result;
-  }
-
-  if (payload.action !== "reopened") return [];
-  node.state = "open";
-  node.updatedAt = issueUpdatedAt;
-  node.updatedAtSource = source;
-  delete node.finalCommentRef;
-  if (node.parent)
-    return routeActive(state, node.parent, { type: "child-reopened", child: key }, envelope);
-  const tree = state.trees[key];
-  if (!tree) {
-    return [
-      {
-        kind: "controller",
-        payload: {
-          type: "triage",
-          issue: key,
-          preexistingChildren: node.children,
-        },
-      },
-    ];
-  }
-  if (tree.status === "lingering") {
-    return routeToken(
-      state,
-      key,
-      roleToken(state.project, key, "architect"),
-      { type: "reopened" },
-      envelope
-    );
-  }
-  return [
-    { kind: "controller", payload: { type: "reactivation", issue: key } },
-    { kind: "probe", tree: key },
-  ];
-}
-
 function issueComment(
   state: LegionState,
   payload: JsonRecord,
@@ -991,17 +633,20 @@ function issueComment(
   const number = numberValue(rawIssue.number);
   if (!repo || number === undefined) return [];
   if (payload.action !== "created" || filtered(comment, config)) return [];
-  const author = stringValue(asRecord(comment.user)?.login) ?? "";
-  const body = stringValue(comment.body) ?? "";
-  const url = stringValue(comment.html_url) ?? "";
-  if (rawIssue.pull_request !== undefined) {
-    const pr = state.prs[`${repo}#${number}`];
-    return pr
-      ? routeActive(state, pr.key, { type: "pr-comment", author, body, url }, envelope)
-      : [];
-  }
-  const key = keyFor(repo, number);
-  return key ? routeActive(state, key, { type: "issue-comment", author, body, url }, envelope) : [];
+  if (rawIssue.pull_request === undefined) return [];
+  const pr = state.prs[`${repo}#${number}`];
+  if (!pr) return [];
+  return routeActive(
+    state,
+    pr.key,
+    {
+      type: "pr-comment",
+      author: stringValue(asRecord(comment.user)?.login) ?? "",
+      body: stringValue(comment.body) ?? "",
+      url: stringValue(comment.html_url) ?? "",
+    },
+    envelope
+  );
 }
 
 function reviewComment(
@@ -1082,11 +727,12 @@ function pullRequest(
   if (!repo || number === undefined) return [];
   const prKey = `${repo}#${number}`;
   const branch = stringValue(payload.head_ref);
+  const body = stringValue(payload.body);
   const sha = stringValue(payload.head_sha);
   const headUpdatedAt = updatedAt(payload);
 
   if (payload.action === "opened") {
-    const pr = registerPrFenced(state, repo, number, branch, sha, headUpdatedAt, source);
+    const pr = registerPrFenced(state, repo, number, branch, body, sha, headUpdatedAt, source);
     if (!pr) return [];
     return routeActive(
       state,
@@ -1098,7 +744,7 @@ function pullRequest(
 
   let pr: PrState | undefined = state.prs[prKey];
   if (!pr && payload.action === "synchronize") {
-    pr = registerPrFenced(state, repo, number, branch, sha, headUpdatedAt, source);
+    pr = registerPrFenced(state, repo, number, branch, body, sha, headUpdatedAt, source);
   }
   if (!pr) return [];
   if (payload.action === "synchronize") {
@@ -1151,21 +797,18 @@ export function reduceGithubEvent(
   if (!payload) return [];
   const repo = repository(payload);
   // Pushes to legion issue branches carry no reducer-visible state transitions.
-  if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/issue-")) return [];
+  if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/")) return [];
   // "resync" is the daemon's own sentinel topic for reducer input (board GraphQL
   // reads, not an external webhook) — GitHub's authoritative read wins a
   // same-clock tie against a webhook (see `supersededBy`).
   const source: UpdateSource = topic === "resync" ? "resync" : "webhook";
-  // Only pullRequest understands Envoy's normalized GitHub envelopes. The issue, issue-comment,
-  // review, and projects_v2_item reducers still require raw GitHub nesting and ignore Envoy payloads.
+  // GitHub carries PRs, checks, and reviews only (D1/D2): the daemon never reads or writes a
+  // GitHub issue, so an `issues`/`projects_v2_item`/`sub_issue` webhook produces no effect.
   return collapseClosedTreeWakes(
-    ingress(state, payload, config, source) ??
-      subIssue(state, payload, envelope, source) ??
-      issueComment(state, payload, envelope, config) ??
+    issueComment(state, payload, envelope, config) ??
       reviewComment(state, payload, envelope, config) ??
       review(state, payload, envelope) ??
       pullRequest(state, payload, envelope, source) ??
-      issueEvent(state, payload, envelope, source) ??
       []
   );
 }
@@ -1196,4 +839,212 @@ export function reduceCiEmission(
         envelope
       )
     : [];
+}
+
+function dispatchEnvelope(eventId: string): EnvelopeJson {
+  return { event_id: eventId, issued_at: Date.now() };
+}
+
+function isIssueStatus(value: string): value is IssueStatus {
+  return (ISSUE_STATUSES as readonly string[]).includes(value);
+}
+
+/** The fields every `issue.*` Dispatch event's payload carries (the full issue, not a diff). */
+interface DispatchIssuePayload {
+  key: IssueKey;
+  title: string;
+  status: IssueStatus;
+  parent: IssueKey | null;
+}
+
+function dispatchIssuePayload(payload: unknown, key: IssueKey): DispatchIssuePayload | undefined {
+  const raw = asRecord(payload);
+  const title = stringValue(raw?.title);
+  const status = stringValue(raw?.status);
+  if (!raw || !title || !status || !isIssueStatus(status)) return undefined;
+  const parent = typeof raw.parent === "string" ? raw.parent : null;
+  return { key, title, status, parent };
+}
+
+function applyDispatchIssueFields(node: IssueNode, issue: DispatchIssuePayload): void {
+  node.title = issue.title;
+  node.status = issue.status;
+  node.state = issue.status === "done" ? "closed" : "open";
+}
+
+/** Creates a `issue.created` node. Idempotent against a redelivered or reordered duplicate that
+ * slips past the outer seq fence (e.g. an older create landing after a resync-derived seq bump
+ * for the same key): once a node exists for this key, this is a no-op — no field is overwritten,
+ * no controller/child-adopted effect is re-emitted — never a replace, since a later event (a
+ * status update, another child's adoption) may have already advanced fields a blind replace would
+ * roll back. */
+function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  const issue = dispatchIssuePayload(event.payload, event.key);
+  if (!issue) return [];
+  if (state.issues[issue.key]) return [];
+  const node: IssueNode = {
+    key: issue.key,
+    title: issue.title,
+    state: issue.status === "done" ? "closed" : "open",
+    children: [],
+    released: true,
+    labels: [],
+    status: issue.status,
+  };
+  if (issue.parent) node.parent = issue.parent;
+  state.issues[issue.key] = node;
+  if (!issue.parent) {
+    return [{ kind: "controller", payload: { type: "triage", issue: issue.key } }];
+  }
+  const parent = state.issues[issue.parent];
+  if (!parent) return [];
+  if (!parent.children.includes(issue.key)) parent.children.push(issue.key);
+  return routeActive(
+    state,
+    issue.parent,
+    { type: "child-adopted", child: issue.key, remaining: openChildren(state, parent) },
+    dispatchEnvelope(event.eventId)
+  );
+}
+
+function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  const issue = dispatchIssuePayload(event.payload, event.key);
+  const node = issue ? state.issues[issue.key] : undefined;
+  if (!issue || !node) return [];
+  const statusChanged = node.status !== issue.status;
+  applyDispatchIssueFields(node, issue);
+  if (!statusChanged) return [];
+  if (issue.status === "todo") return [{ kind: "admit", issue: issue.key }];
+  if (issue.status === "backlog" || issue.status === "icebox") {
+    const tree = state.trees[issue.key];
+    return tree && tree.status === "active" ? [{ kind: "linger", tree: issue.key }] : [];
+  }
+  return [];
+}
+
+function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  const issue = dispatchIssuePayload(event.payload, event.key);
+  const node = issue ? state.issues[issue.key] : undefined;
+  if (!issue || !node) return [];
+  const wasOpen = node.state === "open";
+  applyDispatchIssueFields(node, issue);
+  if (!node.parent) {
+    const tree = state.trees[issue.key];
+    return tree && tree.status === "active" ? [{ kind: "linger", tree: issue.key }] : [];
+  }
+  if (!wasOpen) return [];
+  const parent = state.issues[node.parent];
+  if (!parent) return [];
+  const result = routeActive(
+    state,
+    node.parent,
+    { type: "child-closed", child: issue.key, remaining: openChildren(state, parent) },
+    dispatchEnvelope(event.eventId)
+  );
+  if (openChildren(state, parent) === 0) {
+    result.push(
+      ...routeActive(
+        state,
+        node.parent,
+        { type: "children-complete" },
+        dispatchEnvelope(event.eventId)
+      )
+    );
+  }
+  return result;
+}
+
+function reduceChildStatus(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  if (!state.issues[event.key]) return [];
+  const raw = asRecord(event.payload);
+  const child = stringValue(raw?.child_key);
+  const from = stringValue(raw?.from);
+  const to = stringValue(raw?.to);
+  if (!child || !from || !to) return [];
+  return routeActive(
+    state,
+    event.key,
+    { type: "child-status", child, from, to },
+    dispatchEnvelope(event.eventId)
+  );
+}
+
+/** Approves the design gate. Idempotent independent of the outer seq fence: once
+ * `gates[key].designApproved` is set, this is a no-op regardless of `event.seq` — a later,
+ * unrelated ask (or an ask reply thread growing after approval) on the same issue would still
+ * pass the per-issue seq fence, so the approval itself needs its own guard against re-emitting
+ * `design-approved` a second time. */
+function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  if (!state.issues[event.key]) return [];
+  const raw = asRecord(event.payload);
+  const askId = stringValue(raw?.id);
+  const answer = asRecord(raw?.answer);
+  const selected = Array.isArray(answer?.selected)
+    ? answer.selected.filter((value): value is string => typeof value === "string")
+    : [];
+  const gate = state.gates[event.key];
+  if (!askId || !gate || gate.designApproved !== undefined) return [];
+  if (gate.designAskId !== askId || !selected.includes("Approve")) return [];
+  gate.designApproved = askId;
+  return routeActive(
+    state,
+    event.key,
+    { type: "design-approved" },
+    dispatchEnvelope(event.eventId)
+  );
+}
+
+/**
+ * The Dispatch counterpart to `reduceGithubEvent`: derives Legion's issue lifecycle (triage
+ * through done), child-tree wakes, and the design gate from native Dispatch issue events —
+ * `issue.created`/`issue.updated`/`issue.closed`/`child.status`/`ask.answered`. Every other event
+ * type (comments, artifacts, messages) is already delivered to the right role/session by
+ * Dispatch's own routing (see the design's "Intake and events" section) and produces no effect
+ * here. `config` is accepted for signature parity with `reduceGithubEvent`; no Dispatch event
+ * currently needs it.
+ *
+ * At-most-once per (issue, seq): before dispatching to a sub-reducer, an event whose `seq` is not
+ * strictly newer than `state.issues[event.key].lastAppliedSeq` is dropped outright — no mutation,
+ * no effect, not even a re-derived one — since Dispatch's own `Issue.last_seq` is monotonic per
+ * issue and a redelivery or reorder can only repeat or regress it, never legitimately reuse it.
+ * After a recognized sub-reducer runs (whether or not it produced an effect — a no-op redelivered
+ * again must stay a no-op), `lastAppliedSeq` is stamped to `event.seq` on `state.issues[event.key]`
+ * if that node exists. Unknown additive event types return before this stamp: they have no Legion
+ * state meaning and are acknowledged without mutation. `child.status`/`ask.answered` against a key
+ * this daemon has no node for skip the stamp because their reducers begin with an explicit node
+ * existence guard, so a schema-valid but dangling gate or tree record cannot be mutated or routed.
+ */
+export function reduceDispatchEvent(
+  state: LegionState,
+  event: DispatchIssueEvent,
+  _config: ReducerConfig
+): Effect[] {
+  const lastAppliedSeq = state.issues[event.key]?.lastAppliedSeq;
+  if (lastAppliedSeq !== undefined && event.seq <= lastAppliedSeq) return [];
+
+  let effects: Effect[];
+  switch (event.type) {
+    case "issue.created":
+      effects = reduceIssueCreated(state, event);
+      break;
+    case "issue.updated":
+      effects = reduceIssueUpdated(state, event);
+      break;
+    case "issue.closed":
+      effects = reduceIssueClosed(state, event);
+      break;
+    case "child.status":
+      effects = reduceChildStatus(state, event);
+      break;
+    case "ask.answered":
+      effects = reduceAskAnswered(state, event);
+      break;
+    default:
+      return [];
+  }
+
+  const node = state.issues[event.key];
+  if (node) node.lastAppliedSeq = event.seq;
+
+  return collapseClosedTreeWakes(effects);
 }

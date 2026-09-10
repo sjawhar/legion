@@ -46,6 +46,29 @@ describe("role token grammar", () => {
     });
   });
 
+  test("encodes and round-trips a Dispatch issue key", () => {
+    const token = roleToken("legion", "LEGION-7", "architect");
+
+    expect(token).toBe("legion-legion-legion-7-architect");
+    expect(parseRoleToken("legion", token)).toEqual({
+      project: "legion",
+      issue: "LEGION-7",
+      role: "architect",
+    });
+  });
+
+  test("distinguishes a Dispatch key from a legacy owner/repo key with the same project prefix", () => {
+    const dispatchToken = roleToken("acme", "ACME-9", "planner");
+    const legacyToken = roleToken("acme", formatIssueKey("acme", "widgets", 9), "planner");
+
+    expect(dispatchToken).not.toBe(legacyToken);
+    expect(parseRoleToken("acme", dispatchToken)).toEqual({
+      project: "acme",
+      issue: "ACME-9",
+      role: "planner",
+    });
+  });
+
   test("distinguishes repositories that collided after dash sanitization", () => {
     const firstIssue = formatIssueKey("foo-bar", "baz", 17);
     const secondIssue = formatIssueKey("foo", "bar-baz", 17);

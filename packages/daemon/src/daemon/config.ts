@@ -36,6 +36,10 @@ export interface DaemonConfig {
    * `dispatchUrl` is unset, even if the environment variable is present.
    */
   dispatchToken?: string;
+  /** The Dispatch project key that owns Legion's issue lifecycle (D1/D2): the daemon's durable
+   * Dispatch consumer, key-prefix filter, and lifecycle-status writes are all scoped to this
+   * project. Always required — Dispatch is the sole source of Legion's issue lifecycle. */
+  dispatchProject: string;
   natsUrls: string[];
   ompInvocation: string;
   boardProjectIds: string[];
@@ -127,6 +131,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   dispatch_mcp_url: null,
   dispatch_url: null,
+  dispatch_project: null,
   nats_urls: null,
   omp_invocation: null,
   board_project_ids: null,
@@ -249,6 +254,15 @@ function validateUrl(value: string, field: string): string {
 function validateRepoSlug(value: string, field: string): string {
   if (!/^[^/]+\/[^/]+$/.test(value)) {
     throw new Error(`${field} entries must be "owner/name" (got "${value}")`);
+  }
+  return value;
+}
+
+const DISPATCH_PROJECT_PATTERN = /^[A-Z][A-Z0-9]*$/;
+
+function validateDispatchProject(value: string, field: string): string {
+  if (!DISPATCH_PROJECT_PATTERN.test(value)) {
+    throw new Error(`${field} must match ^[A-Z][A-Z0-9]*$`);
   }
   return value;
 }
@@ -454,6 +468,10 @@ export function loadConfigFromFile(
   if (dispatchUrlField !== undefined) {
     fields.dispatchUrl = validateUrl(dispatchUrlField, "dispatch_url");
   }
+  const dispatchProjectField = readString(config.dispatch_project, "dispatch_project");
+  if (dispatchProjectField !== undefined) {
+    fields.dispatchProject = validateDispatchProject(dispatchProjectField, "dispatch_project");
+  }
   const natsUrls = readStringArray(config.nats_urls, "nats_urls");
   if (natsUrls !== undefined) fields.natsUrls = natsUrls;
   const ompInvocation = readString(config.omp_invocation, "omp_invocation");
@@ -596,6 +614,19 @@ export function resolveDaemonConfig(
   );
   if (repos.value.length === 0) throw new Error("repos is required");
   for (const repo of repos.value) validateRepoSlug(repo, "LEGION_REPOS");
+  const dispatchProject = resolveValue(
+    opts.cliOverrides?.dispatchProject,
+    fileString(fields, "dispatchProject"),
+    env.DISPATCH_PROJECT,
+    undefined
+  );
+  if (!dispatchProject.value) {
+    throw new Error("dispatch_project is required");
+  }
+  const resolvedDispatchProject = validateDispatchProject(
+    dispatchProject.value,
+    "DISPATCH_PROJECT"
+  );
   const appLogins = resolveValue(
     opts.cliOverrides?.appLogins,
     fileStringArray(fields, "appLogins"),
@@ -726,6 +757,7 @@ export function resolveDaemonConfig(
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
       dispatchUrl: resolvedDispatchUrl,
       dispatchToken,
+      dispatchProject: resolvedDispatchProject,
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       boardProjectIds: boardProjectIds.value,

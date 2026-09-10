@@ -1,25 +1,81 @@
 import { describe, expect, it } from "bun:test";
-import { formatIssueKey, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
-import { type LegionState, newLegionState, type PrState } from "../legion-state";
+import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import { type IssueStatus, type LegionState, newLegionState, type PrState } from "../legion-state";
 import {
+  type DispatchIssueEvent,
   type Effect,
   type EnvelopeJson,
   type ReducerConfig,
   reduceCiEmission,
+  reduceDispatchEvent,
   reduceGithubEvent,
   settleCiVerdict,
   uncertifyCiVerdict,
 } from "../reducers";
+import askAnswered from "./fixtures/dispatch/ask-answered.json";
+import childStatus from "./fixtures/dispatch/child-status.json";
+import issueClosed from "./fixtures/dispatch/issue-closed.json";
+import issueCreatedChild from "./fixtures/dispatch/issue-created-child.json";
+import issueCreatedRoot from "./fixtures/dispatch/issue-created-root.json";
+import issueUpdatedBacklog from "./fixtures/dispatch/issue-updated-backlog.json";
+import issueUpdatedIcebox from "./fixtures/dispatch/issue-updated-icebox.json";
+import issueUpdatedInProgress from "./fixtures/dispatch/issue-updated-in-progress.json";
+import issueUpdatedNeedsReview from "./fixtures/dispatch/issue-updated-needs-review.json";
+import issueUpdatedRetro from "./fixtures/dispatch/issue-updated-retro.json";
+import issueUpdatedTesting from "./fixtures/dispatch/issue-updated-testing.json";
+import issueUpdatedTodo from "./fixtures/dispatch/issue-updated-todo.json";
+import humanApproved from "./fixtures/dispatch/legsmoke-3-ask.answered-approve.json";
+import humanTodo from "./fixtures/dispatch/legsmoke-3-issue.updated-human-todo.json";
 
 const repo = "acme/widgets" as const;
-const root = formatIssueKey("acme", "widgets", 1);
-const child = formatIssueKey("acme", "widgets", 2);
+const root = "LEGSMOKE-1" as IssueKey;
+const child = "LEGSMOKE-2" as IssueKey;
+const childBranch = `legion/${child}`;
+
 const prNumber = 17;
 const config: ReducerConfig = {
   boardProjectIds: ["PVT_board"],
   appLogins: ["legion-author[bot]", "legion-reviewer[bot]"],
   maxFixAttempts: 3,
 };
+
+const DAEMON_STATUS_FIXTURES: ReadonlyArray<readonly [IssueStatus, DispatchFixture]> = [
+  ["in_progress", issueUpdatedInProgress as unknown as DispatchFixture],
+  ["testing", issueUpdatedTesting as unknown as DispatchFixture],
+  ["needs_review", issueUpdatedNeedsReview as unknown as DispatchFixture],
+  ["retro", issueUpdatedRetro as unknown as DispatchFixture],
+];
+const PARKED_STATUS_FIXTURES: ReadonlyArray<readonly [IssueStatus, DispatchFixture]> = [
+  ["backlog", issueUpdatedBacklog as unknown as DispatchFixture],
+  ["icebox", issueUpdatedIcebox as unknown as DispatchFixture],
+];
+
+interface DispatchFixture {
+  readonly id: number;
+  readonly issue_key: string;
+  readonly seq: number;
+  readonly notify: boolean;
+  readonly type: DispatchIssueEvent["type"];
+  readonly payload: unknown;
+}
+
+function dispatch(fixture: DispatchFixture): DispatchIssueEvent {
+  return {
+    type: fixture.type,
+    key: fixture.issue_key as IssueKey,
+    seq: fixture.seq,
+    notify: fixture.notify,
+    payload: fixture.payload,
+    eventId: `dispatch-${fixture.id}`,
+  };
+}
+function dispatchIssueWithKey(fixture: DispatchFixture, key: IssueKey): DispatchIssueEvent {
+  const event = dispatch(fixture);
+  if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) {
+    throw new Error("issue.closed fixture payload must be an object");
+  }
+  return { ...event, key, payload: { ...event.payload, key } };
+}
 
 function envelope(payload: Record<string, unknown>, eventId = "delivery-1"): EnvelopeJson {
   return {
@@ -29,32 +85,40 @@ function envelope(payload: Record<string, unknown>, eventId = "delivery-1"): Env
   };
 }
 
+function github(payload: Record<string, unknown>, eventId?: string): EnvelopeJson {
+  return envelope({ repository: { full_name: repo }, ...payload }, eventId);
+}
 function issue(number: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     number,
     title: `Issue ${number}`,
     state: "open",
-    html_url: `https://github.com/${repo}/issues/${number}`,
-    labels: [],
     updated_at: "2026-01-01T00:00:00.000Z",
     ...overrides,
   };
 }
 
-function github(payload: Record<string, unknown>, eventId?: string): EnvelopeJson {
-  return envelope({ repository: { full_name: repo }, ...payload }, eventId);
+function issueNode(
+  key: IssueKey,
+  title: string,
+  status: IssueStatus = "triage",
+  parent?: IssueKey
+) {
+  return {
+    key,
+    title,
+    state: status === "done" ? ("closed" as const) : ("open" as const),
+    ...(parent === undefined ? {} : { parent }),
+    children: [],
+    released: true,
+    labels: [],
+    status,
+  };
 }
 
 function rootState(status: "active" | "lingering" | "closed" = "active"): LegionState {
   const state = newLegionState("omp", 4);
-  state.issues[root] = {
-    key: root,
-    title: "Root",
-    state: "open",
-    children: [],
-    released: true,
-    labels: [],
-  };
+  state.issues[root] = issueNode(root, "Root");
   state.trees[root] = {
     root,
     generation: 1,
@@ -74,17 +138,9 @@ function claim(state: LegionState, key: IssueKey, role: LegionRole): string {
   return token;
 }
 
-function attachChild(state: LegionState, released = true): void {
+function attachChild(state: LegionState): void {
   state.issues[root].children.push(child);
-  state.issues[child] = {
-    key: child,
-    title: "Child",
-    state: "open",
-    parent: root,
-    children: [],
-    released,
-    labels: [],
-  };
+  state.issues[child] = issueNode(child, "Child", "triage", root);
 }
 
 function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
@@ -110,7 +166,7 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     fixAttempts: 0,
     ...rest,
   };
-  state.prByBranch[`${repo}@legion/issue-2`] = `${repo}#${prNumber}`;
+  state.prByBranch[`${repo}@legion/${child}`] = `${repo}#${prNumber}`;
 }
 
 function effects(
@@ -123,840 +179,473 @@ function effects(
   return reduceGithubEvent(state, topic, input, config);
 }
 
-describe("reduceGithubEvent", () => {
-  it("creates a board issue and wakes the controller with its preexisting children", () => {
-    const state = newLegionState("omp", 4);
-    const result = effects(state, {
-      action: "opened",
-      project: { id: "PVT_board" },
-      issue: issue(1, { sub_issues: [issue(2)] }),
-    });
-
-    expect(state.issues[root]).toMatchObject({
-      key: root,
-      state: "open",
-      children: [child],
-    });
-    expect(state.issues[child]).toMatchObject({
-      key: child,
-      parent: root,
-      state: "open",
-      released: false,
-    });
-    expect(result).toEqual([
-      {
-        kind: "controller",
-        payload: {
-          type: "triage",
-          issue: root,
-          preexistingChildren: [child],
-        },
-      },
-    ]);
-
-    state.trees[root] = {
-      root,
-      generation: 1,
-      status: "active",
-      launchFailures: 0,
-    };
-    const architect = claim(state, root, "architect");
-    expect(
-      effects(state, {
-        action: "closed",
-        issue: issue(2, { state: "closed" }),
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: {
-          type: "child-closed",
-          child,
-          completion: "closed",
-          remaining: 0,
-          finalCommentRef: null,
-        },
-      },
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "children-complete" },
-      },
-    ]);
-  });
-
-  it("excludes dispatch-thread children from ingress adoption", () => {
-    const state = newLegionState("omp", 4);
-    const excludedChild = formatIssueKey("acme", "widgets", 3);
-    const result = effects(state, {
-      action: "opened",
-      project: { id: "PVT_board" },
-      issue: issue(1, {
-        sub_issues: [issue(2), issue(3, { labels: ["dispatch-thread"] })],
-      }),
-    });
-
-    expect(state.issues[root]).toMatchObject({ children: [child] });
-    expect(state.issues[child]).toBeDefined();
-    expect(state.issues[excludedChild]).toBeUndefined();
-    expect(result).toEqual([
-      {
-        kind: "controller",
-        payload: { type: "triage", issue: root, preexistingChildren: [child] },
-      },
-    ]);
-  });
-
-  it("creates an issue from a board item-created event", () => {
-    const state = newLegionState("omp", 4);
-    const result = effects(state, {
-      action: "created",
-      project: { id: "PVT_board" },
-      projects_v2_item: { content: issue(1) },
-    });
-
-    expect(state.issues[root]).toMatchObject({ key: root, title: "Issue 1" });
-    expect(result).toEqual([
-      {
-        kind: "controller",
-        payload: { type: "triage", issue: root, preexistingChildren: [] },
-      },
-    ]);
-  });
-
-  it("does not triage a dispatch thread added to the board", () => {
-    const state = newLegionState("omp", 4);
-
-    expect(
-      effects(state, {
-        action: "created",
-        project: { id: "PVT_board" },
-        projects_v2_item: { content: issue(1, { labels: [{ name: "dispatch-thread" }] }) },
-      })
-    ).toEqual([]);
-    expect(state.issues[root]).toBeUndefined();
-  });
-
-  it("does not triage child or backlog issue ingress", () => {
-    for (const labels of [["legion-child"], ["legion-backlog"]]) {
+/** Every Dispatch fixture that mutates state or emits an effect on its first application, paired
+ * with the state it needs to do so — one entry per fixture file under `fixtures/dispatch/`,
+ * excluding `ask-opened.json` (an event type `reduceDispatchEvent` does not switch on, so it is a
+ * true no-op: no mutation, no effect, no seq stamp). Used below to assert the at-most-once
+ * contract holds for every one of them, not just the two hand-picked in the tests above. */
+const REPLAY_ONCE_CASES: ReadonlyArray<{
+  readonly name: string;
+  readonly setup: () => LegionState;
+  readonly event: () => DispatchIssueEvent;
+}> = [
+  {
+    name: "issue.created root",
+    setup: () => newLegionState("omp", 4),
+    event: () => dispatch(issueCreatedRoot as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.created child",
+    setup: () => rootState(),
+    event: () => dispatch(issueCreatedChild as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> todo",
+    setup: () => {
       const state = newLegionState("omp", 4);
-      expect(
-        effects(state, {
-          action: "opened",
-          project: { id: "PVT_board" },
-          issue: issue(1, { labels }),
-        })
-      ).toEqual([]);
-      expect(state.issues[root]).toBeUndefined();
-    }
-  });
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedTodo as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated human -> todo (LEGSMOKE-3)",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      const issue = "LEGSMOKE-3" as IssueKey;
+      state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+      return state;
+    },
+    event: () => dispatch(humanTodo as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> backlog on an active tree",
+    setup: () => rootState(),
+    event: () => dispatch(issueUpdatedBacklog as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> icebox on an active tree",
+    setup: () => rootState(),
+    event: () => dispatch(issueUpdatedIcebox as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> in_progress echo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedInProgress as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> testing echo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedTesting as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> needs_review echo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedNeedsReview as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> retro echo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedRetro as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.closed root on an active tree",
+    setup: () => rootState(),
+    event: () => dispatch(issueClosed as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.closed child (last-child completion)",
+    setup: () => {
+      const state = rootState();
+      attachChild(state);
+      return state;
+    },
+    event: () => dispatchIssueWithKey(issueClosed as unknown as DispatchFixture, child),
+  },
+  {
+    name: "child.status routed to the active parent",
+    setup: () => rootState(),
+    event: () => dispatch(childStatus as unknown as DispatchFixture),
+  },
+  {
+    name: "ask.answered approves the registered design gate (legsmoke-3-ask.answered-approve.json)",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      const issue = "LEGSMOKE-3" as IssueKey;
+      state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+      state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
+      claim(state, issue, "architect");
+      state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+      return state;
+    },
+    event: () => dispatch(humanApproved as unknown as DispatchFixture),
+  },
+  {
+    name: "ask.answered approves the registered design gate (ask-answered.json)",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      const issue = "LEGSMOKE-3" as IssueKey;
+      state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+      state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
+      claim(state, issue, "architect");
+      state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+      return state;
+    },
+    event: () => dispatch(askAnswered as unknown as DispatchFixture),
+  },
+];
 
-  it("ignores a stale ingress redelivery whose issue.updated_at is older than a newer applied event", () => {
+describe("reduceDispatchEvent", () => {
+  it("records a triage root and wakes the controller", () => {
     const state = newLegionState("omp", 4);
-    // A newer sub_issue_added event already advanced the root's fence past
-    // the ingress payload's timestamp.
-    state.issues[root] = {
-      key: root,
-      title: "Root",
-      state: "open",
-      children: [],
-      released: true,
-      labels: [],
-      updatedAt: Date.parse("2026-01-01T00:00:02.000Z"),
-    };
 
-    const result = effects(state, {
-      action: "opened",
-      project: { id: "PVT_board" },
-      issue: issue(1, {
-        sub_issues: [issue(2)],
-        updated_at: "2026-01-01T00:00:01.000Z",
-      }),
-    });
-
-    expect(result).toEqual([]);
-    // Nothing from the stale payload was applied: no children overwritten,
-    // no tree created, fence untouched.
+    expect(
+      reduceDispatchEvent(state, dispatch(issueCreatedRoot as unknown as DispatchFixture), config)
+    ).toEqual([{ kind: "controller", payload: { type: "triage", issue: root } }]);
     expect(state.issues[root]).toMatchObject({
+      key: root,
+      title: "T20 fixture capture — root",
+      status: "triage",
       children: [],
-      updatedAt: Date.parse("2026-01-01T00:00:02.000Z"),
     });
-    expect(state.trees[root]).toBeUndefined();
   });
 
-  it("does not re-triage or overwrite state once a tree already exists for the ingress issue", () => {
-    const state = newLegionState("omp", 4);
-    const first = effects(state, {
-      action: "opened",
-      project: { id: "PVT_board" },
-      issue: issue(1, { sub_issues: [issue(2)] }),
-    });
-    expect(first).toEqual([
+  it("records a child and routes child-adopted to its active parent role", () => {
+    const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(
+      reduceDispatchEvent(state, dispatch(issueCreatedChild as unknown as DispatchFixture), config)
+    ).toEqual([
       {
-        kind: "controller",
-        payload: { type: "triage", issue: root, preexistingChildren: [child] },
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-adopted", child, remaining: 1 },
       },
     ]);
-    state.trees[root] = {
-      root,
+    expect(state.issues[root].children).toEqual([child]);
+    expect(state.issues[child]).toMatchObject({ key: child, parent: root, status: "triage" });
+  });
+
+  it("adopts the human todo transition as an admission effect", () => {
+    const state = newLegionState("omp", 4);
+    const issue = "LEGSMOKE-3" as IssueKey;
+    state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+
+    expect(
+      reduceDispatchEvent(state, dispatch(humanTodo as unknown as DispatchFixture), config)
+    ).toEqual([{ kind: "admit", issue }]);
+    expect(state.issues[issue].status).toBe("todo");
+  });
+
+  it("does not re-admit an unchanged todo status", () => {
+    const state = newLegionState("omp", 4);
+    const issue = "LEGSMOKE-3" as IssueKey;
+    state.issues[issue] = issueNode(issue, "T20 fixture — ask host", "todo");
+
+    expect(
+      reduceDispatchEvent(state, dispatch(humanTodo as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    expect(state.issues[issue].status).toBe("todo");
+  });
+
+  for (const [status, fixture] of DAEMON_STATUS_FIXTURES) {
+    it(`records the daemon-owned ${status} echo without a lifecycle effect`, () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+
+      expect(reduceDispatchEvent(state, dispatch(fixture), config)).toEqual([]);
+      expect(state.issues[root].status).toBe(status);
+    });
+  }
+
+  for (const [status, fixture] of PARKED_STATUS_FIXTURES) {
+    it(`records ${status} without a tree and lingers an active tree`, () => {
+      const idle = newLegionState("omp", 4);
+      idle.issues[root] = issueNode(root, "Root");
+      expect(reduceDispatchEvent(idle, dispatch(fixture), config)).toEqual([]);
+      expect(idle.issues[root].status).toBe(status);
+
+      const active = rootState();
+      expect(reduceDispatchEvent(active, dispatch(fixture), config)).toEqual([
+        { kind: "linger", tree: root },
+      ]);
+      expect(active.issues[root].status).toBe(status);
+    });
+  }
+
+  it("lingers an active root when Dispatch closes it", () => {
+    const state = rootState();
+
+    expect(
+      reduceDispatchEvent(state, dispatch(issueClosed as unknown as DispatchFixture), config)
+    ).toEqual([{ kind: "linger", tree: root }]);
+    expect(state.issues[root].status).toBe("done");
+  });
+
+  it("routes a child close and the last-child completion edge", () => {
+    const state = rootState();
+    attachChild(state);
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(
+      reduceDispatchEvent(
+        state,
+        dispatchIssueWithKey(issueClosed as unknown as DispatchFixture, child),
+        config
+      )
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-closed", child, remaining: 0 },
+      },
+      { kind: "publish", role: architect, payload: { type: "children-complete" } },
+    ]);
+    expect(state.issues[child].status).toBe("done");
+  });
+
+  it("routes the Dispatch child-status payload to the active parent role", () => {
+    const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(
+      reduceDispatchEvent(state, dispatch(childStatus as unknown as DispatchFixture), config)
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-status", child, from: "triage", to: "todo" },
+      },
+    ]);
+  });
+
+  it("approves only the registered design ask and records its ask id", () => {
+    const state = newLegionState("omp", 4);
+    const issue = "LEGSMOKE-3" as IssueKey;
+    state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+    state.trees[issue] = {
+      root: issue,
       generation: 1,
       status: "active",
       launchFailures: 0,
     };
-    // A newer event drops one of the children the first ingress recorded.
-    state.issues[root].children = [];
+    const architect = claim(state, issue, "architect");
+    state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
 
-    // A duplicate/redelivered ingress event, newer timestamp included, must
-    // not re-triage or clobber the children a later event already changed:
-    // the tree's existence means this issue was already triaged once.
-    const second = effects(state, {
-      action: "opened",
-      project: { id: "PVT_board" },
-      issue: issue(1, {
-        sub_issues: [issue(2), issue(3)],
-        updated_at: "2026-01-01T00:00:05.000Z",
-      }),
-    });
+    expect(
+      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "design-approved" } }]);
+    expect(state.gates[issue].designApproved).toBe("36e95e78-81d5-4da3-ae7b-789a16640bd9");
 
-    expect(second).toEqual([]);
-    expect(state.issues[root].children).toEqual([]);
+    state.gates[issue] = { designAskId: "registered-ask" };
+    const unrelatedAsk = dispatch(askAnswered as unknown as DispatchFixture);
+    if (
+      typeof unrelatedAsk.payload !== "object" ||
+      unrelatedAsk.payload === null ||
+      Array.isArray(unrelatedAsk.payload)
+    ) {
+      throw new Error("ask.answered fixture payload must be an object");
+    }
+    // A higher seq than the approval's own (4), so this is fenced out by askId mismatch inside
+    // reduceAskAnswered, not by the outer at-most-once seq fence — the seq fence alone would
+    // also produce `[]` here (the raw fixture's own seq, 3, is lower than the approval's), which
+    // would silently pass this assertion for the wrong reason.
+    expect(
+      reduceDispatchEvent(
+        state,
+        {
+          ...unrelatedAsk,
+          key: issue,
+          seq: 100,
+          payload: { ...unrelatedAsk.payload, id: "unrelated-ask" },
+        },
+        config
+      )
+    ).toEqual([]);
+    expect(state.gates[issue].designApproved).toBeUndefined();
   });
 
-  it("preserves an issue's updatedAt fence across addNode when a later ingress event omits updated_at", () => {
+  it("never re-approves or re-emits design-approved once the gate is already approved, even at a newer seq", () => {
     const state = newLegionState("omp", 4);
-    state.issues[root] = {
-      key: root,
-      title: "Root",
-      state: "open",
-      children: [],
-      released: true,
-      labels: [],
-      updatedAt: Date.parse("2026-01-01T00:00:05.000Z"),
+    const issue = "LEGSMOKE-3" as IssueKey;
+    state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+    state.trees[issue] = {
+      root: issue,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
     };
-
-    // No tree yet, so this ingress isn't blocked by the tree-exists guard;
-    // it omits updated_at entirely (unlike a real webhook, addNode must not
-    // silently wipe the fence a prior event already established).
-    effects(state, {
-      action: "opened",
-      project: { id: "PVT_board" },
-      issue: issue(1, { updated_at: undefined }),
-    });
-
-    expect(state.issues[root].updatedAt).toBe(Date.parse("2026-01-01T00:00:05.000Z"));
-  });
-
-  it("adopts a human-added child on an active tree but ignores an already-recorded legion child", () => {
-    const state = rootState();
-    const architect = roleToken(state.project, root, "architect");
+    const architect = claim(state, issue, "architect");
+    state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
 
     expect(
-      effects(state, {
-        action: "sub_issue_added",
-        parent_issue: issue(1),
-        sub_issue: issue(2),
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "child-adopted", child, remaining: 1 },
-      },
-    ]);
-    expect(state.issues[root].children).toEqual([child]);
-    expect(state.issues[child]).toMatchObject({
-      parent: root,
-      released: false,
-    });
+      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "design-approved" } }]);
+    expect(state.gates[issue].designApproved).toBe("36e95e78-81d5-4da3-ae7b-789a16640bd9");
 
+    // Same ask, same answer, a strictly newer seq than the approval it already applied: the
+    // outer at-most-once fence alone would let this through (100 > lastAppliedSeq), so only the
+    // dedicated `gate.designApproved !== undefined` guard inside reduceAskAnswered stops the
+    // re-approval and the duplicate design-approved wake.
     expect(
-      effects(state, {
-        action: "sub_issue_added",
-        parent_issue: issue(1),
-        sub_issue: issue(2),
-      })
-    ).toEqual([]);
-  });
-
-  it("never adopts a dispatch thread as a child", () => {
-    const state = rootState();
-
-    expect(
-      effects(state, {
-        action: "sub_issue_added",
-        parent_issue: issue(1),
-        sub_issue: issue(2, { labels: ["dispatch-thread"] }),
-      })
-    ).toEqual([]);
-    expect(state.issues[root].children).toEqual([]);
-    expect(state.issues[child]).toBeUndefined();
-  });
-
-  it("crashes loud on an issue event missing a parseable updated_at (a contract violation, not a real GitHub payload)", () => {
-    const state = rootState();
-    for (const updated_at of [undefined, "not-a-date"]) {
-      expect(() =>
-        effects(state, {
-          action: "reopened",
-          issue: issue(1, { updated_at }),
-        })
-      ).toThrow(/missing a parseable updated_at/);
-    }
-  });
-
-  it("crashes loud on a sub_issue event missing a parseable parent_issue.updated_at", () => {
-    const state = rootState();
-    for (const updated_at of [undefined, "not-a-date"]) {
-      expect(() =>
-        effects(state, {
-          action: "sub_issue_added",
-          parent_issue: issue(1, { updated_at }),
-          sub_issue: issue(2),
-        })
-      ).toThrow(/missing a parseable parent_issue.updated_at/);
-    }
-  });
-
-  it("fences a real webhook against a newer resync-sourced snapshot (resync carries GitHub's updated_at too)", () => {
-    const state = rootState();
-    const architect = roleToken(state.project, root, "architect");
-
-    // A resync-sourced label reconciliation carries GitHub's real
-    // updated_at now, so it advances the fence exactly like a webhook would.
-    expect(
-      effects(
+      reduceDispatchEvent(
         state,
-        {
-          action: "labeled",
-          issue: issue(1, { updated_at: "2026-01-01T00:00:02.000Z" }),
-          label: { name: "human-approved" },
-        },
-        "resync"
-      )
-    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
-    expect(state.issues[root].updatedAt).toBe(Date.parse("2026-01-01T00:00:02.000Z"));
-
-    // A delayed, older real webhook redelivering after that resync snapshot
-    // must not reverse it.
-    expect(
-      effects(state, {
-        action: "unlabeled",
-        issue: issue(1, { updated_at: "2026-01-01T00:00:01.000Z" }),
-        label: { name: "human-approved" },
-      })
-    ).toEqual([]);
-    expect(state.issues[root].labels).toEqual(["human-approved"]);
-  });
-
-  it("lets a resync-sourced label change win an identical-clock tie against a webhook's disagreeing one", () => {
-    const state = rootState();
-    const architect = roleToken(state.project, root, "architect");
-    const T = "2026-01-01T00:00:02.000Z";
-
-    // A real webhook labels the issue "human-approved" at T.
-    expect(
-      effects(state, {
-        action: "labeled",
-        issue: issue(1, { updated_at: T }),
-        label: { name: "human-approved" },
-      })
-    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
-    expect(state.issues[root]).toMatchObject({
-      updatedAt: Date.parse(T),
-      updatedAtSource: "webhook",
-      labels: ["human-approved"],
-    });
-
-    // resync's own board read disagrees at the exact same clock. Unlike a
-    // webhook redelivery at an identical clock (ignored — see the test
-    // above), GitHub's authoritative resync read wins this tie regardless
-    // of arrival order, so the label is removed rather than the event
-    // being treated as a stale redelivery.
-    expect(
-      effects(
-        state,
-        {
-          action: "unlabeled",
-          issue: issue(1, { updated_at: T }),
-          label: { name: "human-approved" },
-        },
-        "resync"
+        { ...dispatch(humanApproved as unknown as DispatchFixture), seq: 100 },
+        config
       )
     ).toEqual([]);
-    expect(state.issues[root]).toMatchObject({
-      updatedAt: Date.parse(T),
-      updatedAtSource: "resync",
-      labels: [],
-    });
+    expect(state.gates[issue].designApproved).toBe("36e95e78-81d5-4da3-ae7b-789a16640bd9");
   });
 
-  it("does not let an issue action it ignores make itself the freshness authority", () => {
+  it("ignores GitHub issue webhooks without changing Dispatch lifecycle state", () => {
     const state = rootState();
-    const architect = roleToken(state.project, root, "architect");
-
-    // issueEvent recognizes labeled/unlabeled/closed/reopened only; "assigned"
-    // falls through unhandled at a later timestamp than the approval below.
-    expect(
-      effects(state, {
-        action: "assigned",
-        issue: issue(1, { updated_at: "2026-01-01T00:00:02.000Z" }),
-      })
-    ).toEqual([]);
-    expect(state.issues[root].updatedAt).toBeUndefined();
-
-    // An earlier human-approved label must still apply: the ignored event
-    // above never mutated anything, so it must not have become the fence.
-    expect(
-      effects(state, {
-        action: "labeled",
-        issue: issue(1, { updated_at: "2026-01-01T00:00:01.000Z" }),
-        label: { name: "human-approved" },
-      })
-    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
-    expect(state.issues[root].labels).toEqual(["human-approved"]);
-  });
-
-  it("reports child closure and the zero-crossing completion edge", () => {
-    const state = rootState();
-    attachChild(state);
-    const architect = roleToken(state.project, root, "architect");
+    const before = structuredClone(state);
 
     expect(
-      effects(state, {
-        action: "closed",
-        issue: issue(2, {
-          state: "closed",
-          state_reason: "completed",
-          final_comment_ref: "comment-9",
+      reduceGithubEvent(
+        state,
+        "notifications.github.acme.widgets.issue.1",
+        github({
+          action: "opened",
+          issue: {
+            number: 1,
+            title: "GitHub issue ignored by Dispatch lifecycle",
+            state: "open",
+            updated_at: "2026-09-10T02:13:55.925399Z",
+          },
         }),
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: {
-          type: "child-closed",
-          child,
-          completion: "completed",
-          remaining: 0,
-          finalCommentRef: "comment-9",
-        },
-      },
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "children-complete" },
-      },
-    ]);
-    expect(state.issues[child].state).toBe("closed");
-  });
-  it("propagates a daemon-recorded closing comment when GitHub omits it from the close webhook", () => {
-    const state = rootState();
-    attachChild(state);
-    const childNode = state.issues[child] as unknown as {
-      finalCommentRef?: string;
-    };
-    childNode.finalCommentRef = "https://github.com/acme/widgets/issues/2#issuecomment-55";
-    const architect = roleToken(state.project, root, "architect");
-
-    expect(
-      effects(state, {
-        action: "closed",
-        issue: issue(2, { state: "closed" }),
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: {
-          type: "child-closed",
-          child,
-          completion: "closed",
-          remaining: 0,
-          finalCommentRef: "https://github.com/acme/widgets/issues/2#issuecomment-55",
-        },
-      },
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "children-complete" },
-      },
-    ]);
-  });
-
-  it("re-arms children-complete after reopening a child and fires it on the next close", () => {
-    const state = rootState();
-    attachChild(state);
-    const architect = roleToken(state.project, root, "architect");
-
-    effects(state, { action: "closed", issue: issue(2, { state: "closed" }) });
-    expect(effects(state, { action: "reopened", issue: issue(2) })).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "child-reopened", child },
-      },
-    ]);
-    expect(
-      effects(state, {
-        action: "closed",
-        issue: issue(2, { state: "closed" }),
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: {
-          type: "child-closed",
-          child,
-          completion: "closed",
-          remaining: 0,
-          finalCommentRef: null,
-        },
-      },
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "children-complete" },
-      },
-    ]);
-  });
-
-  it("reports a removed child and emits children-complete when it was the last open child", () => {
-    const state = rootState();
-    attachChild(state);
-    const architect = roleToken(state.project, root, "architect");
-
-    expect(
-      effects(state, {
-        action: "sub_issue_removed",
-        parent_issue: issue(1),
-        sub_issue: issue(2),
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "child-removed", child, remaining: 0 },
-      },
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "children-complete" },
-      },
-    ]);
-    expect(state.issues[root].children).toEqual([]);
-    expect(state.issues[child].parent).toBeUndefined();
-  });
-
-  it("does not re-adopt a redelivered sub_issue_added that arrives after a newer sub_issue_removed", () => {
-    const state = rootState();
-    const architect = roleToken(state.project, root, "architect");
-    const addedPayload = {
-      action: "sub_issue_added",
-      parent_issue: issue(1, { updated_at: "2026-01-01T00:00:01.000Z" }),
-      sub_issue: issue(2),
-    };
-
-    expect(effects(state, addedPayload)).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "child-adopted", child, remaining: 1 },
-      },
-    ]);
-    expect(state.issues[root].children).toEqual([child]);
-
-    expect(
-      effects(state, {
-        action: "sub_issue_removed",
-        parent_issue: issue(1, { updated_at: "2026-01-01T00:00:02.000Z" }),
-        sub_issue: issue(2),
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "child-removed", child, remaining: 0 },
-      },
-      {
-        kind: "publish",
-        role: architect,
-        payload: { type: "children-complete" },
-      },
-    ]);
-    expect(state.issues[root].children).toEqual([]);
-
-    // Redelivery of the original sub_issue_added: its parent_issue.updated_at
-    // (t=1) is now older than the parent's last-applied event (t=2, from the
-    // removal above), so it is ignored instead of re-adopting the child.
-    expect(effects(state, addedPayload)).toEqual([]);
-    expect(state.issues[root].children).toEqual([]);
-    expect(state.issues[child].parent).toBeUndefined();
-  });
-
-  it("routes a reopened removed child through controller triage instead of root resurrection", () => {
-    const state = rootState();
-    attachChild(state);
-    effects(state, {
-      action: "sub_issue_removed",
-      parent_issue: issue(1),
-      sub_issue: issue(2),
-    });
-
-    expect(effects(state, { action: "reopened", issue: issue(2) })).toEqual([
-      {
-        kind: "controller",
-        payload: { type: "triage", issue: child, preexistingChildren: [] },
-      },
-    ]);
-  });
-
-  it("starts linger when a root of an active tree closes", () => {
-    const state = rootState();
-    expect(
-      effects(state, {
-        action: "closed",
-        issue: issue(1, { state: "closed" }),
-      })
-    ).toEqual([{ kind: "linger", tree: root }]);
-    expect(state.issues[root].state).toBe("closed");
-  });
-
-  it("keeps settled CI envelopes out of the generic GitHub reducer", () => {
-    const state = rootState();
-    expect(
-      effects(
-        state,
-        { action: "completed", check_run: { conclusion: "failure" } },
-        `notifications.github.acme.widgets.pr.${prNumber}.checks`
+        config
       )
     ).toEqual([]);
+    expect(state).toEqual(before);
   });
 
-  it("returns a lingering root to its architect on reopen", () => {
-    const state = rootState("lingering");
-    const architect = roleToken(state.project, root, "architect");
-
-    expect(effects(state, { action: "reopened", issue: issue(1) })).toEqual([
-      { kind: "publish", role: architect, payload: { type: "reopened" } },
-    ]);
-    expect(state.issues[root].state).toBe("open");
-  });
-
-  it("sends a gone root reopening through controller resurrection", () => {
-    const state = rootState("closed");
-    expect(effects(state, { action: "reopened", issue: issue(1) })).toEqual([
-      { kind: "controller", payload: { type: "reactivation", issue: root } },
-      { kind: "probe", tree: root },
-    ]);
-  });
-
-  it("routes plain issue comments to the issue architect", () => {
-    const state = rootState();
-    const architect = roleToken(state.project, root, "architect");
+  it("ignores a status update whose seq is not newer than the last one applied to the issue", () => {
+    const state = newLegionState("omp", 4);
+    state.issues[root] = { ...issueNode(root, "Root", "testing"), lastAppliedSeq: 999 };
+    const before = structuredClone(state.issues[root]);
 
     expect(
-      effects(state, {
-        action: "created",
-        issue: issue(1),
-        comment: {
-          user: { login: "sami" },
-          body: "Please adjust scope",
-          html_url: "comment-url",
-        },
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: {
-          type: "issue-comment",
-          author: "sami",
-          body: "Please adjust scope",
-          url: "comment-url",
-        },
-      },
-    ]);
-  });
-
-  it("keeps routing to the active phase while a tree lingers", () => {
-    const state = rootState("lingering");
-    const implementer = claim(state, root, "implementer");
-
-    expect(
-      effects(state, {
-        action: "created",
-        issue: issue(1),
-        comment: {
-          user: { login: "sami" },
-          body: "Any update?",
-          html_url: "comment-url",
-        },
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: implementer,
-        payload: {
-          type: "issue-comment",
-          author: "sami",
-          body: "Any update?",
-          url: "comment-url",
-        },
-      },
-    ]);
-  });
-
-  it("wakes the controller for activity on a closed tree instead of publishing or holding", () => {
-    const state = rootState("closed");
-
-    expect(
-      effects(state, {
-        action: "created",
-        issue: issue(1),
-        comment: {
-          user: { login: "sami" },
-          body: "Still around?",
-          html_url: "comment-url",
-        },
-      })
-    ).toEqual([
-      {
-        kind: "controller",
-        payload: {
-          type: "closed-tree-activity",
-          issue: root,
-          root,
-          event: {
-            type: "issue-comment",
-            author: "sami",
-            body: "Still around?",
-            url: "comment-url",
-          },
-        },
-      },
-    ]);
-  });
-
-  it("wakes the controller exactly once for a closed tree's approved review at a green head", () => {
-    const state = rootState("closed");
-    attachChild(state);
-    addPr(state, { verdict: "green", ciSettledAt: 0 });
-
-    const result = effects(state, {
-      action: "submitted",
-      pull_request: { number: prNumber, head: { sha: "old-sha" } },
-      review: {
-        user: { login: "sami" },
-        state: "approved",
-        commit_id: "old-sha",
-        body: "Looks good",
-      },
-    });
-
-    expect(result.filter((effect) => effect.kind === "controller")).toEqual([
-      {
-        kind: "controller",
-        payload: {
-          type: "closed-tree-activity",
-          issue: child,
-          root,
-          event: {
-            type: "pr-review",
-            state: "approved",
-            author: "sami",
-            body: "Looks good",
-          },
-        },
-      },
-    ]);
-    expect(result).toContainEqual({ kind: "approval-status", repo, pr: prNumber, sha: "old-sha" });
-  });
-
-  it("wakes the controller exactly once when closing the last open child of a closed tree", () => {
-    const state = rootState("closed");
-    attachChild(state);
-
-    expect(
-      effects(state, {
-        action: "closed",
-        issue: issue(2, { state: "closed", state_reason: "completed" }),
-      })
-    ).toEqual([
-      {
-        kind: "controller",
-        payload: {
-          type: "closed-tree-activity",
-          issue: root,
-          root,
-          event: {
-            type: "child-closed",
-            child,
-            completion: "completed",
-            remaining: 0,
-            finalCommentRef: null,
-          },
-        },
-      },
-    ]);
-  });
-
-  it("routes comments on an unreleased child to the tree's architect and never holds them", () => {
-    const state = rootState();
-    attachChild(state, false);
-    const architect = roleToken(state.project, root, "architect");
-    expect(
-      effects(
-        state,
-        {
-          action: "created",
-          issue: issue(2),
-          comment: {
-            user: { login: "sami" },
-            body: "Hold this",
-            html_url: "comment-url",
-          },
-        },
-        undefined,
-        "event-hold"
-      )
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: {
-          type: "issue-comment",
-          author: "sami",
-          body: "Hold this",
-          url: "comment-url",
-        },
-      },
-    ]);
-  });
-
-  it("filters legion-footer and self-authored comments before routing", () => {
-    const state = rootState();
-    const comment = {
-      user: { login: "sami" },
-      body: '<!-- legion: {"session":"x"} -->',
-      html_url: "comment-url",
-    };
-    expect(effects(state, { action: "created", issue: issue(1), comment })).toEqual([]);
-    expect(
-      effects(state, {
-        action: "created",
-        issue: issue(1),
-        comment: {
-          ...comment,
-          user: { login: "legion-author[bot]" },
-          body: "Normal",
-        },
-      })
+      reduceDispatchEvent(state, dispatch(issueUpdatedTodo as unknown as DispatchFixture), config)
     ).toEqual([]);
+    expect(state.issues[root]).toEqual(before);
   });
 
+  it("applies a redelivered event with the same seq exactly once", () => {
+    const state = newLegionState("omp", 4);
+    const event = dispatch(issueCreatedRoot as unknown as DispatchFixture);
+
+    expect(reduceDispatchEvent(state, event, config)).toEqual([
+      { kind: "controller", payload: { type: "triage", issue: root } },
+    ]);
+    const afterFirst = structuredClone(state.issues[root]);
+    expect(afterFirst.lastAppliedSeq).toBe(event.seq);
+
+    // Exact redelivery: same event object, same seq. Must be a total no-op — no mutation
+    // (including no re-derived one) and no re-emitted effect.
+    expect(reduceDispatchEvent(state, event, config)).toEqual([]);
+    expect(state.issues[root]).toEqual(afterFirst);
+  });
+
+  it("leaves status and children intact when an older issue.created is redelivered after a newer issue.updated", () => {
+    const state = newLegionState("omp", 4);
+    const createEvent = dispatch(issueCreatedRoot as unknown as DispatchFixture);
+    const updateEvent = dispatch(issueUpdatedTodo as unknown as DispatchFixture);
+    expect(createEvent.seq).toBeLessThan(updateEvent.seq);
+
+    reduceDispatchEvent(state, createEvent, config);
+    expect(reduceDispatchEvent(state, updateEvent, config)).toEqual([
+      { kind: "admit", issue: root },
+    ]);
+    expect(state.issues[root].status).toBe("todo");
+    const afterUpdate = structuredClone(state.issues[root]);
+
+    // The stale create (an out-of-order redelivery) must not roll the status back to "triage",
+    // touch children, or re-emit the triage wake.
+    expect(reduceDispatchEvent(state, createEvent, config)).toEqual([]);
+    expect(state.issues[root]).toEqual(afterUpdate);
+  });
+
+  it("never replaces an existing node on issue.created, even one whose seq clears the outer fence", () => {
+    const state = newLegionState("omp", 4);
+    // Constructed directly (not through a prior reduceDispatchEvent call) with a lower seq than
+    // the create fixture below, so the outer at-most-once fence alone would let the create
+    // through — only reduceIssueCreated's own existing-node guard must stop it from here.
+    state.issues[root] = { ...issueNode(root, "Root", "todo"), lastAppliedSeq: 0 };
+    state.issues[root].children.push(child);
+    const before = structuredClone(state.issues[root]);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(issueCreatedRoot as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    expect(state.issues[root]).toEqual({ ...before, lastAppliedSeq: 1 });
+  });
+
+  it("ignores ask.answered against a gate with no corresponding issue node", () => {
+    const state = newLegionState("omp", 4);
+    const issue = "LEGSMOKE-3" as IssueKey;
+    // A schema-valid but dangling gate record: registered without the issue node ever existing.
+    state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+    const before = structuredClone(state.gates[issue]);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    expect(state.gates[issue]).toEqual(before);
+    expect(state.issues[issue]).toBeUndefined();
+  });
+
+  it("ignores child.status against a tree with no corresponding issue node", () => {
+    const state = newLegionState("omp", 4);
+    // A schema-valid but dangling tree record: an architect is even claimed for it, but no issue
+    // node was ever created — routeActive must never be reached for this key.
+    state.trees[root] = { root, generation: 1, status: "active", launchFailures: 0 };
+    claim(state, root, "architect");
+    const before = structuredClone(state);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(childStatus as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    expect(state).toEqual(before);
+  });
+
+  for (const { name, setup, event: buildEvent } of REPLAY_ONCE_CASES) {
+    it(`replays exactly once: ${name}`, () => {
+      const state = setup();
+      const beforeFirst = structuredClone(state);
+      const event = buildEvent();
+
+      const first = reduceDispatchEvent(state, event, config);
+      const afterFirst = structuredClone(state);
+      const mutated = JSON.stringify(afterFirst) !== JSON.stringify(beforeFirst);
+      expect(first.length > 0 || mutated).toBe(true);
+
+      // Exact redelivery: same event object, same seq. Must be a total no-op — no mutation
+      // (including no re-derived one) and no re-emitted effect.
+      expect(reduceDispatchEvent(state, event, config)).toEqual([]);
+      expect(state).toEqual(afterFirst);
+    });
+  }
+});
+
+describe("reduceGithubEvent", () => {
   it("routes PR conversation issue_comment events to the mapped implementer", () => {
     const state = rootState();
     attachChild(state);
@@ -1030,7 +719,7 @@ describe("reduceGithubEvent", () => {
         action: "opened",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "head-sha",
         url: "pr-url",
         updated_at: "2026-09-07T03:00:00Z",
@@ -1042,39 +731,12 @@ describe("reduceGithubEvent", () => {
         payload: { type: "pr-opened", pr: prNumber, url: "pr-url" },
       },
     ]);
-    expect(state.prByBranch[`${repo}@legion/issue-2`]).toBe(`${repo}#${prNumber}`);
+    expect(state.prByBranch[`${repo}@${childBranch}`]).toBe(`${repo}#${prNumber}`);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       key: child,
       headSha: "head-sha",
       headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
     });
-  });
-  it("does not index a registered PR under an unknown branch", () => {
-    const state = rootState();
-    const fallbackIssue = formatIssueKey("acme", "widgets", prNumber);
-    state.issues[fallbackIssue] = {
-      key: fallbackIssue,
-      title: "Fallback PR issue",
-      state: "open",
-      children: [],
-      released: true,
-      labels: [],
-    };
-
-    expect(
-      effects(state, {
-        kind: "pr",
-        action: "opened",
-        repo,
-        number: String(prNumber),
-        head_sha: "head-sha",
-      })
-    ).toEqual([]);
-    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
-      key: fallbackIssue,
-      headSha: "head-sha",
-    });
-    expect(state.prByBranch).toEqual({});
   });
 
   it("registers a Legion PR on synchronization when its opened event was missed", () => {
@@ -1087,7 +749,7 @@ describe("reduceGithubEvent", () => {
         action: "synchronize",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "recovered-head",
       })
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "recovered-head" }]);
@@ -1095,7 +757,7 @@ describe("reduceGithubEvent", () => {
       key: child,
       headSha: "recovered-head",
     });
-    expect(state.prByBranch[`${repo}@legion/issue-2`]).toBe(`${repo}#${prNumber}`);
+    expect(state.prByBranch[`${repo}@${childBranch}`]).toBe(`${repo}#${prNumber}`);
   });
 
   it("resets a red CI verdict and approval state on synchronization, counts the retry, and rechecks approval", () => {
@@ -1117,7 +779,7 @@ describe("reduceGithubEvent", () => {
         action: "synchronize",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "new-sha",
       })
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "new-sha" }]);
@@ -1146,7 +808,7 @@ describe("reduceGithubEvent", () => {
         action: "synchronize",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "head-b",
         updated_at: "2026-09-07T03:02:00Z",
       })
@@ -1165,7 +827,7 @@ describe("reduceGithubEvent", () => {
         action: "synchronize",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "head-a",
         updated_at: "2026-09-07T03:01:00Z",
       })
@@ -1200,7 +862,7 @@ describe("reduceGithubEvent", () => {
         action: "synchronize",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "head-b",
         updated_at: T,
       })
@@ -1315,7 +977,7 @@ describe("reduceGithubEvent", () => {
       },
     ]);
     expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
-    expect(state.prByBranch[`${repo}@legion/issue-2`]).toBeUndefined();
+    expect(state.prByBranch[`${repo}@${childBranch}`]).toBeUndefined();
   });
 
   it("keeps a tombstone after an unmerged close so an older opened redelivery cannot recreate the PR", () => {
@@ -1351,13 +1013,13 @@ describe("reduceGithubEvent", () => {
         action: "opened",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "old-sha",
         updated_at: "2026-09-07T03:00:00Z",
       })
     ).toEqual([]);
     expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
-    expect(state.prByBranch[`${repo}@legion/issue-2`]).toBeUndefined();
+    expect(state.prByBranch[`${repo}@${childBranch}`]).toBeUndefined();
   });
 
   it("keeps a tombstone after an unmerged close so an older synchronize cannot recreate the PR", () => {
@@ -1381,7 +1043,7 @@ describe("reduceGithubEvent", () => {
         action: "synchronize",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "stale-resurrection-head",
         updated_at: "2026-09-07T03:30:00Z",
       })
@@ -1415,7 +1077,7 @@ describe("reduceGithubEvent", () => {
         action: "synchronize",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "stale-resurrection-head",
         updated_at: closedAt,
       })
@@ -1444,7 +1106,7 @@ describe("reduceGithubEvent", () => {
         action: "opened",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "reopened-head",
         url: "pr-url",
         updated_at: "2026-09-07T05:00:00Z",
@@ -1470,7 +1132,7 @@ describe("reduceGithubEvent", () => {
         action: "opened",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "stale-reopen-head",
         url: "pr-url",
         updated_at: "2026-09-07T02:00:00Z",
@@ -1503,7 +1165,7 @@ describe("reduceGithubEvent", () => {
         action: "opened",
         repo,
         number: String(prNumber),
-        head_ref: "legion/issue-2",
+        head_ref: childBranch,
         head_sha: "settled-head",
         url: "pr-url",
         updated_at: "2026-09-07T03:00:00Z",
@@ -1550,55 +1212,6 @@ describe("reduceGithubEvent", () => {
       { kind: "approval-status", repo, pr: prNumber, sha: "current-sha" },
     ]);
     expect(state.prs[`${repo}#${prNumber}`]?.reviewDecision).toBeUndefined();
-  });
-
-  it("mirrors supported labels, waking the architect once when a human approves", () => {
-    const state = rootState();
-    const architect = roleToken(state.project, root, "architect");
-    expect(
-      effects(state, {
-        action: "labeled",
-        issue: issue(1),
-        label: { name: "needs-approval" },
-      })
-    ).toEqual([]);
-    expect(state.issues[root].labels).toEqual(["needs-approval"]);
-    expect(
-      effects(state, {
-        action: "labeled",
-        issue: issue(1),
-        label: { name: "human-approved" },
-      })
-    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
-    expect(state.issues[root].labels).toEqual(["needs-approval", "human-approved"]);
-    effects(state, {
-      action: "labeled",
-      issue: issue(1),
-      label: { name: "unknown-label" },
-    });
-    expect(state.issues[root].labels).toEqual(["needs-approval", "human-approved"]);
-    effects(state, {
-      action: "unlabeled",
-      issue: issue(1),
-      label: { name: "needs-approval" },
-    });
-    expect(state.issues[root].labels).toEqual(["human-approved"]);
-  });
-
-  it("ignores pushes to legion issue branches", () => {
-    const state = rootState();
-    attachChild(state);
-
-    expect(
-      effects(state, {
-        ref: "refs/heads/legion/issue-2",
-        action: "labeled",
-        issue: issue(1),
-        label: { name: "human-approved" },
-        commits: [{ id: "abc123", message: "Implement it" }],
-      })
-    ).toEqual([]);
-    expect(state.issues[root].labels).toEqual([]);
   });
 });
 
@@ -1694,13 +1307,14 @@ describe("routeActive", () => {
     const state = rootState();
     attachChild(state);
     state.phases[child] = { phase: "bogus", sessionId: "x" };
+    state.gates[child] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
 
     expect(() =>
-      effects(state, {
-        action: "created",
-        issue: issue(2),
-        comment: { user: { login: "sami" }, body: "hi", html_url: "u" },
-      })
+      reduceDispatchEvent(
+        state,
+        { ...dispatch(humanApproved as unknown as DispatchFixture), key: child },
+        config
+      )
     ).toThrow(child);
   });
 
