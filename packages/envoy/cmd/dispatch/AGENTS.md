@@ -21,7 +21,11 @@ Otherwise Dispatch reads
 `natsUrls` from shared `envoy.json`, connects through `bus.Connect`, and runs
 the outbox. Host adapters can override their configured Dispatch base URL
 with `DISPATCH_URL`; the server reads `dispatch.serverUrl` from shared
-`envoy.json`.
+`envoy.json`. `DISPATCH_TEST_HOOKS=1` mounts `POST /api/v1/events/_test/disconnect`
+(closes every open SSE connection, as if the server had restarted) — unset in
+every real deployment; e2e's `run-server.sh` sets it so the web client's
+reconnect-from-lastId path can be exercised without seeding thousands of
+events to trip the SSE replay cap.
 
 Documents use a Yjs `Y.Text` named `content`. `GET /ws/doc/{room}` uses
 Hocuspocus framing. Server-side edits use the document service, persist updates,
@@ -91,7 +95,8 @@ the table says human only.
 | `/api/v1/issues/{key}/artifacts/{slug}/primary` | POST | human only | Make a document the issue primary artifact. `{slug}` is resolved within `{key}`.
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
-| `/api/v1/events` | GET | identity | Stream durable events with SSE. |
+| `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
+| `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. |
 
 ## Checks

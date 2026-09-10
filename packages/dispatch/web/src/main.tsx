@@ -14,6 +14,11 @@ const queryClient = new QueryClient({
       // a 5xx) is worth a couple of quick retries before we show an error.
       retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
       retryDelay: 500,
+      // The event stream is the source of freshness; a stale query still gets
+      // invalidated the moment a relevant event arrives. This just avoids an
+      // unconditional refetch-on-mount for data the stream keeps current.
+      refetchOnWindowFocus: true,
+      staleTime: 30_000,
     },
   },
 });

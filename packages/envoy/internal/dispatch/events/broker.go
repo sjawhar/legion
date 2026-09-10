@@ -134,3 +134,15 @@ func (b *Broker) Publish(e model.Event) {
 		}
 	}
 }
+
+// CloseAll disconnects every active local subscriber, ending their SSE response
+// bodies as if the server had restarted. Test-only: exercises a client's
+// reconnect-from-lastId path without seeding enough events to trip the replay cap.
+func (b *Broker) CloseAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, ch := range b.subscribers {
+		delete(b.subscribers, id)
+		close(ch)
+	}
+}

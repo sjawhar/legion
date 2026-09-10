@@ -100,7 +100,7 @@ test("API client uploads inline artifact content as JSON and files as multipart"
     primary: true,
   });
   expect(multipart?.init?.body).toBeInstanceOf(FormData);
-  expect((multipart?.init?.body as FormData).get("name")).toBe("spec.md");
+  expect((multipart?.init?.body as FormData | undefined)?.get("name")).toBe("spec.md");
 });
 
 test("API client sends the documented method and JSON body for mutations", async () => {
