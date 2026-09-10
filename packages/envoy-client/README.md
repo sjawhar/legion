@@ -44,7 +44,9 @@ only to that returned topic.
 `resolveDispatchConfig` enables Dispatch only when both its URL and bearer token
 resolve. Set `dispatch.enabled: true`, `dispatch.serverUrl`, and
 `dispatch.token` in `envoy.json`, or override the URL and token with
-`DISPATCH_URL` and `DISPATCH_TOKEN`. Invalid configuration, malformed URLs, and
+`DISPATCH_URL` and `DISPATCH_TOKEN`. With `dispatch.enabled: true` and no
+`dispatch.serverUrl`, the URL defaults to `http://localhost:8766`, the Go server's
+listen address. Invalid configuration, malformed URLs, and
 empty tokens leave Dispatch disabled and name the failing source in `error`.
 ## Tool contract
 

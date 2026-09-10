@@ -98,7 +98,9 @@ Configure the shared `envoy.json` with:
 
 The user file is `~/.config/opencode/envoy.json`; a
 `<cwd>/.opencode/envoy.json` file shallow-merges over it. `DISPATCH_URL` and
-`DISPATCH_TOKEN` override the file values for one process. Invalid configuration,
+`DISPATCH_TOKEN` override the file values for one process. Omitting
+`dispatch.serverUrl` while `dispatch.enabled` is true targets
+`http://localhost:8766`, the Go server's listen address. Invalid configuration,
 an invalid URL, or an empty token leaves the nine tools unavailable and reports
 the source of the error.
 
