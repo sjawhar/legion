@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api, type ListEventsOptions } from "../../api/client";
@@ -322,5 +322,87 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
     api.getIssueEvents = originalGetIssueEvents;
     api.getInbox = originalGetInbox;
     api.getMyState = originalGetMyState;
+  }
+});
+
+class IssuePageWebSocketStub {
+  binaryType = "arraybuffer";
+  identifier = 0;
+  readyState = 0;
+
+  addEventListener(..._args: unknown[]): void {}
+
+  close(): void {
+    this.readyState = 3;
+  }
+
+  removeEventListener(..._args: unknown[]): void {}
+
+  send(..._args: unknown[]): void {}
+}
+
+test("IssuePage highlights a current spec range from its deep-link URL", async () => {
+  const primaryArtifact = issue.artifacts?.[0];
+  if (primaryArtifact === undefined) {
+    throw new Error("IssuePage test fixture needs a primary document.");
+  }
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = IssuePageWebSocketStub as unknown as typeof WebSocket;
+  const restore = stubIssuePage(issue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...primaryArtifact,
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "SQLite is local",
+    version: 1,
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec?from=0&to=5");
+
+  try {
+    await waitFor(() =>
+      expect(view.container.querySelector("mark.dispatch-anchor-history")?.textContent).toBe(
+        "SQLit"
+      )
+    );
+    expect(screen.getByRole("button", { name: "Edit" })).not.toBeNull();
+  } finally {
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    restore();
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
+test("IssuePage shows the orphan affordance for an unmapped current spec deep link", async () => {
+  const primaryArtifact = issue.artifacts?.[0];
+  if (primaryArtifact === undefined) {
+    throw new Error("IssuePage test fixture needs a primary document.");
+  }
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = IssuePageWebSocketStub as unknown as typeof WebSocket;
+  const restore = stubIssuePage(issue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...primaryArtifact,
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "SQLite is local",
+    version: 1,
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec?from=20&to=25");
+
+  try {
+    await within(view.container).findByText(
+      "Text changed. The selected range no longer exists in this document."
+    );
+    expect(view.container.querySelector("mark.dispatch-anchor-history")).toBeNull();
+  } finally {
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    restore();
+    globalThis.WebSocket = originalWebSocket;
   }
 });
