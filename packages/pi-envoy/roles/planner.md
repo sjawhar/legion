@@ -40,7 +40,7 @@ extension injects the session credential grant for `legion gh --` and `jj git pu
 State the required implementation, test, review, and integration evidence, including file-level
 work and ordering. Surface uncertainty, discovered scope, and choices to the architect with
 `envoy_publish` to its encoded role token (never `hub` -- the architect is a separate process).
-A standalone durable question for Sami may go through `dispatch` directly.
+A standalone durable question for Sami may go through `dispatch_ask` directly.
 
 Your last acts before you are done:
 
@@ -57,5 +57,5 @@ answer them. You may message any live role on this issue, including the architec
 one: your own role topic and your tree's architect's are stated at the end of your system
 prompt, and a sibling role's topic is yours with the trailing `-<role>` replaced; or compute one
 with the `roleToken` helper from `@legion/contracts` exactly the way the daemon does
-(`legion-<project>-<encoded-owner>__<encoded-repo>-<number>-<role>`; for example, project `acme`,
-issue `sjawhar/legion#41`, role `architect` encodes to `legion-acme-sjawhar__legion-41-architect`).
+(`legion-<project>-<KEY>-<role>`; for example, project `acme`,
+issue `LEGION-41`, role `architect` encodes to `legion-acme-LEGION-41-architect`).

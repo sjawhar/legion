@@ -10,29 +10,31 @@ with human-created children; either way you own its complete outcome. Work from 
 wakes and current artifacts. Do not perform code work yourself and do not rely on a
 separate coordinator to finish necessary work.
 
+This skill documents the target Dispatch-native contract. The `legion` tool's
+`register_gate`/`release_wave`/`set_status` ops, the Dispatch key format, and the
+`dispatch_*` tool family land with PR B (#TBD); until that PR merges, this skill's contract
+is not yet runnable on `main`.
+
 ## Tool and ownership boundaries
 
-- Use the `legion` tool for lifecycle writes. Its issue key format is
-  `owner/repo#number`.
+- Use the `legion` tool for lifecycle writes. Its issue key is the Dispatch key
+  (pattern `^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-41`).
 - Use `legion({ op: "spawn_worker", issue, role, task })` for every Legion role spawn.
   Message a known phase worker with `envoy_publish` to `notifications.role.` followed by
   its encoded role token (the token `spawn_worker` returned for it); re-assign it by
   calling `spawn_worker` again on the same existing role, which resumes the same process
   instead of starting a fresh one. Phase workers escalate lifecycle, scope, and
   cross-phase matters the same way: `envoy_publish` to your own encoded token. Any role
-  may use `dispatch` directly for a standalone human question; replies return to the
+  may use `dispatch_ask` directly for a standalone human question; replies return to the
   asking session.
 - The daemon spawns each role as its own process with the issue's context already in its
   environment. Never hand-format a role token: the daemon encodes one as
-  `legion-<project>-<encoded-owner>__<encoded-repo>-<number>-<role>` (escaping `_`, `.`,
-  and `-` within the owner/repo names); for example, project `acme`, issue
-  `sjawhar/legion#41`, role `architect` encodes to `legion-acme-sjawhar__legion-41-architect`.
-  Reuse a token you already hold (your own, or one `spawn_worker` returned) or compute
-  another with the `roleToken` helper from `@legion/contracts` exactly the way the daemon
-  does.
-- Use only the live label vocabulary: `needs-approval`, `human-approved`,
-  `legion-child`, and `legion-backlog`. Do not attempt to apply a label whose ownership
-  belongs to the controller or Sami.
+  `legion-<project>-<KEY>-<role>`; for example, project `acme`, issue `LEGION-41`, role
+  `architect` encodes to `legion-acme-LEGION-41-architect`. Reuse a token you already
+  hold (your own, or one `spawn_worker` returned) or compute another with the
+  `roleToken` helper from `@legion/contracts` exactly the way the daemon does.
+- There is no label vocabulary. Dispatch status replaces the board, and the design gate
+  is a `dispatch_ask` answered `Approve`, not a label. Never attempt to apply a label.
 - Deferring necessary work is failure. The sole valid deferral is a new child issue you
   create and continue to own. Re-file a genuinely independent child through the
   controller rather than treating it as an abandoned dependency.
@@ -46,7 +48,7 @@ exercise a criterion end to end, building that path is a child issue of this tre
 
 - **Existing children:** adopt them. Do not replace or re-decompose human-created work.
   Put every adopted child into the initial wave. **You MUST call**
-  `legion({ op: "wave_release", children: ["owner/repo#41", "owner/repo#42"] })`
+  `legion({ op: "release_wave", issues: ["LEGION-41", "LEGION-42"] })`
   **before any `spawn_worker` call for an adopted child.** Until release, the daemon
   holds that child's role activity. Then spawn each child's daemon-managed sub-architect
   owner.
@@ -54,16 +56,19 @@ exercise a criterion end to end, building that path is a child issue of this tre
   completed and integrated as one unit. Otherwise create complete child issues with:
 
   ```text
-  legion({
-    op: "issue_create",
+  dispatch_issue({
+    project: "<project>",
+    parent: "<root issue>",
     title: "<child outcome>",
-    body: "<acceptance criteria, scope, and context>",
-    labels: []
+    spec: "<acceptance criteria, scope, and context>"
   })
   ```
 
-  The daemon establishes the sub-issue relationship and the `legion-child` label. Keep
-  the returned issue keys in ordered waves; a child is inert until released.
+  `project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`) — not
+  the role-token `<project>` (the daemon's own project, e.g. `acme`), a different string. A
+  root session has `LEGION_TREE == LEGION_ISSUE`. The daemon establishes the sub-issue
+  relationship from `parent`. Keep the returned issue keys in ordered waves; a child is
+  inert until released.
 
 Write one root specification containing the accepted scope, adoption/decomposition,
 waves, acceptance criteria, and integration test. When the config-armed root design gate
@@ -71,20 +76,18 @@ applies, run this exact sequence **before any Legion-role spawn**, including a
 sub-architect:
 
 ```text
-legion({ op: "post_spec", issue: "<root issue>", body: "<root specification>" })
-legion({ op: "label_add", issue: "<root issue>", label: "needs-approval" })
-dispatch({
-  parent: "<root issue>",
-  subject: "Legion design approval requested",
-  context: "<what the tree is, what triggered the gate>",
-  question: "<specification summary and the decision requested>"
+dispatch_artifact({ issue: "<root issue>", name: "spec.md", content: "<root specification>", primary: true, summary: "<one-line summary>" })
+askId = dispatch_ask({
+  issue: "<root issue>",
+  question: "<specification summary and the decision requested>",
+  options: [{ label: "Approve" }, ...]
 })
+legion({ op: "register_gate", issue: "<root issue>", askId })
 ```
 
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake
-shows `human-approved` on the root. You never add that label yourself. Approval covers
-the entire tree: later waves, re-scopes, and integration-failure children do not repeat
-this sequence.
+shows `design-approved` on the root. Approval covers the entire tree: later waves,
+re-scopes, and integration-failure children do not repeat this sequence.
 
 ## 2. Children in flight
 
@@ -92,7 +95,7 @@ Release only the next useful wave, then give its owners their work. A release is
 explicit lifecycle write:
 
 ```text
-legion({ op: "wave_release", children: ["owner/repo#41", "owner/repo#42"] })
+legion({ op: "release_wave", issues: ["LEGION-41", "LEGION-42"] })
 ```
 
 After release, spawn each relevant owner; for example:
@@ -100,7 +103,7 @@ After release, spawn each relevant owner; for example:
 ```text
 legion({
   op: "spawn_worker",
-  issue: "owner/repo#41",
+  issue: "LEGION-41",
   role: "architect",
   task: "Own this child through its lifecycle and report its evidence."
 })
@@ -122,7 +125,7 @@ and current `main` integration surface:
 ```text
 legion({
   op: "spawn_worker",
-  issue: "owner/repo#40",
+  issue: "LEGION-40",
   role: "tester",
   task: "Verify this parent issue against its acceptance criteria on current main; return reproducible integration evidence."
 })
@@ -181,15 +184,12 @@ If anything changes the approved head, return to review; do not let the merger p
 
 ## 7. Close
 
-After the merge result and sign-off are recorded, close this issue through the Legion
-write surface and include the sign-off comment:
+After the merge result and sign-off are recorded, post the sign-off and close this issue
+through the Legion write surface:
 
 ```text
-legion({
-  op: "issue_close",
-  issue: "owner/repo#40",
-  comment: "<sign-off: scope, integration evidence, review, retro, Sami approval, and merge>"
-})
+dispatch_comment({ issue: "LEGION-40", body: "<sign-off: scope, integration evidence, review, retro, Sami approval, and merge>" })
+legion({ op: "set_status", issue: "LEGION-40", status: "done" })
 ```
 
 Closing a child supplies the closure event to its parent. Do not close a parent until the
@@ -220,6 +220,6 @@ corresponding lifecycle procedure.
 
 Controller-actionable matters are exactly re-filing a genuinely independent child,
 capacity, and cross-tree conflict. Use the Legion escalation operation for those. Handle
-everything else in the tree, or use `dispatch` for a human question; workers may reach
-Sami directly with `dispatch` the same way. Do not create a wait loop for any wake
+everything else in the tree, or use `dispatch_ask` for a human question; workers may reach
+Sami directly with `dispatch_ask` the same way. Do not create a wait loop for any wake
 source.

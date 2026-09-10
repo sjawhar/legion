@@ -8,7 +8,7 @@ readonly gh_config_dir="${smoke_dir}/gh-config"
 readonly nats_name="legion-smoke-nats"
 readonly nats_port="${NATS_PORT:-14222}"
 readonly listener_port="${ENVOY_PORT:-19020}"
-readonly dispatch_port="${DISPATCH_PORT:-18766}"
+readonly smoke_dispatch_project="LEGSMOKE"
 readonly daemon_port="${LEGION_DAEMON_PORT:-19370}"
 readonly nats_url="nats://127.0.0.1:${nats_port}"
 readonly omp_pin="github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841"
@@ -262,20 +262,13 @@ app_installation_token() {
 }
 
 write_daemon_config() {
-  local board_config=" []"
-
-  if [[ -n "${SMOKE_PROJECT_ID:-}" ]]; then
-    [[ "$SMOKE_PROJECT_ID" =~ ^PVT_ ]] || fail "SMOKE_PROJECT_ID must be a Projects V2 node ID"
-    board_config=$'\n  - '"${SMOKE_PROJECT_ID}"
-  fi
-
   cat >"${smoke_dir}/legion.yaml" <<EOF
 project: ${SMOKE_PROJECT}
 port: ${daemon_port}
 envoy_url: http://127.0.0.1:${listener_port}
 nats_urls:
   - ${nats_url}
-board_project_ids:${board_config}
+dispatch_project: ${smoke_dispatch_project}
 app_logins:
 $(printf '%s\n' "$LEGION_APP_LOGINS" | tr ',' '\n' | sed 's/^/  - /')
 admission_cap: 4
@@ -298,13 +291,6 @@ github_apps:
     private_key_command: 'printf "%s" "\$GH_REVIEW_APP_PRIVATE_KEY_B64" | base64 --ignore-garbage --decode'
 EOF
 }
-write_dispatch_config() {
-  mkdir -p "${smoke_dir}/dispatch-home/.config/opencode"
-  jq -n --arg nats_url "$nats_url" --arg repo "$SMOKE_REPO" \
-    '{natsUrls: [$nats_url], dispatch: {defaultRepo: $repo}}' \
-    >"${smoke_dir}/dispatch-home/.config/opencode/envoy.json"
-}
-
 
 ensure_nats() {
   if docker container inspect "$nats_name" >/dev/null 2>&1; then
@@ -552,19 +538,19 @@ main() {
   require_env GH_REVIEW_APP_PRIVATE_KEY_B64
   require_numeric LEGION_IMPLEMENT_APP_ID
   require_numeric LEGION_REVIEW_APP_ID
+  require_env DISPATCH_URL
+  require_env DISPATCH_TOKEN
 
   [[ "$SMOKE_REPO" =~ ^[^/]+/[^/]+$ ]] || fail "SMOKE_REPO must be <owner>/<repo>"
   [[ "$SMOKE_PROJECT" =~ ^[^/]+/[0-9]+$ ]] || fail "SMOKE_PROJECT must be <owner>/<number>"
   webhook_mode="$(resolve_webhook_mode)"
 
-  mkdir -p "$smoke_dir" "${smoke_dir}/daemon" "${smoke_dir}/dispatch-home" \
+  mkdir -p "$smoke_dir" "${smoke_dir}/daemon" \
     "${smoke_dir}/xdg-data" "${smoke_dir}/xdg-state/legion" "$gh_config_dir"
   printf '%s\n' "$webhook_mode" >"${smoke_dir}/webhook-mode"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
-  assert_port_free dispatch "$dispatch_port" "${smoke_dir}/dispatch.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config
-  write_dispatch_config
   setup_bearer="$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64)"
   board_scope="${SMOKE_BOARD_SCOPE:-}"
   if [[ -z "$board_scope" ]]; then
@@ -577,7 +563,6 @@ main() {
   (
     cd "${repo_root}/packages/envoy"
     go build -o out/envoy-listener ./cmd/listener
-    go build -o out/envoy-dispatch ./cmd/dispatch
   )
 
   ensure_nats
@@ -592,14 +577,7 @@ main() {
     ENVOY_REVIEWER_APP_ID="$LEGION_REVIEW_APP_ID" \
     "${repo_root}/packages/envoy/out/envoy-listener"
 
-  start_process dispatch env \
-    HOME="${smoke_dir}/dispatch-home" \
-    DISPATCH_PORT="$dispatch_port" \
-    NATS_URLS="$nats_url" \
-    "${repo_root}/packages/envoy/out/envoy-dispatch"
-
   wait_for_json 'Envoy listener' "http://127.0.0.1:${listener_port}/healthz" '.status == "healthy"' "${smoke_dir}/listener.pid"
-  wait_for_http 'dispatch' "http://127.0.0.1:${dispatch_port}/healthz" "${smoke_dir}/dispatch.pid"
   assert_webhook_round_trip
   if [[ "$webhook_mode" == "forward" ]]; then
     if pid_is_live "${smoke_dir}/webhook-forward.pid" &&
@@ -638,7 +616,8 @@ main() {
     ENVOY_NATS_URL="$nats_url" \
     ENVOY_URL="http://127.0.0.1:${listener_port}" \
     LEGION_DAEMON_PORT="$daemon_port" \
-    DISPATCH_URL="http://127.0.0.1:${dispatch_port}" \
+    DISPATCH_URL="$DISPATCH_URL" \
+    DISPATCH_TOKEN="$DISPATCH_TOKEN" \
     LEGION_STATE_DIR="${smoke_dir}/daemon" \
     XDG_DATA_HOME="${smoke_dir}/xdg-data" \
     XDG_STATE_HOME="${smoke_dir}/xdg-state" \
@@ -655,9 +634,6 @@ main() {
   fi
   label_bearer="$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64 "$(repo_owner)")"
   ensure_labels "$label_bearer"
-  if [[ -z "${SMOKE_PROJECT_ID:-}" ]]; then
-    printf 'SKIPPED-BLOCKED board ingress: SMOKE_PROJECT_ID is required after the sandbox Projects V2 board exists\n'
-  fi
   case "${SMOKE_BRANCH_PROTECTION:-}" in
     1)
       configure_branch_protection
