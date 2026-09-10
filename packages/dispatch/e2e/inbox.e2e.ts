@@ -60,6 +60,19 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
 
   const alice = await asUser(browser, "alice");
   const alicePage = await alice.newPage();
+  // Every issue write the browser sends, attached on failure: the route-clear race
+  // shows up as a PATCH carrying the previous route instead of "".
+  const issueWrites: string[] = [];
+  alicePage.on("request", (request) => {
+    if (request.method() === "PATCH" && request.url().includes("/api/v1/issues/")) {
+      issueWrites.push(`${new Date().toISOString()} PATCH ${request.url()} ${request.postData()}`);
+    }
+  });
+  const attachIssueWrites = () =>
+    testInfo.attach("issue-writes.log", {
+      body: issueWrites.join("\n"),
+      contentType: "text/plain",
+    });
   await alicePage.goto("/");
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Open navigation" }).click();
@@ -119,9 +132,18 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
     .toMatchObject({
       route: "role:legion-controller-core",
     });
-  await alicePage.getByLabel("Route").fill("");
+  const routeInput = alicePage.getByLabel("Route");
+  await routeInput.fill("");
+  // The field must still read "" when the earlier PATCH's response has been applied;
+  // a revert here (not a wrong request body) is the race this test guards.
+  await expect(alicePage.getByRole("button", { name: "Save route" })).toBeEnabled();
+  await expect(routeInput).toHaveValue("");
   await alicePage.getByRole("button", { name: "Save route" }).click();
-  await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ route: null });
+  try {
+    await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ route: null });
+  } finally {
+    await attachIssueWrites();
+  }
   await expect(
     alicePage.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })
   ).toHaveAttribute("title", "GitHub details are unavailable for this sign-in.");

@@ -1,17 +1,17 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Issue } from "../../api/types";
+import type { IssueDetails } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
 
-export function ChildrenTab({ issue }: { issue: Issue }): ReactNode {
+export function ChildrenTab({ issue }: { issue: IssueDetails }): ReactNode {
   if ((issue.children ?? []).length === 0) {
     return <p className="text-slate-500">No child issues.</p>;
   }
 
   return (
     <ul className="space-y-2">
-      {issue.children?.map((child) => (
+      {issue.children.map((child) => (
         <li className="rounded-lg border border-slate-200 bg-white p-3" key={child.key}>
           <Link
             className="font-medium text-sky-700 hover:text-sky-900"

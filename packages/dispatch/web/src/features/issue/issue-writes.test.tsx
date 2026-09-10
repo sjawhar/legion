@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { IssueDetails } from "../../api/types";
+import type { Issue, IssueDetails } from "../../api/types";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
@@ -63,6 +63,11 @@ function renderIssuePage() {
   return { queryClient, unmount: view.unmount };
 }
 
+function narrowIssue(details: IssueDetails): Issue {
+  const { artifacts: _artifacts, children: _children, open_asks: _openAsks, ...rest } = details;
+  return rest;
+}
+
 function stubIssueApi() {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue([]);
@@ -70,10 +75,12 @@ function stubIssueApi() {
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({
     "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false },
   });
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, update) => ({
-    ...issue,
-    ...update,
-  }));
+  // The server answers a PATCH with the narrow `Issue`, not `IssueDetails`: no artifacts,
+  // children, or open asks. The stub mirrors that so the page is exercised against the
+  // real response shape.
+  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, update) =>
+    narrowIssue({ ...issue, ...update })
+  );
 
   return {
     getIssue,
@@ -91,7 +98,7 @@ function stubIssueApi() {
 test("IssuePage keeps an unsaved route draft when a stale refetch arrives", async () => {
   const { patchIssue, restore } = stubIssueApi();
   const { unmount } = renderIssuePage();
-  const firstSave = deferred<IssueDetails>();
+  const firstSave = deferred<Issue>();
   patchIssue.mockImplementationOnce(() => firstSave.promise);
 
   try {
@@ -103,12 +110,73 @@ test("IssuePage keeps an unsaved route draft when a stale refetch arrives", asyn
 
     fireEvent.change(route, { target: { value: "" } });
     await act(async () => {
-      firstSave.resolve({ ...issue, route: "role:a" });
+      firstSave.resolve(narrowIssue({ ...issue, route: "role:a" }));
     });
     await waitFor(() => expect(route.value).toBe(""));
 
     fireEvent.click(saveRoute);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "" }));
+    expect(route.value).toBe("");
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage keeps a route cleared while the previous save was still in flight", async () => {
+  // The CI route-clear flake: the user clears the field while the earlier PATCH is
+  // pending, and its response lands before React flushes the passive effects of the
+  // clear. The success callback must see the cleared draft, not a stale mirror.
+  const { patchIssue, restore } = stubIssueApi();
+  const { unmount } = renderIssuePage();
+  const firstSave = deferred<IssueDetails>();
+  patchIssue.mockImplementationOnce(() => firstSave.promise);
+
+  try {
+    const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
+    const saveRoute = screen.getByRole("button", { name: "Save route" });
+    fireEvent.change(route, { target: { value: "role:a" } });
+    fireEvent.click(saveRoute);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+
+    await act(async () => {
+      fireEvent.change(route, { target: { value: "" } });
+      firstSave.resolve({ ...issue, route: "role:a" });
+      await firstSave.promise;
+      await Promise.resolve();
+    });
+
+    expect(route.value).toBe("");
+    fireEvent.click(saveRoute);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "" }));
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage keeps the document and a route draft across a save response", async () => {
+  // A PATCH response is the narrow `Issue`. Applying it wholesale to the cached
+  // `IssueDetails` drops `artifacts`, which swaps the whole page body for the
+  // missing-document error and remounts the form on the next refetch with the
+  // server's route in place of whatever the user had typed since.
+  const { patchIssue, restore } = stubIssueApi();
+  const { unmount } = renderIssuePage();
+
+  try {
+    const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
+    fireEvent.change(route, { target: { value: "role:a" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save route" }));
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    fireEvent.change(route, { target: { value: "" } });
+
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Save route" }) as HTMLButtonElement).disabled
+      ).toBe(false)
+    );
+    expect(screen.queryByText("Could not load this issue's primary document.")).toBeNull();
+    expect(screen.getByLabelText("Route")).toBe(route);
     expect(route.value).toBe("");
   } finally {
     unmount();

@@ -3,6 +3,7 @@ import { type ReactNode, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { mergeIssue } from "../../api/issue-cache";
 import type {
   Artifact,
   ArtifactVersionContent,
@@ -145,7 +146,12 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
   const makePrimary = useMutation({
     mutationFn: () => api.makeArtifactPrimary(artifact.id),
     onSuccess: (issue) => {
-      queryClient.setQueryData(["issue", issue.key], issue);
+      mergeIssue(queryClient, issue);
+      // The badges read each artifact's `primary`; flip them from the response so the tab
+      // is right before the list refetch lands.
+      queryClient.setQueryData<Artifact[]>(["artifacts", issue.key], (current) =>
+        current?.map((entry) => ({ ...entry, primary: entry.id === issue.primary_artifact_id }))
+      );
       void queryClient.invalidateQueries({ queryKey: ["artifact"] });
       void queryClient.invalidateQueries({ queryKey: ["artifacts", issue.key] });
       void queryClient.invalidateQueries({ queryKey: ["issue", issue.key] });
