@@ -67,12 +67,11 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: issueKey,
-		Type:     "message.created",
-		Actor:    actor,
-		Payload:  message,
-	})
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(issueKey).event(
+		"message.created",
+		actor,
+		message,
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

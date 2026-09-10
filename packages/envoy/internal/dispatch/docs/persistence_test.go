@@ -88,8 +88,8 @@ func createDocument(t *testing.T, database *store.Store, markdown string) string
 	}
 	var artifactID string
 	if err := tx.QueryRow(ctx, `
-		insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
-		values ('DOC-1', $1, 'document.md', 'doc', false, '{"kind":"user","id":"alice"}')
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ('DOC-1', 'DOC', $1, 'document.md', 'doc', false, '{"kind":"user","id":"alice"}')
 		returning id::text
 	`, "document-"+genRandomSuffix(t)).Scan(&artifactID); err != nil {
 		t.Fatalf("create test artifact: %v", err)

@@ -298,7 +298,7 @@ func TestIssueReopenRestoresLiveWrites(t *testing.T) {
 		t.Fatalf("reopen document issue: %v", err)
 	}
 	service.SetIssueClosed("DOC-1", false)
-	service.events.Publish(model.Event{IssueKey: "DOC-1", Type: "issue.closed"})
+	service.events.Publish(model.Event{IssueKey: new("DOC-1"), Type: "issue.closed"})
 	if got := service.events.SubscriberCount(); got != 0 {
 		t.Fatalf("stale issue.closed event gained %d subscriptions, want none", got)
 	}

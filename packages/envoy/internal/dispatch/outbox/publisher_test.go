@@ -59,12 +59,12 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	seedIssue(t, database, "T-1", nil)
 	askID := "5a660655-04ad-4ce0-8a9b-93dd03c412b7"
 	event := appendEvent(t, database, broker, model.Event{
-		IssueKey: "T-1",
+		IssueKey: new("T-1"),
 		Type:     "ask.answered",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.Ask{
 			ID:       askID,
-			IssueKey: "T-1",
+			IssueKey: new("T-1"),
 			Question: "Should the dispatcher publish this answer?",
 			Urgency:  "blocking",
 			State:    "answered",
@@ -102,18 +102,72 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	}
 }
 
+func TestRunPublishesDocumentEventsOnTheDocumentTopicOnly(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	var artifactID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (project_key, slug, name, kind, created_by)
+		values ('TT', 'notes-md', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&artifactID); err != nil {
+		t.Fatalf("create unlinked artifact: %v", err)
+	}
+	var askID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into asks (artifact_id, author, question)
+		values ($1, '{"kind":"session","id":"session-asker"}', 'Ship it?')
+		returning id::text
+	`, artifactID).Scan(&askID); err != nil {
+		t.Fatalf("create document ask: %v", err)
+	}
+	event := appendEvent(t, database, broker, model.Event{
+		ArtifactID: new(artifactID),
+		Type:       "comment.created",
+		Actor:      model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID:    "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b",
+			AskID: &askID,
+			Body:  "Ship it.",
+		}},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "document event publication", func() bool {
+		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) != nil
+	})
+	item := publisher.all()[0]
+	if item.Topic != "notifications.dispatch.document.TT.notes-md.comment.created" {
+		t.Fatalf("document topic = %q", item.Topic)
+	}
+	if !strings.HasPrefix(item.PayloadSummary, "TT/notes-md comment created") {
+		t.Fatalf("document payload summary = %q", item.PayloadSummary)
+	}
+	var payload model.Event
+	if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+		t.Fatalf("decode event payload: %v", err)
+	}
+	if payload.IssueKey != nil || payload.ArtifactID == nil || *payload.ArtifactID != artifactID || payload.Project != "TT" {
+		t.Fatalf("document event payload owner = issue %v artifact %v project %q, want nil issue %q artifact and TT project", payload.IssueKey, payload.ArtifactID, payload.Project, artifactID)
+	}
+}
+
 func TestRunSummarizesCommentBody(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	appendEvent(t, database, broker, model.Event{
-		IssueKey: "T-1",
+		IssueKey: new("T-1"),
 		Type:     "comment.created",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.CommentEventPayload{
 			Comment: model.Comment{
 				ID:       "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b",
-				IssueKey: "T-1",
+				IssueKey: new("T-1"),
 				Body:     "Tighten this paragraph",
 			},
 			ArtifactName: "spec.md",
@@ -136,13 +190,13 @@ func TestRunCorrelatesAskReplyCommentToItsAsk(t *testing.T) {
 	askID := "5a660655-04ad-4ce0-8a9b-93dd03c412b7"
 	commentID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
 	event := appendEvent(t, database, broker, model.Event{
-		IssueKey: "T-1",
+		IssueKey: new("T-1"),
 		Type:     "comment.created",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.CommentEventPayload{
 			Comment: model.Comment{
 				ID:       commentID,
-				IssueKey: "T-1",
+				IssueKey: new("T-1"),
 				Body:     "I'd go with option A.",
 				AskID:    &askID,
 			},
@@ -176,13 +230,13 @@ func TestRunRoutesAskReplyToAuthorEvenWhenIssueRoutedElsewhere(t *testing.T) {
 	askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
 	commentID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
 	event := appendEvent(t, database, broker, model.Event{
-		IssueKey: "T-1",
+		IssueKey: new("T-1"),
 		Type:     "comment.created",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.CommentEventPayload{
 			Comment: model.Comment{
 				ID:       commentID,
-				IssueKey: "T-1",
+				IssueKey: new("T-1"),
 				Body:     "Ship it.",
 				AskID:    &askID,
 			},
@@ -238,10 +292,10 @@ func TestRunRoutesHumanAskResolutionToAuthorOnly(t *testing.T) {
 			seedIssue(t, database, "T-1", &route)
 			askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
 			event := appendEvent(t, database, broker, model.Event{
-				IssueKey: "T-1",
+				IssueKey: new("T-1"),
 				Type:     "ask.resolved",
 				Actor:    tc.actor,
-				Payload:  model.Ask{ID: askID, IssueKey: "T-1", Question: "Ship it?", State: "resolved"},
+				Payload:  model.Ask{ID: askID, IssueKey: new("T-1"), Question: "Ship it?", State: "resolved"},
 			})
 			publisher := &recordingPublisher{}
 			stop := run(t, database, publisher, broker)
@@ -278,7 +332,7 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", &tc.route)
 			event := appendEvent(t, database, broker, model.Event{
-				IssueKey: "T-1", Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+				IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
 				Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Route this update"},
 			})
 			publisher := &recordingPublisher{}
@@ -305,12 +359,12 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	route := "role:legion-controller-x"
 	seedIssue(t, database, "T-1", &route)
 	silent := appendEvent(t, database, broker, model.Event{
-		IssueKey: "T-1", Type: "message.created",
+		IssueKey: new("T-1"), Type: "message.created",
 		Actor:   model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"},
 		Payload: model.Message{ID: "d7657c0d-71b9-43d5-8783-a5d98f7812e0", IssueKey: "T-1", Body: "Agent-only update"},
 	})
 	notifying := appendEvent(t, database, broker, model.Event{
-		IssueKey: "T-1", Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Notify listeners"},
 	})
 	publisher := &recordingPublisher{}
@@ -405,7 +459,7 @@ func TestRunMarksEventPublishedAfterRouteFailure(t *testing.T) {
 	route := "role:legion-controller-x"
 	seedIssue(t, database, "T-1", &route)
 	event := appendEvent(t, database, broker, model.Event{
-		IssueKey: "T-1", Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Role publication is best effort"},
 	})
 	publisher := &recordingPublisher{failTopic: "notifications.role.legion-controller-x"}
@@ -430,7 +484,7 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	event := appendEvent(t, database, broker, model.Event{
-		IssueKey: "T-1", Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Retry me"},
 	})
 	publisher := &recordingPublisher{failures: 1, attempt: make(chan struct{}, 1)}

@@ -20,7 +20,7 @@ import (
 // clause on the joined rows, so it matches the partial asks_open(issue_key)
 // where state = 'open' index instead of forcing a sequential scan of asks.
 const listIssuesQuery = `
-	select i.key, i.title, i.status, i.parent_key, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.labels, i.parent_key, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null)
 	from issues i
 	left join asks a on a.issue_key = i.key and a.state = 'open'
@@ -89,7 +89,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	issues := []model.IssueSummary{}
 	for rows.Next() {
 		var issue model.IssueSummary
-		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
+		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Labels, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -252,10 +252,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 
 	var artifactID string
 	if err := tx.QueryRow(r.Context(), `
-		insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
-		values ($1, 'spec', 'spec.md', 'doc', true, $2)
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ($1, $2, 'spec', 'spec.md', 'doc', true, $3)
 		returning id::text
-	`, key, actorJSON).Scan(&artifactID); err != nil {
+	`, key, input.Project, actorJSON).Scan(&artifactID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -290,12 +290,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: key,
-		Type:     "issue.created",
-		Actor:    actor,
-		Payload:  issue,
-	})
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(
+		"issue.created",
+		actor,
+		issue,
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -492,19 +491,18 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		eventType = "issue.closed"
 	}
 	after.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, model.Event{IssueKey: key, Type: eventType, Actor: actor, Payload: after})
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, after))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	events = append(events, event)
 	if statusChanged && after.Parent != nil {
-		childEvent, err := s.appendEvent(r.Context(), tx, model.Event{
-			IssueKey: *after.Parent,
-			Type:     "child.status",
-			Actor:    actor,
-			Payload:  map[string]any{"child_key": after.Key, "from": before.Status, "to": after.Status},
-		})
+		childEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*after.Parent).event(
+			"child.status",
+			actor,
+			map[string]any{"child_key": after.Key, "from": before.Status, "to": after.Status},
+		))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

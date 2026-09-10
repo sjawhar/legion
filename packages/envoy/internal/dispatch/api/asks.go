@@ -139,7 +139,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ask.ID = rowID
-	ask.IssueKey = issueKey
+	ask.IssueKey = new(issueKey)
 	ask.Author = actor
 	ask.Question = input.Question
 	ask.Options = input.Options
@@ -153,19 +153,18 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	events := []model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.appendEvent(r.Context(), tx, model.Event{
-			IssueKey: issueKey,
-			Type:     "artifact.version",
-			Actor:    actor,
-			Payload:  versionEventPayload(anchor.ArtifactID, artifactName, *snapshot, nil),
-		})
+		snapshotEvent, err := s.appendEvent(r.Context(), tx, issueOwner(issueKey).event(
+			"artifact.version",
+			actor,
+			versionEventPayload(anchor.ArtifactID, artifactName, *snapshot, nil),
+		))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		events = append(events, snapshotEvent)
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{IssueKey: issueKey, Type: "ask.opened", Actor: actor, Payload: ask})
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(issueKey).event("ask.opened", actor, ask))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -288,7 +287,7 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	if err != nil {
 		return model.Ask{}, err
 	}
-	if err := s.requireOpenIssue(ctx, tx, unlockedAsk.IssueKey); err != nil {
+	if err := s.requireOpenOwner(ctx, tx, ownerOf(unlockedAsk.IssueKey, unlockedAsk.ArtifactID)); err != nil {
 		return model.Ask{}, err
 	}
 	ask, err := s.loadAskForUpdate(ctx, tx, id)
@@ -311,7 +310,7 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	if err != nil {
 		return model.Ask{}, err
 	}
-	event, err := s.appendEvent(ctx, tx, model.Event{IssueKey: ask.IssueKey, Type: transition.EventType, Actor: actor, Payload: ask})
+	event, err := s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(transition.EventType, actor, ask))
 	if err != nil {
 		return model.Ask{}, err
 	}
@@ -370,13 +369,13 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
 	return scanAsk(q.QueryRow(ctx, `
-		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
+		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
 		from asks where id = $1
 	`, id))
 }
 
 // listIssueAsksColumns are the columns every ask-listing query selects, in scan order.
-const listIssueAsksColumns = `id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at`
+const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at`
 
 // listIssueAsksQueryAll, listIssueAsksQueryOpen, and listIssueAsksQueryAnswered are three
 // distinct constant query strings rather than one query with a parameterized state predicate.
@@ -425,7 +424,7 @@ func (s *server) loadIssueAsks(ctx context.Context, q queryer, key, state string
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
 	return scanAsk(tx.QueryRow(ctx, `
-		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
+		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
 		from asks where id = $1 for update
 	`, id))
 }
@@ -434,7 +433,8 @@ func scanAsk(row pgx.Row) (model.Ask, error) {
 	var ask model.Ask
 	var author, options, anchor, answer, resolution []byte
 	if err := row.Scan(
-		&ask.ID, &ask.IssueKey, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency, &anchor, &ask.State, &answer, &resolution, &ask.CreatedAt,
+		&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
+		&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt,
 	); err != nil {
 		return model.Ask{}, err
 	}

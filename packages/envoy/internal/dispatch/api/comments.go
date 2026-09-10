@@ -21,32 +21,55 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	artifactID := strings.TrimSpace(r.URL.Query().Get("artifact"))
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
-		from comments
-		where issue_key = $1 and ($2 = '' or anchor->>'artifact_id' = $2)
-		order by created_at, id
-	`, r.PathValue("key"), artifactID)
+	comments, err := s.loadOwnerComments(
+		r.Context(),
+		s.deps.Store.Pool,
+		issueOwner(r.PathValue("key")),
+		strings.TrimSpace(r.URL.Query().Get("artifact")),
+	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, comments)
+}
+
+func (s *server) loadOwnerComments(ctx context.Context, q queryer, owner owner, artifactFilter string) ([]model.Comment, error) {
+	var ownerColumn, ownerValue string
+	switch {
+	case owner.IssueKey != nil:
+		ownerColumn, ownerValue = "issue_key", *owner.IssueKey
+	case owner.ArtifactID != nil:
+		ownerColumn, ownerValue = "artifact_id", *owner.ArtifactID
+	default:
+		return nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
+	}
+	rows, err := q.Query(ctx, fmt.Sprintf(`
+		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+		from comments
+		where %s = $1 and ($2 = '' or anchor->>'artifact_id' = $2)
+		order by created_at, id
+	`, ownerColumn), ownerValue, artifactFilter)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	comments := []model.Comment{}
 	for rows.Next() {
 		comment, err := scanComment(rows)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+			return nil, err
 		}
 		comments = append(comments, comment)
 	}
-	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	return comments, rows.Err()
+}
+
+func commentHasOwner(comment model.Comment, owner owner) bool {
+	if owner.IssueKey != nil {
+		return comment.IssueKey != nil && *comment.IssueKey == *owner.IssueKey
 	}
-	writeJSON(w, http.StatusOK, comments)
+	return owner.ArtifactID != nil && comment.ArtifactID != nil && *comment.ArtifactID == *owner.ArtifactID
 }
 
 func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
@@ -78,13 +101,13 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seedValue string) ([]model.Comment, error) {
 	rows, err := q.Query(ctx, fmt.Sprintf(`
 		with recursive replies as (
-			select id, issue_key, author, body, anchor, reply_to, ask_id, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+			select id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 			from comments where %s = $1
 			union all
-			select c.id, c.issue_key, c.author, c.body, c.anchor, c.reply_to, c.ask_id, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at
+			select c.id, c.issue_key, c.artifact_id, c.author, c.body, c.anchor, c.reply_to, c.ask_id, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at
 			from comments c join replies r on c.reply_to = r.id
 		)
-		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 		from replies
 		order by created_at, id
 	`, seedColumn), seedValue)
@@ -104,6 +127,10 @@ func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seed
 }
 
 func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
+	s.createCommentFor(w, r, issueOwner(r.PathValue("key")))
+}
+
+func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner owner) {
 	var input struct {
 		Body       string             `json:"body"`
 		Anchor     *model.AnchorInput `json:"anchor"`
@@ -144,8 +171,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	issueKey := r.PathValue("key")
-	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
+	if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -160,12 +186,12 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	var replyRoot *model.Comment
 	if input.ReplyTo != nil {
 		if strings.TrimSpace(*input.ReplyTo) == "" {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this issue")
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this owner")
 			return
 		}
 		root, err := s.loadCommentForUpdate(r.Context(), tx, *input.ReplyTo)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && root.IssueKey != issueKey) {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this issue")
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !commentHasOwner(root, owner)) {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this owner")
 			return
 		}
 		if err != nil {
@@ -181,12 +207,17 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	var askQuestion string
 	if input.AskID != nil {
 		if strings.TrimSpace(*input.AskID) == "" {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this issue")
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this owner")
 			return
 		}
-		if err := tx.QueryRow(r.Context(), `select question from asks where id = $1 and issue_key = $2`, *input.AskID, issueKey).Scan(&askQuestion); err != nil {
+		if err := tx.QueryRow(r.Context(), `
+			select question from asks
+			where id = $1
+			  and issue_key is not distinct from $2
+			  and artifact_id is not distinct from $3
+		`, *input.AskID, owner.IssueKey, owner.ArtifactID).Scan(&askQuestion); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this issue")
+				writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this owner")
 				return
 			}
 			s.writeHandlerError(w, err)
@@ -202,7 +233,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	if input.Suggestion != nil {
 		markKind = docs.MarkSuggestion
 	}
-	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, markKind, rowID, actor)
+	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, owner, input.Anchor, markKind, rowID, actor)
 	if anchor != nil {
 		evictOnFailure = true
 		evictArtifactID = anchor.ArtifactID
@@ -245,15 +276,16 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	}
 	var comment model.Comment
 	if err := tx.QueryRow(r.Context(), `
-		insert into comments (id, issue_key, author, body, anchor, reply_to, ask_id, suggestion)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, suggestion)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		returning created_at
-	`, rowID, issueKey, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	comment.ID = rowID
-	comment.IssueKey = issueKey
+	comment.IssueKey = owner.IssueKey
+	comment.ArtifactID = owner.ArtifactID
 	comment.Author = actor
 	comment.Body = input.Body
 	comment.Anchor = anchor
@@ -316,12 +348,11 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	}
 	events := []model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.appendEvent(r.Context(), tx, model.Event{
-			IssueKey: issueKey,
-			Type:     "artifact.version",
-			Actor:    actor,
-			Payload:  versionEventPayload(anchor.ArtifactID, artifactName, *snapshot, nil),
-		})
+		snapshotEvent, err := s.appendEvent(r.Context(), tx, owner.event(
+			"artifact.version",
+			actor,
+			versionEventPayload(anchor.ArtifactID, artifactName, *snapshot, nil),
+		))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -329,24 +360,22 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		events = append(events, snapshotEvent)
 	}
 	if reopenedRoot != nil {
-		event, err := s.appendEvent(r.Context(), tx, model.Event{
-			IssueKey: issueKey,
-			Type:     "comment.reopened",
-			Actor:    actor,
-			Payload:  commentEventPayload(*reopenedRoot, reopenedArtifactName, ""),
-		})
+		event, err := s.appendEvent(r.Context(), tx, owner.event(
+			"comment.reopened",
+			actor,
+			commentEventPayload(*reopenedRoot, reopenedArtifactName, ""),
+		))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		events = append(events, event)
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: issueKey,
-		Type:     "comment.created",
-		Actor:    actor,
-		Payload:  commentEventPayload(comment, artifactName, askQuestion),
-	})
+	event, err := s.appendEvent(r.Context(), tx, owner.event(
+		"comment.created",
+		actor,
+		commentEventPayload(comment, artifactName, askQuestion),
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -399,7 +428,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.requireOpenIssue(r.Context(), tx, unlockedComment.IssueKey); err != nil {
+	if err := s.requireOpenOwner(r.Context(), tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -446,12 +475,11 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: comment.IssueKey,
-		Type:     "comment.reopened",
-		Actor:    actor,
-		Payload:  commentEventPayload(comment, artifactName, ""),
-	})
+	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
+		"comment.reopened",
+		actor,
+		commentEventPayload(comment, artifactName, ""),
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -503,7 +531,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.requireOpenIssue(r.Context(), tx, unlockedComment.IssueKey); err != nil {
+	if err := s.requireOpenOwner(r.Context(), tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -555,12 +583,11 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: comment.IssueKey,
-		Type:     "comment.edited",
-		Actor:    actor,
-		Payload:  commentEventPayload(comment, artifactName, ""),
-	})
+	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
+		"comment.edited",
+		actor,
+		commentEventPayload(comment, artifactName, ""),
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -614,7 +641,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.requireOpenIssue(r.Context(), tx, unlockedComment.IssueKey); err != nil {
+	if err := s.requireOpenOwner(r.Context(), tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -772,24 +799,22 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		versionEvent, err := s.appendEvent(r.Context(), tx, model.Event{
-			IssueKey: comment.IssueKey,
-			Type:     "artifact.version",
-			Actor:    actor,
-			Payload:  versionEventPayload(comment.Anchor.ArtifactID, artifactName, namedVersion, diff),
-		})
+		versionEvent, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
+			"artifact.version",
+			actor,
+			versionEventPayload(comment.Anchor.ArtifactID, artifactName, namedVersion, diff),
+		))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		events = append(events, versionEvent)
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: comment.IssueKey,
-		Type:     eventType,
-		Actor:    actor,
-		Payload:  commentEventPayload(comment, artifactName, ""),
-	})
+	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
+		eventType,
+		actor,
+		commentEventPayload(comment, artifactName, ""),
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -809,7 +834,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 
 func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.Comment, error) {
 	return scanComment(q.QueryRow(ctx, `
-		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 		from comments where id = $1
 	`, id))
 }
@@ -854,7 +879,7 @@ func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestio
 
 func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
 	return scanComment(tx.QueryRow(ctx, `
-		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 		from comments where id = $1 for update
 	`, id))
 }
@@ -864,7 +889,7 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 	var author, anchor, resolvedBy, suggestion []byte
 	var resolvedAt, editedAt *time.Time
 	if err := row.Scan(
-		&comment.ID, &comment.IssueKey, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.AskID, &comment.Resolved,
+		&comment.ID, &comment.IssueKey, &comment.ArtifactID, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.AskID, &comment.Resolved,
 		&resolvedBy, &resolvedAt, &editedAt, &suggestion, &comment.CreatedAt,
 	); err != nil {
 		return model.Comment{}, err

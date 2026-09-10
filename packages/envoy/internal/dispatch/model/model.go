@@ -45,6 +45,7 @@ type AnchorInput struct {
 type Project struct {
 	Key       string    `json:"key"`
 	Name      string    `json:"name"`
+	OpenAsks  int       `json:"open_asks"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -86,6 +87,7 @@ type IssueSummary struct {
 	Key       string    `json:"key"`
 	Title     string    `json:"title"`
 	Status    string    `json:"status"`
+	Labels    []string  `json:"labels"`
 	Parent    *string   `json:"parent"`
 	UpdatedAt time.Time `json:"updated_at"`
 	LastSeq   int       `json:"last_seq"`
@@ -139,10 +141,12 @@ type IssueChild struct {
 	Status string `json:"status"`
 }
 
-// Artifact is an issue-attached document or binary blob.
+// Artifact is an issue-attached document or binary blob, or an unlinked project document.
 type Artifact struct {
 	ID        string    `json:"id"`
-	IssueKey  string    `json:"issue_key"`
+	IssueKey  *string   `json:"issue_key"`
+	Project   string    `json:"project"`
+	RefKey    string    `json:"ref_key"`
 	Slug      string    `json:"slug"`
 	Name      string    `json:"name"`
 	Kind      string    `json:"kind"`
@@ -167,7 +171,8 @@ type Version struct {
 // Ask is a question with either a human answer or a recorded closure reason.
 type Ask struct {
 	ID         string         `json:"id"`
-	IssueKey   string         `json:"issue_key"`
+	IssueKey   *string        `json:"issue_key"`
+	ArtifactID *string        `json:"artifact_id"`
 	Author     Actor          `json:"author"`
 	Question   string         `json:"question"`
 	Options    []AskOption    `json:"options"`
@@ -202,14 +207,15 @@ type AskResolution struct {
 	At     time.Time `json:"at"`
 }
 
-// Comment is an issue comment, optionally with an edit suggestion. A comment
+// Comment is a collaboration comment, optionally with an edit suggestion. A comment
 // replies to at most one of another comment (ReplyTo) or an ask (AskID): a
 // top-level reply in an ask's thread sets AskID; a reply nested under that
 // comment sets ReplyTo instead, so an ask's full thread is "AskID = the ask"
 // plus the ReplyTo chains rooted at those comments.
 type Comment struct {
 	ID         string      `json:"id"`
-	IssueKey   string      `json:"issue_key"`
+	IssueKey   *string     `json:"issue_key"`
+	ArtifactID *string     `json:"artifact_id"`
 	Author     Actor       `json:"author"`
 	Body       string      `json:"body"`
 	Anchor     *Anchor     `json:"anchor"`
@@ -251,24 +257,60 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ReferencedBy identifies a post that mentions an artifact.
+// ReferencedBy identifies a post or artifact that mentions an artifact.
 type ReferencedBy struct {
-	Kind     string `json:"kind"`
-	ID       string `json:"id"`
-	IssueKey string `json:"issue_key"`
-	Excerpt  string `json:"excerpt"`
+	Kind     string  `json:"kind"`
+	ID       string  `json:"id"`
+	IssueKey *string `json:"issue_key"`
+	Project  string  `json:"project"`
+	Excerpt  string  `json:"excerpt"`
+	RefKey   string  `json:"ref_key,omitempty"`
 }
 
-// Event is the immutable event-log record for an issue mutation.
+// ReferenceVia identifies the item or artifact through which a reference was reached.
+type ReferenceVia struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+// ReferenceMember is one artifact in an issue's reference closure.
+type ReferenceMember struct {
+	Artifact Artifact     `json:"artifact"`
+	Depth    int          `json:"depth"`
+	Via      ReferenceVia `json:"via"`
+}
+
+// IssueReferences is an issue's artifact reference closure.
+type IssueReferences struct {
+	Members   []ReferenceMember `json:"members"`
+	Truncated bool              `json:"truncated"`
+}
+
+// OutgoingReference is a target edge from an artifact.
+type OutgoingReference struct {
+	Kind     string    `json:"kind"`
+	ToID     string    `json:"to_id"`
+	Artifact *Artifact `json:"artifact,omitempty"`
+}
+
+// ArtifactReferences describes an artifact's outgoing and incoming reference edges.
+type ArtifactReferences struct {
+	Outgoing     []OutgoingReference `json:"outgoing"`
+	ReferencedBy []ReferencedBy      `json:"referenced_by"`
+}
+
+// Event is the immutable event-log record for a Dispatch mutation.
 type Event struct {
-	ID        int64     `json:"id"`
-	IssueKey  string    `json:"issue_key"`
-	Seq       int       `json:"seq"`
-	Type      string    `json:"type"`
-	Actor     Actor     `json:"actor"`
-	Notify    bool      `json:"notify"`
-	CreatedAt time.Time `json:"created_at"`
-	Payload   any       `json:"payload"`
+	ID         int64     `json:"id"`
+	IssueKey   *string   `json:"issue_key"`
+	ArtifactID *string   `json:"artifact_id"`
+	Project    string    `json:"project"`
+	Seq        int       `json:"seq"`
+	Type       string    `json:"type"`
+	Actor      Actor     `json:"actor"`
+	Notify     bool      `json:"notify"`
+	CreatedAt  time.Time `json:"created_at"`
+	Payload    any       `json:"payload"`
 }
 
 // EditOp is one agent document editing operation.

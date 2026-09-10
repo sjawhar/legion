@@ -12,8 +12,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// Broker appends issue events transactionally and fans committed events to
-// local subscribers. NATS publication is an outbox concern owned by A5.
+// Broker appends owner-scoped events transactionally and fans committed events
+// to local subscribers. NATS publication is an outbox concern owned by A5.
 type Broker struct {
 	mu          sync.Mutex
 	nextID      uint64
@@ -25,15 +25,36 @@ func NewBroker() *Broker {
 	return &Broker{subscribers: make(map[uint64]chan model.Event)}
 }
 
-// Append assigns the next per-issue sequence, writes e in tx, and returns the
-// database-assigned event ID. The caller must call Publish only after tx commits.
+// Append assigns the next sequence of the event's owner, writes e in tx, and
+// returns the database-assigned event ID. The caller must call Publish only
+// after tx commits.
 func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Event, error) {
 	if b == nil {
 		return model.Event{}, fmt.Errorf("event broker required")
 	}
+	if (e.IssueKey == nil) == (e.ArtifactID == nil) {
+		return model.Event{}, fmt.Errorf("event requires exactly one owner")
+	}
+
 	var lastSeq int
-	if err := tx.QueryRow(ctx, `select last_seq from issues where key = $1 for update`, e.IssueKey).Scan(&lastSeq); err != nil {
-		return model.Event{}, fmt.Errorf("lock issue for event: %w", err)
+	var err error
+	if e.IssueKey != nil {
+		err = tx.QueryRow(ctx, `
+			select last_seq, project_key from issues where key = $1 for update
+		`, *e.IssueKey).Scan(&lastSeq, &e.Project)
+		if err != nil {
+			return model.Event{}, fmt.Errorf("lock issue for event: %w", err)
+		}
+	} else {
+		err = tx.QueryRow(ctx, `
+			select last_seq, project_key
+			from artifacts
+			where id = $1 and issue_key is null
+			for update
+		`, *e.ArtifactID).Scan(&lastSeq, &e.Project)
+		if err != nil {
+			return model.Event{}, fmt.Errorf("lock unlinked artifact for event: %w", err)
+		}
 	}
 	e.Seq = lastSeq + 1
 	e.Notify = b.Notify(e)
@@ -47,14 +68,22 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 		return model.Event{}, fmt.Errorf("encode event payload: %w", err)
 	}
 	if err := tx.QueryRow(ctx, `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		values ($1, $2, $3, $4, $5, $6)
+		insert into events (issue_key, artifact_id, seq, type, actor, payload, notify)
+		values ($1, $2, $3, $4, $5, $6, $7)
 		returning id, created_at
-	`, e.IssueKey, e.Seq, e.Type, actor, payload, e.Notify).Scan(&e.ID, &e.CreatedAt); err != nil {
+	`, e.IssueKey, e.ArtifactID, e.Seq, e.Type, actor, payload, e.Notify).Scan(&e.ID, &e.CreatedAt); err != nil {
 		return model.Event{}, fmt.Errorf("insert event: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `update issues set last_seq = $2, updated_at = greatest(updated_at, $3) where key = $1`, e.IssueKey, e.Seq, e.CreatedAt); err != nil {
-		return model.Event{}, fmt.Errorf("advance issue event sequence: %w", err)
+	if e.IssueKey != nil {
+		if _, err := tx.Exec(ctx, `
+			update issues set last_seq = $2, updated_at = greatest(updated_at, $3) where key = $1
+		`, *e.IssueKey, e.Seq, e.CreatedAt); err != nil {
+			return model.Event{}, fmt.Errorf("advance issue event sequence: %w", err)
+		}
+	} else if _, err := tx.Exec(ctx, `
+		update artifacts set last_seq = $2 where id = $1
+	`, *e.ArtifactID, e.Seq); err != nil {
+		return model.Event{}, fmt.Errorf("advance artifact event sequence: %w", err)
 	}
 	return e, nil
 }

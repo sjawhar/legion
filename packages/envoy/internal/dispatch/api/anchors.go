@@ -71,7 +71,7 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, issueKey string, 
 
 func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, issueKey, artifactRef string) (model.Artifact, error) {
 	return scanArtifact(tx.QueryRow(ctx, `
-		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts
 		where issue_key = $1 and (id::text = $2 or slug = $2)
 		for key share

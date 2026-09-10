@@ -391,7 +391,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		eventActor = authors[0]
 	}
 	event, err := s.events.Append(ctx, tx, model.Event{
-		IssueKey: issueKey,
+		IssueKey: new(issueKey),
 		Type:     "artifact.version",
 		Actor:    eventActor,
 		Payload:  artifactVersionEventPayload(room, artifactName, version, nil),

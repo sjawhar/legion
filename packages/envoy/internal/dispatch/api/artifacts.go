@@ -235,11 +235,12 @@ func (s *server) storeArtifact(
 			return
 		}
 		if err := tx.QueryRow(r.Context(), `
-			insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
-			values ($1, $2, $3, $4, false, $5)
-			returning id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
+			insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+			values ($1, (select project_key from issues where key = $1), $2, $3, $4, false, $5)
+			returning id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
 		`, issueKey, slug, input.name, kind, actorJSON).Scan(
-			&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &actorJSON, &artifact.CreatedAt,
+			&artifact.ID, &artifact.IssueKey, &artifact.Project, &artifact.RefKey, &artifact.Slug, &artifact.Name,
+			&artifact.Kind, &artifact.Primary, &actorJSON, &artifact.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -337,7 +338,7 @@ func (s *server) storeArtifact(
 		artifact.Versions = []model.Version{version}
 		payload = map[string]any{"artifact": artifact}
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{IssueKey: issueKey, Type: eventType, Actor: actor, Payload: payload})
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(issueKey).event(eventType, actor, payload))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -469,7 +470,11 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
+	eventOwner := documentOwner(artifact.ID)
+	if artifact.IssueKey != nil {
+		eventOwner = issueOwner(*artifact.IssueKey)
+	}
+	if err := s.requireOpenOwner(r.Context(), tx, eventOwner); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -487,12 +492,11 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: artifact.IssueKey,
-		Type:     "artifact.version",
-		Actor:    actor,
-		Payload:  versionEventPayload(artifact.ID, artifact.Name, version, diff),
-	})
+	event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
+		"artifact.version",
+		actor,
+		versionEventPayload(artifact.ID, artifact.Name, version, diff),
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -545,7 +549,11 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
+	eventOwner := documentOwner(artifact.ID)
+	if artifact.IssueKey != nil {
+		eventOwner = issueOwner(*artifact.IssueKey)
+	}
+	if err := s.requireOpenOwner(r.Context(), tx, eventOwner); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -585,12 +593,11 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			event, err := s.appendEvent(r.Context(), tx, model.Event{
-				IssueKey: artifact.IssueKey,
-				Type:     "artifact.version",
-				Actor:    actor,
-				Payload:  versionEventPayload(artifact.ID, artifact.Name, *version, diff),
-			})
+			event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
+				"artifact.version",
+				actor,
+				versionEventPayload(artifact.ID, artifact.Name, *version, diff),
+			))
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -612,7 +619,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
 	rows, err := q.Query(ctx, `
-		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts where issue_key = $1 order by created_at, id
 	`, issueKey)
 	if err != nil {
@@ -666,14 +673,14 @@ func (s *server) loadArtifact(ctx context.Context, q queryer, id string) (model.
 		return model.Artifact{}, err
 	}
 	return s.loadArtifactRow(ctx, q, q.QueryRow(ctx, `
-		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts where id = $1
 	`, parsed))
 }
 
 func (s *server) loadArtifactBySlug(ctx context.Context, q queryer, issueKey, slug string) (model.Artifact, error) {
 	return s.loadArtifactRow(ctx, q, q.QueryRow(ctx, `
-		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts where issue_key = $1 and slug = $2
 	`, issueKey, slug))
 }
@@ -695,11 +702,14 @@ func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (m
 }
 
 // scanArtifact reads the canonical artifact column list:
-// id::text, issue_key, slug, name, kind, is_primary, created_by, created_at.
+// id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at.
 func scanArtifact(row pgx.Row) (model.Artifact, error) {
 	var artifact model.Artifact
 	var createdBy []byte
-	if err := row.Scan(&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt); err != nil {
+	if err := row.Scan(
+		&artifact.ID, &artifact.IssueKey, &artifact.Project, &artifact.RefKey, &artifact.Slug, &artifact.Name,
+		&artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt,
+	); err != nil {
 		return model.Artifact{}, err
 	}
 	if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {

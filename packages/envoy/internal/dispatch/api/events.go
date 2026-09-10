@@ -14,6 +14,11 @@ import (
 
 const maxSSEReplay = 1000
 
+const eventSelect = `select e.id, e.issue_key, e.artifact_id::text, coalesce(i.project_key, ar.project_key), e.seq, e.type, e.actor, e.notify, e.created_at, e.payload
+	from events e
+	left join issues i on i.key = e.issue_key
+	left join artifacts ar on ar.id = e.artifact_id`
+
 func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -199,38 +204,33 @@ type eventListOptions struct {
 
 func (s *server) readEvents(ctx context.Context, issueKey string, options eventListOptions) ([]model.Event, error) {
 	if len(options.ids) > 0 {
-		return s.readEventRows(ctx, `
-			select id, issue_key, seq, type, actor, notify, created_at, payload
-			from events where issue_key = $1 and id = any($2)
-			order by seq asc
+		return s.readEventRows(ctx, eventSelect+`
+			where e.issue_key = $1 and e.id = any($2)
+			order by e.seq asc
 		`, issueKey, options.ids)
 	}
 	if options.descending {
 		if options.hasBefore {
-			return s.readEventRows(ctx, `
-				select id, issue_key, seq, type, actor, notify, created_at, payload
-				from events where issue_key = $1 and seq < $2
-				order by seq desc limit $3
+			return s.readEventRows(ctx, eventSelect+`
+				where e.issue_key = $1 and e.seq < $2
+				order by e.seq desc limit $3
 			`, issueKey, options.before, options.limit)
 		}
-		return s.readEventRows(ctx, `
-			select id, issue_key, seq, type, actor, notify, created_at, payload
-			from events where issue_key = $1
-			order by seq desc limit $2
+		return s.readEventRows(ctx, eventSelect+`
+			where e.issue_key = $1
+			order by e.seq desc limit $2
 		`, issueKey, options.limit)
 	}
-	return s.readEventRows(ctx, `
-		select id, issue_key, seq, type, actor, notify, created_at, payload
-		from events where issue_key = $1 and seq > $2
-		order by seq asc limit $3
+	return s.readEventRows(ctx, eventSelect+`
+		where e.issue_key = $1 and e.seq > $2
+		order by e.seq asc limit $3
 	`, issueKey, options.after, options.limit)
 }
 
 func (s *server) readEventsAfterID(ctx context.Context, after int64) ([]model.Event, error) {
-	return s.readEventRows(ctx, `
-		select id, issue_key, seq, type, actor, notify, created_at, payload
-		from events where id > $1
-		order by id asc limit $2
+	return s.readEventRows(ctx, eventSelect+`
+		where e.id > $1
+		order by e.id asc limit $2
 	`, after, maxSSEReplay)
 }
 
@@ -244,7 +244,18 @@ func (s *server) readEventRows(ctx context.Context, query string, arguments ...a
 	for rows.Next() {
 		var event model.Event
 		var actor, payload []byte
-		if err := rows.Scan(&event.ID, &event.IssueKey, &event.Seq, &event.Type, &actor, &event.Notify, &event.CreatedAt, &payload); err != nil {
+		if err := rows.Scan(
+			&event.ID,
+			&event.IssueKey,
+			&event.ArtifactID,
+			&event.Project,
+			&event.Seq,
+			&event.Type,
+			&actor,
+			&event.Notify,
+			&event.CreatedAt,
+			&payload,
+		); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(actor, &event.Actor); err != nil {

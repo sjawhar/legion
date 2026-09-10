@@ -23,7 +23,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	}
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select a.id::text, a.issue_key, a.author, a.question, a.options, a.multiple, a.urgency,
+		select a.id::text, a.issue_key, a.artifact_id::text, a.author, a.question, a.options, a.multiple, a.urgency,
 		       a.anchor, a.state, a.answer, a.resolution, a.created_at, i.key, i.title
 		from asks a
 		join issues i on i.key = a.issue_key
@@ -40,7 +40,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		var ask inboxAsk
 		var author, options, anchor, answer, resolution []byte
 		if err := rows.Scan(
-			&ask.ID, &ask.IssueKey, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
+			&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
 			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &ask.Issue.Key, &ask.Issue.Title,
 		); err != nil {
 			s.writeHandlerError(w, err)

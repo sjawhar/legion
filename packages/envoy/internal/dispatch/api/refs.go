@@ -32,18 +32,27 @@ func (s *server) replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID, b
 
 func (s *server) loadReferencedBy(ctx context.Context, artifact model.Artifact) ([]model.ReferencedBy, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select sources.kind, sources.id, sources.issue_key, sources.excerpt
+		select sources.kind, sources.id, sources.issue_key, sources.project, sources.excerpt
 		from refs
 		join (
-			select 'ask'::text as kind, id::text as id, issue_key, left(question, 240) as excerpt from asks
+			select 'ask'::text as kind, a.id::text as id, a.issue_key,
+			       coalesce(i.project_key, ar.project_key) as project, left(a.question, 240) as excerpt
+			from asks a
+			left join issues i on i.key = a.issue_key
+			left join artifacts ar on ar.id = a.artifact_id
 			union all
-			select 'comment'::text, id::text, issue_key, left(body, 240) from comments
+			select 'comment'::text, c.id::text, c.issue_key,
+			       coalesce(i.project_key, ar.project_key), left(c.body, 240)
+			from comments c
+			left join issues i on i.key = c.issue_key
+			left join artifacts ar on ar.id = c.artifact_id
 			union all
-			select 'message'::text, id::text, issue_key, left(body, 240) from messages
+			select 'message'::text, m.id::text, m.issue_key, i.project_key, left(m.body, 240)
+			from messages m join issues i on i.key = m.issue_key
 		) as sources on sources.kind = refs.from_kind and sources.id = refs.from_id
 		where refs.to_kind = 'artifact' and refs.to_id = $1
 		order by sources.kind, sources.id
-	`, artifact.IssueKey+"/"+artifact.Slug)
+	`, artifact.RefKey)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +60,7 @@ func (s *server) loadReferencedBy(ctx context.Context, artifact model.Artifact) 
 	references := []model.ReferencedBy{}
 	for rows.Next() {
 		var reference model.ReferencedBy
-		if err := rows.Scan(&reference.Kind, &reference.ID, &reference.IssueKey, &reference.Excerpt); err != nil {
+		if err := rows.Scan(&reference.Kind, &reference.ID, &reference.IssueKey, &reference.Project, &reference.Excerpt); err != nil {
 			return nil, err
 		}
 		references = append(references, reference)
