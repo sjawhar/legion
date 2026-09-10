@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -38,6 +39,52 @@ func TestFindQuoteDisambiguatesByOccurrenceAndNearest(t *testing.T) {
 	normalizedRange, err := FindQuote(normalized, "quick brown", nil, nil)
 	if err != nil || normalizedRange != (Range{From: 5, To: 16}) {
 		t.Fatalf("normalized whitespace range = %v, %v", normalizedRange, err)
+	}
+}
+
+func TestFindHeadingMatchesTitleAcrossLevels(t *testing.T) {
+	doc, err := Parse("# A\n\ntext\n\n## A\n\n# B\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FindHeading(doc, "A", nil); !errors.As(err, new(*ErrTargetAmbiguous)) {
+		t.Fatalf("two headings titled A: err = %v, want ErrTargetAmbiguous", err)
+	}
+	one := 1
+	r, err := FindHeading(doc, "A", &one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// doc = h1("A")[0,3) p("text")[3,9) h2("A")[9,12) h1("B")[12,15)
+	if r != (Range{From: 9, To: 12}) {
+		t.Fatalf("second A = %v, want [9,12)", r)
+	}
+	if r, err := FindHeading(doc, "B", nil); err != nil || r != (Range{From: 12, To: 15}) {
+		t.Fatalf("B = %v %v", r, err)
+	}
+	if _, err := FindHeading(doc, "text", nil); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("paragraph text is not a heading: %v", err)
+	}
+	if got := Size(doc); got != 15 {
+		t.Fatalf("Size = %d, want 15", got)
+	}
+}
+
+func TestListMarksAndMarkAttrs(t *testing.T) {
+	doc, err := FromJSON(fixtureNamed(t, "marks").PMJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []MarkRef{{"proofComment", "c1"}, {"dispatchAsk", "a1"}, {"proofSuggestion", "s1"}}
+	if got := ListMarks(doc); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListMarks = %v, want %v", got, want)
+	}
+	attrs, ok := MarkAttrs(doc, "proofSuggestion", "s1")
+	if !ok || attrs["kind"] != "replace" || attrs["by"] != "session:01a0" {
+		t.Fatalf("MarkAttrs = %v %v", attrs, ok)
+	}
+	if _, ok := MarkAttrs(doc, "proofComment", "nope"); ok {
+		t.Fatal("unknown id must not resolve")
 	}
 }
 
@@ -274,6 +321,62 @@ func TestSpliceAcrossTextblocksKeepsPartialBoundaries(t *testing.T) {
 	}
 }
 
+func spliceRange(t *testing.T, doc *Node, fx spliceFixture) Range {
+	t.Helper()
+	if fx.Point == "" {
+		from, err := FindQuote(doc, fx.From, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		to, err := FindQuote(doc, fx.To, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Range{From: from.From, To: to.To}
+	}
+	var pos int
+	switch fx.Point {
+	case "doc-start":
+		pos = 0
+	case "doc-end":
+		pos = Size(doc)
+	default:
+		at, err := FindQuote(doc, fx.At, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block := textblockContaining(doc, at.From)
+		if block.To == 0 {
+			t.Fatalf("point %q is not in a textblock", fx.Point)
+		}
+		switch fx.Point {
+		case "after":
+			pos = at.To
+		case "before":
+			pos = at.From
+		case "after-textblock":
+			pos = block.To
+		case "before-textblock":
+			pos = block.From
+		default:
+			t.Fatalf("unknown point %q", fx.Point)
+		}
+	}
+	return Range{From: pos, To: pos}
+}
+
+func textblockContaining(doc *Node, position int) Range {
+	var block Range
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if isTextblock(node.Type) && pos+1 <= position && position <= end-1 {
+			block = Range{From: pos, To: end}
+			return false
+		}
+		return true
+	})
+	return block
+}
+
 func TestSpliceMatchesEngineReplaceRange(t *testing.T) {
 	for _, fx := range loadSpliceFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
@@ -281,19 +384,12 @@ func TestSpliceMatchesEngineReplaceRange(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			from, err := FindQuote(doc, fx.From, nil, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			to, err := FindQuote(doc, fx.To, nil, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			r := spliceRange(t, doc, fx)
 			with, err := Parse(fx.Replacement)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+			got, err := Splice(doc, r, with)
 			if err != nil {
 				t.Fatal(err)
 			}

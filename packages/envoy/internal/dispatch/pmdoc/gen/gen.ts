@@ -31,7 +31,18 @@ const fixtures = readdirSync(corpus).filter((f) => f.endsWith(".md")).sort().map
 
 // These are browser-oracle replaceRange cases. A single paragraph replacement
 // is sliced open to model Splice's inline paragraph replacement contract.
-const replaceRangeCases = [
+type ReplaceRangeCase = {
+  name: string;
+  markdown: string;
+  from?: string;
+  to?: string;
+  at?: string;
+  point?: "after" | "before" | "after-textblock" | "before-textblock" | "doc-start" | "doc-end";
+  replacement: string;
+  inline?: boolean;
+};
+
+const replaceRangeCases: ReplaceRangeCase[] = [
   { name: "paragraph-inline", markdown: "Alpha first.\n\nSecond omega.\n", from: "first.", to: "Second", replacement: "X\n", inline: true },
   { name: "paragraph-multiblock", markdown: "Alpha first.\n\nSecond omega.\n", from: "first.", to: "Second", replacement: "X\n\nY\n" },
   { name: "paragraph-list", markdown: "Alpha first.\n\nSecond omega.\n", from: "first.", to: "Second", replacement: "- X\n- Y\n" },
@@ -59,12 +70,31 @@ const replaceRangeCases = [
   { name: "table-cell-code", markdown: "| head |\n| :--- |\n| a target c |\n", from: "target", to: "target", replacement: "```\ncode\n```\n" },
   { name: "table-cell-inline", markdown: "| head |\n| :--- |\n| a target c |\n", from: "target", to: "target", replacement: "X\n", inline: true },
   { name: "table-header-into-first-body-cell-inline", markdown: "| a tail |\n| :--- |\n| head b |\n| after |\n", from: "tail", to: "head", replacement: "X\n", inline: true },
-].map(({ name, markdown, from, to, replacement, inline = false }) => {
+  { name: "insert-inline-after-quote", markdown: "Alpha first. omega.\n", at: "first.", point: "after", replacement: "X\n", inline: true },
+  { name: "insert-inline-at-textblock-start", markdown: "Alpha omega.\n", at: "Alpha", point: "before", replacement: "X\n", inline: true },
+  { name: "insert-inline-at-textblock-end", markdown: "Alpha omega.\n", at: "omega.", point: "after", replacement: "X\n", inline: true },
+  { name: "insert-blocks-after-quote-splits-paragraph", markdown: "Alpha first. omega.\n", at: "first.", point: "after", replacement: "- X\n- Y\n" },
+  { name: "insert-block-at-doc-start", markdown: "Body.\n", point: "doc-start", replacement: "# Title\n" },
+  { name: "insert-block-at-doc-end", markdown: "Body.\n", point: "doc-end", replacement: "Tail.\n" },
+  { name: "insert-block-after-heading-textblock", markdown: "# Title\n\nBody.\n", at: "Title", point: "after-textblock", replacement: "Intro.\n" },
+  { name: "insert-block-before-heading-textblock", markdown: "# Title\n\nBody.\n", at: "Title", point: "before-textblock", replacement: "Lead.\n" },
+  { name: "insert-paragraph-after-list-item-textblock", markdown: "- one\n- two\n", at: "one", point: "after-textblock", replacement: "extra\n" },
+].map(({ name, markdown, from, to, at, point, replacement, inline = false }) => {
   const doc = engine.parseMarkdown(markdown);
   const inserted = engine.parseMarkdown(replacement);
   const transformed = new Transform(doc);
-  const fromPos = quotePosition(doc, from);
-  const toPos = quotePosition(doc, to) + to.length;
+  const pointPosition = (): number => {
+    switch (point) {
+      case "doc-start": return 0;
+      case "doc-end": return doc.content.size;
+      case "after": return quotePosition(doc, at!) + at!.length;
+      case "before": return quotePosition(doc, at!);
+      case "after-textblock": return doc.resolve(quotePosition(doc, at!)).after();
+      case "before-textblock": return doc.resolve(quotePosition(doc, at!)).before();
+    }
+  };
+  const fromPos = point ? pointPosition() : quotePosition(doc, from!);
+  const toPos = point ? fromPos : quotePosition(doc, to!) + to!.length;
   const slice = inline
     ? inserted.slice(1, inserted.content.size - 1)
     : inserted.slice(0, inserted.content.size);
@@ -74,6 +104,8 @@ const replaceRangeCases = [
     markdown,
     from,
     to,
+    at,
+    point,
     replacement,
     pm_json: transformed.doc.toJSON(),
   };

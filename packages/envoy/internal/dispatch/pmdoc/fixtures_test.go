@@ -22,6 +22,8 @@ type spliceFixture struct {
 	Markdown    string          `json:"markdown"`
 	From        string          `json:"from"`
 	To          string          `json:"to"`
+	At          string          `json:"at"`
+	Point       string          `json:"point"`
 	Replacement string          `json:"replacement"`
 	PMJSON      json.RawMessage `json:"pm_json"`
 }
@@ -103,6 +105,10 @@ func TestSpliceFixturesHaveRequiredCoverage(t *testing.T) {
 		"blockquote-last-paragraph-into-following-list-inline", "blockquote-list",
 		"headings-paragraph", "code-blocks-paragraph", "heading-code", "code-list", "table-cell-code",
 		"table-cell-inline", "table-header-into-first-body-cell-inline",
+		"insert-inline-after-quote", "insert-inline-at-textblock-start", "insert-inline-at-textblock-end",
+		"insert-blocks-after-quote-splits-paragraph", "insert-block-at-doc-start", "insert-block-at-doc-end",
+		"insert-block-after-heading-textblock", "insert-block-before-heading-textblock",
+		"insert-paragraph-after-list-item-textblock",
 	}
 	if len(fixtures) != len(wantNames) {
 		t.Fatalf("splice fixture count = %d, want %d", len(fixtures), len(wantNames))
