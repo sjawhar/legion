@@ -69,7 +69,9 @@ Every root, worker, and controller pane also receives `DISPATCH_URL` and `DISPAT
 and `DISPATCH_TOKEN` is read from the `DISPATCH_TOKEN` environment variable (required whenever
 `dispatch_url` is set — `resolveDaemonConfig` refuses to start otherwise) so each pane's native
 dispatch tool can authenticate and register. Neither variable is exported when `dispatch_url` is
-unset; those panes fall back to their own `envoy.json` dispatch config.
+unset; those panes fall back to their own `envoy.json` dispatch config. The daemon never emits the
+retired `DISPATCH_MCP_URL` alias and strips it from every child process it spawns, pane or
+otherwise.
 
 Before loading state, opening core NATS, or serving the API, the daemon probes the exact resolved OMP executable with an isolated extension and refuses startup unless it confirms `pi.agents`. It also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 

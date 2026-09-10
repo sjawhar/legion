@@ -83,14 +83,17 @@ function parseMiseEnvironment(stdout: string): FullMiseEnvironment {
 
 /** `DISPATCH_URL`/`DISPATCH_TOKEN` are configured pane-only exports: the only place they belong
  * is the explicit, config-driven `-e` pairs `processes.ts` adds to a spawned pane's own tmux
- * environment. `DISPATCH_MCP_URL` is a retired alias with no legitimate destination at all —
- * stripped everywhere, including from a pane's own environment. Every other child process the
- * daemon spawns (mise/tool resolution here, `executePrivateKeyCommand`'s `sh -c` in `config.ts`,
- * GitHub App role/`gh` CLI children in `github-app-env.ts`, and any other daemon subprocess) must
- * never see any of the three, even when the daemon's own process (or mise's) happens to carry one
- * for unrelated reasons. Shared by `fullMiseEnvironment`/`resolveOmpInvocation` below, by
- * `config.ts`'s `executePrivateKeyCommand`, and by `github-app-env.ts`'s base-env copy, so every
- * consumer strips the same three keys the same way. */
+ * environment. `DISPATCH_MCP_URL` is a retired alias with no legitimate destination at all — the
+ * daemon never emits it and strips it from every child process it spawns (an `-e` pair can only
+ * add or override a key for a new pane, never remove one the pane would otherwise inherit from
+ * the tmux server's own environment, so this key must never reach that environment in the first
+ * place). Every other child process the daemon spawns (mise/tool resolution here,
+ * `executePrivateKeyCommand`'s `sh -c` in `config.ts`, GitHub App role/`gh` CLI children in
+ * `github-app-env.ts`, and any other daemon subprocess) must never see any of the three, even
+ * when the daemon's own process (or mise's) happens to carry one for unrelated reasons. Shared
+ * by `fullMiseEnvironment`/`resolveOmpInvocation` below, by `config.ts`'s
+ * `executePrivateKeyCommand`, and by `github-app-env.ts`'s base-env copy, so every consumer
+ * strips the same three keys the same way. */
 const DISPATCH_ENV_KEYS = ["DISPATCH_TOKEN", "DISPATCH_URL", "DISPATCH_MCP_URL"] as const;
 
 export function stripDispatchEnv<T extends NodeJS.ProcessEnv>(env: T): T {

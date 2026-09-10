@@ -1,3 +1,4 @@
+import { stripDispatchEnv } from "../daemon/environment";
 import type { BuildDependencyGraphOptions } from "./graph";
 import type { ChangeHotspotEntry } from "./types";
 
@@ -18,6 +19,7 @@ export type JjCommandRunner = (rootDir: string, args: string[]) => Promise<JjCom
 function defaultHotspotRunner(rootDir: string, args: string[]): Promise<JjCommandResult> {
   const proc = Bun.spawn(["jj", ...args], {
     cwd: rootDir,
+    env: stripDispatchEnv(process.env),
     stdout: "pipe",
     stderr: "pipe",
   });

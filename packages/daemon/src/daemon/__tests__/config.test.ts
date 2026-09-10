@@ -307,9 +307,9 @@ describe("daemon config", () => {
       DISPATCH_URL: process.env.DISPATCH_URL,
       DISPATCH_MCP_URL: process.env.DISPATCH_MCP_URL,
     };
-    // Set directly on process.env (not resolveDaemonConfig's env param):
-    // executePrivateKeyCommand reads process.env for its spawnSync call, so this is what
-    // actually exercises the leak path pre-fix.
+    // Set directly on process.env (not resolveDaemonConfig's env param): executePrivateKeyCommand
+    // reads process.env for its spawnSync call, so its child must never see any of these three
+    // keys from that environment.
     process.env.DISPATCH_TOKEN = "leaked-private-key-command-token";
     process.env.DISPATCH_URL = "http://leaked-private-key-command";
     process.env.DISPATCH_MCP_URL = "http://leaked-private-key-command/mcp";

@@ -144,9 +144,8 @@ describe("resolveDaemonEnvironment", () => {
     const miseWhereCall = received.find(
       (call) => call.command.join(" ") === `/tools/mise where ${OMP_PIN}`
     );
-    // Neither bootstrap call relied on inheriting the daemon's raw ambient process environment
-    // (an omitted `options` — before this fix, both calls passed none at all): each now receives
-    // an explicit `env` with the dispatch keys already gone, even though `deps.env` carried them.
+    // Neither bootstrap call inherits the daemon's raw ambient process environment: each passes
+    // an explicit `env` with the dispatch keys already gone, even though `deps.env` carries them.
     expect(miseEnvCall?.options?.env).toEqual({ PATH: "/narrow/bin" });
     expect(miseWhereCall?.options?.env).toEqual({
       PATH: "/full/bin:/usr/bin",
