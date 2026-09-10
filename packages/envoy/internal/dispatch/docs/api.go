@@ -1,4 +1,10 @@
-// Package docs defines the document-service boundary used by Dispatch's HTTP API.
+// Package docs defines Dispatch's live document service. A room has the
+// authoritative ProseMirror Y.XmlFragment and a server-owned marks Y.Map
+// projecting Postgres rows. Browsers edit the tree and originate browser marks;
+// API calls write rows and the marks projection, while agent quote anchors are
+// marked by Go. Markdown is canonically rendered from the tree for reads and
+// versions. At boot the service migrates legacy Y.Text rooms and offset anchors
+// once; check-documents inspects that conversion without modifying the database.
 package docs
 
 import (

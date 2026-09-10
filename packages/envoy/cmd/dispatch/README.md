@@ -92,6 +92,21 @@ go run ./cmd/dispatch
 The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 `DISPATCH_PORT` to change it.
 
+## Document migration preflight
+
+Before deploying against a database that may contain documents from before the
+tree model, inspect it without writing any data:
+
+```sh
+cd packages/envoy
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
+  go run ./cmd/dispatch check-documents
+```
+
+The command prints each document's tree or legacy state, legacy markdown parse
+result, and anchor/resolvable-anchor counts. It exits nonzero for an unparseable
+legacy document. Normal server boot performs the one-shot conversion from legacy
+`Y.Text` rooms and offset anchors to the ProseMirror tree and mark anchors.
 ## Routes
 
 | Path | Method | Identity | Purpose |
@@ -112,13 +127,13 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
 | `/api/v1/issues?project=&status=&parent=&updated_since=` | GET | cookie, trusted header, or bearer | List issue summaries. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. Summaries contain `key`, `title`, `status`, `parent`, `updated_at`, `last_seq`, and `open_asks`. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank seeds the writing-a-spec skeleton. |
-| `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. |
+| `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |
 | `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
-| `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, reply, or suggestion. |
+| `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, reply, or suggestion. An anchored comment uses the same quote-or-mark-ID shape as an ask; replies have their parent's anchor and send none. |
 | `/api/v1/comments/{id}` | GET | cookie, trusted header, or bearer | Read a comment and its reply chain. |
 | `/api/v1/comments/{id}/resolve` | POST | cookie, trusted header, or bearer | Resolve a comment. |
 | `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. |
@@ -139,6 +154,17 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 
 A caller resolved by header identity without a stored GitHub token receives
 `503` with code `GITHUB_TOKEN_UNAVAILABLE` from GitHub proxy routes.
+
+## Document errors
+
+| Status / code | Meaning |
+| --- | --- |
+| `404 TARGET_NOT_FOUND` | The quote requested by an anchor or document edit is absent. |
+| `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
+| `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
+| `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
+| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema. Malformed edit replacements report `INVALID_OP`. |
+| `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely. |
 
 ## Tests
 
