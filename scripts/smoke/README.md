@@ -101,8 +101,10 @@ Keep `SMOKE_REPO` and `SMOKE_PROJECT` exported for teardown so it can close the 
 Run the numbered assertions during the end-to-end exercise:
 
 ```sh
-bash scripts/smoke/checkpoints.sh <1-12>
+secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <1-12>
 ```
+
+`DISPATCH_TOKEN` is a secret: the `secrets` wrapper injects it only for this one invocation and never persists it under `SMOKE_DIR` (the same wrapper the start command above uses for `up.sh`). `DISPATCH_URL` is not a secret and must already be exported in the shell, exactly as in "Start and stop" above.
 
 Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints 1–4, 9, and 12 read the root issue `up.sh` recorded at `${SMOKE_DIR}/root-issue`; checkpoint 5 infers the Legion pull request from `gh pr list` where possible. Set the listed variable when a later exercise has more than one candidate, or when checkpoints run against a `SMOKE_DIR` `up.sh` never populated:
 

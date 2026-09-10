@@ -169,3 +169,18 @@ fi
 }
 rm -rf "$bare_temporary_dir"
 printf 'PASS: fails with a clear message when neither SMOKE_ROOT_ISSUE nor a recorded root-issue file is present\n'
+
+if PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  env -u DISPATCH_TOKEN bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected checkpoint 1 to fail without DISPATCH_TOKEN\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: missing-token error names the exact secrets-wrapped invocation\n'

@@ -20,10 +20,14 @@ require_env() {
 state() {
   curl --fail --silent --show-error "${daemon_url}/legion/v1/state"
 }
+require_dispatch_token() {
+  [[ -n "${DISPATCH_TOKEN:-}" ]] ||
+    fail 'DISPATCH_TOKEN is required; run: secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <n>'
+}
 dispatch_request() {
   local path="$1"
   require_env DISPATCH_URL
-  require_env DISPATCH_TOKEN
+  require_dispatch_token
   curl --fail --silent --show-error \
     -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
     "${DISPATCH_URL%/}/api/v1/${path}"
