@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -378,7 +379,7 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	artifact, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -398,7 +399,7 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	artifact, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -424,7 +425,7 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_VERSION", http.StatusBadRequest, "version number must be positive")
 		return
 	}
-	artifact, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -477,13 +478,17 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_VERSION", http.StatusBadRequest, "named versions require a summary")
 		return
 	}
+	if err := validateArtifactRequestRef(r); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
-	artifact, err := s.loadArtifact(r.Context(), tx, r.PathValue("id"))
+	artifact, err := s.loadArtifactForRequest(r.Context(), tx, r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -539,7 +544,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	artifact, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -647,13 +652,17 @@ func (s *server) setPrimaryArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "only users can select the primary document")
 		return
 	}
+	if err := validateArtifactRequestRef(r); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
-	artifact, err := s.loadArtifact(r.Context(), tx, r.PathValue("id"))
+	artifact, err := s.loadArtifactForRequest(r.Context(), tx, r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -720,11 +729,52 @@ func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) 
 	return artifacts, nil
 }
 
+func validateArtifactRequestRef(r *http.Request) error {
+	if r.PathValue("key") != "" {
+		return nil
+	}
+	_, err := parseArtifactID(r.PathValue("id"))
+	return err
+}
+
+func parseArtifactID(id string) (string, error) {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return "", errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
+	}
+	return parsed.String(), nil
+}
+
+func (s *server) loadArtifactForRequest(ctx context.Context, q queryer, r *http.Request) (model.Artifact, error) {
+	if issueKey := r.PathValue("key"); issueKey != "" {
+		return s.loadArtifactBySlug(ctx, q, issueKey, r.PathValue("slug"))
+	}
+	return s.loadArtifact(ctx, q, r.PathValue("id"))
+}
+
 func (s *server) loadArtifact(ctx context.Context, q queryer, id string) (model.Artifact, error) {
-	artifact, err := scanArtifact(q.QueryRow(ctx, `
+	parsed, err := parseArtifactID(id)
+	if err != nil {
+		return model.Artifact{}, err
+	}
+	return s.loadArtifactRow(ctx, q, q.QueryRow(ctx, `
 		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts where id = $1
-	`, id))
+	`, parsed))
+}
+
+func (s *server) loadArtifactBySlug(ctx context.Context, q queryer, issueKey, slug string) (model.Artifact, error) {
+	return s.loadArtifactRow(ctx, q, q.QueryRow(ctx, `
+		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
+		from artifacts where issue_key = $1 and slug = $2
+	`, issueKey, slug))
+}
+
+func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (model.Artifact, error) {
+	artifact, err := scanArtifact(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Artifact{}, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
+	}
 	if err != nil {
 		return model.Artifact{}, err
 	}

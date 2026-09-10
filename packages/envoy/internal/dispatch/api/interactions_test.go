@@ -1031,6 +1031,25 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 			ID string `json:"id"`
 		} `json:"artifact"`
 	}](t, document).Artifact.ID
+	issueDetail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
+	artifactList := decodeBody[struct {
+		Artifacts []struct {
+			ID   string `json:"id"`
+			Slug string `json:"slug"`
+		} `json:"artifacts"`
+	}](t, issueDetail)
+	var documentSlug, primarySlug string
+	for _, artifact := range artifactList.Artifacts {
+		switch artifact.ID {
+		case documentID:
+			documentSlug = artifact.Slug
+		case issue.PrimaryArtifactID:
+			primarySlug = artifact.Slug
+		}
+	}
+	if documentSlug == "" || primarySlug == "" {
+		t.Fatalf("resolve artifact slugs: document=%q primary=%q", documentSlug, primarySlug)
+	}
 
 	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
 	var closedIssue struct {
@@ -1082,6 +1101,13 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
 	}))
 	assertClosed("named version", sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]any{
+		"summary": "checkpoint", "actor": sessionActor(),
+	}))
+	assertClosed("primary selection (slug)", dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts/"+documentSlug+"/primary", map[string]any{}, "alice"))
+	assertClosed("document edit (slug)", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts/"+primarySlug+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
+	}))
+	assertClosed("named version (slug)", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts/"+primarySlug+"/versions", map[string]any{
 		"summary": "checkpoint", "actor": sessionActor(),
 	}))
 
