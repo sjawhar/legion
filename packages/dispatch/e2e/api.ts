@@ -8,6 +8,7 @@ import type {
   CreateAskInput,
   CreateCommentInput,
   CreateMessageInput,
+  CreateProjectInput,
   EditArtifactInput,
   Event,
   Issue,
@@ -61,7 +62,7 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
-export function createProject(input: Project, login = "alice"): Promise<Project> {
+export function createProject(input: CreateProjectInput, login = "alice"): Promise<Project> {
   return request<Project>("/api/v1/projects", "POST", input, { login });
 }
 

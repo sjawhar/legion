@@ -268,7 +268,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   });
   const api = createApiClient(stub.fetch);
 
-  await api.getProjects();
+  await api.listProjects();
   await api.listIssues();
   await api.createIssue({ project: "CORE", title: "Ship it" });
   await api.getIssue("CORE-1");

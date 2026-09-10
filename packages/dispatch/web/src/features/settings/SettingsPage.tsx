@@ -6,6 +6,7 @@ import { api } from "../../api/client";
 import type { RepoProject } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { ProjectsSection } from "./ProjectsSection";
 
 type FailedAction =
   | { readonly kind: "put"; readonly project: string; readonly repo: string }
@@ -18,7 +19,7 @@ export function SettingsPage(): ReactNode {
   const [project, setProject] = useState("");
   const [failedAction, setFailedAction] = useState<FailedAction>();
   const mappings = useQuery({ queryKey: ["repo-projects"], queryFn: () => api.listRepoProjects() });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.getProjects() });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.listProjects() });
   const putMapping = useMutation<
     RepoProject,
     Error,
@@ -95,6 +96,7 @@ export function SettingsPage(): ReactNode {
           Control where external repository issues appear in Dispatch.
         </p>
       </header>
+      <ProjectsSection />
       <section aria-labelledby="repository-projects-heading">
         <h2 className="text-xl font-semibold" id="repository-projects-heading">
           Repositories → Projects

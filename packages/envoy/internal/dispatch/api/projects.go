@@ -11,7 +11,7 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `select key, name from projects order by key`)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `select key, name, created_at from projects order by key`)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -20,7 +20,7 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 	projects := []model.Project{}
 	for rows.Next() {
 		var project model.Project
-		if err := rows.Scan(&project.Key, &project.Name); err != nil {
+		if err := rows.Scan(&project.Key, &project.Name, &project.CreatedAt); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -59,8 +59,12 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	var project model.Project
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
-		insert into projects (key, name) values ($1, $2) returning key, name
-	`, input.Key, input.Name).Scan(&project.Key, &project.Name); err != nil {
+		insert into projects (key, name) values ($1, $2) returning key, name, created_at
+	`, input.Key, input.Name).Scan(&project.Key, &project.Name, &project.CreatedAt); err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, "PROJECT_EXISTS", http.StatusConflict, "a project with this key already exists")
+			return
+		}
 		s.writeHandlerError(w, err)
 		return
 	}

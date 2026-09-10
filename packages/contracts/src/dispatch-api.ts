@@ -45,6 +45,7 @@ export type AnchorInput =
 export interface Project {
   readonly key: string;
   readonly name: string;
+  readonly created_at: string;
 }
 
 export interface RepoProject {
