@@ -43,7 +43,7 @@ export function ArtifactDocument({
     selectedItem === undefined ||
     anchor === null ||
     anchor === undefined ||
-    anchor.orphaned ||
+    (anchor.orphaned && version === undefined) ||
     anchor.artifact_id !== artifact.id
       ? undefined
       : {

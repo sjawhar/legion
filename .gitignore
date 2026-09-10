@@ -267,3 +267,5 @@ $RECYCLE.BIN/
 # Playwright output (packages/dispatch e2e)
 packages/dispatch/e2e/test-results/
 packages/dispatch/e2e/playwright-report/
+
+.superpowers/sdd/

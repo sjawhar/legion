@@ -28,6 +28,23 @@ function connectionLabel(connection: ConnectionState): string {
   return connection === "connecting" ? "Connecting to the document…" : connection;
 }
 
+function removeMarkFromDocument(editor: EditorHandle, markId: string): void {
+  let transaction = editor.view.state.tr;
+  editor.view.state.doc.descendants((node, position) => {
+    if (!node.isText) {
+      return true;
+    }
+    const mark = node.marks.find((candidate) => candidate.attrs.id === markId);
+    if (mark !== undefined) {
+      transaction = transaction.removeMark(position, position + node.nodeSize, mark);
+    }
+    return true;
+  });
+  if (transaction.docChanged) {
+    editor.view.dispatch(transaction);
+  }
+}
+
 export function ProofDocument({
   artifact,
   highlight,
@@ -44,13 +61,16 @@ export function ProofDocument({
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [showDiff, setShowDiff] = useState(false);
   const { connect, createEditor } = useContext(DocumentRuntime);
-  const { composeForMark, focusItemForMark, registerDocument, setMarkPositions } = useMargin();
+  const { composeForMark, focusItemForMark, hoverItemForMark, registerDocument, setMarkPositions } =
+    useMargin();
   const composeForMarkRef = useRef(composeForMark);
   const focusItemForMarkRef = useRef(focusItemForMark);
+  const hoverItemForMarkRef = useRef(hoverItemForMark);
   const registerDocumentRef = useRef(registerDocument);
   const setMarkPositionsRef = useRef(setMarkPositions);
   composeForMarkRef.current = composeForMark;
   focusItemForMarkRef.current = focusItemForMark;
+  hoverItemForMarkRef.current = hoverItemForMark;
   registerDocumentRef.current = registerDocument;
   setMarkPositionsRef.current = setMarkPositions;
   const queryClient = useQueryClient();
@@ -127,10 +147,20 @@ export function ProofDocument({
               case "comment":
               case "suggest":
               case "ask":
-                return composeForMarkRef.current({
-                  anchor: { artifact: artifact.id, mark_id: action.markId, quote: action.quote },
-                  kind: composerKindFor(action.kind),
-                });
+                return composeForMarkRef
+                  .current({
+                    anchor: { artifact: artifact.id, mark_id: action.markId, quote: action.quote },
+                    kind: composerKindFor(action.kind),
+                  })
+                  .catch((error: unknown) => {
+                    if (editor === undefined) {
+                      throw new Error(
+                        "The editor must exist before its selection action can be cancelled."
+                      );
+                    }
+                    removeMarkFromDocument(editor, action.markId);
+                    throw error;
+                  });
               default:
                 throw new Error(
                   `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
@@ -138,6 +168,7 @@ export function ProofDocument({
             }
           },
           onMarkClick: (markId) => focusItemForMarkRef.current(markId),
+          onMarkHover: (markId) => hoverItemForMarkRef.current(markId),
           readOnly: isClosedRef.current,
           user: {
             color: colorForLogin(userRef.current.login),

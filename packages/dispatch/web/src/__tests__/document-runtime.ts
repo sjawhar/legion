@@ -74,6 +74,12 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       root,
     };
     root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
+    const transaction = {
+      docChanged: false,
+      removeMark() {
+        return transaction;
+      },
+    };
     const handle = {
       applyRemoteMarks(metadata: Record<string, StoredMark>) {
         editor.remoteMarks.push(metadata);
@@ -93,7 +99,11 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       setReadOnly(readOnly: boolean) {
         editor.readOnly = readOnly;
       },
-      view: { dom: root, state: { doc: { descendants() {} } } },
+      view: {
+        dispatch() {},
+        dom: root,
+        state: { doc: { descendants() {} }, tr: transaction },
+      },
     } as unknown as EditorHandle;
     editors.push(editor);
     return handle;

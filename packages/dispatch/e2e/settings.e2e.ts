@@ -20,7 +20,14 @@ test("a repository mapping added in Settings assigns a new external issue to its
     await expect(page.getByRole("heading", { name: "Repositories → Projects" })).toBeVisible();
     await page.getByLabel("Repository").fill("Owner/Repo.git");
     await page.getByRole("combobox", { name: "Project" }).selectOption("CORE");
+    const mappingSaved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        response.url().endsWith("/api/v1/settings/repo-projects/owner/repo") &&
+        response.ok()
+    );
     await page.getByRole("button", { name: "Add mapping" }).click();
+    await mappingSaved;
     await expect(page.getByRole("cell", { exact: true, name: "owner/repo" })).toBeVisible();
 
     const issue = await createIssue({ external: "owner/repo#1" });

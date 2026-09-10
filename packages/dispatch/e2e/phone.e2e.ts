@@ -1,7 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import { createAsk, createIssue, createMessage, createProject, getAsk } from "./api";
-import { selectPreviewText } from "./preview";
+import { actionBar, barAction, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -9,7 +9,11 @@ const session = {
   actor: { kind: "session" as const, id: "e2e-phone" },
   as: "agent" as const,
 };
-const initialMarkdown = "The quick brown fox jumps over the lazy dog";
+const initialMarkdown =
+  "The quick brown fox jumps over the lazy dog\n\n" +
+  "| One | Two | Three | Four | Five | Six |\n" +
+  "| --- | --- | --- | --- | --- | --- |\n" +
+  "| 1 | 2 | 3 | 4 | 5 | 6 |";
 const pinnedMessage = "Pin me before you forget";
 
 async function activeElementInside(page: Page, selector: string): Promise<boolean> {
@@ -99,12 +103,23 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       await page.getByRole("button", { name: /Close review panel/ }).click();
     }
     await expect(page.getByRole("tabpanel", { name: "Spec" }).getByRole("article")).toContainText(
-      initialMarkdown
+      "The quick brown fox jumps over the lazy dog"
     );
+    await expect(documentEditor(page).locator("table")).toBeVisible();
 
     // D11: choosing Comment on a selection autofocuses the composer's body field.
-    await selectPreviewText(page, "brown");
-    await page.getByRole("button", { exact: true, name: "Comment" }).click();
+    await selectEditorText(page, "brown");
+    if (isPhone) {
+      for (const button of await actionBar(page).getByRole("button").all()) {
+        const box = await button.boundingBox();
+        expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+        expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+      }
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+      ).toBe(true);
+    }
+    await barAction(page, "Comment");
     const commentComposer = page.getByRole("form", { name: "Comment composer" });
     const commentBody = commentComposer.getByLabel("Comment");
     await expect(commentBody).toBeFocused();

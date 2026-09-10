@@ -50,6 +50,7 @@ function renderProofDocument({
             | { focusMark(markId: string): void; setActiveMarks(markIds: string[]): void }
             | undefined;
           focusRequest: { markId: string; seq: number } | undefined;
+          hoveredMarkId: string | undefined;
           markPositions: ReadonlyMap<string, number>;
           pendingCompose:
             | {
@@ -351,15 +352,16 @@ test("a selection-bar action opens the margin composer for the mark and settles 
   }
 });
 
-test("a highlight click focuses its margin item and the margin drives the editor", async () => {
+test("a highlight click focuses its margin item and hover identifies its matching margin item", async () => {
   const { editors, margin, sync, view } = renderProofDocument();
 
   try {
     sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     const onMarkClick = editors[0]?.options.onMarkClick;
-    if (onMarkClick === undefined) {
-      throw new Error("The editor did not receive an onMarkClick handler.");
+    const onMarkHover = editors[0]?.options.onMarkHover;
+    if (onMarkClick === undefined || onMarkHover === undefined) {
+      throw new Error("The editor did not receive mark interaction handlers.");
     }
     const span = document.createElement("span");
     span.dataset.id = "m-9";
@@ -367,6 +369,11 @@ test("a highlight click focuses its margin item and the margin drives the editor
 
     act(() => onMarkClick("m-9"));
     expect(margin.current?.focusRequest?.markId).toBe("m-9");
+
+    act(() => onMarkHover("m-9"));
+    expect(margin.current?.hoveredMarkId).toBe("m-9");
+    act(() => onMarkHover(null));
+    expect(margin.current?.hoveredMarkId).toBeUndefined();
 
     act(() => margin.current?.documentBridge?.focusMark("m-9"));
     expect(editors[0]?.focused).toEqual(["m-9"]);

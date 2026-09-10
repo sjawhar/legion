@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, listComments } from "./api";
-import { selectPreviewText } from "./preview";
+import { barAction, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -100,8 +100,8 @@ test("double-clicking Submit posts exactly one comment", async ({ browser }) => 
   const page = await context.newPage();
   await page.goto(`/issues/${issue.key}`);
   await page.getByRole("tab", { name: "Spec" }).click();
-  await selectPreviewText(page, "brown");
-  await page.getByRole("button", { exact: true, name: "Comment" }).click();
+  await selectEditorText(page, "brown");
+  await barAction(page, "Comment");
   const composer = page.getByRole("form", { name: "Comment composer" });
   await composer.getByLabel("Comment").fill("dup check");
   const submit = composer.getByRole("button", { exact: true, name: "Comment" });

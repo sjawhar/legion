@@ -8,6 +8,10 @@ export function actionBar(page: Page): Locator {
   return page.locator(".dispatch-action-bar");
 }
 
+export async function barAction(page: Page, label: "Comment" | "Suggest" | "Ask"): Promise<void> {
+  await actionBar(page).getByRole("button", { exact: true, name: label }).click();
+}
+
 export function markSpan(page: Page, markId: string): Locator {
   return documentEditor(page).locator(`[data-id="${markId}"]`);
 }
@@ -41,12 +45,21 @@ export async function selectEditorText(page: Page, quote: string): Promise<void>
   await actionBar(page).waitFor({ state: "visible" });
 }
 
+export async function deleteEditorText(page: Page, quote: string): Promise<void> {
+  await selectEditorText(page, quote);
+  await page.keyboard.press("Backspace");
+}
+
 export async function typeAtEnd(page: Page, text: string): Promise<void> {
   const editor = documentEditor(page);
   await editor.click();
   await page.keyboard.press("Control+End");
   await page.keyboard.press("Enter");
   await page.keyboard.type(text);
+}
+
+export function marginCard(page: Page, id: string): Locator {
+  return page.locator(`[data-margin-item="${id}"]`);
 }
 
 export function countDocumentSockets(page: Page): () => number {

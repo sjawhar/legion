@@ -44,7 +44,9 @@ interface MarginContextValue {
   documentBridge: DocumentBridge | undefined;
   focusItemForMark(markId: string): void;
   focusRequest: { markId: string; seq: number } | undefined;
+  hoverItemForMark(markId: string | null): void;
   hoveredItemId: string | undefined;
+  hoveredMarkId: string | undefined;
   markPositions: ReadonlyMap<string, number>;
   pendingCompose: (MarkComposeRequest & { seq: number }) | undefined;
   registerDocument(bridge: DocumentBridge | undefined): void;
@@ -52,6 +54,7 @@ interface MarginContextValue {
   selectItem(id: string): void;
   selectedItemId: string | undefined;
   setHoveredItemId(id: string | undefined): void;
+  setMarkItemIds(markItemIds: ReadonlyMap<string, string>): void;
   setMarkPositions(positions: ReadonlyMap<string, number>): void;
   settleCompose(outcome: "saved" | "cancelled"): void;
 }
@@ -110,7 +113,9 @@ const MarginContext = createContext<MarginContextValue>({
   documentBridge: undefined,
   focusItemForMark: unavailableMargin,
   focusRequest: undefined,
+  hoverItemForMark: unavailableMargin,
   hoveredItemId: undefined,
+  hoveredMarkId: undefined,
   markPositions: new Map(),
   pendingCompose: undefined,
   registerDocument: unavailableMargin,
@@ -118,6 +123,7 @@ const MarginContext = createContext<MarginContextValue>({
   selectItem: unavailableMargin,
   selectedItemId: undefined,
   setHoveredItemId: unavailableMargin,
+  setMarkItemIds: unavailableMargin,
   setMarkPositions: unavailableMargin,
   settleCompose: unavailableMargin,
 });
@@ -126,11 +132,13 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const [documentBridge, setDocumentBridge] = useState<DocumentBridge>();
   const [focusRequest, setFocusRequest] = useState<{ markId: string; seq: number }>();
   const [hoveredItemId, setHoveredItemId] = useState<string>();
+  const [hoveredMarkId, setHoveredMarkId] = useState<string>();
   const [markPositions, setMarkPositions] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [pendingCompose, setPendingCompose] = useState<
     (MarkComposeRequest & { seq: number }) | undefined
   >();
   const [selectedItemId, setSelectedItemId] = useState<string>();
+  const markItemIds = useRef<ReadonlyMap<string, string>>(new Map());
   const sequence = useRef(0);
   const composePromise = useRef<{ reject(reason: Error): void; resolve(): void } | undefined>(
     undefined
@@ -169,6 +177,17 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     sequence.current += 1;
     setFocusRequest({ markId, seq: sequence.current });
   }, []);
+  const hoverItemForMark = useCallback((markId: string | null) => {
+    setHoveredMarkId(markId ?? undefined);
+    setHoveredItemId(markId === null ? undefined : markItemIds.current.get(markId));
+  }, []);
+  const selectHoveredItem = useCallback((itemId: string | undefined) => {
+    setHoveredMarkId(undefined);
+    setHoveredItemId(itemId);
+  }, []);
+  const setMarkItemIds = useCallback((nextMarkItemIds: ReadonlyMap<string, string>) => {
+    markItemIds.current = nextMarkItemIds;
+  }, []);
   const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
     setDocumentBridge(bridge);
   }, []);
@@ -178,14 +197,17 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       documentBridge,
       focusItemForMark,
       focusRequest,
+      hoverItemForMark,
       hoveredItemId,
+      hoveredMarkId,
       markPositions,
       pendingCompose,
       registerDocument,
       replaceCompose,
       selectItem: setSelectedItemId,
       selectedItemId,
-      setHoveredItemId,
+      setHoveredItemId: selectHoveredItem,
+      setMarkItemIds,
       setMarkPositions,
       settleCompose,
     }),
@@ -194,12 +216,16 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       documentBridge,
       focusItemForMark,
       focusRequest,
+      hoverItemForMark,
       hoveredItemId,
+      hoveredMarkId,
       markPositions,
       pendingCompose,
       registerDocument,
       replaceCompose,
+      selectHoveredItem,
       selectedItemId,
+      setMarkItemIds,
       settleCompose,
     ]
   );
@@ -221,6 +247,7 @@ function useMarginSheet(): MarginSheetModel {
     selectItem,
     selectedItemId,
     setHoveredItemId,
+    setMarkItemIds,
     settleCompose,
     replaceCompose,
   } = useMargin();
@@ -261,6 +288,20 @@ function useMarginSheet(): MarginSheetModel {
     retryComments,
     retryItem,
   } = useMarginItems(issueKey, tab, visibleArtifact, markPositions);
+  const markItemIds = useMemo(() => {
+    const ids = new Map<string, string>();
+    for (const item of marginItems) {
+      const markId = marginItemMarkId(item);
+      if (markId !== undefined) {
+        ids.set(markId, marginItemId(item));
+      }
+    }
+    return ids;
+  }, [marginItems]);
+  useEffect(() => {
+    setMarkItemIds(markItemIds);
+    return () => setMarkItemIds(new Map());
+  }, [markItemIds, setMarkItemIds]);
   const isClosed = issue.data !== undefined && issue.data.closed_at !== null;
   const sheetExpanded = issueKey !== undefined && expandedIssueKey === issueKey;
   const toggleSheet = useCallback(
