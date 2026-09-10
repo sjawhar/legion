@@ -11,7 +11,7 @@ interface SelectionMenuProps {
 
 export function SelectionMenu({ onAction, selection }: SelectionMenuProps): ReactNode {
   const left = Math.max(8, Math.min(selection.rect.left, window.innerWidth - 232));
-  const top = Math.max(8, selection.rect.top - 44);
+  const top = Math.max(8, Math.min(selection.rect.top - 44, window.innerHeight - 44));
   const actions: ComposerKind[] = selection.canSuggest
     ? ["comment", "ask", "suggestion"]
     : ["comment", "ask"];
