@@ -261,7 +261,20 @@ export async function handleWorkerReady(
 ): Promise<Response> {
   const { issue, role, sessionId } = requireWorkerSession(ctx, body, "worker/ready");
   const generation = requiredNumber(body, "generation");
-  await ctx.deps.processManager.workerReady(issue, role, sessionId, generation);
+  // Same deadlock shape as /process/ready (see handleProcessReady): the calling worker's own
+  // bootstrap cannot answer a negotiate_protocol request until this response returns, so the
+  // shim connect and the pending-prompt delivery it enables must happen after we respond, not
+  // before. A connect/prompt failure leaves pendingAssignment queued exactly as it is today —
+  // workerClient never caches a failed connect, so the next touch (a probe, a resume, another
+  // spawnWorker) retries it.
+  Promise.resolve(ctx.deps.processManager.workerReady(issue, role, sessionId, generation)).catch(
+    (error) => {
+      console.error(
+        `[legion] failed to deliver worker/ready assignment for ${issue}/${role}:`,
+        error
+      );
+    }
+  );
   return Response.json(validateContractResponse(LegionDaemonApi.WorkerReady.response, {}));
 }
 

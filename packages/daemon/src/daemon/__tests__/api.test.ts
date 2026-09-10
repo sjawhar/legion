@@ -44,6 +44,9 @@ describe("Legion HTTP API", () => {
     sessionId: string;
     generation: number;
   }>;
+  let treeReadyConnected: IssueKey[];
+  let controllerConnected: boolean;
+  let workerReadyConnected: boolean;
   let now: number;
   let controllerSecret: string;
 
@@ -56,6 +59,9 @@ describe("Legion HTTP API", () => {
     admissions = [];
     spawnedWorkers = [];
     workerReadyCalls = [];
+    treeReadyConnected = [];
+    controllerConnected = false;
+    workerReadyConnected = false;
     now = 1_700_000_000_000;
     state = newLegionState("omp", 2);
     state.issues[root] = {
@@ -108,6 +114,9 @@ describe("Legion HTTP API", () => {
     envoyPublish?: LegionApiDeps["envoyPublish"];
     spawnWorkerImpl?: LegionApiDeps["processManager"]["spawnWorker"];
     mutateLiveRoleClaimImpl?: LegionApiDeps["processManager"]["mutateLiveRoleClaim"];
+    markTreeReadyImpl?: LegionApiDeps["processManager"]["markTreeReady"];
+    markControllerReadyImpl?: LegionApiDeps["processManager"]["markControllerReady"];
+    workerReadyImpl?: LegionApiDeps["processManager"]["workerReady"];
     dispatchClient?: LegionApiDeps["dispatchClient"];
   }) {
     const runner =
@@ -144,8 +153,8 @@ describe("Legion HTTP API", () => {
         releaseSlot: (issue) => {
           releaseSlots.push(issue);
         },
-        markTreeReady: () => {},
-        markControllerReady: () => {},
+        markTreeReady: options?.markTreeReadyImpl ?? (() => {}),
+        markControllerReady: options?.markControllerReadyImpl ?? (() => {}),
         cancelBootWatchdog: () => {},
         spawnWorker:
           options?.spawnWorkerImpl ??
@@ -155,6 +164,7 @@ describe("Legion HTTP API", () => {
           }),
         workerReady: (issue, role, sessionId, generation) => {
           workerReadyCalls.push({ issue, role, sessionId, generation });
+          return options?.workerReadyImpl?.(issue, role, sessionId, generation);
         },
         rejectIfTreeGone: () => {},
         mutateLiveRoleClaim:
@@ -808,6 +818,45 @@ describe("Legion HTTP API", () => {
     expect(treeReady).toEqual([root]);
   });
 
+  it("responds to process/ready before the architect's own shim connects, delivering the connect afterward (T18 regression)", async () => {
+    const shimGate = Promise.withResolvers<void>();
+    let connected: Promise<void> | undefined;
+    await start({
+      markTreeReadyImpl: (tree) => {
+        connected = (async () => {
+          await shimGate.promise;
+          treeReadyConnected.push(tree);
+        })();
+        return connected;
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+
+    // The response returns even though the fake shim connect below is still gated shut -- the
+    // architect's own bootstrap (the caller of this exact request) must never be blocked on its
+    // own shim answering, or every root spawn deadlocks under load exactly as T18 found.
+    const ready = await json("/legion/v1/process/ready", {
+      tree: root,
+      sessionId: "ses_root",
+      secret: started.body.secret,
+    });
+    expect(ready.response.status).toBe(200);
+    expect(treeReadyConnected).toEqual([]);
+
+    shimGate.resolve();
+    await connected;
+    expect(treeReadyConnected).toEqual([root]);
+  });
+
   it("escalates, mints provisioning credentials, and redacts secrets from state", async () => {
     await start();
     const bootToken = await api?.mintBootToken(root, 3);
@@ -896,6 +945,34 @@ describe("Legion HTTP API", () => {
     const stateJson = await stateResponse.text();
     expect(stateJson).not.toContain("minted-");
     expect(stateJson).not.toContain("controllerCapabilityHash");
+  });
+
+  it("responds to controller/ready before its own shim connects, delivering the connect afterward (T18 regression)", async () => {
+    const shimGate = Promise.withResolvers<void>();
+    let connected: Promise<void> | undefined;
+    await start({
+      markControllerReadyImpl: () => {
+        connected = (async () => {
+          await shimGate.promise;
+          controllerConnected = true;
+        })();
+        return connected;
+      },
+    });
+
+    // Same shape as /process/ready: the response returns before the (best-effort)
+    // markControllerReady connect below settles, so a slow/failing shim connect can never add
+    // RPC-timeout latency to the controller's own ready call.
+    const ready = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_controller",
+    });
+    expect(ready.response.status).toBe(200);
+    expect(controllerConnected).toBe(false);
+
+    shimGate.resolve();
+    await connected;
+    expect(controllerConnected).toBe(true);
   });
 
   it("retries controller startup redelivery after a failed ready callback", async () => {
@@ -2066,6 +2143,63 @@ describe("Legion HTTP API", () => {
     expect(workerReadyCalls).toEqual([
       { issue: root, role: "tester", sessionId: "ses_tester", generation: 1 },
     ]);
+  });
+
+  it("responds to worker/ready before the calling worker's own shim connects, delivering the prompt afterward (T18 regression)", async () => {
+    const shimGate = Promise.withResolvers<void>();
+    let connected: Promise<void> | undefined;
+    await start({
+      workerReadyImpl: () => {
+        connected = (async () => {
+          await shimGate.promise;
+          workerReadyConnected = true;
+        })();
+        return connected;
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+
+    // Same shape as /process/ready: the calling worker's own bootstrap is blocked on this
+    // exact HTTP response, so the daemon must never await connecting to (and prompting) that
+    // same worker's own shim socket before responding -- the identical T18 deadlock, one level
+    // down from the root architect.
+    const ready = await json("/legion/v1/worker/ready", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      sessionId: "ses_tester",
+      generation: 1,
+      secret: started.body.secret,
+    });
+    expect(ready.response.status).toBe(200);
+    expect(workerReadyConnected).toBe(false);
+
+    shimGate.resolve();
+    await connected;
+    expect(workerReadyConnected).toBe(true);
   });
 
   it("rejects worker/ready when the session's role does not match the requested role", async () => {
