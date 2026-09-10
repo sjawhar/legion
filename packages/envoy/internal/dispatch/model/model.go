@@ -92,6 +92,46 @@ type IssueSummary struct {
 	OpenAsks  int       `json:"open_asks"`
 }
 
+// SearchIssue identifies an issue in a global search result.
+type SearchIssue struct {
+	Key    string `json:"key"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+// SearchArtifact identifies an artifact attached to a global search result.
+type SearchArtifact struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+// SearchResult is one ranked Dispatch search hit.
+type SearchResult struct {
+	Kind     string          `json:"kind"`
+	Issue    SearchIssue     `json:"issue"`
+	Artifact *SearchArtifact `json:"artifact,omitempty"`
+	ID       string          `json:"id"`
+	Snippet  string          `json:"snippet"`
+	Rank     float64         `json:"rank"`
+	Href     string          `json:"href"`
+}
+
+// SearchResponse is the ranked global search result set.
+type SearchResponse struct {
+	Results []SearchResult `json:"results"`
+	TookMS  int64          `json:"took_ms"`
+}
+
+// DuplicateCandidate is a potential duplicate issue proposed before creation.
+type DuplicateCandidate struct {
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	Snippet     string `json:"snippet"`
+	SharedTerms int    `json:"shared_terms"`
+	Href        string `json:"href"`
+}
+
 // IssueChild is a child item embedded in an issue detail response.
 type IssueChild struct {
 	Key    string `json:"key"`
