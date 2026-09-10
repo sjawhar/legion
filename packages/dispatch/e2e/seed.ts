@@ -46,6 +46,16 @@ export async function insertExternalLink(issueKey: string, url: string): Promise
   ]);
 }
 
+export async function setEventCreatedAt(eventId: number, iso: string): Promise<void> {
+  await execFileAsync("psql", [
+    databaseUrl(),
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-c",
+    `UPDATE events SET created_at = ${sqlLiteral(iso)}::timestamptz WHERE id = ${Number(eventId)}`,
+  ]);
+}
+
 export async function resetDatabase(): Promise<void> {
   await execFileAsync("psql", [
     databaseUrl(),

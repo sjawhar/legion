@@ -62,6 +62,7 @@ test("API client normalizes server asks with null options", async () => {
         id: "ask-1",
         issue_key: "CORE-1",
         multiple: false,
+        opened_event_id: 1,
         options: null,
         question: "Which path?",
         state: "open",
@@ -273,6 +274,7 @@ test("API client reaches every remaining documented endpoint", async () => {
           id: "ask-1",
           issue_key: "CORE-1",
           multiple: false,
+          opened_event_id: 1,
           options: [],
           question: "Ship?",
           state: "open",
@@ -300,6 +302,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.rejectComment("comment-1");
   await api.createMessage("CORE-1", { body: "Ready" });
   await api.listArtifacts("CORE-1");
+  await api.listAgents();
   await api.uploadArtifact("CORE-1", {
     file: new File(["spec"], "spec.md", { type: "text/markdown" }),
     name: "spec.md",
@@ -332,6 +335,7 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["POST", "/api/v1/comments/comment-1/reject"],
     ["POST", "/api/v1/issues/CORE-1/messages"],
     ["GET", "/api/v1/issues/CORE-1/artifacts"],
+    ["GET", "/api/v1/agents"],
     ["POST", "/api/v1/issues/CORE-1/artifacts"],
     ["GET", "/api/v1/artifacts/artifact-1"],
     ["GET", "/api/v1/artifacts/artifact-1/text"],

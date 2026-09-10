@@ -280,7 +280,7 @@ test("reloading mid-edit reopens the same content", async ({ browser }) => {
   }
 });
 
-test("tab round-trips keep one document connection, the typed text, and the log scroll position", async ({
+test("tab round-trips keep one document connection, the typed text, and the Conversation scroll position", async ({
   browser,
 }) => {
   await createProject({ key: "TABS", name: "Tabs" });
@@ -303,14 +303,14 @@ test("tab round-trips keep one document connection, the typed text, and the log 
     await expect(editor).toContainText("stay mounted");
     await expect.poll(sockets).toBe(1);
 
-    await page.getByRole("tab", { name: "Log" }).click();
-    await expect(page.getByRole("tab", { name: "Log" })).toBeFocused();
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    await expect(page.getByRole("tab", { name: "Conversation" })).toBeFocused();
     await expect(page.getByText("Existing message 29")).toBeVisible();
     await page.evaluate(() => window.scrollTo(0, 500));
     const scrollPosition = await page.evaluate(() => window.scrollY);
     expect(scrollPosition).toBeGreaterThan(0);
 
-    await page.getByRole("tab", { name: "Log" }).press("ArrowLeft");
+    await page.getByRole("tab", { name: "Conversation" }).press("ArrowLeft");
     await expect(editor).toContainText("stay mounted");
     await page.getByRole("tab", { name: "Spec" }).press("ArrowRight");
     await expect(page.getByText("Existing message 29")).toBeVisible();

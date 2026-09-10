@@ -77,6 +77,14 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	askPointers := make([]*model.Ask, len(asks))
+	for index := range asks {
+		askPointers[index] = &asks[index].Ask
+	}
+	if err := s.attachOpenedEventIDs(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, asks)
 }
 

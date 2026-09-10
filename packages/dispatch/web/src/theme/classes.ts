@@ -112,7 +112,7 @@ export const textMutedHoverToSecondary =
  * placeholder-affordance button). */
 export const textSecondaryHoverToPrimary =
   "text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100";
-/** A muted affordance (e.g. "Dismiss") that jumps straight to primary-emphasis on hover. */
+/** A muted affordance that jumps straight to primary-emphasis on hover. */
 export const textMutedHoverToPrimary =
   "text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100";
 /** `SURFACE_MUTED` used as a disabled-state background (e.g. a `<select>` that greys out rather
@@ -198,8 +198,8 @@ registerText("danger text on canvas", DANGER_TEXT, CANVAS);
 registerText("success text on surface", SUCCESS_TEXT, SURFACE);
 registerText("success text on canvas", SUCCESS_TEXT, CANVAS);
 /** `linkText`, unqualified, also renders directly inside a `SURFACE_MUTED`/`SURFACE_RECESSED`
- * container in several places (an unfurled reference card, a log entry's recessed quote box) -
- * `LINK` is a single fixed pair, so these are the same values already checked above, just
+ * container in several places (an unfurled reference card, a Conversation turn's recessed quote
+ * box) — `LINK` is a single fixed pair, so these are the same values already checked above, just
  * against a background that wasn't yet registered. */
 registerText("link on surface-muted", LINK, SURFACE_MUTED);
 registerText("link on surface-recessed", LINK, SURFACE_RECESSED);
@@ -254,8 +254,12 @@ export const quoteBodyText = "text-slate-600 dark:text-slate-400";
  * for the fill, with a slightly bolder sky-500/400 border than `FOCUS_ACCENT` uses for a focus
  * ring (this is a resting selected state, not a focus indicator). */
 export const SELECTED_CARD_BORDER = pair(P.SKY_500, P.SKY_400);
+export const SELECTED_CARD_BG = pair(P.SKY_50, P.SKY_950);
+/** Option descriptions need a stronger muted role to clear AA on selected sky cards. */
+export const TEXT_OPTION_DESCRIPTION = pair(P.SLATE_600, P.SLATE_400);
 export const selectedCardBorder = "border-sky-500 dark:border-sky-400";
 export const selectedCardBg = "bg-sky-50 dark:bg-sky-950";
+export const textOptionDescription = "text-slate-600 dark:text-slate-400";
 /** A native checkbox's `accent-color` fill: fixed, not paired — accent-color has no reliable
  * `dark:` variant support across browsers, and sky-600 already reads fine on either scheme's
  * checkbox chrome. */
@@ -297,6 +301,9 @@ registerText("inline warning text on callout-info", INLINE_WARNING_TEXT, CALLOUT
 registerText("success text on callout-info", SUCCESS_TEXT, CALLOUT_INFO_BG);
 registerText("danger text on callout-info", DANGER_TEXT, CALLOUT_INFO_BG);
 registerText("link on callout-info", LINK, CALLOUT_INFO_BG);
+registerText("primary text on selected card", TEXT_PRIMARY, SELECTED_CARD_BG);
+registerText("option description text on selected card", TEXT_OPTION_DESCRIPTION, SELECTED_CARD_BG);
+registerText("link text on selected card", LINK, SELECTED_CARD_BG);
 
 // ---------------------------------------------------------------------------------------------
 // Suggestion and version diffs

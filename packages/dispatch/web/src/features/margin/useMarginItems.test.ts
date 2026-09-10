@@ -5,7 +5,12 @@ import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import type { Artifact, Comment, Event } from "../../api/types";
-import { fetchPinnedEvents, marginItemId, useMarginItems } from "./useMarginItems";
+import {
+  anchoredThreadComments,
+  fetchPinnedEvents,
+  marginItemId,
+  useMarginItems,
+} from "./useMarginItems";
 
 function event(id: string): Event {
   const seq = Number(id);
@@ -38,6 +43,16 @@ const artifact: Artifact = {
   slug: "spec",
   versions: [],
 };
+
+function anchorOn(artifactId: string, quote = "anchored", orphaned = false) {
+  return {
+    artifact_id: artifactId,
+    mark_id: `mark-${artifactId}`,
+    orphaned,
+    quote,
+    version: 1,
+  };
+}
 
 function comment(id: string, markId: string | null, createdAt: string, orphaned = false): Comment {
   return {
@@ -84,6 +99,26 @@ test("pinned lookup chunks 51 ids and combines results by sequence", async () =>
   expect(events.map(({ seq }) => seq)).toEqual(ids.map(Number));
 });
 
+test("unanchored comments and their replies leave the margin; replies to anchored roots stay", () => {
+  const root = { ...comment("r", "root", "2026-09-09T00:00:00Z"), anchor: anchorOn("a1") };
+  const replyToRoot = {
+    ...comment("r1", null, "2026-09-09T00:01:00Z"),
+    reply_to: root.id,
+  };
+  const loose = comment("u", null, "2026-09-09T00:02:00Z");
+  const replyToLoose = {
+    ...comment("u1", null, "2026-09-09T00:03:00Z"),
+    reply_to: loose.id,
+  };
+  const other = { ...comment("o", "other", "2026-09-09T00:04:00Z"), anchor: anchorOn("a2") };
+
+  expect(
+    anchoredThreadComments([root, replyToRoot, loose, replyToLoose, other], "a1").map(
+      (comment) => comment.id
+    )
+  ).toEqual(["r", "r1"]);
+});
+
 function OrderedItems() {
   const { items } = useMarginItems(
     "CORE-1",
@@ -101,7 +136,7 @@ function OrderedItems() {
   );
 }
 
-test("useMarginItems orders items by their mark position, then unplaced anchors, then unanchored", () => {
+test("useMarginItems orders found and missing document anchors while excluding unanchored comments", () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
@@ -131,7 +166,7 @@ test("useMarginItems orders items by their mark position, then unplaced anchors,
   );
 
   try {
-    expect(screen.getByLabelText("Margin item order").textContent).toBe("B,A,C,D");
+    expect(screen.getByLabelText("Margin item order").textContent).toBe("B,A,C");
   } finally {
     view.unmount();
   }

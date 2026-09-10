@@ -122,6 +122,8 @@ export interface Ask {
   readonly state: "open" | "answered" | "resolved";
   readonly answer: AskAnswer | null;
   readonly resolution?: AskResolution;
+  /** The canonical event ID of this ask's opening turn. */
+  readonly opened_event_id: number;
   readonly created_at: string;
   readonly issue?: Pick<Issue, "key" | "title">;
 }
@@ -513,6 +515,7 @@ export const ArtifactVersionEventPayloadSchema = z.object({
 });
 
 export const AskEventPayloadSchema = z.object({
+  opened_event_id: z.number().int().positive(),
   question: z.string().optional(),
   options: z.array(z.object({ label: z.string().optional() })).nullish(),
   answer: z

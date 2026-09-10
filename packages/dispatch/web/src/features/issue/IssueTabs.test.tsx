@@ -14,7 +14,7 @@ function TabsHarness() {
   );
 }
 
-test("IssueTabs exposes the Artifacts tab", () => {
+test("IssueTabs exposes the Conversation tab at its canonical route", () => {
   const view = render(
     <MemoryRouter initialEntries={["/issues/CORE-1/spec"]}>
       <TabsHarness />
@@ -24,10 +24,12 @@ test("IssueTabs exposes the Artifacts tab", () => {
   try {
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Spec",
-      "Log",
+      "Conversation",
       "Children",
       "Artifacts",
     ]);
+    fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+    expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/conversation");
     fireEvent.click(screen.getByRole("tab", { name: "Artifacts" }));
     expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/artifacts");
   } finally {

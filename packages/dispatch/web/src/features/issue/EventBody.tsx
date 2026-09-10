@@ -7,7 +7,7 @@ import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { actorLabel } from "../refs/actor";
 import { Timestamp } from "../refs/Timestamp";
-import { eventDescription } from "./log-model";
+import { eventDescription } from "./event-description";
 
 let headlessProof: Promise<HeadlessProofEditor> | undefined;
 
@@ -91,12 +91,7 @@ function AskEventBody({
         {event.type === "ask.opened" ? "Ask opened:" : "Ask:"}
       </p>
       <MarkdownBody markdown={question} onRendered={onRendered} />
-      <AskOptionList
-        descriptionClass={textMutedOnSurface}
-        labelClass={textPrimaryOnSurface}
-        options={options}
-        selected={answer?.selected ?? []}
-      />
+      <AskOptionList options={options} selected={answer?.selected ?? []} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Opened <Timestamp at={created_at} />
       </p>

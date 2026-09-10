@@ -3,6 +3,7 @@ import {
   type Actor,
   type Anchor,
   type AnchorInput,
+  AskEventPayloadSchema,
   type Comment,
   type CreateProjectInput,
   type DispatchEvent,
@@ -27,6 +28,16 @@ test("accepts the typed artifact version event payload", () => {
   };
 
   expect(DispatchEventSchema.safeParse(event)).toMatchObject({ success: true });
+});
+
+test("requires a positive opened event id on an ask event payload", () => {
+  expect(AskEventPayloadSchema.safeParse({ question: "Q" }).success).toBe(false);
+  expect(AskEventPayloadSchema.safeParse({ opened_event_id: 0, question: "Q" }).success).toBe(
+    false
+  );
+  expect(AskEventPayloadSchema.safeParse({ opened_event_id: 12, question: "Q" }).success).toBe(
+    true
+  );
 });
 
 test("permits the actor supplied with an agent project creation request", () => {

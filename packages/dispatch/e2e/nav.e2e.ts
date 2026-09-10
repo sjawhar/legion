@@ -30,7 +30,7 @@ test("issue tabs are URL-driven and keyboard-navigable, the sidebar marks the cu
   // D34 — the page title follows the route, including the issue's own title.
   await expect(page).toHaveTitle(`${issue.key} · ${issue.title} · Dispatch`);
 
-  // The document is the issue landing view; historical activity stays available on Log.
+  // The document is the issue landing view; historical activity stays available in Conversation.
   await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
   await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}$`));
 
@@ -63,9 +63,12 @@ test("issue tabs are URL-driven and keyboard-navigable, the sidebar marks the cu
   // D26 — roving tabindex: arrow keys move focus and activate the adjacent tab.
   await page.getByRole("tab", { name: "Children" }).focus();
   await page.keyboard.press("ArrowLeft");
-  await expect(page.getByRole("tab", { name: "Log" })).toBeFocused();
-  await expect(page.getByRole("tab", { name: "Log" })).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/log$`));
+  await expect(page.getByRole("tab", { name: "Conversation" })).toBeFocused();
+  await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  );
+  await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
   await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("tab", { name: "Children" })).toBeFocused();
   await expect(page.getByRole("tab", { name: "Children" })).toHaveAttribute(
@@ -80,7 +83,7 @@ test("issue tabs are URL-driven and keyboard-navigable, the sidebar marks the cu
   await expect(page.getByRole("link", { name: "Back to inbox" })).toBeVisible();
 
   // An unrecognized tab suffix on an otherwise valid issue also gets the
-  // not-found view (and the not-found title), not the Log tab it would
+  // not-found view (and the not-found title), not the Conversation tab it would
   // silently fall back to. (The route-gate short-circuits before any of
   // IssuePage's own queries run — proven directly, without the sidebar's
   // own unrelated issue fetch as noise, by the IssuePage unit test.)

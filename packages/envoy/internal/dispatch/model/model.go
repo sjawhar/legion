@@ -170,19 +170,20 @@ type Version struct {
 
 // Ask is a question with either a human answer or a recorded closure reason.
 type Ask struct {
-	ID         string         `json:"id"`
-	IssueKey   *string        `json:"issue_key"`
-	ArtifactID *string        `json:"artifact_id"`
-	Author     Actor          `json:"author"`
-	Question   string         `json:"question"`
-	Options    []AskOption    `json:"options"`
-	Multiple   bool           `json:"multiple"`
-	Urgency    string         `json:"urgency"`
-	Anchor     *Anchor        `json:"anchor"`
-	State      string         `json:"state"`
-	Answer     *AskAnswer     `json:"answer"`
-	Resolution *AskResolution `json:"resolution,omitempty"`
-	CreatedAt  time.Time      `json:"created_at"`
+	ID            string         `json:"id"`
+	IssueKey      *string        `json:"issue_key"`
+	ArtifactID    *string        `json:"artifact_id"`
+	Author        Actor          `json:"author"`
+	Question      string         `json:"question"`
+	Options       []AskOption    `json:"options"`
+	Multiple      bool           `json:"multiple"`
+	Urgency       string         `json:"urgency"`
+	Anchor        *Anchor        `json:"anchor"`
+	State         string         `json:"state"`
+	Answer        *AskAnswer     `json:"answer"`
+	Resolution    *AskResolution `json:"resolution,omitempty"`
+	OpenedEventID *int64         `json:"opened_event_id,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
 }
 
 // AskOption is an answer choice.

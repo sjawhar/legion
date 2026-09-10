@@ -108,6 +108,7 @@ const anchoredAsk: Ask = {
   id: "ask-1",
   issue_key: "CORE-1",
   multiple: false,
+  opened_event_id: 1,
   options: [{ label: "Ship" }],
   question: "Should this ship?",
   state: "open",
@@ -603,7 +604,7 @@ test("Margin clears an answered anchored ask from Needs you without an event str
   }
 });
 
-test("Margin replies to an unanchored root without opening an anchored composer", async () => {
+test("Margin leaves an unanchored root out of document review", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -626,10 +627,9 @@ test("Margin replies to an unanchored root without opening an anchored composer"
   );
 
   try {
-    const rootCard = await screen.findByTestId(`margin-comment-${unanchoredRootComment.id}`);
-    fireEvent.click(within(rootCard).getByRole("button", { name: "Reply" }));
-    const composer = await screen.findByRole("form", { name: "Comment composer" });
-    expect(composer.querySelector("blockquote")).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByTestId(`margin-comment-${unanchoredRootComment.id}`)).toBeNull()
+    );
   } finally {
     view.unmount();
   }
@@ -719,6 +719,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
     created_at: "2026-09-10T00:00:00Z",
     id: "ask-answered",
     issue_key: issue.key,
+    opened_event_id: 2,
     multiple: false,
     options: [],
     question: "Why brown?",
@@ -740,6 +741,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
     created_at: "2026-09-10T00:02:00Z",
     id: "ask-open",
     issue_key: issue.key,
+    opened_event_id: 3,
     multiple: false,
     options: [],
     question: "Why the?",
@@ -766,7 +768,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
   try {
     const card = await screen.findByTestId(`ask-${answeredAsk.id}`);
     expect(listIssueAsks).toHaveBeenCalledWith(issue.key, "all");
-    expect(card.textContent).toContain("alice answered");
+    expect(card.textContent).toContain("Answered by alice");
     expect(card.textContent).toContain("Because it is precise.");
     expect(
       Array.from(

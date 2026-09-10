@@ -1,4 +1,5 @@
 import type {
+  Agent,
   AnswerAskInput,
   Artifact,
   ArtifactDetails,
@@ -214,6 +215,10 @@ export class DispatchApiClient {
   async getInbox(project?: string): Promise<Ask[]> {
     const asks = await this.json<Ask[]>(pathWithQuery("/api/v1/inbox", { project }));
     return asks.map(normalizeAsk);
+  }
+
+  listAgents(): Promise<Agent[]> {
+    return this.json<Agent[]>("/api/v1/agents");
   }
 
   async createAsk(key: string, input: CreateAskInput): Promise<Ask> {

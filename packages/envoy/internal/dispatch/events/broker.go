@@ -74,6 +74,21 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 	`, e.IssueKey, e.ArtifactID, e.Seq, e.Type, actor, payload, e.Notify).Scan(&e.ID, &e.CreatedAt); err != nil {
 		return model.Event{}, fmt.Errorf("insert event: %w", err)
 	}
+	if e.Type == "ask.opened" {
+		ask, ok := e.Payload.(model.Ask)
+		if !ok {
+			return model.Event{}, fmt.Errorf("ask.opened payload must be model.Ask")
+		}
+		ask.OpenedEventID = &e.ID
+		payload, err = json.Marshal(ask)
+		if err != nil {
+			return model.Event{}, fmt.Errorf("encode ask.opened payload: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `update events set payload = $2 where id = $1`, e.ID, payload); err != nil {
+			return model.Event{}, fmt.Errorf("record ask.opened event identity: %w", err)
+		}
+		e.Payload = ask
+	}
 	if e.IssueKey != nil {
 		if _, err := tx.Exec(ctx, `
 			update issues set last_seq = $2, updated_at = greatest(updated_at, $3) where key = $1

@@ -87,7 +87,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   // Alice answers - a distinct, first-class event.
   await card.getByRole("radio", { name: "Ship" }).check();
   await card.getByRole("button", { name: "Submit answer" }).click();
-  await expect(margin.getByText(/answered/)).toBeVisible();
+  await expect(margin.getByText(/Answered by/)).toBeVisible();
 
   // Answering does not end the conversation: the thread and its composer stay
   // open here (the margin, unlike the Inbox, keeps an anchored answered ask),
@@ -104,7 +104,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await expect(replies).toHaveCount(2);
   await expect(replies.nth(0)).toContainText("Any blockers first?");
   await expect(replies.nth(1)).toContainText("Shipping now.");
-  await expect(margin.getByText(/answered/)).toBeVisible();
+  await expect(margin.getByText(/Answered by/)).toBeVisible();
 
   // The asking session replies over the API (bearer auth, its own comment on
   // the ask). Alice's already-open page shows it live over SSE, no reload.
@@ -169,7 +169,7 @@ test("a comment reply after an agent-authored reply targets the root without cop
   }
 });
 
-test("a session retraction leaves its reason in the thread and removes the human's live inbox item", async ({
+test("a session retraction leaves its reason on the card and removes the human's live inbox item", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -222,7 +222,7 @@ test("a session retraction leaves its reason in the thread and removes the human
     fullPage: true,
     path: testInfo.outputPath("inbox-after-ask-retraction.png"),
   });
-  await expect(margin.getByTestId(`thread-${ask.id}`)).toContainText(
+  await expect(margin.getByTestId(`ask-${ask.id}`)).toContainText(
     "Retracted by e2e-session-bob - A newer question supersedes this one."
   );
   await expect(margin.getByRole("button", { name: "Reply" })).toHaveCount(0);
@@ -239,14 +239,14 @@ test("a session retraction leaves its reason in the thread and removes the human
     await issuePage.getByRole("button", { name: "Close navigation" }).click();
   }
 
-  await issuePage.getByRole("tab", { name: "Log" }).click();
-  await expect(
-    issuePage
-      .getByRole("region", { name: "Issue log" })
-      .getByText("Resolved by e2e-session-bob (A newer question supersedes this one.)", {
-        exact: false,
-      })
-  ).toBeVisible();
+  await issuePage.getByRole("tab", { name: "Conversation" }).click();
+  const resolvedCard = issuePage
+    .getByRole("region", { name: "Conversation" })
+    .getByTestId(`ask-${ask.id}`);
+  await expect(resolvedCard.getByTestId("ask-resolution-badge")).toHaveText("Retracted");
+  await expect(resolvedCard).toContainText(
+    "Retracted by e2e-session-bob - A newer question supersedes this one."
+  );
 
   await alice.close();
 });

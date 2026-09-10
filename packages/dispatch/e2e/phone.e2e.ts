@@ -16,6 +16,10 @@ const initialMarkdown =
   "| 1 | 2 | 3 | 4 | 5 | 6 |";
 const pinnedMessage = "Pin me before you forget";
 
+function turn(page: Page, text: string) {
+  return page.getByRole("list", { name: "Conversation turns" }).locator("li", { hasText: text });
+}
+
 async function activeElementInside(page: Page, selector: string): Promise<boolean> {
   return page.evaluate((sel) => {
     const container = document.querySelector(sel);
@@ -154,12 +158,11 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       await page.getByRole("button", { name: /Close review panel/ }).click();
     }
 
-    // D25: a pinned log event renders its own description, never the literal "Event <seq>".
-    await page.getByRole("tab", { name: "Log" }).click();
-    await page
-      .locator("article", { hasText: pinnedMessage })
-      .getByRole("button", { name: "Pin" })
-      .click();
+    // D25: a pinned Conversation turn renders its own description, never the literal "Event <seq>".
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    const pinnedTurn = turn(page, pinnedMessage);
+    await pinnedTurn.hover();
+    await pinnedTurn.getByRole("button", { name: "Pin" }).click();
     if (isPhone) {
       await page.getByRole("button", { name: /Open review panel/ }).click();
     }

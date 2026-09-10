@@ -51,6 +51,7 @@ const openAsk = {
   options: [{ label: "JSON" }, { label: "MCP" }],
   multiple: false,
   urgency: "med",
+  opened_event_id: 7,
   anchor: null,
   state: "open",
   answer: null,
@@ -120,6 +121,7 @@ describe("renderInbound dispatch events", () => {
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
         payload: {
+          opened_event_id: 7,
           question: "Which API?",
           options: [{ label: "JSON" }, { label: "MCP" }],
           answer: { selected: ["JSON"], text: "Use JSON HTTP." },
@@ -151,6 +153,7 @@ describe("renderInbound dispatch events", () => {
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
         payload: {
+          opened_event_id: 7,
           question: "Which API?",
           options: [{ label: "JSON" }, { label: "MCP" }],
           answer: { selected: [], text: "Neither; let's do a third thing." },
@@ -182,6 +185,7 @@ describe("renderInbound dispatch events", () => {
       type: "ask.resolved",
       actor: { kind: "session", id: "session-1" },
       payload: {
+        opened_event_id: 7,
         question: "Which API?",
         options: [{ label: "JSON" }, { label: "MCP" }],
         answer: null,

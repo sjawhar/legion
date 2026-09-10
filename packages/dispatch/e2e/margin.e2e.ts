@@ -429,12 +429,12 @@ test("accepting a suggestion changes the text in both browsers and names a versi
   }
 });
 
-test("a comment from the Log with nothing selected reaches the Log and margin of both users", async ({
+test("unanchored comments reach Conversation, not document review, for both viewers", async ({
   browser,
 }, testInfo) => {
-  await createProject({ key: "LOG", name: "Log comments" });
+  await createProject({ key: "COMMENT", name: "Issue comments" });
   const issue = await createIssue({
-    project: "LOG",
+    project: "COMMENT",
     spec: initialMarkdown,
     title: "No selection needed",
   });
@@ -450,37 +450,33 @@ test("a comment from the Log with nothing selected reaches the Log and margin of
     const alicePage = await alice.newPage();
     const bobPage = await bob.newPage();
     await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/log`),
-      bobPage.goto(`/issues/${issue.key}/log`),
+      alicePage.goto(`/issues/${issue.key}/conversation`),
+      bobPage.goto(`/issues/${issue.key}/conversation`),
     ]);
 
-    const composer = alicePage.getByRole("form", { name: "Comment composer" });
-    await expect(composer).toBeVisible();
-    await composer.getByLabel("Comment").fill("General remark");
-    await composer.getByRole("button", { exact: true, name: "Comment" }).click();
     await setSheet(alicePage, testInfo.project.name, true);
     await setSheet(bobPage, testInfo.project.name, true);
-    await expect(marginCard(alicePage, anchored.id)).toContainText("anchored first");
-    await expect(marginCard(bobPage, anchored.id)).toContainText("anchored first");
-    const comment = await commentWithBody(issue.key, undefined, "General remark");
-    expect(comment.anchor).toBeNull();
+    await Promise.all([
+      expect(marginCard(alicePage, anchored.id)).toContainText("anchored first"),
+      expect(marginCard(bobPage, anchored.id)).toContainText("anchored first"),
+    ]);
 
+    const comment = await createComment(issue.key, { body: "General remark" }, session);
+    expect(comment.anchor).toBeNull();
     await Promise.all([
       expect(
-        alicePage.locator("article[data-event-seq]").getByText("General remark", { exact: true })
+        alicePage
+          .getByRole("list", { name: "Conversation turns" })
+          .getByText("General remark", { exact: true })
       ).toBeVisible(),
       expect(
-        bobPage.locator("article[data-event-seq]").getByText("General remark", { exact: true })
+        bobPage
+          .getByRole("list", { name: "Conversation turns" })
+          .getByText("General remark", { exact: true })
       ).toBeVisible({ timeout: 1000 }),
-      expect(marginCard(alicePage, comment.id)).toBeVisible(),
-      expect(marginCard(bobPage, comment.id)).toBeVisible({ timeout: 1000 }),
+      expect(marginCard(alicePage, comment.id)).toHaveCount(0),
+      expect(marginCard(bobPage, comment.id)).toHaveCount(0),
     ]);
-    await expect(marginCard(bobPage, comment.id).locator("blockquote")).toHaveCount(0);
-    const marginOrder = await bobPage
-      .getByLabel("Margin review items")
-      .locator("[data-margin-item]")
-      .evaluateAll((items) => items.map((item) => item.getAttribute("data-margin-item")));
-    expect(marginOrder.indexOf(anchored.id)).toBeLessThan(marginOrder.indexOf(comment.id));
   } finally {
     await bob.close();
     await alice.close();
@@ -690,7 +686,7 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     await expect(bobCard).toBeVisible();
     await expect(bobCard).toContainText("brown");
     await expect(bobCard).toContainText("Why brown?");
-    await expect(bobCard).toContainText("alice answered");
+    await expect(bobCard).toContainText("Answered by alice");
     await expect(bobCard).toContainText("Because it is precise.");
     const timestamps = bobCard.locator("time");
     await expect(timestamps).toHaveCount(2);
