@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api, type ListEventsOptions } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
@@ -61,12 +61,12 @@ function stubIssuePage(nextIssue: IssueDetails): () => void {
   };
 }
 
-function renderIssuePage() {
+function renderIssuePage(path = "/issues/CORE-1") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
   return render(
-    <MemoryRouter initialEntries={["/issues/CORE-1"]}>
+    <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <Routes>
           <Route path="/issues/:key/*" element={<IssuePage user={{ login: "alice" }} />} />
@@ -188,5 +188,118 @@ test("IssuePage continues to unfurl GitHub issues through the issues endpoint", 
     view.unmount();
     githubRest.mockRestore();
     restore();
+  }
+});
+
+test("IssuePage defaults the bare issue route to the Log tab", async () => {
+  const restore = stubIssuePage(issue);
+  const view = renderIssuePage("/issues/CORE-1");
+
+  try {
+    await screen.findByRole("tab", { name: "Log", selected: true });
+    expect(screen.getByRole("tab", { name: "Spec", selected: false })).toBeDefined();
+    expect(screen.getByRole("tab", { name: "Children", selected: false })).toBeDefined();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage renders a not-found view for an unrecognized tab suffix without fetching the issue", async () => {
+  const getIssueSpy = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getMyStateSpy = spyOn(api, "getMyState").mockResolvedValue({
+    "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false },
+  });
+  const view = renderIssuePage("/issues/CORE-1/not-a-tab");
+
+  try {
+    await screen.findByRole("heading", { name: "Page not found" });
+    expect(screen.getByRole("link", { name: "Back to inbox" })).toBeDefined();
+    expect(screen.queryByRole("tablist", { name: "Issue detail" })).toBeNull();
+    expect(document.title).toBe("Not found · Dispatch");
+    expect(getIssueSpy).not.toHaveBeenCalled();
+    expect(getMyStateSpy).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getIssueSpy.mockRestore();
+    getMyStateSpy.mockRestore();
+  }
+});
+
+test("IssuePage remounts when switching issues, discarding unsaved local state", async () => {
+  const secondIssue: Issue = {
+    ...issue,
+    artifacts: [
+      {
+        created_at: "2026-09-09T00:00:00Z",
+        created_by: { id: "alice", kind: "user" },
+        id: "artifact-2",
+        issue_key: "CORE-2",
+        kind: "doc",
+        name: "spec.md",
+        primary: true,
+        slug: "spec",
+        versions: [],
+      },
+    ],
+    key: "CORE-2",
+    primary_artifact_id: "artifact-2",
+    route: "role:second-issue-route",
+    title: "Second issue",
+  };
+  const originalGetIssue = api.getIssue;
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalGetInbox = api.getInbox;
+  const originalGetMyState = api.getMyState;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  // Pre-warm CORE-2 so switching to it is an instant cache hit with no
+  // pending/loading transition — the scenario where a stale-state leak would
+  // otherwise go unnoticed by a naive loading-gate remount.
+  queryClient.setQueryData(["issue", "CORE-2"], secondIssue);
+
+  try {
+    api.getIssue = async (key: string) => (key === "CORE-2" ? secondIssue : issue);
+    api.getInbox = async () => [];
+    api.getMyState = async () => ({
+      "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false },
+      "CORE-2": { dismissed: [], last_read_seq: 0, pinned: false },
+    });
+    api.getIssueEvents = async () => [];
+
+    const view = render(
+      <MemoryRouter initialEntries={["/issues/CORE-1"]}>
+        <QueryClientProvider client={queryClient}>
+          <Link to="/issues/CORE-2">Go to CORE-2</Link>
+          <Routes>
+            <Route path="/issues/:key/*" element={<IssuePage user={{ login: "alice" }} />} />
+          </Routes>
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+
+    try {
+      const routeInput = await screen.findByLabelText("Route");
+      fireEvent.change(routeInput, { target: { value: "role:not-saved-draft" } });
+      await screen.findByDisplayValue("role:not-saved-draft");
+
+      fireEvent.click(screen.getByRole("link", { name: "Go to CORE-2" }));
+
+      await screen.findByDisplayValue("Second issue");
+      // The route field marks itself dirty on edit and, absent a remount,
+      // skips resyncing to the newly loaded issue's own route — leaking
+      // CORE-1's unsaved draft onto CORE-2's page instead of showing CORE-2's
+      // own route.
+      expect(screen.queryByDisplayValue("role:not-saved-draft")).toBeNull();
+      expect(await screen.findByDisplayValue("role:second-issue-route")).toBeDefined();
+    } finally {
+      view.unmount();
+    }
+  } finally {
+    api.getIssue = originalGetIssue;
+    api.getIssueEvents = originalGetIssueEvents;
+    api.getInbox = originalGetInbox;
+    api.getMyState = originalGetMyState;
   }
 });

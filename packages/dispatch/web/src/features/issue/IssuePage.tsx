@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useState } from "react";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type {
@@ -12,12 +12,16 @@ import type {
   UserIssueState,
   UserState,
 } from "../../api/types";
+import { QueryError } from "../../components/QueryError";
 import { DocEditor } from "../doc/DocEditor";
 import { DocView } from "../doc/DocView";
 import { actorLabel } from "../refs/actor";
-import { buildIssuePath, parseIssuePath } from "../refs/routes";
+import { buildIssuePath, type DispatchRoute, parseIssuePath } from "../refs/routes";
+import { NotFoundPage } from "../shell/NotFoundPage";
+import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
+import { type IssueTab, IssueTabs } from "./IssueTabs";
 import { LogTab } from "./LogTab";
 
 const issueStatuses = [
@@ -32,8 +36,6 @@ const issueStatuses = [
   "done",
 ];
 const routePattern = /^(role:[a-z0-9-]+|session:[0-9a-f-]{16,})$/;
-
-type IssueTab = "spec" | "log" | "children";
 
 function activeSessions(events: Event[]): Extract<Event["actor"], { kind: "session" }>[] {
   const sessions = new Map<string, Extract<Event["actor"], { kind: "session" }>>();
@@ -413,12 +415,28 @@ function ArtifactVersionView({
 }
 
 export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
-  const { key } = useParams();
   const { pathname, search } = useLocation();
   const route = parseIssuePath(pathname, search);
-  const artifactRoute = route?.kind === "artifact" ? route : undefined;
+  if (route === undefined) {
+    return <NotFoundPage />;
+  }
+  // key={route.key}: switching to a different issue remounts IssueDetail
+  // fresh (discarding any unsaved local drafts); switching tabs within the
+  // same issue keeps route.key unchanged, so it only re-renders.
+  return <IssueDetail key={route.key} route={route} user={user} />;
+}
+
+function IssueDetail({
+  route,
+  user,
+}: {
+  route: DispatchRoute;
+  user: AuthenticatedUser;
+}): ReactNode {
+  const { search } = useLocation();
+  const artifactRoute = route.kind === "artifact" ? route : undefined;
   const artifactRouteSlug = artifactRoute?.slug;
-  const isSpecRoute = route?.kind === "spec";
+  const isSpecRoute = route.kind === "spec";
   const query = new URLSearchParams(search);
   const from = Number(query.get("from"));
   const to = Number(query.get("to"));
@@ -426,18 +444,51 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
     Number.isInteger(from) && Number.isInteger(to) && from >= 0 && to > from
       ? { from, to }
       : undefined;
-  const [tab, setTab] = useState<IssueTab>("log");
   const issue = useQuery({
-    enabled: key !== undefined,
-    queryKey: ["issue", key],
-    queryFn: () => api.getIssue(key ?? ""),
+    queryKey: ["issue", route.key],
+    queryFn: () => api.getIssue(route.key),
   });
   const state = useQuery({ queryKey: ["user-state"], queryFn: () => api.getMyState() });
+
+  useDocumentTitle(
+    issue.data === undefined ? "Dispatch" : `${issue.data.key} · ${issue.data.title} · Dispatch`
+  );
 
   if (issue.isPending || state.isPending) {
     return <p className="text-slate-500">Loading issue…</p>;
   }
-  if (issue.isError || state.isError || issue.data === undefined || key === undefined) {
+  if (issue.isError || state.isError) {
+    const notFound = issue.error instanceof ApiError && issue.error.status === 404;
+    return (
+      <section>
+        <h1 className="text-xl font-semibold text-slate-950">
+          {notFound ? "Issue not found" : "Couldn't load this issue"}
+        </h1>
+        {notFound ? (
+          <p className="mt-2 text-sm text-slate-600">
+            {route.key} doesn&apos;t exist, or you don&apos;t have access to it.
+          </p>
+        ) : (
+          <div className="mt-2">
+            <QueryError
+              message="Couldn't load this issue."
+              onRetry={() => {
+                void issue.refetch();
+                void state.refetch();
+              }}
+            />
+          </div>
+        )}
+        <Link
+          className="mt-4 inline-block text-sm font-medium text-sky-700 underline hover:text-sky-900"
+          to="/"
+        >
+          Back to inbox
+        </Link>
+      </section>
+    );
+  }
+  if (issue.data === undefined) {
     return <p className="text-rose-700">Could not load this issue.</p>;
   }
 
@@ -459,12 +510,17 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
   const activeTab: IssueTab =
     artifactRouteSlug !== undefined && selectedArtifact.kind !== "doc"
       ? "log"
-      : artifactRoute?.version === undefined && !isSpecRoute && artifactRouteSlug === undefined
-        ? tab
-        : "spec";
-  const tabID = `issue-${activeTab}-tab`;
-  const panelID = `issue-${activeTab}-panel`;
+      : route.kind === "children"
+        ? "children"
+        : route.kind === "log"
+          ? "log"
+          : artifactRoute !== undefined || isSpecRoute
+            ? "spec"
+            : // Bare `/issues/KEY` with no tab segment: Log is the historical default.
+              "log";
   const isClosed = issue.data.closed_at !== null;
+  const issueKey = issue.data.key;
+
   return (
     <section>
       {isClosed ? (
@@ -474,54 +530,13 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
       ) : null}
       <IssueHeader isClosed={isClosed} issue={issue.data} state={issueState} />
       <BoardStrip issue={issue.data} state={issueState} />
-      <div className="mb-4 flex gap-2 border-b border-slate-200" role="tablist">
-        <button
-          aria-controls="issue-spec-panel"
-          aria-selected={activeTab === "spec"}
-          className={
-            activeTab === "spec"
-              ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
-              : "px-3 py-2 text-sm text-slate-600"
-          }
-          id="issue-spec-tab"
-          onClick={() => setTab("spec")}
-          role="tab"
-          type="button"
-        >
-          Spec
-        </button>
-        <button
-          aria-controls="issue-log-panel"
-          aria-selected={activeTab === "log"}
-          className={
-            activeTab === "log"
-              ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
-              : "px-3 py-2 text-sm text-slate-600"
-          }
-          id="issue-log-tab"
-          onClick={() => setTab("log")}
-          role="tab"
-          type="button"
-        >
-          Log
-        </button>
-        <button
-          aria-controls="issue-children-panel"
-          aria-selected={activeTab === "children"}
-          className={
-            activeTab === "children"
-              ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
-              : "px-3 py-2 text-sm text-slate-600"
-          }
-          id="issue-children-tab"
-          onClick={() => setTab("children")}
-          role="tab"
-          type="button"
-        >
-          Children
-        </button>
-      </div>
-      <div aria-labelledby={tabID} id={panelID} role="tabpanel">
+      <IssueTabs activeTab={activeTab} issueKey={issueKey} />
+      <div
+        aria-labelledby="issue-spec-tab"
+        hidden={activeTab !== "spec"}
+        id="issue-spec-panel"
+        role="tabpanel"
+      >
         {activeTab === "spec" ? (
           artifactRoute?.version === undefined ? (
             <DocEditor
@@ -534,16 +549,28 @@ export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
             <ArtifactVersionView
               artifactId={selectedArtifact.id}
               from={highlight?.from}
-              issueKey={issue.data.key}
+              issueKey={issueKey}
               to={highlight?.to}
               version={artifactRoute.version}
             />
           )
-        ) : activeTab === "log" ? (
-          <LogTab issueKey={issue.data.key} state={state.data} />
-        ) : (
-          <ChildrenTab issue={issue.data} />
-        )}
+        ) : null}
+      </div>
+      <div
+        aria-labelledby="issue-log-tab"
+        hidden={activeTab !== "log"}
+        id="issue-log-panel"
+        role="tabpanel"
+      >
+        {activeTab === "log" ? <LogTab issueKey={issueKey} state={state.data} /> : null}
+      </div>
+      <div
+        aria-labelledby="issue-children-tab"
+        hidden={activeTab !== "children"}
+        id="issue-children-panel"
+        role="tabpanel"
+      >
+        {activeTab === "children" ? <ChildrenTab issue={issue.data} /> : null}
       </div>
     </section>
   );

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
-import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { Link, Route, Routes, useLocation } from "react-router-dom";
 
 import { api } from "./api/client";
 import { useEventStream } from "./api/sse";
@@ -9,6 +9,9 @@ import { ArtifactsTab } from "./features/artifacts/ArtifactsTab";
 import { Inbox } from "./features/inbox/Inbox";
 import { IssuePage } from "./features/issue/IssuePage";
 import { Margin, MarginProvider } from "./features/margin/Margin";
+import { parseIssuePath } from "./features/refs/routes";
+import { NotFoundPage } from "./features/shell/NotFoundPage";
+import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { Sidebar } from "./features/sidebar/Sidebar";
 
 function SignInPage(): ReactNode {
@@ -29,12 +32,44 @@ function SignInPage(): ReactNode {
   );
 }
 
+function InboxPage(): ReactNode {
+  useDocumentTitle("Inbox · Dispatch");
+  return (
+    <section>
+      <h1 className="mb-6 text-2xl font-semibold">Inbox</h1>
+      <Inbox />
+    </section>
+  );
+}
+
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const location = useLocation();
+  const mainRef = useRef<HTMLElement | null>(null);
+  const isFirstRender = useRef(true);
+  // Tabs within the same issue manage their own focus (roving tabindex); only a
+  // genuine page change — a different issue, or a different top-level route —
+  // should move focus to the main region.
+  const pageIdentity = parseIssuePath(location.pathname)?.key ?? location.pathname;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run only to move focus to main on a real page change
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    mainRef.current?.focus();
+  }, [pageIdentity]);
 
   return (
     <MarginProvider>
       <div className="min-h-dvh bg-slate-50 text-slate-900 md:flex">
+        <a
+          className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-slate-950 focus:px-4 focus:py-2 focus:text-slate-100"
+          href="#main-content"
+        >
+          Skip to content
+        </a>
         <header className="flex items-center justify-between border-b border-slate-200 bg-slate-950 px-3 text-slate-100 md:hidden">
           <Link className="text-lg font-semibold" to="/">
             Dispatch
@@ -50,6 +85,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </button>
         </header>
         <aside
+          aria-label="Navigation"
           className={`${
             navigationOpen ? "fixed inset-y-0 left-0 z-30 w-80 max-w-[calc(100vw-2rem)]" : "hidden"
           } border-b border-slate-200 bg-slate-950 p-5 text-slate-100 shadow-2xl md:static md:order-1 md:block md:min-h-dvh md:w-80 md:max-w-none md:border-r md:border-b-0 md:shadow-none`}
@@ -70,19 +106,16 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <p className="mt-3 text-sm text-slate-400">Signed in as {user.login}</p>
           <Sidebar onNavigate={() => setNavigationOpen(false)} />
         </aside>
-        <main className="min-w-0 flex-1 p-6 pb-32 md:order-2 md:pb-6">
+        <main
+          className="min-w-0 flex-1 p-6 pb-32 outline-none md:order-2 md:pb-6"
+          id="main-content"
+          ref={mainRef}
+          tabIndex={-1}
+        >
           <Routes>
-            <Route
-              path="/"
-              element={
-                <section>
-                  <h1 className="mb-6 text-2xl font-semibold">Inbox</h1>
-                  <Inbox />
-                </section>
-              }
-            />
-            <Route path="/issues/:key/*" element={<IssuePage user={user} />} />
-            <Route path="*" element={<Navigate replace to="/" />} />
+            <Route element={<InboxPage />} path="/" />
+            <Route element={<IssuePage user={user} />} path="/issues/:key/*" />
+            <Route element={<NotFoundPage />} path="*" />
           </Routes>
         </main>
         <Margin ArtifactsTabSlot={ArtifactsTab} />

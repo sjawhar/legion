@@ -64,7 +64,7 @@ export interface DispatchToolResult {
 
 interface ParsedDispatchRef {
   readonly issue: string;
-  readonly kind: "issue" | "spec" | "artifact" | "ask" | "comment";
+  readonly kind: "issue" | "spec" | "log" | "children" | "artifact" | "ask" | "comment";
   readonly id: string;
   readonly version?: number;
 }
@@ -110,12 +110,14 @@ function askUrgency(args: ToolArguments): AskUrgency | undefined {
 
 function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   const match = ref.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+))?$/
+    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+))?$/
   );
   if (!match) return null;
-  const [, issue, spec, artifact, version, ask, comment] = match;
+  const [, issue, spec, log, children, artifact, version, ask, comment] = match;
   if (!issue || (version !== undefined && Number(version) < 1)) return null;
   if (spec) return { issue, kind: "spec", id: spec };
+  if (log) return { issue, kind: "log", id: log };
+  if (children) return { issue, kind: "children", id: children };
   if (artifact) {
     return {
       issue,
@@ -242,6 +244,29 @@ function issueSummary(issue: IssueDetails, events: readonly Event[]): string {
           (event) =>
             `- #${event.seq} ${event.type} · ${event.actor.kind} ${event.actor.id} · ${event.created_at}`
         )),
+  ].join("\n");
+}
+
+function logSummary(issue: IssueDetails, events: readonly Event[]): string {
+  return [
+    `Key: ${issue.key}`,
+    "Events:",
+    ...(events.length === 0
+      ? ["- none"]
+      : events.map(
+          (event) =>
+            `- #${event.seq} ${event.type} · ${event.actor.kind} ${event.actor.id} · ${event.created_at}`
+        )),
+  ].join("\n");
+}
+
+function childrenSummary(issue: IssueDetails): string {
+  return [
+    `Key: ${issue.key}`,
+    "Children:",
+    ...(issue.children.length === 0
+      ? ["- none"]
+      : issue.children.map((child) => `- ${child.key}: ${child.title} (${child.status})`)),
   ].join("\n");
 }
 
@@ -511,6 +536,18 @@ export async function executeDispatchTool(
         };
       }
       const read = await client.read(issue());
+      if (issueArguments.ref?.kind === "log") {
+        return {
+          text: logSummary(read.issue, read.events),
+          details: { issue: read.issue.key, topic: dispatchTopic(read.issue.key) },
+        };
+      }
+      if (issueArguments.ref?.kind === "children") {
+        return {
+          text: childrenSummary(read.issue),
+          details: { issue: read.issue.key, topic: dispatchTopic(read.issue.key) },
+        };
+      }
       return {
         text: issueSummary(read.issue, read.events),
         details: { issue: read.issue.key, topic: dispatchTopic(read.issue.key) },
