@@ -178,7 +178,12 @@ test("API client encodes list filters and artifact version query parameters", as
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
 
-  await api.listIssues({ project: "CORE", status: "in progress", parent: "CORE-1" });
+  await api.listIssues({
+    project: "CORE",
+    status: "in progress",
+    parent: "CORE-1",
+    updated_since: "2026-09-10T12:00:00Z",
+  });
   await api.getIssueEvents("CORE-1", { after: 3, limit: 20 });
   await api.getIssueEvents("CORE-1", { before: 40, order: "desc" });
   await api.getIssueEvents("CORE-1", { ids: ["42", "10"] });
@@ -186,7 +191,7 @@ test("API client encodes list filters and artifact version query parameters", as
   await api.resolveIssue("owner/repo#42");
 
   expect(stub.requests.map(({ path }) => path)).toEqual([
-    "/api/v1/issues?project=CORE&status=in+progress&parent=CORE-1",
+    "/api/v1/issues?project=CORE&status=in+progress&parent=CORE-1&updated_since=2026-09-10T12%3A00%3A00Z",
     "/api/v1/issues/CORE-1/events?after=3&limit=20",
     "/api/v1/issues/CORE-1/events?before=40&order=desc",
     "/api/v1/issues/CORE-1/events?ids=42%2C10",

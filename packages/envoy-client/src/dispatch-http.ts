@@ -21,6 +21,7 @@ import type {
   Issue,
   IssueDetails,
   IssueRead,
+  IssueSummary,
   Message,
   TargetCandidate,
   Version,
@@ -49,6 +50,13 @@ function isJson(response: Response): boolean {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
 
+export interface ListIssuesOptions {
+  readonly project?: string;
+  readonly status?: string;
+  readonly parent?: string;
+  readonly updated_since?: string;
+}
+
 /** JSON HTTP client for Dispatch's native-tool API. */
 export class DispatchClient {
   readonly #baseUrl: string;
@@ -65,6 +73,10 @@ export class DispatchClient {
 
   async issue(input: CreateIssueInput): Promise<Issue> {
     return this.#json("POST", ["api", "v1", "issues"], input);
+  }
+
+  async listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
+    return this.#json("GET", ["api", "v1", "issues"], undefined, options);
   }
 
   async getIssue(issue: string): Promise<IssueDetails> {
@@ -237,7 +249,7 @@ export class DispatchClient {
     method: string,
     path: readonly string[],
     body?: unknown,
-    query?: Record<string, string | number>
+    query?: object
   ): Promise<T> {
     const headers: Record<string, string> = {
       Accept: "application/json",
@@ -261,13 +273,17 @@ export class DispatchClient {
     return this.#response<T>(response);
   }
 
-  #url(path: readonly string[], query?: Record<string, string | number>): string {
+  #url(path: readonly string[], query?: object): string {
     const url = new URL(
       `${path.map((segment) => encodeURIComponent(segment)).join("/")}`,
       `${this.#baseUrl}/`
     );
     if (query) {
-      for (const [name, value] of Object.entries(query)) url.searchParams.set(name, String(value));
+      for (const [name, value] of Object.entries(query)) {
+        if (typeof value === "string" || typeof value === "number") {
+          url.searchParams.set(name, String(value));
+        }
+      }
     }
     return url.toString();
   }

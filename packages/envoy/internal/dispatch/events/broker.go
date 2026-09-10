@@ -53,7 +53,7 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 	`, e.IssueKey, e.Seq, e.Type, actor, payload, e.Notify).Scan(&e.ID, &e.CreatedAt); err != nil {
 		return model.Event{}, fmt.Errorf("insert event: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `update issues set last_seq = $2 where key = $1`, e.IssueKey, e.Seq); err != nil {
+	if _, err := tx.Exec(ctx, `update issues set last_seq = $2, updated_at = greatest(updated_at, $3) where key = $1`, e.IssueKey, e.Seq, e.CreatedAt); err != nil {
 		return model.Event{}, fmt.Errorf("advance issue event sequence: %w", err)
 	}
 	return e, nil

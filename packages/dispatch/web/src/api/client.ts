@@ -79,6 +79,7 @@ export interface ListIssuesOptions {
   project?: string;
   status?: string;
   parent?: string;
+  updated_since?: string;
 }
 
 export interface ListEventsOptions {
