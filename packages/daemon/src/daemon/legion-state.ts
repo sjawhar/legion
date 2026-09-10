@@ -641,10 +641,13 @@ function migrateV16State(state: unknown): unknown {
  * is. Merged with (never overwriting) any `controllerPendingNotices` already present on the raw
  * state -- a state that reached this step more than once (e.g. an interrupted earlier migration
  * attempt) must never lose whichever notices that first pass already converted -- and deduped by
- * `eventId`: a converted entry whose id already appears among the already-present notices is the
- * same underlying event that first pass already converted, so it is skipped rather than queued a
- * second time. A malformed entry (missing a `payloadJson`/`eventId` string pair) is logged and
- * discarded rather than silently dropped or carried forward broken. A state with no
+ * `eventId` against both the already-present notices and every earlier entry converted in this
+ * same pass: a `controllerHeldEvents` array can itself carry the same underlying event more than
+ * once (e.g. two redeliveries recorded before either drained), and each already-accepted eventId
+ * is folded into the same dedupe set as it converts, so a later duplicate is skipped too, not
+ * only ones matching an already-present notice. A malformed entry (missing a
+ * `payloadJson`/`eventId` string pair) is logged and discarded rather than silently dropped or
+ * carried forward broken. A state with no
  * `controllerHeldEvents` at all (every state before v16 ever added one) gets an empty array,
  * same as before. */
 function migrateV17State(state: unknown): unknown {
@@ -666,6 +669,7 @@ function migrateV17State(state: unknown): unknown {
         typeof held.eventId === "string"
       ) {
         if (existingEventIds.has(held.eventId)) continue;
+        existingEventIds.add(held.eventId);
         convertedNotices.push({ payloadJson: held.payloadJson, eventId: held.eventId });
       } else {
         console.error(

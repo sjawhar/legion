@@ -675,6 +675,45 @@ describe("legion state", () => {
     expect(loaded.controllerPendingNotices).toEqual([alreadyPresent]);
   });
 
+  it("dedupes two controllerHeldEvents entries sharing the same eventId, keeping exactly one notice, with no already-present controllerPendingNotices involved", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-dedupe-intra-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const firstConverted = {
+      payloadJson: '{"text":"first redelivery"}',
+      eventId: "evt-duplicated",
+    };
+    current.controllerPendingNotices = [firstConverted];
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v16Input = {
+      ...currentWithoutNotices,
+      version: 16,
+      // Two entries for the same underlying event (e.g. a redelivered Slack mention held
+      // twice before either drained) -- only the first accepted conversion may become a
+      // notice; the second, sharing its eventId, must be skipped rather than duplicated.
+      controllerHeldEvents: [
+        {
+          role: "controller",
+          payloadJson: firstConverted.payloadJson,
+          heldAt: "2026-09-01T00:00:00.000Z",
+          eventId: "evt-duplicated",
+        },
+        {
+          role: "controller",
+          payloadJson: '{"text":"second redelivery"}',
+          heldAt: "2026-09-01T00:05:00.000Z",
+          eventId: "evt-duplicated",
+        },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
+    expect(loaded).toEqual(current);
+    expect(loaded.controllerPendingNotices).toEqual([firstConverted]);
+  });
+
   it("rejects removed v6 fields on current-version state", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-current-"));
     const file = path.join(tempDir, "state.json");
