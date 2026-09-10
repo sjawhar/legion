@@ -5,6 +5,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { canonicalRepo } from "@legion/contracts/repo";
 import { machineID } from "./machine";
 
 const execFileAsync = promisify(execFile);
@@ -86,7 +87,7 @@ export function parseGitHubRemoteUrl(url: string): string | null {
   const trimmed = url.trim();
   for (const pattern of GITHUB_REMOTE_PATTERNS) {
     const match = trimmed.match(pattern);
-    if (match) return `${match[1]}/${match[2]}`;
+    if (match) return canonicalRepo(match[1] ?? "", match[2] ?? "");
   }
   return null;
 }

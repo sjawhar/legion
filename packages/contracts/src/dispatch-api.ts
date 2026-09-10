@@ -47,6 +47,13 @@ export interface Project {
   readonly name: string;
 }
 
+export interface RepoProject {
+  readonly repo: string;
+  readonly project: string;
+  readonly created_by: Actor;
+  readonly created_at: string;
+}
+
 export interface ExternalLink {
   readonly url: string;
   readonly kind?: string;
@@ -244,6 +251,7 @@ export interface EditOp {
 }
 
 export interface AuthenticatedUser {
+  readonly kind: "user";
   readonly login: string;
 }
 

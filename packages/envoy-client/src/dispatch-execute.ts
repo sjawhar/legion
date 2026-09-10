@@ -18,6 +18,7 @@ import {
   dispatchToolSpecs,
   zodSchemaApi,
 } from "@legion/contracts";
+import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import {
@@ -84,6 +85,10 @@ const nativeIssueKeyPattern = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
 const externalIssueRefPattern = /^([^/\s]+)\/([^/\s#]+)#([1-9][0-9]*)$/;
 const bareIssueNumberPattern = /^[1-9][0-9]*$/;
 
+function canonicalExternalIssueRef(value: string): string {
+  const match = value.trim().match(externalIssueRefPattern);
+  return match ? `${canonicalRepo(match[1] ?? "", match[2] ?? "")}#${match[3]}` : value;
+}
 function stringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   if (typeof value !== "string") throw new Error(`${name} is required`);
@@ -162,7 +167,11 @@ async function resolveIssueArguments(
     return {
       args: {
         ...args,
-        ...(issueArgument === undefined && ref?.issue !== undefined ? { issue: ref.issue } : {}),
+        ...(typeof issueArgument === "string"
+          ? { issue: canonicalExternalIssueRef(issueArgument) }
+          : issueArgument === undefined && ref?.issue !== undefined
+            ? { issue: ref.issue }
+            : {}),
         ...(artifactArgument === undefined && (ref?.kind === "spec" || ref?.kind === "artifact")
           ? { artifact: ref.id }
           : {}),
@@ -176,7 +185,7 @@ async function resolveIssueArguments(
   const legionIssue = env.LEGION_ISSUE;
   if (!legionIssue) throw new Error("issue is required; supply issue or set LEGION_ISSUE");
   if (nativeIssueKeyPattern.test(legionIssue) || externalIssueRefPattern.test(legionIssue)) {
-    return { args: { ...args, issue: legionIssue }, ref: null };
+    return { args: { ...args, issue: canonicalExternalIssueRef(legionIssue) }, ref: null };
   }
   if (!bareIssueNumberPattern.test(legionIssue)) {
     throw new Error(
@@ -589,7 +598,7 @@ async function ensureIssue(
     if (error instanceof DispatchServiceError && error.code === "PROJECT_UNMAPPED") {
       const repository = issueReference.slice(0, issueReference.lastIndexOf("#"));
       throw new Error(
-        `repository ${repository} is not mapped in DISPATCH_REPO_PROJECTS and no DISPATCH_DEFAULT_PROJECT is configured`
+        `repository ${repository} is not mapped in repository settings and no DISPATCH_DEFAULT_PROJECT is configured`
       );
     }
     throw error;

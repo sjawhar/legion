@@ -8,6 +8,7 @@ import type { AuthenticatedUser } from "./api/types";
 import { Inbox } from "./features/inbox/Inbox";
 import { Margin, MarginProvider } from "./features/margin/Margin";
 import { parseIssuePath } from "./features/refs/routes";
+import { SettingsPage } from "./features/settings/SettingsPage";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { useDialog } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
@@ -293,7 +294,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               </button>
             </p>
           ) : null}
-          <Sidebar onNavigate={() => setNavigationOpen(false)} />
+          <Sidebar onNavigate={() => setNavigationOpen(false)} user={user} />
         </aside>
         <main
           className="min-w-0 flex-1 p-6 pb-32 outline-none md:order-2 md:pb-6"
@@ -305,6 +306,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <Routes>
               <Route element={<InboxPage />} path="/" />
               <Route element={<IssuePage user={user} />} path="/issues/:key/*" />
+              <Route element={<SettingsPage />} path="/settings" />
               <Route element={<NotFoundPage />} path="*" />
             </Routes>
           </Suspense>

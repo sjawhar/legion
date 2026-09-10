@@ -11,14 +11,13 @@ OAuth, and the GitHub REST/GraphQL proxy.
 store contains users, native issues, artifacts, document updates, and the event
 outbox.
 
-`DISPATCH_REPO_PROJECTS` optionally maps specific external repositories to
-native issue projects; `DISPATCH_DEFAULT_PROJECT` names the project that
-catches every other repository (required unless `DISPATCH_REPO_PROJECTS`
-already covers every repository the deployment will see; validated against
-Postgres at boot). An issue created from a repository that only resolves
-through the default also gets a `repo:owner/name` label so it stays
-filterable. `DISPATCH_NATS_DISABLED=1` leaves database and SSE paths
-available and makes `/healthz` report `nats: null`. Otherwise Dispatch reads
+`DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
+with comma-separated `owner/repo=KEY` entries. Stored dashboard mappings are
+authoritative, and external issues fall back to `DISPATCH_DEFAULT_PROJECT` when
+configured. An unmapped repository without a default is rejected; issues that
+use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
+database and SSE paths available and makes `/healthz` report `nats: null`.
+Otherwise Dispatch reads
 `natsUrls` from shared `envoy.json`, connects through `bus.Connect`, and runs
 the outbox. Host adapters can override their configured Dispatch base URL
 with `DISPATCH_URL`; the server reads `dispatch.serverUrl` from shared
@@ -56,11 +55,13 @@ the table says human only.
 | `/auth/start` | GET | public | Start GitHub OAuth. |
 | `/auth/callback` | GET | OAuth state | Exchange an allowlisted GitHub login's token pair. |
 | `/auth/logout` | POST | identity | Remove the resolved user's tokens. |
-| `/auth/whoami` | GET | identity | Return the resolved login. |
+| `/auth/whoami` | GET | identity | Return the resolved human identity. |
 | `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
 | `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
 | `/healthz` | GET | public | Report database and NATS readiness. |
 | `/api/v1/projects` | GET, POST | POST human only | List or create projects. |
+| `/api/v1/settings/repo-projects` | GET | human only | List repository-to-project mappings. |
+| `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | human only | Create or replace, or remove, a repository mapping. |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. |
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. |
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |

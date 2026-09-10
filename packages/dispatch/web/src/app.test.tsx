@@ -22,7 +22,7 @@ test("signing out shows the sign-in page without a reload and tears down the eve
     if (!signedIn) {
       throw new ApiError(401, { error: "unauthorized" });
     }
-    return { login: "alice" };
+    return { kind: "user", login: "alice" };
   });
   const logout = spyOn(api, "logout").mockImplementation(async () => {
     signedIn = false;

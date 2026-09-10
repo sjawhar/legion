@@ -225,7 +225,7 @@ func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"login": login})
+	writeJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": login})
 }
 
 func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {

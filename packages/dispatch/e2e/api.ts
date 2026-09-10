@@ -96,7 +96,11 @@ export function patchIssue(
   return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "PATCH", input, options);
 }
 export function createIssue(
-  input: Pick<Issue, "project" | "title"> & { parent?: string; spec?: string },
+  input: Partial<Pick<Issue, "project" | "title">> & {
+    external?: string;
+    parent?: string;
+    spec?: string;
+  },
   options: ApiOptions = {}
 ): Promise<Issue> {
   return request<Issue>("/api/v1/issues", "POST", input, options);

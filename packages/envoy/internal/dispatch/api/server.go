@@ -37,7 +37,6 @@ type Deps struct {
 	Store          *store.Store
 	Identity       identity.Identity
 	AgentToken     string
-	RepoProjects   map[string]string
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
@@ -58,8 +57,7 @@ type DepsInput struct {
 
 // NewDeps parses boot configuration once and returns API dependencies.
 func NewDeps(input DepsInput) (Deps, error) {
-	repoProjects, err := ParseRepoProjects(input.RepoProjectsRaw)
-	if err != nil {
+	if _, err := ParseRepoProjects(input.RepoProjectsRaw); err != nil {
 		return Deps{}, err
 	}
 	defaultProject := strings.TrimSpace(input.DefaultProject)
@@ -82,7 +80,6 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Store:          input.Store,
 		Identity:       input.Identity,
 		AgentToken:     input.AgentToken,
-		RepoProjects:   repoProjects,
 		DefaultProject: defaultProject,
 		ServerURL:      strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:           input.Docs,
@@ -99,16 +96,18 @@ func ParseRepoProjects(raw string) (map[string]string, error) {
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
 		repo, project, ok := strings.Cut(part, "=")
-		if !ok || repo == "" || project == "" || strings.Contains(project, "=") {
+		project = strings.TrimSpace(project)
+		if !ok || repo == "" || project == "" || strings.Contains(project, "=") || !projectKeyPattern.MatchString(project) {
 			return nil, fmt.Errorf("invalid DISPATCH_REPO_PROJECTS entry %q (expected owner/repo=KEY)", part)
 		}
-		if !externalRefPattern.MatchString(repo+"#1") || !projectKeyPattern.MatchString(project) {
+		canonical, _, err := externalRef(repo + "#1")
+		if err != nil {
 			return nil, fmt.Errorf("invalid DISPATCH_REPO_PROJECTS entry %q (expected owner/repo=KEY)", part)
 		}
-		if _, exists := projects[repo]; exists {
-			return nil, fmt.Errorf("duplicate DISPATCH_REPO_PROJECTS repository %q", repo)
+		if _, exists := projects[canonical]; exists {
+			return nil, fmt.Errorf("duplicate DISPATCH_REPO_PROJECTS repository %q", canonical)
 		}
-		projects[repo] = project
+		projects[canonical] = project
 	}
 	return projects, nil
 }
@@ -129,6 +128,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
+	mux.HandleFunc("GET /api/v1/settings/repo-projects", s.listRepoProjects)
+	mux.HandleFunc("PUT /api/v1/settings/repo-projects/{owner}/{repo}", s.putRepoProject)
+	mux.HandleFunc("DELETE /api/v1/settings/repo-projects/{owner}/{repo}", s.deleteRepoProject)
 	mux.HandleFunc("GET /api/v1/issues", s.listIssues)
 	mux.HandleFunc("POST /api/v1/issues", s.createIssue)
 	mux.HandleFunc("GET /api/v1/issues/resolve", s.resolveIssue)
@@ -390,11 +392,17 @@ func (s *server) namedVersionDiff(ctx context.Context, tx pgx.Tx, artifactID str
 }
 
 func externalRef(ref string) (repo string, number string, err error) {
-	match := externalRefPattern.FindStringSubmatch(ref)
+	match := externalRefPattern.FindStringSubmatch(strings.TrimSpace(ref))
 	if match == nil {
 		return "", "", errorf(http.StatusBadRequest, "INVALID_ISSUE_REF", "invalid issue reference %q", ref)
 	}
-	return match[1] + "/" + match[2], match[3], nil
+	return canonicalRepo(match[1], match[2]), match[3], nil
+}
+
+func canonicalRepo(owner, repo string) string {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	repo = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(repo)), ".git")
+	return owner + "/" + repo
 }
 
 func externalURL(repo, number string) string {

@@ -388,6 +388,11 @@ func TestExternalIssueResolutionAndAutoCreation(t *testing.T) {
 	}, "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "TEST",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("map external repository: status=%d body=%s", response.Code, response.Body.String())
+	}
 	for number := 1; number <= 2; number++ {
 		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
 			"project": "TEST", "title": "ordinary issue",
@@ -427,7 +432,7 @@ func TestExternalIssueRejectsUnmappedProject(t *testing.T) {
 	}, "alice")
 	body := response.Body.String()
 	if response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"PROJECT_UNMAPPED"`) ||
-		!strings.Contains(body, "DISPATCH_REPO_PROJECTS") || !strings.Contains(body, "DISPATCH_DEFAULT_PROJECT") {
+		!strings.Contains(body, "repository settings") || !strings.Contains(body, "DISPATCH_DEFAULT_PROJECT") {
 		t.Fatalf("create unmapped external issue: status=%d body=%s", response.Code, body)
 	}
 }
@@ -474,6 +479,11 @@ func TestExternalIssueExplicitMappingTakesPrecedenceOverDefaultProject(t *testin
 		"key": "DEFAULT", "name": "Default project",
 	}, "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("create default project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "TEST",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("map external repository: status=%d body=%s", response.Code, response.Body.String())
 	}
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
 		"external": "owner/repo#9",

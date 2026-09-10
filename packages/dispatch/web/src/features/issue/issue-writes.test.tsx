@@ -55,7 +55,10 @@ function renderIssuePage() {
     <MemoryRouter initialEntries={["/issues/CORE-1"]}>
       <QueryClientProvider client={queryClient}>
         <Routes>
-          <Route path="/issues/:key/*" element={<IssuePage user={{ login: "alice" }} />} />
+          <Route
+            path="/issues/:key/*"
+            element={<IssuePage user={{ kind: "user", login: "alice" }} />}
+          />
         </Routes>
       </QueryClientProvider>
     </MemoryRouter>

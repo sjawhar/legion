@@ -7,6 +7,11 @@
       "types": "./src/index.ts",
       "bun": "./src/index.ts",
       "default": "./dist/index.js"
+    },
+    "./repo": {
+      "types": "./src/repo.ts",
+      "bun": "./src/repo.ts",
+      "default": "./dist/repo.js"
     }
   },
   "main": "dist/index.js",
