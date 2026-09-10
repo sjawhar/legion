@@ -1,5 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type KeyboardEvent, type ReactNode, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -564,6 +571,46 @@ function IssueDetail({
     queryFn: () => api.getIssue(route.key),
   });
   const state = useQuery({ queryKey: ["user-state"], queryFn: () => api.getMyState() });
+  const primaryArtifact = issue.data?.artifacts?.find(
+    ({ id }) => id === issue.data?.primary_artifact_id
+  );
+  const selectedArtifact =
+    artifactRouteSlug === undefined
+      ? primaryArtifact
+      : issue.data?.artifacts?.find(({ slug }) => slug === artifactRouteSlug);
+  const isNonDocArtifactRoute = artifactRouteSlug !== undefined && selectedArtifact?.kind !== "doc";
+  const activeTab: IssueTab = isNonDocArtifactRoute
+    ? "log"
+    : route.kind === "children"
+      ? "children"
+      : route.kind === "log"
+        ? "log"
+        : artifactRoute !== undefined || isSpecRoute
+          ? "spec"
+          : // Bare `/issues/KEY` with no tab segment: Log is the historical default.
+            "log";
+  const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
+
+  useLayoutEffect(() => {
+    const top = panelScroll.current[activeTab];
+    if (top !== undefined) {
+      window.scrollTo({ top });
+    }
+  }, [activeTab]);
+
+  // Once a panel's tab has ever been active, keep rendering its content even
+  // while hidden — that is what keeps the Spec document connected and the Log
+  // observer's state alive across tab switches (see the `hidden` panels
+  // below). A panel the user has never opened stays unmounted, so a fresh
+  // page load doesn't pay for panels it never shows.
+  const [activatedTabs, setActivatedTabs] = useState<Record<IssueTab, boolean>>(() => ({
+    children: activeTab === "children",
+    log: activeTab === "log",
+    spec: activeTab === "spec",
+  }));
+  if (!activatedTabs[activeTab]) {
+    setActivatedTabs({ ...activatedTabs, [activeTab]: true });
+  }
 
   useDocumentTitle(
     issue.data === undefined ? "Dispatch" : `${issue.data.key} · ${issue.data.title} · Dispatch`
@@ -607,32 +654,14 @@ function IssueDetail({
     return <p className="text-rose-700">Could not load this issue.</p>;
   }
 
-  const primaryArtifact = issue.data.artifacts.find(
-    ({ id }) => id === issue.data.primary_artifact_id
-  );
   if (primaryArtifact === undefined) {
-    return <p className="text-rose-700">Could not load this issue's primary document.</p>;
+    return <p className="text-rose-700">Could not load this issue&apos;s primary document.</p>;
   }
-  const selectedArtifact =
-    artifactRouteSlug === undefined
-      ? primaryArtifact
-      : issue.data.artifacts.find(({ slug }) => slug === artifactRouteSlug);
   if (selectedArtifact === undefined) {
     return <p className="text-rose-700">Could not load this document artifact.</p>;
   }
 
   const issueState = stateForIssue(state.data, issue.data.key);
-  const activeTab: IssueTab =
-    artifactRouteSlug !== undefined && selectedArtifact.kind !== "doc"
-      ? "log"
-      : route.kind === "children"
-        ? "children"
-        : route.kind === "log"
-          ? "log"
-          : artifactRoute !== undefined || isSpecRoute
-            ? "spec"
-            : // Bare `/issues/KEY` with no tab segment: Log is the historical default.
-              "log";
   const isClosed = issue.data.closed_at !== null;
   const issueKey = issue.data.key;
 
@@ -645,14 +674,21 @@ function IssueDetail({
       ) : null}
       <IssueHeader isClosed={isClosed} issue={issue.data} state={issueState} />
       <BoardStrip issue={issue.data} state={issueState} />
-      <IssueTabs activeTab={activeTab} issueKey={issueKey} />
+      <IssueTabs
+        activeTab={activeTab}
+        issueKey={issueKey}
+        onBeforeTabChange={(current) => {
+          panelScroll.current[current] = window.scrollY;
+        }}
+      />
       <div
+        aria-hidden={activeTab !== "spec"}
         aria-labelledby="issue-spec-tab"
         hidden={activeTab !== "spec"}
         id="issue-spec-panel"
         role="tabpanel"
       >
-        {activeTab === "spec" ? (
+        {activatedTabs.spec && !isNonDocArtifactRoute ? (
           artifactRoute?.version === undefined ? (
             <DocEditor
               artifact={selectedArtifact}
@@ -677,27 +713,30 @@ function IssueDetail({
         ) : null}
       </div>
       <div
+        aria-hidden={activeTab !== "log"}
         aria-labelledby="issue-log-tab"
         hidden={activeTab !== "log"}
         id="issue-log-panel"
         role="tabpanel"
       >
-        {activeTab === "log" ? (
+        {activatedTabs.log ? (
           <LogTab
             isClosed={isClosed}
             issueKey={issueKey}
             route={issue.data.route}
             state={state.data}
+            visible={activeTab === "log"}
           />
         ) : null}
       </div>
       <div
+        aria-hidden={activeTab !== "children"}
         aria-labelledby="issue-children-tab"
         hidden={activeTab !== "children"}
         id="issue-children-panel"
         role="tabpanel"
       >
-        {activeTab === "children" ? <ChildrenTab issue={issue.data} /> : null}
+        {activatedTabs.children ? <ChildrenTab issue={issue.data} /> : null}
       </div>
     </section>
   );
