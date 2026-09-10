@@ -249,7 +249,7 @@ test("Margin hides an open composer when navigating to a different artifact", as
   }
 });
 
-test("a comment deep link activates Comments and scrolls its card from Pinned", async () => {
+test("a desktop comment deep link activates Comments and scrolls its card from Pinned", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -258,6 +258,18 @@ test("a comment deep link activates Comments and scrolls its card from Pinned", 
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
 
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
@@ -289,6 +301,7 @@ test("a comment deep link activates Comments and scrolls its card from Pinned", 
     expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
   } finally {
     view.unmount();
+    window.matchMedia = originalMatchMedia;
     getIssue.mockRestore();
     getInbox.mockRestore();
     getMyState.mockRestore();

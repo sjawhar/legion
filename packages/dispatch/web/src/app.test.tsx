@@ -17,6 +17,19 @@ if (typeof globalThis.EventSource === "undefined") {
 }
 
 test("signing out shows the sign-in page without a reload and tears down the event stream", async () => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+
   let signedIn = true;
   const whoAmI = spyOn(api, "whoAmI").mockImplementation(async () => {
     if (!signedIn) {
@@ -71,6 +84,7 @@ test("signing out shows the sign-in page without a reload and tears down the eve
     expect(streamTornDown).toBe(true);
   } finally {
     view.unmount();
+    window.matchMedia = originalMatchMedia;
     whoAmI.mockRestore();
     logout.mockRestore();
     listIssues.mockRestore();

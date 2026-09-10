@@ -193,10 +193,15 @@ function useMarginSheet(): MarginSheetModel {
       return;
     }
     setTab("artifacts");
-    if (window.matchMedia("(max-width: 767px)").matches) {
+    if (window.matchMedia("(max-width: 1279px)").matches) {
       setExpandedIssueKey(issueKey);
     }
   }, [issueKey, routeArtifactSlug, visibleArtifact]);
+  useEffect(() => {
+    if (routeItemId !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
+      setExpandedIssueKey(issueKey);
+    }
+  }, [issueKey, routeItemId]);
 
   useMarginListeners({
     items,

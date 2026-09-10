@@ -44,7 +44,7 @@ export function useMarginListeners({
       tab !== "comments" ||
       scrolledRouteItem.current === routeItemId ||
       !items.some((item) => marginItemId(item) === routeItemId) ||
-      (window.matchMedia("(max-width: 767px)").matches && !sheetExpanded)
+      (window.matchMedia("(max-width: 1279px)").matches && !sheetExpanded)
     ) {
       return;
     }

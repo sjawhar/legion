@@ -202,10 +202,10 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     const marginItems = page.getByLabel("Margin review items");
     if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel" }).click();
-    }
-    if (testInfo.project.name === "iphone") {
+      await expect(page.getByRole("button", { name: "Close review panel" })).toBeVisible();
       await expect(page.getByTestId(`margin-comment-${comment.id}`)).toBeVisible();
+      await page.getByRole("button", { name: "Close review panel" }).click();
+      await expect(page.getByRole("button", { name: "Open review panel" })).toBeVisible();
     } else {
       await expect
         .poll(() => marginItems.evaluate((element) => element.scrollTop))

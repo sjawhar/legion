@@ -15,6 +15,18 @@ class TestEventSource {
 test("human users manage repository project mappings from the settings route", async () => {
   const originalEventSource = globalThis.EventSource;
   globalThis.EventSource = TestEventSource as unknown as typeof EventSource;
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
   const mapping: RepoProject = {
     created_at: "2026-09-10T00:00:00Z",
     created_by: { id: "alice", kind: "user" },
@@ -69,6 +81,7 @@ test("human users manage repository project mappings from the settings route", a
     putRepoProject.mockRestore();
     deleteRepoProject.mockRestore();
     globalThis.EventSource = originalEventSource;
+    window.matchMedia = originalMatchMedia;
   }
 });
 
