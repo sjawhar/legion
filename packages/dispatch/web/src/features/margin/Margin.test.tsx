@@ -60,10 +60,9 @@ const secondIssue: IssueDetails = {
 const comment: Comment = {
   anchor: {
     artifact_id: "artifact-1",
-    from: 10,
+    mark_id: "m-1",
     orphaned: false,
     quote: "brown",
-    to: 15,
     version: 1,
   },
   author: { id: "alice", kind: "user" },
@@ -95,10 +94,9 @@ const unanchoredRootComment: Comment = {
 const anchoredAsk: Ask = {
   anchor: {
     artifact_id: "artifact-1",
-    from: 0,
+    mark_id: "m-2",
     orphaned: false,
     quote: "Review",
-    to: 6,
     version: 1,
   },
   answer: null,
@@ -143,10 +141,8 @@ function SelectionButton(): ReactNode {
           artifact: "artifact-1",
           artifactId: "artifact-1",
           canSuggest: true,
-          from: 0,
           quote: "Review",
           rect: { bottom: 0, left: 0, right: 0, top: 0 },
-          to: 6,
         })
       }
       type="button"
@@ -585,7 +581,7 @@ test("Margin replies to an unanchored root without opening an anchored composer"
   }
 });
 
-test("Margin replies to an unanchored child with its root comment's anchor", async () => {
+test("Margin replies to an unanchored child without copying its root comment anchor", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -617,7 +613,7 @@ test("Margin replies to an unanchored child with its root comment's anchor", asy
     const replyCard = await screen.findByTestId(`margin-comment-${replyToAnchoredComment.id}`);
     fireEvent.click(within(replyCard).getByRole("button", { name: "Reply" }));
     const composer = await screen.findByRole("form", { name: "Comment composer" });
-    expect(within(composer).getByText(comment.anchor?.quote ?? "")).toBeTruthy();
+    expect(composer.querySelector("blockquote")).toBeNull();
     fireEvent.change(within(composer).getByLabelText("Comment"), {
       target: { value: "Nested reply." },
     });
@@ -645,10 +641,9 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
   const answeredAsk: Ask = {
     anchor: {
       artifact_id: "artifact-1",
-      from: 10,
+      mark_id: "m-3",
       orphaned: false,
       quote: "brown",
-      to: 15,
       version: 1,
     },
     answer: {
@@ -667,16 +662,14 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
     state: "answered",
     urgency: "med",
   };
-  // Anchored earlier in the document than the answered ask above, but created later - if the
-  // margin ordered by recency instead of anchor position, this would render second instead
-  // of first.
+  // Open asks remain in the Needs you group before the historical answered ask, regardless of
+  // their document positions.
   const openAsk: Ask = {
     anchor: {
       artifact_id: "artifact-1",
-      from: 0,
+      mark_id: "m-4",
       orphaned: false,
       quote: "The",
-      to: 3,
       version: 1,
     },
     answer: null,

@@ -19,10 +19,9 @@ export type Actor =
 
 export interface Anchor {
   readonly artifact_id: string;
+  readonly mark_id: string;
   readonly version: number;
   readonly quote: string;
-  readonly from: number;
-  readonly to: number;
   readonly orphaned: boolean;
 }
 
@@ -31,15 +30,13 @@ export type AnchorInput =
       readonly artifact: string;
       readonly quote: string;
       readonly occurrence?: number;
-      readonly from?: never;
-      readonly to?: never;
+      readonly mark_id?: never;
     }
   | {
       readonly artifact: string;
-      readonly from: number;
-      readonly to: number;
-      readonly quote?: string;
-      readonly occurrence?: number;
+      readonly mark_id: string;
+      readonly quote?: never;
+      readonly occurrence?: never;
     };
 
 export interface Project {
@@ -409,6 +406,7 @@ export interface EditArtifactResponse {
   readonly version: Version | null;
 }
 
+/** ProseMirror positions in the live document. */
 export interface TargetCandidate {
   readonly from: number;
   readonly to: number;

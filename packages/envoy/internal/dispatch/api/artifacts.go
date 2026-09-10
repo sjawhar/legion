@@ -277,29 +277,30 @@ func (s *server) storeArtifact(
 		summaryValue = input.summary
 	}
 	if kind == "doc" {
-		if err := tx.QueryRow(r.Context(), `
-			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary)
-			values ($1, $2, $3, $4, $5, $6)
-			returning number, named, summary, authors, created_at
-		`, artifact.ID, nextNumber, string(input.content), authors, input.summary != "", summaryValue).Scan(
-			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
-		); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
 		ctx := docs.WithTx(r.Context(), tx)
+		var markdown string
 		if created {
-			err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content))
+			markdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content))
 		} else {
 			evictArtifactID = artifact.ID
 			evictOnFailure = true
-			err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(input.content), actor)
+			markdown, err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(input.content), actor)
 		}
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := s.replaceRefs(r.Context(), tx, "artifact", artifact.ID, string(input.content)); err != nil {
+		if err := tx.QueryRow(r.Context(), `
+			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary)
+			values ($1, $2, $3, $4, $5, $6)
+			returning number, named, summary, authors, created_at
+		`, artifact.ID, nextNumber, markdown, authors, input.summary != "", summaryValue).Scan(
+			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
+		); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if err := s.replaceRefs(r.Context(), tx, "artifact", artifact.ID, markdown); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

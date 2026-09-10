@@ -82,6 +82,57 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	return Range{}, &ErrTargetAmbiguous{Candidates: candidates}
 }
 
+// FindHeading finds the heading whose text equals title exactly. occurrence is
+// zero-based; without it, repeated titles return ErrTargetAmbiguous.
+func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
+	if doc == nil {
+		return Range{}, fmt.Errorf("%w: FindHeading wants a document", ErrSchema)
+	}
+	if err := doc.Validate(); err != nil {
+		return Range{}, err
+	}
+
+	var matches []Candidate
+	pos := 0
+	for _, child := range doc.Children {
+		end := pos + nodeSize(child)
+		if child.Type == "heading" {
+			var text strings.Builder
+			for _, inline := range child.Children {
+				if inline.Type == "text" {
+					text.WriteString(inline.Text)
+				}
+			}
+			headingText := text.String()
+			if headingText == title {
+				matches = append(matches, Candidate{
+					Range:   Range{From: pos, To: end},
+					Context: headingText,
+				})
+			}
+		}
+		pos = end
+	}
+	if len(matches) == 0 {
+		return Range{}, ErrTargetNotFound
+	}
+	if occurrence != nil {
+		if *occurrence < 0 || *occurrence >= len(matches) {
+			return Range{}, ErrTargetNotFound
+		}
+		return matches[*occurrence].Range, nil
+	}
+	if len(matches) == 1 {
+		return matches[0].Range, nil
+	}
+	return Range{}, &ErrTargetAmbiguous{Candidates: matches}
+}
+
+// Size returns the ProseMirror position immediately after the last block.
+func Size(doc *Node) int {
+	return nodeSize(doc)
+}
+
 type documentText struct {
 	value     string
 	positions []int
@@ -245,36 +296,94 @@ func distance(left, right int) int {
 	return left - right
 }
 
-// FindMark finds the first contiguous text range covered by a mark identity.
+// FindMark finds the first document-contiguous range covered by a mark identity.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
-	var matches []markedText
-	walk(doc, func(node *Node, _ []int, pos, _ int) bool {
-		if node.Type == "text" && nodeMarkID(node, markType) == id {
-			matches = append(matches, markedText{Range: Range{From: pos, To: pos + len16(node.Text)}, text: node.Text})
+	var quote strings.Builder
+	var marked Range
+	found := false
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if node.Type != "text" {
+			return true
+		}
+		if nodeMarkID(node, markType) != id {
+			return !found
+		}
+		if !found {
+			found = true
+			marked = Range{From: pos, To: end}
+			quote.WriteString(node.Text)
+			return true
+		}
+		if pos != marked.To {
+			quote.WriteByte(' ')
+		}
+		marked.To = end
+		quote.WriteString(node.Text)
+		return true
+	})
+	if !found {
+		return Range{}, "", false
+	}
+	return marked, quote.String(), true
+}
+
+type MarkRef struct {
+	Type string
+	ID   string
+}
+
+// ListMarks returns each distinct Proof or Dispatch mark identity in document
+// order.
+func ListMarks(doc *Node) []MarkRef {
+	seen := make(map[MarkRef]struct{})
+	var refs []MarkRef
+	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+		if node.Type != "text" {
+			return true
+		}
+		for _, mark := range node.Marks {
+			if !strings.HasPrefix(mark.Type, "proof") && mark.Type != "dispatchAsk" {
+				continue
+			}
+			id, ok := mark.Attrs["id"].(string)
+			if !ok {
+				continue
+			}
+			ref := MarkRef{Type: mark.Type, ID: id}
+			if _, ok := seen[ref]; ok {
+				continue
+			}
+			seen[ref] = struct{}{}
+			refs = append(refs, ref)
 		}
 		return true
 	})
-	if len(matches) == 0 {
-		return Range{}, "", false
-	}
-
-	first := matches[0]
-	var quote strings.Builder
-	quote.WriteString(first.text)
-	out := first.Range
-	for _, match := range matches[1:] {
-		if match.From != out.To {
-			break
-		}
-		out.To = match.To
-		quote.WriteString(match.text)
-	}
-	return out, quote.String(), true
+	return refs
 }
 
-type markedText struct {
-	Range
-	text string
+// MarkAttrs returns a copy of the attributes on the first matching mark run.
+func MarkAttrs(doc *Node, markType, id string) (Attrs, bool) {
+	var attrs Attrs
+	found := false
+	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+		if node.Type != "text" || nodeMarkID(node, markType) != id {
+			return true
+		}
+		for _, mark := range node.Marks {
+			if mark.Type != markType {
+				continue
+			}
+			markID, ok := mark.Attrs["id"].(string)
+			if !ok || markID != id {
+				continue
+			}
+			attrs = cloneAttrs(mark.Attrs)
+			found = true
+			return false
+		}
+		return true
+	})
+	return attrs, found
 }
 
 func nodeMarkID(node *Node, markType string) string {

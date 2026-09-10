@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -58,6 +59,14 @@ func openTestStore(t *testing.T) *store.Store {
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {
 	t.Helper()
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse test document: %v", err)
+	}
+	markdown, _, err = pmdoc.Render(pmdoc.StripAnchorMarks(tree))
+	if err != nil {
+		t.Fatalf("render test document: %v", err)
+	}
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {

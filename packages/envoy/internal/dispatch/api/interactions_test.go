@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -99,7 +101,7 @@ type firstReplaceGate struct {
 	second        sync.Once
 }
 
-func (g *firstReplaceGate) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, replacement string, actor model.Actor) error {
+func (g *firstReplaceGate) AcceptSuggestion(ctx context.Context, artifactID, markID, replacement string, actor model.Actor) error {
 	first := false
 	g.first.Do(func() {
 		first = true
@@ -110,7 +112,7 @@ func (g *firstReplaceGate) ApplyReplace(ctx context.Context, artifactID string, 
 	} else {
 		g.second.Do(func() { close(g.secondEntered) })
 	}
-	return g.API.ApplyReplace(ctx, artifactID, anchor, replacement, actor)
+	return g.API.AcceptSuggestion(ctx, artifactID, markID, replacement, actor)
 }
 
 func waitForSecondReplacementOrCommentLock(t *testing.T, database *store.Store, secondReplacement <-chan struct{}) {
@@ -191,8 +193,8 @@ func TestAnchoredAskAnswerAndInbox(t *testing.T) {
 		State  string       `json:"state"`
 		Anchor model.Anchor `json:"anchor"`
 	}](t, created)
-	if ask.State != "open" || ask.Anchor.From != 10 || ask.Anchor.To != 15 || ask.Anchor.Version != 1 {
-		t.Fatalf("anchored ask = %#v; want open with [10,15) at version 1", ask)
+	if ask.State != "open" || ask.Anchor.MarkID != ask.ID || ask.Anchor.Quote != "brown" || ask.Anchor.Version != 1 {
+		t.Fatalf("anchored ask = %#v; want open brown mark at version 1", ask)
 	}
 
 	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
@@ -417,7 +419,7 @@ func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
 	notFound := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Missing text", "anchor": map[string]any{"artifact": "spec", "quote": "missing"}, "actor": sessionActor(),
 	})
-	if notFound.Code != http.StatusUnprocessableEntity || !strings.Contains(notFound.Body.String(), `"code":"TARGET_NOT_FOUND"`) {
+	if notFound.Code != http.StatusNotFound || !strings.Contains(notFound.Body.String(), `"code":"TARGET_NOT_FOUND"`) {
 		t.Fatalf("missing anchor target: status=%d body=%s", notFound.Code, notFound.Body.String())
 	}
 	ambiguous := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -436,15 +438,8 @@ func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
 	ask := decodeBody[struct {
 		Anchor model.Anchor `json:"anchor"`
 	}](t, disambiguated)
-	if ask.Anchor.From != 10 || ask.Anchor.To != 13 {
-		t.Fatalf("disambiguated anchor = %#v; want [10,13)", ask.Anchor)
-	}
-	from, to := 10, 13
-	selection := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
-		"question": "Selection ask", "anchor": map[string]any{"artifact": "spec", "from": from, "to": to}, "actor": sessionActor(),
-	})
-	if selection.Code != http.StatusCreated || !strings.Contains(selection.Body.String(), `"quote":"the"`) {
-		t.Fatalf("selection anchor: status=%d body=%s", selection.Code, selection.Body.String())
+	if ask.Anchor.MarkID == "" || ask.Anchor.Quote != "the" {
+		t.Fatalf("disambiguated anchor = %#v; want the on a document mark", ask.Anchor)
 	}
 }
 
@@ -613,7 +608,7 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 		return documentService
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Dirty document", "The quick brown fox")
-	if err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The clever brown fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The clever brown fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("change live document: %v", err)
 	}
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -625,11 +620,11 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 	ask := decodeBody[struct {
 		Anchor model.Anchor `json:"anchor"`
 	}](t, created)
-	if ask.Anchor.Version != 2 || ask.Anchor.From != 11 || ask.Anchor.To != 16 {
-		t.Fatalf("anchor against changed document = %#v; want version 2 [11,16)", ask.Anchor)
+	if ask.Anchor.Version != 2 || ask.Anchor.MarkID == "" || ask.Anchor.Quote != "brown" {
+		t.Fatalf("anchor against changed document = %#v; want brown mark at version 2", ask.Anchor)
 	}
 	version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions/2", nil, "alice")
-	if version.Code != http.StatusOK || !strings.Contains(version.Body.String(), `"markdown":"The clever brown fox"`) || !strings.Contains(version.Body.String(), `"named":false`) {
+	if version.Code != http.StatusOK || !strings.Contains(version.Body.String(), `"markdown":"The clever brown fox\n"`) || !strings.Contains(version.Body.String(), `"named":false`) {
 		t.Fatalf("unnamed anchor version: status=%d body=%s", version.Code, version.Body.String())
 	}
 	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
@@ -662,7 +657,7 @@ func TestDocumentEditMapsMissingAndAmbiguousTargets(t *testing.T) {
 		t.Fatalf("missing edit: status=%d body=%s", missing.Code, missing.Body.String())
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
-	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"same same"`) {
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"same same\n"`) {
 		t.Fatalf("failed edit changed document: status=%d body=%s", text.Code, text.Body.String())
 	}
 }
@@ -723,7 +718,12 @@ func TestAnchorsKeepCleanDocumentAtExistingVersion(t *testing.T) {
 	}
 }
 func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
-	handler := newTestHandler(t)
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
 	issue := createInteractionIssue(t, handler, "TEST", "Comments", "The quick brown fox")
 	first := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": "Why brown?", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "actor": sessionActor(),
@@ -745,6 +745,9 @@ func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
 	resolved := sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/resolve", map[string]any{"actor": sessionActor()})
 	if resolved.Code != http.StatusOK || !strings.Contains(resolved.Body.String(), `"resolved":true`) {
 		t.Fatalf("session resolves comment: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	if projection := loadMarkProjection(t, database, issue.PrimaryArtifactID, comment.ID); projection["resolved"] != true || len(projection["replies"].([]any)) != 1 {
+		t.Fatalf("resolved comment projection = %#v, want resolved with one reply", projection)
 	}
 	if floating.Code != http.StatusCreated {
 		t.Fatalf("create floating comment: status=%d body=%s", floating.Code, floating.Body.String())
@@ -768,12 +771,25 @@ func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
 	if suggestion.Code != http.StatusCreated {
 		t.Fatalf("create suggestion: status=%d body=%s", suggestion.Code, suggestion.Body.String())
 	}
-	suggested := decodeBody[struct {
-		ID string `json:"id"`
-	}](t, suggestion)
+	suggested := decodeBody[model.Comment](t, suggestion)
 	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+suggested.ID+"/reject", map[string]any{}, "alice")
 	if rejected.Code != http.StatusOK || !strings.Contains(rejected.Body.String(), `"resolved":true`) || !strings.Contains(rejected.Body.String(), `"accepted":false`) {
 		t.Fatalf("reject suggestion: status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	rejectedStored := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+suggested.ID, nil, "alice")
+	if rejectedStored.Code != http.StatusOK {
+		t.Fatalf("read rejected suggestion: status=%d body=%s", rejectedStored.Code, rejectedStored.Body.String())
+	}
+	if stored := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, rejectedStored).Comment; stored.Anchor == nil || stored.Anchor.Orphaned {
+		t.Fatalf("rejected suggestion anchor = %#v, want retained non-orphaned anchor", stored.Anchor)
+	}
+	if markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || markdown != "The quick brown fox\n" {
+		t.Fatalf("rejected suggestion text = %q (%v), want unchanged document", markdown, err)
+	}
+	if projection := loadMarkProjection(t, database, issue.PrimaryArtifactID, suggested.ID); projection["status"] != "rejected" {
+		t.Fatalf("rejected suggestion projection = %#v", projection)
 	}
 
 	floatingSuggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
@@ -793,8 +809,8 @@ func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
 
 func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
 		t.Cleanup(func() {
 			if err := documentService.Shutdown(context.Background()); err != nil {
 				t.Errorf("shutdown document service: %v", err)
@@ -807,9 +823,7 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
 	})
-	comment := decodeBody[struct {
-		ID string `json:"id"`
-	}](t, suggestion)
+	comment := decodeBody[model.Comment](t, suggestion)
 	forbidden := sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{"actor": sessionActor()})
 	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), `"code":"HUMAN_ONLY"`) {
 		t.Fatalf("session accepts suggestion: status=%d body=%s", forbidden.Code, forbidden.Body.String())
@@ -818,17 +832,81 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `"resolved":true`) || !strings.Contains(accepted.Body.String(), `"accepted":true`) {
 		t.Fatalf("accept suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
+	acceptedStored := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if acceptedStored.Code != http.StatusOK {
+		t.Fatalf("read accepted suggestion: status=%d body=%s", acceptedStored.Code, acceptedStored.Body.String())
+	}
+	if stored := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, acceptedStored).Comment; stored.Anchor == nil || stored.Anchor.Orphaned {
+		t.Fatalf("accepted suggestion anchor = %#v, want retained non-orphaned anchor", stored.Anchor)
+	}
 	markdown, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
 	if err != nil {
 		t.Fatalf("read accepted document: %v", err)
 	}
-	if markdown != "The quick red fox" {
+	if markdown != "The quick red fox\n" {
 		t.Fatalf("accepted document = %q; want replacement applied", markdown)
+	}
+	if _, err := documentService.VerifyMark(context.Background(), issue.PrimaryArtifactID, docs.MarkSuggestion, comment.Anchor.MarkID); !errors.Is(err, docs.ErrAnchorMissing) {
+		t.Fatalf("accepted suggestion mark = %v, want missing", err)
+	}
+	if projection := loadMarkProjection(t, database, issue.PrimaryArtifactID, comment.ID); projection["status"] != "accepted" {
+		t.Fatalf("accepted suggestion projection = %#v", projection)
 	}
 	repeated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
 	if repeated.Code != http.StatusConflict || !strings.Contains(repeated.Body.String(), `"code":"ALREADY_ACTIONED"`) {
 		t.Fatalf("repeat accept: status=%d body=%s", repeated.Code, repeated.Body.String())
 	}
+}
+
+func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Orphaned suggestion", "The quick brown fox")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("delete suggestion mark text: %v", err)
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusConflict || !strings.Contains(accepted.Body.String(), `"code":"ANCHOR_ORPHANED"`) {
+		t.Fatalf("accept orphaned suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read orphaned suggestion: status=%d body=%s", read.Code, read.Body.String())
+	}
+	loaded := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read)
+	if loaded.Comment.Anchor == nil || !loaded.Comment.Anchor.Orphaned {
+		t.Fatalf("orphaned suggestion = %#v, want orphaned anchor", loaded.Comment)
+	}
+}
+
+func waitForArtifactVersion(t *testing.T, handler http.Handler, artifactID string, number int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		version := dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", artifactID, number), nil, "alice")
+		if version.Code == http.StatusOK {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("artifact version %d did not settle", number)
 }
 
 func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
@@ -926,7 +1004,7 @@ func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read document after concurrent acceptance: %v", err)
 	}
-	if markdown != "foo2" {
+	if markdown != "foo2\n" {
 		t.Fatalf("document after concurrent acceptance = %q, want foo2", markdown)
 	}
 }
@@ -974,7 +1052,7 @@ func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read closed document: %v", err)
 	}
-	if markdown != "foo" {
+	if markdown != "foo\n" {
 		t.Fatalf("closed suggestion changed document to %q, want foo", markdown)
 	}
 }
@@ -1601,7 +1679,7 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 	if handlerResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
 	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
 	waitForDocumentConnectionClose(t, connection)
 	reconnected, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
@@ -1609,7 +1687,7 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 		t.Fatalf("reconnect evicted document: response=%#v err=%v", wsResponse, err)
 	}
 	t.Cleanup(func() { _ = reconnected.Close() })
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 }
 
 func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
@@ -1646,6 +1724,7 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 		t.Fatalf("connect live document: response=%#v err=%v", wsResponse, err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
+	drainDocumentUpdates(persistenceStore)
 	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body":       "replace it",
 		"anchor":     map[string]any{"artifact": "spec", "quote": "before"},
@@ -1668,7 +1747,7 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 	if handlerResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("accept with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
 	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
 	waitForDocumentConnectionClose(t, connection)
 	reconnected, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
@@ -1676,7 +1755,79 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 		t.Fatalf("reconnect evicted document: response=%#v err=%v", wsResponse, err)
 	}
 	t.Cleanup(func() { _ = reconnected.Close() })
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
+}
+
+func TestCommentProjectionFailureEvictsLiveDocument(t *testing.T) {
+	for _, action := range []string{"reply", "resolve"} {
+		t.Run(action, func(t *testing.T) {
+			var documentService *docs.Service
+			var failure *postApplyFailureDocs
+			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+				documentService = docs.New(docs.Deps{
+					Store:    database,
+					Settle:   time.Hour,
+					Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+				})
+				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+				failure = &postApplyFailureDocs{
+					API:               documentService,
+					applied:           make(chan struct{}),
+					release:           make(chan struct{}),
+					failProjectMark:   true,
+					projectMarkPasses: 1,
+				}
+				return failure
+			})
+			issue := createInteractionIssue(t, handler, "TEST", "Projection rollback", "before")
+			documentServer := httptest.NewServer(http.HandlerFunc(documentService.ServeHTTP))
+			t.Cleanup(documentServer.Close)
+			connection, wsResponse, err := gws.DefaultDialer.Dial(
+				"ws"+strings.TrimPrefix(documentServer.URL, "http")+"/ws/doc/"+issue.PrimaryArtifactID,
+				http.Header{"X-Dispatch-User": []string{"alice"}},
+			)
+			if err != nil {
+				t.Fatalf("connect live document: response=%#v err=%v", wsResponse, err)
+			}
+			t.Cleanup(func() { _ = connection.Close() })
+			rootResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "root", "anchor": map[string]any{"artifact": "spec", "quote": "before"}, "actor": sessionActor(),
+			})
+			if rootResponse.Code != http.StatusCreated {
+				t.Fatalf("create anchored root: status=%d body=%s", rootResponse.Code, rootResponse.Body.String())
+			}
+			root := decodeBody[model.Comment](t, rootResponse)
+
+			responses := make(chan *httptest.ResponseRecorder, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if action == "reply" {
+					responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+						"body": "reply", "reply_to": root.ID,
+					}, "alice")
+					return
+				}
+				responses <- sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+root.ID+"/resolve", map[string]any{"actor": sessionActor()})
+			}()
+			t.Cleanup(func() {
+				closeTestGate(failure.release)
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("projection failure request did not finish after its gate opened")
+				}
+			})
+			waitForPostApply(t, failure)
+			closeTestGate(failure.release)
+			handlerResponse := awaitResponse(t, responses)
+			if handlerResponse.Code != http.StatusInternalServerError {
+				t.Fatalf("%s projection failure: status=%d body=%s", action, handlerResponse.Code, handlerResponse.Body.String())
+			}
+			assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
+			waitForDocumentConnectionClose(t, connection)
+		})
+	}
 }
 
 func TestDocumentUploadRollbackEvictsLiveDocument(t *testing.T) {
@@ -1703,7 +1854,7 @@ func TestDocumentUploadRollbackEvictsLiveDocument(t *testing.T) {
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("upload with forced post-replace failure: status=%d body=%s", response.Code, response.Body.String())
 	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 }
 
 type recordingVersionedStore struct {
@@ -1735,6 +1886,8 @@ type postApplyFailureDocs struct {
 	releaseEvict       chan struct{}
 	applied            chan struct{}
 	release            chan struct{}
+	failProjectMark    bool
+	projectMarkPasses  int
 }
 
 func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
@@ -1748,9 +1901,9 @@ func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, 
 	return applied, errors.New("forced post-apply failure")
 }
 
-func (d *postApplyFailureDocs) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, replacement string, actor model.Actor) error {
+func (d *postApplyFailureDocs) AcceptSuggestion(ctx context.Context, artifactID, markID, replacement string, actor model.Actor) error {
 	d.waitBeforeApply()
-	if err := d.API.ApplyReplace(ctx, artifactID, anchor, replacement, actor); err != nil {
+	if err := d.API.AcceptSuggestion(ctx, artifactID, markID, replacement, actor); err != nil {
 		return err
 	}
 	close(d.applied)
@@ -1758,14 +1911,32 @@ func (d *postApplyFailureDocs) ApplyReplace(ctx context.Context, artifactID stri
 	return errors.New("forced post-apply failure")
 }
 
-func (d *postApplyFailureDocs) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) error {
+func (d *postApplyFailureDocs) ProjectMark(ctx context.Context, artifactID, markID string, record docs.MarkRecord) error {
+	if !d.failProjectMark {
+		return d.API.ProjectMark(ctx, artifactID, markID, record)
+	}
+	if d.projectMarkPasses > 0 {
+		d.projectMarkPasses--
+		return d.API.ProjectMark(ctx, artifactID, markID, record)
+	}
 	d.waitBeforeApply()
-	if err := d.API.ReplaceText(ctx, artifactID, markdown, actor); err != nil {
+	if err := d.API.ProjectMark(ctx, artifactID, markID, record); err != nil {
 		return err
 	}
 	close(d.applied)
 	<-d.release
-	return errors.New("forced post-apply failure")
+	return errors.New("forced post-projection failure")
+}
+
+func (d *postApplyFailureDocs) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
+	d.waitBeforeApply()
+	_, err := d.API.ReplaceText(ctx, artifactID, markdown, actor)
+	if err != nil {
+		return "", err
+	}
+	close(d.applied)
+	<-d.release
+	return "", errors.New("forced post-apply failure")
 }
 
 func (d *postApplyFailureDocs) Evict(ctx context.Context, artifactID string) error {
@@ -1782,6 +1953,36 @@ func (d *postApplyFailureDocs) waitBeforeApply() {
 	}
 	close(d.beforeApply)
 	<-d.releaseBeforeApply
+}
+
+func loadMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) map[string]any {
+	t.Helper()
+	projection, found := findMarkProjection(t, database, artifactID, markID)
+	if !found {
+		t.Fatalf("mark projection %q is missing", markID)
+	}
+	return projection
+}
+
+func findMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) (map[string]any, bool) {
+	t.Helper()
+	loaded, err := docs.NewPgVersioned(database).Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load persisted document: %v", err)
+	}
+	document := crdt.New()
+	if err := crdt.ApplyUpdateV1(document, loaded.Update, nil); err != nil {
+		t.Fatalf("decode persisted document: %v", err)
+	}
+	value, found := document.GetMap("marks").Get(markID)
+	if !found {
+		return nil, false
+	}
+	projection, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("mark projection = %#v, want object", value)
+	}
+	return projection, true
 }
 
 func drainDocumentUpdates(store *recordingVersionedStore) {

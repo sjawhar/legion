@@ -1,7 +1,7 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import { createAsk, createIssue, createMessage, createProject, getAsk } from "./api";
-import { enterEditMode } from "./editor";
+import { selectPreviewText } from "./preview";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -11,17 +11,6 @@ const session = {
 };
 const initialMarkdown = "The quick brown fox jumps over the lazy dog";
 const pinnedMessage = "Pin me before you forget";
-
-async function selectEditorRange(editor: Locator, from: number, length: number): Promise<void> {
-  await editor.click();
-  await editor.press("Control+Home");
-  for (let index = 0; index < from; index += 1) {
-    await editor.press("ArrowRight");
-  }
-  for (let index = 0; index < length; index += 1) {
-    await editor.press("Shift+ArrowRight");
-  }
-}
 
 async function activeElementInside(page: Page, selector: string): Promise<boolean> {
   return page.evaluate((sel) => {
@@ -109,12 +98,12 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       ).toBe(true);
       await page.getByRole("button", { name: /Close review panel/ }).click();
     }
-    await enterEditMode(page);
-    const editor = page.getByRole("textbox", { name: "Document editor" });
-    await expect(editor).toContainText(initialMarkdown);
+    await expect(page.getByRole("tabpanel", { name: "Spec" }).getByRole("article")).toContainText(
+      initialMarkdown
+    );
 
     // D11: choosing Comment on a selection autofocuses the composer's body field.
-    await selectEditorRange(editor, 10, 5);
+    await selectPreviewText(page, "brown");
     await page.getByRole("button", { exact: true, name: "Comment" }).click();
     const commentComposer = page.getByRole("form", { name: "Comment composer" });
     const commentBody = commentComposer.getByLabel("Comment");

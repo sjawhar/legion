@@ -61,9 +61,9 @@ echo "$!" >"$sse_pid_file"
 sleep 0.1
 
 ask="$(agent_request -X POST "${dispatch_url}/api/v1/issues/${issue_key}/asks" \
-  -d '{"question":"Which colour?","options":[{"label":"brown"},{"label":"red"}],"custom":false,"anchor":{"artifact":"spec","quote":"brown"},"actor":{"kind":"session","id":"session-e2e-api"}}')"
+  -d '{"question":"Which colour?","options":[{"label":"brown"},{"label":"red"}],"anchor":{"artifact":"spec","quote":"brown"},"actor":{"kind":"session","id":"session-e2e-api"}}')"
 ask_id="$(jq -er '.id' <<<"$ask")"
-jq -e '.anchor.quote == "brown" and .anchor.from == 10 and .anchor.to == 15 and .state == "open"' <<<"$ask" >/dev/null || {
+jq -e '.anchor.quote == "brown" and (.anchor.mark_id | type == "string") and .state == "open"' <<<"$ask" >/dev/null || {
   printf 'anchored ask response was unexpected: %s\n' "$ask" >&2
   exit 1
 }

@@ -24,23 +24,21 @@ type ActorOrigin struct {
 	SessionTitle string `json:"session_title,omitempty"`
 }
 
-// Anchor identifies a range of document text at a particular named version.
+// Anchor identifies a document mark at a particular named version.
 type Anchor struct {
 	ArtifactID string `json:"artifact_id"`
+	MarkID     string `json:"mark_id"`
 	Version    int    `json:"version"`
 	Quote      string `json:"quote"`
-	From       int    `json:"from"`
-	To         int    `json:"to"`
 	Orphaned   bool   `json:"orphaned"`
 }
 
-// AnchorInput selects document text by quote or by a browser-owned UTF-16 range.
+// AnchorInput selects document text by quote or identifies a browser-owned mark.
 type AnchorInput struct {
 	Artifact   string  `json:"artifact"`
 	Quote      *string `json:"quote,omitempty"`
 	Occurrence *int    `json:"occurrence,omitempty"`
-	From       *int    `json:"from,omitempty"`
-	To         *int    `json:"to,omitempty"`
+	MarkID     *string `json:"mark_id,omitempty"`
 }
 
 // Project groups native issues under a short key.

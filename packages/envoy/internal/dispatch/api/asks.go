@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const (
@@ -40,7 +40,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask question is required")
 		return
 	}
-	if length := text.Len16(input.Question); length > maxAskQuestion16 {
+	if length := len16(input.Question); length > maxAskQuestion16 {
 		capExceeded(w, "question", length, maxAskQuestion16)
 		return
 	}
@@ -83,13 +83,29 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	evictOnFailure := false
+	evictArtifactID := ""
+	defer func() {
+		if evictOnFailure {
+			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
+		}
+	}()
 	defer tx.Rollback(r.Context())
 	issueKey := r.PathValue("key")
 	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, actor)
+	var rowID string
+	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, docs.MarkAsk, rowID, actor)
+	if anchor != nil {
+		evictOnFailure = true
+		evictArtifactID = anchor.ArtifactID
+	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -115,13 +131,14 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	var ask model.Ask
 	if err := tx.QueryRow(r.Context(), `
-		insert into asks (issue_key, author, question, options, multiple, urgency, anchor)
-		values ($1, $2, $3, $4, $5, $6, $7)
-		returning id::text, created_at
-	`, issueKey, author, input.Question, options, multiple, urgency, anchorJSON).Scan(&ask.ID, &ask.CreatedAt); err != nil {
+		insert into asks (id, issue_key, author, question, options, multiple, urgency, anchor)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		returning created_at
+	`, rowID, issueKey, author, input.Question, options, multiple, urgency, anchorJSON).Scan(&ask.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	ask.ID = rowID
 	ask.IssueKey = issueKey
 	ask.Author = actor
 	ask.Question = input.Question
@@ -158,6 +175,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	evictOnFailure = false
 	if snapshot != nil {
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
 	}

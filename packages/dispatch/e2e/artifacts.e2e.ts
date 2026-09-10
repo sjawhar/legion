@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { expect, type Page, test } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createProject } from "./api";
-import { enterEditMode } from "./editor";
 import { resetDatabase } from "./seed";
 
 const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
@@ -82,8 +81,7 @@ test("artifacts upload, versions, references, and phone layout", async ({ page }
     }
   }
   await page.getByRole("tab", { name: "Spec" }).click();
-  await enterEditMode(page);
-  await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
+  await expect(page.getByRole("tabpanel", { name: "Spec" }).getByRole("article")).toContainText(
     "The original document."
   );
 
@@ -101,12 +99,6 @@ test("artifacts upload, versions, references, and phone layout", async ({ page }
   await openArtifacts(page);
   await expect(diagram.getByLabel("Referenced by")).toContainText("Comment");
   await expect(diagram.getByLabel("Referenced by")).toContainText("diagram.png");
-  const documentRequests: string[] = [];
-  page.on("websocket", (socket) => {
-    if (socket.url().includes("/ws/doc/")) {
-      documentRequests.push(socket.url());
-    }
-  });
   await diagram.getByLabel("Referenced by").getByRole("link", { name: "diagram.png" }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/diagram-png`);
   const artifactsPanel = page.getByRole("tabpanel", { name: "Artifacts" });

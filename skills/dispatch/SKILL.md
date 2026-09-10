@@ -76,8 +76,10 @@ dispatch_ask({
 It returns `details` `{ issue, topic, ask }`. Options are buttons: never enumerate choices in
 prose. Put the recommendation in `question`, and put each selectable choice in `options`.
 Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence` is
-zero-based and selects a repeated quote. An anchor whose quote disappears becomes orphaned but
-remains readable against its original document version.
+zero-based and selects a repeated quote. The server writes the resulting mark. The HTTP API also
+accepts `{ artifact, mark_id }` from a browser that has already written its mark; Dispatch tools
+use the quote form. An anchor whose quote disappears becomes orphaned but remains readable against
+its original document version.
 
 An ask stays open until a human answers, unless its question no longer needs that answer. Retract a
 moot or superseded question, or self-resolve one after finding the answer:
@@ -141,7 +143,8 @@ dispatch_comment({ issue, artifact?, quote?, occurrence?, body, reply_to?, reply
 ```
 
 It returns `details` `{ issue, topic, comment }`. `quote` requires `artifact`; omit both for a
-floating issue comment. Use `reply_to` to continue a comment thread; use `reply_to_ask` to reply
+floating issue comment. A reply (`reply_to`/`reply_to_ask`) takes no `quote`; it belongs to its
+parent's anchor. Use `reply_to` to continue a comment thread; use `reply_to_ask` to reply
 directly under a question asked with `dispatch_ask`. The two are mutually exclusive.
 
 Propose an exact replacement instead of describing it:
@@ -152,8 +155,12 @@ dispatch_suggest({ issue, artifact, quote, replace_with, body?, occurrence? })
 
 It returns `details` `{ issue, topic, comment }`. A human accepts or rejects a suggestion. On
 `TARGET_AMBIGUOUS`, add zero-based `occurrence`. On `TARGET_NOT_FOUND`, re-read the document
-before retrying. `INVALID_OP` names a malformed edit; `CAP_EXCEEDED` never truncates;
-`ISSUE_CLOSED` rejects a write. `ACTOR_KIND` and `ROUTE_INVALID` reject an invalid actor or route.
+before retrying. `INVALID_ANCHOR` requires exactly one nonempty anchor `quote` or `mark_id`;
+`ANCHOR_MISSING` means a browser mark was not observed in the live tree, and
+`ANCHOR_ORPHANED` means its marked text no longer exists. `INVALID_MARKDOWN` and `DOC_SCHEMA`
+reject Markdown or a live tree outside the Proof schema. `INVALID_OP` names a malformed edit;
+`CAP_EXCEEDED` never truncates; `ISSUE_CLOSED` rejects a write. `ACTOR_KIND` and `ROUTE_INVALID`
+reject an invalid actor or route.
 
 ## Artifacts
 

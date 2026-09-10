@@ -22,7 +22,7 @@ test("tablet keeps the log readable and exposes the review sheet", async ({
     title: "Review at tablet width",
   });
   const comment = await createComment(issue.key, {
-    anchor: { artifact: "spec", from: 0, to: 6 },
+    anchor: { artifact: "spec", quote: "Review" },
     body: "Open this review item.",
   });
   const context = await asUser(browser, "alice");

@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const maxCommentBody16 = 2000
@@ -126,7 +126,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
 	}
-	if length := text.Len16(input.Body); length > maxCommentBody16 {
+	if length := len16(input.Body); length > maxCommentBody16 {
 		capExceeded(w, "body", length, maxCommentBody16)
 		return
 	}
@@ -136,6 +136,13 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	evictOnFailure := false
+	evictArtifactID := ""
+	defer func() {
+		if evictOnFailure {
+			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
+		}
+	}()
 	defer tx.Rollback(r.Context())
 	issueKey := r.PathValue("key")
 	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
@@ -144,6 +151,10 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.ReplyTo != nil && input.AskID != nil {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to and ask_id cannot both be set")
+		return
+	}
+	if input.Anchor != nil && (input.ReplyTo != nil || input.AskID != nil) {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "replies cannot carry anchors")
 		return
 	}
 	if input.ReplyTo != nil {
@@ -176,10 +187,32 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, actor)
+	var rowID string
+	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	markKind := docs.MarkComment
+	if input.Suggestion != nil {
+		markKind = docs.MarkSuggestion
+	}
+	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, markKind, rowID, actor)
+	if anchor != nil {
+		evictOnFailure = true
+		evictArtifactID = anchor.ArtifactID
+	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+
+	projectionKind := ""
+	if input.Suggestion != nil && anchor != nil {
+		projectionKind, err = s.deps.Docs.SuggestionKind(r.Context(), anchor.ArtifactID, anchor.MarkID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	author, err := encodeJSON(actor)
 	if err != nil {
@@ -206,13 +239,14 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	}
 	var comment model.Comment
 	if err := tx.QueryRow(r.Context(), `
-		insert into comments (issue_key, author, body, anchor, reply_to, ask_id, suggestion)
-		values ($1, $2, $3, $4, $5, $6, $7)
-		returning id::text, created_at
-	`, issueKey, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, suggestionJSON).Scan(&comment.ID, &comment.CreatedAt); err != nil {
+		insert into comments (id, issue_key, author, body, anchor, reply_to, ask_id, suggestion)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		returning created_at
+	`, rowID, issueKey, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	comment.ID = rowID
 	comment.IssueKey = issueKey
 	comment.Author = actor
 	comment.Body = input.Body
@@ -220,6 +254,39 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	comment.ReplyTo = input.ReplyTo
 	comment.AskID = input.AskID
 	comment.Suggestion = suggestion
+	if comment.Anchor != nil {
+		evictArtifactID = comment.Anchor.ArtifactID
+		evictOnFailure = true
+		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if comment.ReplyTo != nil {
+		root, err := s.commentThreadRoot(r.Context(), tx, comment)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if root.Anchor != nil {
+			replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", root.ID)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			rootProjectionKind, err := s.commentProjectionKind(r.Context(), root)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			evictArtifactID = root.Anchor.ArtifactID
+			evictOnFailure = true
+			if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind)); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+	}
 	if err := s.replaceRefs(r.Context(), tx, "comment", comment.ID, comment.Body); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -253,6 +320,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	evictOnFailure = false
 	if snapshot != nil {
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
 	}
@@ -297,9 +365,8 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
-	// Same shape as editArtifact: a CRDT replacement cannot be rolled back in memory, so a
-	// failure after ApplyReplace evicts the room (R30). Deferred BEFORE tx.Rollback so the
-	// transaction releases its document locks before eviction compacts the room.
+	// A live mark mutation cannot roll back from memory with the SQL transaction.
+	// Evict after the transaction releases its locks when a later step fails.
 	evictOnFailure := false
 	evictArtifactID := ""
 	defer func() {
@@ -327,9 +394,15 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
+	projectionKind := ""
 	eventType := "comment.resolved"
 	switch action {
 	case "resolve":
+		projectionKind, err = s.commentProjectionKind(r.Context(), comment)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		if _, err := tx.Exec(r.Context(), `update comments set resolved = true where id = $1`, comment.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -344,15 +417,48 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
 			return
 		}
-		if action == "accept" {
-			if comment.Anchor == nil {
-				writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
-				return
-			}
+		if action == "accept" && comment.Anchor == nil {
+			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
+			return
+		}
+		kind, kindErr := s.commentProjectionKind(r.Context(), comment)
+		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
+			s.writeHandlerError(w, kindErr)
+			return
+		}
+		if kindErr == nil {
+			projectionKind = kind
+		}
+		if comment.Anchor != nil {
 			evictArtifactID = comment.Anchor.ArtifactID
 			evictOnFailure = true
-			if err := s.deps.Docs.ApplyReplace(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, *comment.Anchor, comment.Suggestion.ReplaceWith, actor); err != nil {
-				s.writeHandlerError(w, err)
+			var markErr error
+			if action == "accept" {
+				markErr = s.deps.Docs.AcceptSuggestion(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, comment.Suggestion.ReplaceWith, actor)
+			} else {
+				markErr = s.deps.Docs.RejectSuggestion(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, actor)
+			}
+			if markErr != nil {
+				if !errors.Is(markErr, docs.ErrAnchorOrphaned) {
+					s.writeHandlerError(w, markErr)
+					return
+				}
+				comment.Anchor.Orphaned = true
+				anchor, err := encodeJSON(comment.Anchor)
+				if err != nil {
+					s.writeHandlerError(w, err)
+					return
+				}
+				if _, err := tx.Exec(r.Context(), `update comments set anchor = $2 where id = $1`, comment.ID, anchor); err != nil {
+					s.writeHandlerError(w, err)
+					return
+				}
+				if err := tx.Commit(r.Context()); err != nil {
+					s.writeHandlerError(w, err)
+					return
+				}
+				evictOnFailure = false
+				s.writeHandlerError(w, markErr)
 				return
 			}
 		}
@@ -380,6 +486,19 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		if result.RowsAffected() != 1 {
 			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
+			return
+		}
+	}
+	if comment.Anchor != nil {
+		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		evictArtifactID = comment.Anchor.ArtifactID
+		evictOnFailure = true
+		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind)); err != nil {
+			s.writeHandlerError(w, err)
 			return
 		}
 	}
@@ -443,6 +562,55 @@ func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.C
 		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
 		from comments where id = $1
 	`, id))
+}
+
+func (s *server) commentThreadRoot(ctx context.Context, q queryer, comment model.Comment) (model.Comment, error) {
+	for comment.ReplyTo != nil {
+		root, err := s.loadComment(ctx, q, *comment.ReplyTo)
+		if err != nil {
+			return model.Comment{}, err
+		}
+		comment = root
+	}
+	return comment, nil
+}
+
+func (s *server) commentProjectionKind(ctx context.Context, comment model.Comment) (string, error) {
+	if comment.Suggestion == nil || comment.Anchor == nil {
+		return "", nil
+	}
+	return s.deps.Docs.SuggestionKind(ctx, comment.Anchor.ArtifactID, comment.Anchor.MarkID)
+}
+
+func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestionKind string) docs.MarkRecord {
+	record := docs.MarkRecord{
+		Kind:      "comment",
+		By:        docs.ActorRef(comment.Author),
+		CreatedAt: comment.CreatedAt.UTC().Format(time.RFC3339Nano),
+		Text:      comment.Body,
+		Resolved:  comment.Resolved,
+		Replies:   make([]docs.MarkReply, 0, len(replies)),
+	}
+	for _, reply := range replies {
+		record.Replies = append(record.Replies, docs.MarkReply{
+			By:   docs.ActorRef(reply.Author),
+			Text: reply.Body,
+			At:   reply.CreatedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	if comment.Suggestion != nil {
+		record.Kind = suggestionKind
+		record.Content = comment.Suggestion.ReplaceWith
+		record.Status = "pending"
+		if comment.Suggestion.Accepted != nil {
+			if *comment.Suggestion.Accepted {
+				record.Status = "accepted"
+			} else {
+				record.Status = "rejected"
+			}
+		}
+	}
+	return record
 }
 
 func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {

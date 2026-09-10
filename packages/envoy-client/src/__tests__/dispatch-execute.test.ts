@@ -751,10 +751,9 @@ describe("executeDispatchTool", () => {
             body: "Please revise this.",
             anchor: {
               artifact_id: "artifact-42",
+              mark_id: "m-1",
               version: 1,
               quote: "Initial wording",
-              from: 0,
-              to: 15,
               orphaned: false,
             },
             reply_to: null,
@@ -770,10 +769,9 @@ describe("executeDispatchTool", () => {
               body: "Revised.",
               anchor: {
                 artifact_id: "artifact-42",
+                mark_id: "m-2",
                 version: 2,
                 quote: "Revised wording",
-                from: 0,
-                to: 15,
                 orphaned: false,
               },
               reply_to: "comment-42",

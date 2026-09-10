@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 
-import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
+import type { Artifact, Ask, Comment, Event } from "../../api/types";
 import type { MarginComposer } from "./CommentsTab";
 import type { ComposerAnchor, ComposerKind } from "./Composer";
 import { MarginSheet } from "./MarginSheet";
@@ -24,18 +24,13 @@ export interface MarginSelection extends ComposerAnchor {
   rect: { bottom: number; left: number; right: number; top: number };
 }
 
-export interface MarginAnchor {
-  anchor: Anchor;
-  id: string;
-}
-
 interface MarginContextValue {
-  anchors: MarginAnchor[];
+  documentText: string;
   hoveredItemId: string | undefined;
   selectItem: (id: string) => void;
   selectedItemId: string | undefined;
   selection: MarginSelection | undefined;
-  setAnchors: (anchors: MarginAnchor[]) => void;
+  setDocumentText: (text: string) => void;
   setHoveredItemId: (id: string | undefined) => void;
   setSelection: (selection: MarginSelection | undefined) => void;
 }
@@ -44,7 +39,7 @@ export interface MarginSheetModel {
   actions: {
     closeComposer: () => void;
     onAction: (id: string, action: MarginItemAction) => void;
-    onReply: (comment: Comment, threadAnchor: Anchor | null) => void;
+    onReply: (comment: Comment) => void;
     onRetryAction: () => void;
     onRetryAnsweredAsk: (() => void) | undefined;
     onRetryComments: () => void;
@@ -88,33 +83,33 @@ export interface MarginSheetModel {
 
 const noMargin = () => {};
 const MarginContext = createContext<MarginContextValue>({
-  anchors: [],
+  documentText: "",
   hoveredItemId: undefined,
   selectItem: noMargin,
   selectedItemId: undefined,
   selection: undefined,
-  setAnchors: noMargin,
+  setDocumentText: noMargin,
   setHoveredItemId: noMargin,
   setSelection: noMargin,
 });
 
 export function MarginProvider({ children }: { children: ReactNode }): ReactNode {
-  const [anchors, setAnchors] = useState<MarginAnchor[]>([]);
+  const [documentText, setDocumentText] = useState("");
   const [hoveredItemId, setHoveredItemId] = useState<string>();
   const [selectedItemId, setSelectedItemId] = useState<string>();
   const [selection, setSelection] = useState<MarginSelection>();
   const value = useMemo<MarginContextValue>(
     () => ({
-      anchors,
+      documentText,
       hoveredItemId,
       selectItem: setSelectedItemId,
       selectedItemId,
       selection,
-      setAnchors,
+      setDocumentText,
       setHoveredItemId,
       setSelection,
     }),
-    [anchors, hoveredItemId, selectedItemId, selection]
+    [documentText, hoveredItemId, selectedItemId, selection]
   );
 
   return <MarginContext.Provider value={value}>{children}</MarginContext.Provider>;
@@ -126,11 +121,11 @@ export function useMargin(): MarginContextValue {
 
 function useMarginSheet(): MarginSheetModel {
   const {
+    documentText,
     hoveredItemId,
     selectItem,
     selectedItemId,
     selection,
-    setAnchors,
     setHoveredItemId,
     setSelection,
   } = useMargin();
@@ -144,7 +139,6 @@ function useMarginSheet(): MarginSheetModel {
     asksPending,
     commentsError,
     commentsPending,
-    decorationAnchors,
     isClosed,
     issueError,
     issueKey,
@@ -163,7 +157,7 @@ function useMarginSheet(): MarginSheetModel {
     retryItem,
     routeItemId,
     visibleArtifact,
-  } = useMarginItems(tab);
+  } = useMarginItems(tab, documentText);
 
   const sheetExpanded = issueKey !== undefined && expandedIssueKey === issueKey;
   const toggleSheet = useCallback(
@@ -174,9 +168,6 @@ function useMarginSheet(): MarginSheetModel {
     [issueKey, sheetExpanded]
   );
 
-  useEffect(() => {
-    setAnchors(decorationAnchors);
-  }, [decorationAnchors, setAnchors]);
   useEffect(() => {
     if (selection !== undefined && selection.artifactId !== visibleArtifact?.id) {
       setSelection(undefined);
@@ -223,19 +214,8 @@ function useMarginSheet(): MarginSheetModel {
     [mutateItem]
   );
   const onReply = useCallback(
-    (comment: Comment, threadAnchor: Anchor | null) => {
-      openComposer(
-        "comment",
-        threadAnchor === null
-          ? undefined
-          : {
-              artifact: threadAnchor.artifact_id,
-              from: threadAnchor.from,
-              quote: threadAnchor.quote,
-              to: threadAnchor.to,
-            },
-        comment.id
-      );
+    (comment: Comment) => {
+      openComposer("comment", undefined, comment.id);
     },
     [openComposer]
   );

@@ -8,6 +8,9 @@ func Splice(doc *Node, r Range, with *Node) (*Node, error) {
 	if err := validateSplice(doc, r, with); err != nil {
 		return nil, err
 	}
+	if r.From == r.To {
+		return insertAt(doc, r.From, with)
+	}
 	selection, err := selectRange(doc, r)
 	if err != nil {
 		return nil, err
@@ -22,13 +25,95 @@ func Splice(doc *Node, r Range, with *Node) (*Node, error) {
 }
 
 func validateSplice(doc *Node, r Range, with *Node) error {
-	if doc == nil || with == nil || doc.Type != "doc" || with.Type != "doc" || r.From >= r.To {
+	if doc == nil || with == nil || doc.Type != "doc" || with.Type != "doc" || r.From > r.To {
 		return fmt.Errorf("%w: invalid splice", ErrSchema)
 	}
 	if err := doc.Validate(); err != nil {
 		return err
 	}
 	return with.Validate()
+}
+
+type insertionBoundary struct {
+	path  []int
+	index int
+}
+
+// insertAt applies ProseMirror's point-insertion fitting. Textblock points
+// retain inline replacements and split around inserted blocks; other points
+// insert at the deepest block-container child boundary that accepts them.
+func insertAt(doc *Node, pos int, with *Node) (*Node, error) {
+	var inline *nodeLocation
+	var boundaries []insertionBoundary
+	walk(doc, func(node *Node, path []int, start, end int) bool {
+		if isTextblock(node.Type) && start+1 <= pos && pos <= end-1 {
+			location := nodeLocation{path: append([]int(nil), path...), pos: start, end: end}
+			inline = &location
+		}
+		if index, ok := childBoundary(node, start, pos); ok {
+			boundaries = append(boundaries, insertionBoundary{
+				path:  append([]int(nil), path...),
+				index: index,
+			})
+		}
+		return true
+	})
+	if inline != nil {
+		if inlineDocument(with) {
+			out := cloneNode(doc)
+			block := nodeAtPath(out, inline.path)
+			if err := spliceInline(block, Range{From: pos, To: pos}, inline.pos, with.Children[0].Children); err != nil {
+				return nil, err
+			}
+			if err := out.Validate(); err != nil {
+				return nil, err
+			}
+			return out, nil
+		}
+		selection := spliceSelection{
+			first:      *inline,
+			last:       *inline,
+			parentPath: append([]int(nil), inline.path[:len(inline.path)-1]...),
+		}
+		return ascend(doc, selection, Range{From: pos, To: pos}, with)
+	}
+
+	for index := len(boundaries) - 1; index >= 0; index-- {
+		boundary := boundaries[index]
+		parent := nodeAtPath(doc, boundary.path)
+		replacement, fits := fitReplacement(parent, with, enclosingListItem(doc, boundary.path), false)
+		if !fits {
+			continue
+		}
+		candidate := cloneNode(parent)
+		children := make([]*Node, 0, len(candidate.Children)+len(replacement))
+		children = append(children, candidate.Children[:boundary.index]...)
+		children = append(children, replacement...)
+		children = append(children, candidate.Children[boundary.index:]...)
+		candidate.Children = children
+		if err := candidate.Validate(); err != nil {
+			continue
+		}
+		return replaceFittedContent(doc, boundary.path, candidate)
+	}
+	return nil, fmt.Errorf("%w: replacement does not fit document", ErrSchema)
+}
+
+func childBoundary(node *Node, nodeStart, pos int) (int, bool) {
+	if node.Type == "text" || isLeafNodeType(node.Type) {
+		return 0, false
+	}
+	childPos := nodeStart
+	if node.Type != "doc" {
+		childPos++
+	}
+	for index, child := range node.Children {
+		if childPos == pos {
+			return index, true
+		}
+		childPos += nodeSize(child)
+	}
+	return len(node.Children), childPos == pos
 }
 
 type spliceSelection struct {
@@ -530,6 +615,12 @@ func spliceInline(block *Node, r Range, blockStart int, replacement []*Node) err
 	for _, child := range block.Children {
 		size := nodeSize(child)
 		end := position + size
+		if !inserted && r.From == r.To && r.From == position {
+			for _, node := range replacement {
+				appendInline(&children, []*Node{cloneNode(node)})
+			}
+			inserted = true
+		}
 		if r.To <= position || r.From >= end {
 			appendInline(&children, []*Node{cloneNode(child)})
 			position = end
@@ -560,6 +651,12 @@ func spliceInline(block *Node, r Range, blockStart int, replacement []*Node) err
 			}
 		}
 		position = end
+	}
+	if !inserted && r.From == r.To && r.From == position {
+		for _, node := range replacement {
+			appendInline(&children, []*Node{cloneNode(node)})
+		}
+		inserted = true
 	}
 	if !inserted {
 		return ErrTargetNotFound

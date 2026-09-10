@@ -1,143 +1,174 @@
 package docs
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-type textMutation struct {
-	from int
-	to   int
-	with string
+// ErrInvalidOp identifies the malformed user-facing operation field.
+type ErrInvalidOp struct {
+	Field  string
+	Reason string
 }
 
-func resolveOperations(markdown string, ops []model.EditOp) ([]textMutation, error) {
-	mutations := make([]textMutation, 0, len(ops))
+func (e *ErrInvalidOp) Error() string {
+	return fmt.Sprintf("invalid document operation field %q: %s", e.Field, e.Reason)
+}
+
+func invalidOp(field string) error {
+	return &ErrInvalidOp{Field: field}
+}
+
+// applyOperations applies each operation to its predecessor's tree so a
+// following operation resolves the structure created by the preceding one.
+func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (*pmdoc.Node, error) {
 	for index, op := range ops {
-		mutation, err := resolveOperation(markdown, op)
+		next, err := applyOperation(tree, op)
 		if err != nil {
 			return nil, fmt.Errorf("operation %d: %w", index, err)
 		}
-		mutations = append(mutations, mutation)
-		markdown = replaceRange(markdown, mutation.from, mutation.to, mutation.with)
+		tree = next
 	}
-	return mutations, nil
+	return tree, nil
 }
 
-func resolveOperation(markdown string, op model.EditOp) (textMutation, error) {
+func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 	switch op.Op {
 	case "replace":
 		if op.Find == "" {
-			return textMutation{}, invalidOp("find")
+			return nil, invalidOp("find")
 		}
-		from, to, err := text.Resolve(markdown, op.Find, op.Occurrence)
+		r, err := pmdoc.FindQuote(tree, op.Find, op.Occurrence, nil)
 		if err != nil {
-			return textMutation{}, err
+			return nil, err
 		}
-		return textMutation{from: from, to: to, with: op.With}, nil
+		with, err := inlineAware(op.With)
+		if err != nil {
+			return nil, invalidMarkdownOp("with", err)
+		}
+		return pmdoc.Splice(tree, r, with)
 	case "delete":
 		if op.Find == "" {
-			return textMutation{}, invalidOp("find")
+			return nil, invalidOp("find")
 		}
-		from, to, err := text.Resolve(markdown, op.Find, op.Occurrence)
+		r, err := pmdoc.FindQuote(tree, op.Find, op.Occurrence, nil)
 		if err != nil {
-			return textMutation{}, err
+			return nil, err
 		}
-		return textMutation{from: from, to: to}, nil
+		empty, err := parseInput("")
+		if err != nil {
+			return nil, err
+		}
+		return pmdoc.Splice(tree, r, empty)
 	case "insert":
 		if op.Markdown == "" {
-			return textMutation{}, invalidOp("markdown")
+			return nil, invalidOp("markdown")
 		}
 		if (op.After == "" && op.Before == "") || (op.After != "" && op.Before != "") {
-			return textMutation{}, invalidOp("after or before")
+			return nil, invalidOp("after or before")
 		}
 		anchor := op.After
 		after := anchor != ""
 		if !after {
 			anchor = op.Before
 		}
-		position, err := insertPosition(markdown, anchor, after, op.Occurrence)
+		position, err := insertPosition(tree, anchor, after, op.Occurrence)
 		if err != nil {
-			return textMutation{}, err
+			return nil, err
 		}
-		return textMutation{from: position, to: position, with: op.Markdown}, nil
+		with, err := inlineAware(op.Markdown)
+		if err != nil {
+			return nil, invalidMarkdownOp("markdown", err)
+		}
+		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
 	default:
-		return textMutation{}, invalidOp("op")
+		return nil, invalidOp("op")
 	}
 }
 
-func insertPosition(markdown, anchor string, after bool, occurrence *int) (int, error) {
+func invalidMarkdownOp(field string, err error) error {
+	if errors.Is(err, ErrInvalidMarkdown) {
+		return &ErrInvalidOp{Field: field, Reason: err.Error()}
+	}
+	return err
+}
+
+func insertPosition(tree *pmdoc.Node, anchor string, after bool, occurrence *int) (int, error) {
 	switch anchor {
 	case "start":
 		return 0, nil
 	case "end":
-		return text.Len16(markdown), nil
+		return pmdoc.Size(tree), nil
 	}
 	if title, ok := strings.CutPrefix(anchor, "heading:"); ok {
 		if title == "" {
 			return 0, invalidOp("heading")
 		}
-		return headingPosition(markdown, title, after, occurrence)
+		r, err := pmdoc.FindHeading(tree, title, occurrence)
+		if err != nil {
+			return 0, err
+		}
+		if after {
+			return r.To, nil
+		}
+		return r.From, nil
 	}
-	from, to, err := text.Resolve(markdown, anchor, occurrence)
+	r, err := pmdoc.FindQuote(tree, anchor, occurrence, nil)
 	if err != nil {
 		return 0, err
 	}
 	if after {
-		return to, nil
+		return r.To, nil
 	}
-	return from, nil
+	return r.From, nil
 }
 
-func headingPosition(markdown, title string, after bool, occurrence *int) (int, error) {
-	position := 0
-	var positions []int
-	for _, line := range strings.SplitAfter(markdown, "\n") {
-		trimmed := strings.TrimSuffix(line, "\n")
-		heading := strings.TrimLeft(trimmed, " ")
-		if strings.HasPrefix(heading, "#") {
-			marker := strings.TrimLeft(heading, "#")
-			if len(marker) < len(heading) && strings.HasPrefix(marker, " ") && strings.TrimSpace(marker) == title {
-				if after {
-					positions = append(positions, position+text.Len16(line))
-				} else {
-					positions = append(positions, position)
-				}
+func inlineAware(markdown string) (*pmdoc.Node, error) {
+	tree, err := parseInput(markdown)
+	if err != nil {
+		return nil, err
+	}
+	if len(tree.Children) != 1 || tree.Children[0].Type != "paragraph" {
+		return tree, nil
+	}
+	paragraph := tree.Children[0]
+	for _, child := range paragraph.Children {
+		if child.Type != "text" && !isInlineLeaf(child) {
+			return tree, nil
+		}
+	}
+	leading := markdown[:len(markdown)-len(strings.TrimLeftFunc(markdown, unicode.IsSpace))]
+	trailing := markdown[len(strings.TrimRightFunc(markdown, unicode.IsSpace)):]
+	if leading == "" && trailing == "" {
+		return tree, nil
+	}
+	var first, last *pmdoc.Node
+	for _, child := range paragraph.Children {
+		if child.Type == "text" {
+			if first == nil {
+				first = child
 			}
+			last = child
 		}
-		position += text.Len16(line)
 	}
-	if len(positions) == 0 {
-		return 0, text.ErrTargetNotFound
+	if first == nil {
+		return tree, nil
 	}
-	if occurrence != nil {
-		if *occurrence < 0 || *occurrence >= len(positions) {
-			return 0, text.ErrTargetNotFound
-		}
-		return positions[*occurrence], nil
-	}
-	if len(positions) > 1 {
-		return 0, &text.ErrTargetAmbiguous{}
-	}
-	return positions[0], nil
+	first.Text = leading + first.Text
+	last.Text += trailing
+	return tree, nil
 }
 
-func replaceRange(markdown string, from, to int, with string) string {
-	return text.Slice16(markdown, 0, from) + with + text.Slice16(markdown, to, text.Len16(markdown))
-}
-
-// ErrInvalidOp identifies the malformed user-facing operation field.
-type ErrInvalidOp struct {
-	Field string
-}
-
-func (e *ErrInvalidOp) Error() string {
-	return fmt.Sprintf("invalid document operation field %q", e.Field)
-}
-
-func invalidOp(field string) error {
-	return &ErrInvalidOp{Field: field}
+func isInlineLeaf(node *pmdoc.Node) bool {
+	switch node.Type {
+	case "hardbreak", "image", "html", "footnote_reference":
+		return true
+	default:
+		return false
+	}
 }

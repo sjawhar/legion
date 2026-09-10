@@ -37,7 +37,7 @@ test("Composer uploads dropped files and inserts their references", async () => 
     const view = render(
       <QueryClientProvider client={queryClient}>
         <Composer
-          anchor={{ artifact: "document-1", from: 0, quote: "text", to: 4 }}
+          anchor={{ artifact: "document-1", quote: "text" }}
           issueKey="CORE-1"
           kind="comment"
           onClose={() => {}}
@@ -66,7 +66,7 @@ function renderComposer(kind: "ask" | "comment" | "suggestion") {
   return render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 }}
+        anchor={{ artifact: "document-1", occurrence: 1, quote: "selected" }}
         issueKey="CORE-1"
         kind={kind}
         onClose={() => {}}
@@ -75,53 +75,62 @@ function renderComposer(kind: "ask" | "comment" | "suggestion") {
   );
 }
 
-test("Composer sends the selected quote occurrence alongside ranges for asks, comments, and suggestions", async () => {
+test("Composer sends only the selected quote occurrence for asks, comments, and suggestions", async () => {
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
-  const anchor = { artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 };
+  const anchor = { artifact: "document-1", occurrence: 1, quote: "selected" };
 
   try {
     const ask = renderComposer("ask");
     fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Why this text?" } });
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
-    await waitFor(() =>
-      expect(createAsk).toHaveBeenCalledWith("CORE-1", {
-        anchor,
-        multiple: false,
-        options: [],
-        question: "Why this text?",
-        urgency: "med",
-      })
-    );
+    await waitFor(() => expect(createAsk).toHaveBeenCalledTimes(1));
+    const askPayload = createAsk.mock.calls[0]?.[1];
+    expect(askPayload).toMatchObject({
+      anchor,
+      multiple: false,
+      options: [],
+      question: "Why this text?",
+      urgency: "med",
+    });
+    expect(
+      askPayload === undefined || askPayload.anchor === undefined
+        ? true
+        : "from" in askPayload.anchor
+    ).toBe(false);
     ask.unmount();
 
     const comment = renderComposer("comment");
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
     fireEvent.click(screen.getByRole("button", { name: "Comment" }));
-    await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith(
-        "CORE-1",
-        expect.objectContaining({
-          anchor,
-          body: "Please revise.",
-        })
-      )
-    );
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    const commentPayload = createComment.mock.calls[0]?.[1];
+    expect(commentPayload).toMatchObject({
+      anchor,
+      body: "Please revise.",
+    });
+    expect(
+      commentPayload === undefined || commentPayload.anchor === undefined
+        ? true
+        : "from" in commentPayload.anchor
+    ).toBe(false);
     comment.unmount();
 
     const suggestion = renderComposer("suggestion");
     fireEvent.change(screen.getByLabelText("Replacement"), { target: { value: "replacement" } });
     fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
-    await waitFor(() =>
-      expect(createComment).toHaveBeenLastCalledWith(
-        "CORE-1",
-        expect.objectContaining({
-          anchor,
-          body: "Suggested replacement.",
-          suggestion: { replace_with: "replacement" },
-        })
-      )
-    );
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    const suggestionPayload = createComment.mock.calls[1]?.[1];
+    expect(suggestionPayload).toMatchObject({
+      anchor,
+      body: "Suggested replacement.",
+      suggestion: { replace_with: "replacement" },
+    });
+    expect(
+      suggestionPayload === undefined || suggestionPayload.anchor === undefined
+        ? true
+        : "from" in suggestionPayload.anchor
+    ).toBe(false);
     suggestion.unmount();
   } finally {
     createAsk.mockRestore();
@@ -131,7 +140,7 @@ test("Composer sends the selected quote occurrence alongside ranges for asks, co
 
 test("Composer submits the configured ask options, multiple selection, and urgency", async () => {
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
-  const anchor = { artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 };
+  const anchor = { artifact: "document-1", occurrence: 1, quote: "selected" };
 
   try {
     const composer = renderComposer("ask");
@@ -187,7 +196,7 @@ test("Escape after typing only an ask option prompts before discarding", async (
   const view = render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 }}
+        anchor={{ artifact: "document-1", occurrence: 1, quote: "selected" }}
         issueKey="CORE-1"
         kind="ask"
         onClose={() => {
@@ -234,7 +243,7 @@ test("Escape on a suggestion with only a replacement shows the discard prompt in
   const view = render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 }}
+        anchor={{ artifact: "document-1", occurrence: 1, quote: "selected" }}
         issueKey="CORE-1"
         kind="suggestion"
         onClose={() => {
@@ -282,7 +291,7 @@ test("Escape from the composer while its reference picker opens closes only the 
   const view = render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 }}
+        anchor={{ artifact: "document-1", occurrence: 1, quote: "selected" }}
         issueKey="CORE-1"
         kind="comment"
         onClose={() => {

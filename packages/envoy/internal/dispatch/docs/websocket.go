@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -192,6 +193,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	open, err := s.issueOpen(ctx, room)
 	if err != nil {
+		return err
+	}
+	if _, err := treeOf(doc); err != nil {
+		slog.Error("dispatch: loaded document outside Proof schema", "room", room, "error", err)
 		return err
 	}
 	state := s.room(room)

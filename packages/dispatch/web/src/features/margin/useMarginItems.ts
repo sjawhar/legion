@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Anchor, Ask, Comment, Event } from "../../api/types";
+import type { Ask, Comment, Event } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { pinnedEventIds } from "../issue/log-model";
 import { parseIssuePath } from "../refs/routes";
@@ -13,7 +13,7 @@ export type MarginTab = "comments" | "pinned";
 export type MarginItemAction = "accept" | "reject" | "resolve";
 export type MarginItem =
   | { ask: Ask; depth: number; kind: "ask" }
-  | { comment: Comment; depth: number; kind: "comment"; threadAnchor: Anchor | null };
+  | { comment: Comment; depth: number; kind: "comment" };
 
 const pinnedEventBatchSize = 50;
 
@@ -59,13 +59,7 @@ function withoutAskThreadReplies(comments: Comment[]): Comment[] {
   return comments.filter((comment) => !askThreadIds.has(comment.id));
 }
 
-interface CommentThreadItem {
-  comment: Comment;
-  depth: number;
-  threadAnchor: Anchor | null;
-}
-
-function commentThreads(comments: Comment[]): CommentThreadItem[][] {
+function commentThreads(comments: Comment[]): Array<Array<{ comment: Comment; depth: number }>> {
   const byParent = new Map<string, Comment[]>();
   const roots: Comment[] = [];
   const known = new Set(comments.map((comment) => comment.id));
@@ -82,9 +76,9 @@ function commentThreads(comments: Comment[]): CommentThreadItem[][] {
   return [...roots]
     .sort((left, right) => right.created_at.localeCompare(left.created_at))
     .map((root) => {
-      const thread: CommentThreadItem[] = [];
+      const thread: Array<{ comment: Comment; depth: number }> = [];
       const append = (comment: Comment, depth: number) => {
-        thread.push({ comment, depth, threadAnchor: root.anchor });
+        thread.push({ comment, depth });
         for (const reply of [...(byParent.get(comment.id) ?? [])].sort((left, right) =>
           right.created_at.localeCompare(left.created_at)
         )) {
@@ -100,7 +94,7 @@ export function marginItemId(item: MarginItem): string {
   return item.kind === "ask" ? item.ask.id : item.comment.id;
 }
 
-export function useMarginItems(tab: MarginTab) {
+export function useMarginItems(tab: MarginTab, documentText: string) {
   const { pathname } = useLocation();
   const queryClient = useQueryClient();
   const route = parseIssuePath(pathname);
@@ -160,12 +154,7 @@ export function useMarginItems(tab: MarginTab) {
       )
     );
     const threads = commentThreads(visibleComments).map((thread) =>
-      thread.map(({ comment, depth, threadAnchor }) => ({
-        comment,
-        depth,
-        kind: "comment" as const,
-        threadAnchor,
-      }))
+      thread.map(({ comment, depth }) => ({ comment, depth, kind: "comment" as const }))
     );
     const roots: MarginItem[][] = [...anchoredItems.map((ask) => [ask]), ...threads];
     return roots
@@ -180,10 +169,25 @@ export function useMarginItems(tab: MarginTab) {
           rightRoot.kind === "ask" ? rightRoot.ask.anchor : rightRoot.comment.anchor;
         // Every anchored ask is always anchored (unanchored asks never enter this list, see
         // useAnsweredAsks), so this puts anchored asks and anchored comments in document
-        // reading order; a general, unanchored comment sorts after any anchored item, most
-        // recent first among its own kind.
+        // reading order; an anchored item whose text has changed sorts after found anchors.
+        // General, unanchored comments remain last, most recent first.
         if (leftAnchor !== null && rightAnchor !== null) {
-          return leftAnchor.from - rightAnchor.from || leftAnchor.to - rightAnchor.to;
+          const leftPosition = documentText.indexOf(leftAnchor.quote);
+          const rightPosition = documentText.indexOf(rightAnchor.quote);
+          if (leftPosition !== rightPosition) {
+            if (leftPosition === -1) {
+              return 1;
+            }
+            if (rightPosition === -1) {
+              return -1;
+            }
+            return leftPosition - rightPosition;
+          }
+          const leftCreatedAt =
+            leftRoot.kind === "ask" ? leftRoot.ask.created_at : leftRoot.comment.created_at;
+          const rightCreatedAt =
+            rightRoot.kind === "ask" ? rightRoot.ask.created_at : rightRoot.comment.created_at;
+          return leftCreatedAt.localeCompare(rightCreatedAt);
         }
         if (leftAnchor !== null || rightAnchor !== null) {
           return leftAnchor !== null ? -1 : 1;
@@ -195,24 +199,10 @@ export function useMarginItems(tab: MarginTab) {
         return rightCreatedAt.localeCompare(leftCreatedAt);
       })
       .flat();
-  }, [anchoredAsks, comments.data, visibleArtifact]);
+  }, [anchoredAsks, comments.data, documentText, visibleArtifact]);
   const marginItems = useMemo<MarginItem[]>(
     () => [...needsYou.map((ask) => ({ ask, depth: 0, kind: "ask" as const })), ...items],
     [items, needsYou]
-  );
-  const decorationAnchors = useMemo(
-    () =>
-      marginItems.flatMap((item) => {
-        const anchor = item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
-        const open = item.kind === "ask" ? item.ask.state === "open" : !item.comment.resolved;
-        return anchor === null ||
-          anchor.artifact_id !== visibleArtifact?.id ||
-          anchor.orphaned ||
-          !open
-          ? []
-          : [{ anchor, id: marginItemId(item) }];
-      }),
-    [marginItems, visibleArtifact?.id]
   );
   const actionGuard = useSubmitGuard();
   const action = useMutation({
@@ -270,7 +260,6 @@ export function useMarginItems(tab: MarginTab) {
     asksPending: asks.isPending,
     commentsError: comments.isError,
     commentsPending: comments.isPending,
-    decorationAnchors,
     isClosed: issue.data !== undefined && issue.data.closed_at !== null,
     issueError: issue.isError,
     issueKey,

@@ -26,7 +26,7 @@ test("dispatch references reject plural artifact paths", () => {
   expect(parseDispatchReference("dispatch://CORE-1/artifacts/design")).toBeUndefined();
 });
 
-test("artifact route parser accepts the canonical and legacy browser forms", () => {
+test("artifact route parser accepts the plural and singular browser paths", () => {
   expect(parseIssuePath(browserPath("issues/CORE-1/artifacts/design"), "?v=3")).toEqual({
     key: "CORE-1",
     kind: "artifact",

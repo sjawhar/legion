@@ -65,10 +65,8 @@ export interface ComposerReference {
 
 export interface ComposerAnchor {
   artifact: string;
-  from: number;
   occurrence?: number;
   quote: string;
-  to: number;
 }
 
 export type ComposerKind = "ask" | "comment" | "message" | "suggestion";
@@ -276,10 +274,8 @@ export function Composer({
           ? undefined
           : {
               artifact: anchor.artifact,
-              from: anchor.from,
-              occurrence: anchor.occurrence,
+              ...(anchor.occurrence === undefined ? {} : { occurrence: anchor.occurrence }),
               quote: anchor.quote,
-              to: anchor.to,
             };
       if (kind === "message") {
         return api.createMessage(issueKey, { body: body.trim() });

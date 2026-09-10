@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import {
   createAsk,
@@ -9,7 +9,7 @@ import {
   getAsk,
   listComments,
 } from "./api";
-import { enterEditMode } from "./editor";
+import { selectPreviewText } from "./preview";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -19,8 +19,8 @@ const session = {
 };
 const initialMarkdown = "The quick brown fox";
 
-// On the phone layout the margin is a bottom sheet over the editor. Acting on a selection
-// opens it; the test closes it again before returning to the editor, as a phone user would.
+// On the phone layout the margin is a bottom sheet over the rendered document. Acting on a
+// selection opens it; the test closes it again before returning to the document, as a user would.
 async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
   if (project !== "iphone") {
     return;
@@ -33,24 +33,11 @@ async function setSheet(page: Page, project: string, open: boolean): Promise<voi
   }
 }
 
-async function selectEditorRange(editor: Locator, from: number, length: number): Promise<void> {
-  await editor.click();
-  await editor.press("Control+Home");
-  for (let index = 0; index < from; index += 1) {
-    await editor.press("ArrowRight");
-  }
-  for (let index = 0; index < length; index += 1) {
-    await editor.press("Shift+ArrowRight");
-  }
-}
-
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("margin creates, follows, and preserves anchored review items", async ({
-  browser,
-}, testInfo) => {
+test("margin creates and preserves anchored review items", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -62,7 +49,7 @@ test("margin creates, follows, and preserves anchored review items", async ({
   const foxComment = await createComment(
     issue.key,
     {
-      anchor: { artifact: "spec", from: 16, to: 19 },
+      anchor: { artifact: "spec", quote: "fox" },
       body: "fox note",
     },
     session
@@ -70,7 +57,7 @@ test("margin creates, follows, and preserves anchored review items", async ({
   const ask = await createAsk(
     issue.key,
     {
-      anchor: { artifact: "spec", from: 10, to: 15 },
+      anchor: { artifact: "spec", quote: "brown" },
       question: "Why brown?",
     },
     session
@@ -81,12 +68,11 @@ test("margin creates, follows, and preserves anchored review items", async ({
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     await page.getByRole("tab", { name: "Spec" }).click();
-    await enterEditMode(page);
-    const editor = page.getByRole("textbox", { name: "Document editor" });
-    await expect(editor).toContainText(initialMarkdown);
+    const article = page.getByRole("tabpanel", { name: "Spec" }).getByRole("article");
+    await expect(article).toContainText(initialMarkdown);
     await expect(page.locator('[aria-label="Selection actions"]')).toHaveCount(0);
 
-    await selectEditorRange(editor, 10, 5);
+    await selectPreviewText(page, "brown");
     await page.getByRole("button", { exact: true, name: "Comment" }).click();
     const commentComposer = page.getByRole("form", { name: "Comment composer" });
     await commentComposer.getByLabel("Comment").press("Control+k");
@@ -107,28 +93,21 @@ test("margin creates, follows, and preserves anchored review items", async ({
     if (comment === undefined) {
       throw new Error("The anchored comment was not created.");
     }
+    if (comment.anchor === null) {
+      throw new Error("The anchored comment has no anchor.");
+    }
+    expect(typeof comment.anchor.mark_id).toBe("string");
     await expect(page.getByTestId(`margin-comment-${comment.id}`)).toContainText("brown");
+    await expect(page.getByTestId(`margin-comment-${foxComment.id}`)).toContainText("fox");
     await page.screenshot({
-      path: testInfo.outputPath("anchored-margin-comment.png"),
+      path: testInfo.outputPath("rendered-document-margin.png"),
       fullPage: true,
     });
-    expect(comment.anchor).toMatchObject({ from: 10, quote: "brown", to: 15, version: 1 });
+    expect(comment.anchor).toMatchObject({ quote: "brown", version: 1 });
     await setSheet(page, testInfo.project.name, false);
+    await article.scrollIntoViewIfNeeded();
 
-    await editor.click();
-    await editor.press("Control+Home");
-    await editor.type("Note: ");
-    await expect(page.locator(".dispatch-anchor").filter({ hasText: "brown" }).first()).toHaveText(
-      "brown"
-    );
-    await expect
-      .poll(
-        async () =>
-          (await listComments(issue.key, artifactId)).find(({ id }) => id === comment.id)?.anchor
-      )
-      .toMatchObject({ from: 16, orphaned: false, quote: "brown", to: 21, version: 1 });
-
-    await selectEditorRange(editor, 16, 5);
+    await selectPreviewText(page, "brown");
     await page.getByRole("button", { exact: true, name: "Suggest" }).click();
     const suggestionComposer = page.getByRole("form", { name: "Suggest composer" });
     await suggestionComposer.getByLabel("Replacement").fill("red");
@@ -151,7 +130,7 @@ test("margin creates, follows, and preserves anchored review items", async ({
       .getByTestId(`margin-comment-${suggestion.id}`)
       .getByRole("button", { name: "Accept" })
       .click();
-    await expect(editor).toContainText("Note: The quick red fox");
+    await expect(article).toContainText("The quick red fox");
     await expect
       .poll(() =>
         listComments(issue.key, artifactId).then((items) =>
@@ -167,27 +146,6 @@ test("margin creates, follows, and preserves anchored review items", async ({
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
     ).toBe(true);
     await setSheet(page, testInfo.project.name, false);
-
-    await selectEditorRange(editor, 20, 3);
-    await editor.press("Backspace");
-    await expect
-      .poll(
-        async () =>
-          (await listComments(issue.key, artifactId)).find(({ id }) => id === foxComment.id)?.anchor
-      )
-      .toMatchObject({ orphaned: true, version: 1 });
-    await setSheet(page, testInfo.project.name, true);
-    await expect(page.getByTestId(`margin-comment-${foxComment.id}`)).toContainText("Text changed");
-    await page.screenshot({
-      path: testInfo.outputPath("orphaned-margin-card.png"),
-      fullPage: true,
-    });
-    await page
-      .getByTestId(`margin-comment-${foxComment.id}`)
-      .getByRole("link", { name: "View original text" })
-      .click();
-    await expect(page.getByRole("region", { name: "Document version 1" })).toContainText("fox");
-    await expect(page.locator("mark.dispatch-anchor-history")).toContainText("fox");
 
     await page.goto(`/issues/${issue.key}`);
     await setSheet(page, testInfo.project.name, true);
@@ -212,14 +170,12 @@ test("margin creates, follows, and preserves anchored review items", async ({
         .toBeGreaterThan(0);
     }
     await page.goto(`/issues/${issue.key}/spec`);
-    await enterEditMode(page);
-    await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
-      "Note: The quick red "
+    await expect(page.getByRole("tabpanel", { name: "Spec" }).getByRole("article")).toContainText(
+      "The quick red fox"
     );
     await page.goto(`/issues/${issue.key}/artifact/spec`);
-    await enterEditMode(page);
-    await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
-      "Note: The quick red "
+    await expect(page.getByRole("tabpanel", { name: "Spec" }).getByRole("article")).toContainText(
+      "The quick red fox"
     );
     await expect(page.getByTestId(`margin-comment-${comment.id}`)).toContainText("why?");
   } finally {
@@ -281,12 +237,7 @@ test("margin anchors a whole-paragraph selection made in the rendered preview", 
     if (comment === undefined) {
       throw new Error("The preview-mode anchored comment was not created.");
     }
-    expect(comment.anchor).toMatchObject({
-      from: 0,
-      quote: initialMarkdown,
-      to: initialMarkdown.length,
-      version: 1,
-    });
+    expect(comment.anchor).toMatchObject({ quote: initialMarkdown, version: 1 });
   } finally {
     await alice.close();
   }
@@ -307,9 +258,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     await page.getByRole("tab", { name: "Spec" }).click();
-    await enterEditMode(page);
-    const editor = page.getByRole("textbox", { name: "Document editor" });
-    await selectEditorRange(editor, 10, 5);
+    await selectPreviewText(page, "brown");
     await page.getByRole("button", { exact: true, name: "Ask" }).click();
 
     const composer = page.getByRole("form", { name: "Ask composer" });
@@ -371,7 +320,7 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
   const ask = await createAsk(
     issue.key,
     {
-      anchor: { artifact: "spec", from: 10, to: 15 },
+      anchor: { artifact: "spec", quote: "brown" },
       question: "Why brown?",
     },
     session

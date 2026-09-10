@@ -6,21 +6,9 @@ import { oklchToSrgb8 } from "./contrast";
 import * as P from "./palette";
 
 /**
- * `styles.css` has two color usages that fall outside the `dark:`-className mechanism entirely
- * (they're plain CSS, not Tailwind utilities): the pre-hydration `:root` fallback and the
- * CodeMirror anchor-highlight overlays. Both are hand-written hex/`rgb()` literals that are
- * *supposed* to equal a specific named Tailwind swatch — but a literal typed from memory can
- * silently drift from what that swatch's OKLCH definition actually renders as (Tailwind v4
- * recomputed several v3 hues; this file's `#38bdf8`/`#fbbf24`/`#f59e0b`/`#bae6fd`/`#0284c7` were
- * v3-era hex constants that no longer match v4's `sky-400`/`amber-400`/`amber-500`/`sky-200`/
- * `sky-600`, confirmed by sampling a real Chromium canvas's OKLCH rendering directly).
- *
- * Every color-bearing declaration in `styles.css` is annotated with a trailing
- * `/* swatch-name *\/` (or `/* swatch-name at N% alpha *\/` for the two 35%-alpha CodeMirror
- * overlays) naming the palette swatch it's meant to equal. This test extracts every such pair
- * and asserts the literal's RGB channels equal that swatch's OKLCH value run through the same
- * conversion `palette.test.ts` uses — so a future hand-edited literal that drifts from its named
- * swatch fails here instead of shipping a silently-wrong shade.
+ * `styles.css` only uses hand-written color literals for the pre-hydration `:root` fallback,
+ * outside components' `dark:`-className mechanism. Each literal is annotated with the matching
+ * palette swatch so a manual fallback change cannot silently drift from the rendered theme.
  */
 
 const STYLES_CSS_PATH = join(import.meta.dir, "..", "styles.css");
@@ -62,11 +50,6 @@ const annotations: Annotation[] = [...stylesCss.matchAll(ANNOTATED_COLOR_PATTERN
   const [, literal, swatchName] = match;
   const actual = literal.startsWith("#") ? hexToRgb(literal) : rgbFunctionToRgb(literal);
   return { actual, swatchName };
-});
-
-test("finds a non-trivial number of annotated color literals", () => {
-  // A regression guard on the extraction itself.
-  expect(annotations.length).toBeGreaterThan(5);
 });
 
 /** Every hex/`rgb()` literal in the file, annotated or not — the exhaustiveness check below

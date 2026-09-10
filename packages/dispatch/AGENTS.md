@@ -46,13 +46,13 @@ output CSS, catching the scanner-blind-spot case those checks exist to prevent;
 background composite in its own file and asserts that pairing is registered, since a component
 can compose a text role onto a background role its own registration never checked;
 `styles-css-pin.test.ts` asserts the hand-written hex/`rgb()` literals in `styles.css` (the
-pre-hydration `:root` fallback and the CodeMirror anchor overlays, both outside the `dark:`
-className mechanism) equal the exact OKLCH-computed value of the palette swatch their trailing
-`/* swatch-name */` comment names. Adding a new color pairing means adding a registered
-composite to `classes.ts`, not inventing a shade inline. The document editor (`DocEditor.tsx`)
-additionally opts a CodeMirror `Compartment` into `{ dark: true }` when the media query matches,
-since CodeMirror's own base theme otherwise hardcodes a light caret and selection color
-regardless of the page's color scheme.
+pre-hydration `:root` fallback) equal the exact OKLCH-computed value of the palette swatch their
+trailing `/* swatch-name */` comment names. Adding a new color pairing means adding a registered
+composite to `classes.ts`, not inventing a shade inline.
+
+The current document tab is an interim read-only rendered view over the server's
+Proof-compatible Yjs tree. It deliberately has no inline typing or collaborative
+cursor path; those return with Lane B PR 4's Proof editor integration.
 
 ## Commands
 

@@ -27,9 +27,13 @@ every real deployment; e2e's `run-server.sh` sets it so the web client's
 reconnect-from-lastId path can be exercised without seeding thousands of
 events to trip the SSE replay cap.
 
-Documents use a Yjs `Y.Text` named `content`. `GET /ws/doc/{room}` uses
-Hocuspocus framing. Server-side edits use the document service, persist updates,
-and create settled or named versions.
+Each document room has two shared Yjs types: the authoritative
+`Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained
+projection of Postgres comment, ask, and suggestion records. Go renders canonical
+markdown from the tree for reads and versions; anchors are Proof marks, so their
+stored rows carry a mark ID while the mark moves with its text. Boot migrates legacy
+`Y.Text` rooms and offset anchors once; run `dispatch check-documents` beforehand to
+inspect a database without changing it.
 ## Identity
 
 `internal/dispatch/identity` is the human identity boundary. Handlers resolve

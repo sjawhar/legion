@@ -1640,6 +1640,364 @@
           }
         ]
       }
+    },
+    {
+      "name": "insert-inline-after-quote",
+      "markdown": "Alpha first. omega.\n",
+      "at": "first.",
+      "point": "after",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Alpha first.X omega."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert-inline-at-textblock-start",
+      "markdown": "Alpha omega.\n",
+      "at": "Alpha",
+      "point": "before",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "XAlpha omega."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert-inline-at-textblock-end",
+      "markdown": "Alpha omega.\n",
+      "at": "omega.",
+      "point": "after",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Alpha omega.X"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert-blocks-after-quote-splits-paragraph",
+      "markdown": "Alpha first. omega.\n",
+      "at": "first.",
+      "point": "after",
+      "replacement": "- X\n- Y\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Alpha first."
+              }
+            ]
+          },
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "X"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Y"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": " omega."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert-block-at-doc-start",
+      "markdown": "Body.\n",
+      "point": "doc-start",
+      "replacement": "# Title\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Body."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert-block-at-doc-end",
+      "markdown": "Body.\n",
+      "point": "doc-end",
+      "replacement": "Tail.\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Body."
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Tail."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert-block-after-heading-textblock",
+      "markdown": "# Title\n\nBody.\n",
+      "at": "Title",
+      "point": "after-textblock",
+      "replacement": "Intro.\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Intro."
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Body."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert-block-before-heading-textblock",
+      "markdown": "# Title\n\nBody.\n",
+      "at": "Title",
+      "point": "before-textblock",
+      "replacement": "Lead.\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Lead."
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Body."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert-paragraph-after-list-item-textblock",
+      "markdown": "- one\n- two\n",
+      "at": "one",
+      "point": "after-textblock",
+      "replacement": "extra\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "one"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "extra"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "two"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

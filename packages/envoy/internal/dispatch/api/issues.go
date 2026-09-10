@@ -247,7 +247,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		markdown = *input.Spec
 	}
-
+	markdown, err = s.deps.Docs.SeedText(r.Context(), tx, artifactID, markdown)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	authors, err := encodeJSON([]model.Actor{actor})
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -257,10 +261,6 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		insert into artifact_versions (artifact_id, number, markdown, authors)
 		values ($1, 1, $2, $3)
 	`, artifactID, markdown, authors); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := s.deps.Docs.SeedText(r.Context(), tx, artifactID, markdown); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

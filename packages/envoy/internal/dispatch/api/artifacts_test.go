@@ -158,12 +158,11 @@ func TestUploadArtifactJSONRejectsBlankContent(t *testing.T) {
 	}
 }
 
-func TestUploadArtifactJSONPreservesNonblankSurroundingWhitespace(t *testing.T) {
+func TestUploadArtifactJSONReturnsCanonicalMarkdown(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
-	content := " \n# Architect spec\n "
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-		"name": "architect-spec.md", "content": content,
+		"name": "architect-spec.md", "content": " \n# Architect spec\n ",
 	}, "alice")
 	if response.Code != http.StatusCreated {
 		t.Fatalf("upload nonblank JSON content: status=%d body=%s", response.Code, response.Body.String())
@@ -178,8 +177,19 @@ func TestUploadArtifactJSONPreservesNonblankSurroundingWhitespace(t *testing.T) 
 	document := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, text)
-	if document.Markdown != content {
-		t.Fatalf("stored Markdown = %q, want %q", document.Markdown, content)
+	if document.Markdown != "# Architect spec\n" {
+		t.Fatalf("stored Markdown = %q, want canonical heading", document.Markdown)
+	}
+}
+
+func TestUploadRejectsMarkdownOutsideProofSchema(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "architect-spec.md", "content": "<details>x</details>",
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_MARKDOWN"`) {
+		t.Fatalf("invalid JSON Markdown: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

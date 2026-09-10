@@ -304,7 +304,7 @@ func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
 		Markdown string `json:"markdown"`
 		Version  *int   `json:"version"`
 	}](t, textResponse)
-	if text.Markdown != "# Hello" || text.Version != nil {
+	if text.Markdown != "# Hello\n" || text.Version != nil {
 		t.Fatalf("primary document: got %#v, want markdown # Hello and null version", text)
 	}
 }
@@ -401,6 +401,21 @@ func TestSeededSpecHeadingsMatchDispatchWritingGuidance(t *testing.T) {
 	}
 }
 
+func TestCreateIssueRejectsSpecOutsideProofSchema(t *testing.T) {
+	handler := newTestHandler(t)
+	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice")
+	if project.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", project.Code, project.Body.String())
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Invalid spec", "spec": "<details>x</details>",
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_MARKDOWN"`) {
+		t.Fatalf("create invalid issue spec: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
 func TestDocumentTextReportsUnavailableService(t *testing.T) {
 	database := openEmptyTestStore(t)
 	broker := events.NewBroker()
@@ -688,7 +703,7 @@ func TestArtifactVersions(t *testing.T) {
 		t.Fatalf("replace document: status=%d body=%s", replacement.Code, replacement.Body.String())
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+uploaded.Artifact.ID+"/text", nil, "alice")
-	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"# Revised"`) {
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"# Revised\n"`) {
 		t.Fatalf("read replaced document: status=%d body=%s", text.Code, text.Body.String())
 	}
 
