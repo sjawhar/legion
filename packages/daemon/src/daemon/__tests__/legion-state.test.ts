@@ -412,7 +412,10 @@ describe("legion state", () => {
       sessionId: "ses_123",
       completed: { summary: "implemented the thing", at: "2026-09-01T00:00:00.000Z" },
     };
-    const notice = { payloadJson: '{"text":"@legion please investigate"}', eventId: "evt-controller" };
+    const notice = {
+      payloadJson: '{"text":"@legion please investigate"}',
+      eventId: "evt-controller",
+    };
     current.controllerPendingNotices = [notice];
     const {
       controllerPendingNotices: _notices,
@@ -541,6 +544,19 @@ describe("legion state", () => {
         "Cannot migrate a Legion state with active trees to the Dispatch lifecycle"
       );
     }
+  });
+  it("migrates a controller-held-events-free v17 state through v18 and v19", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
+    const file = path.join(tempDir, "state.json");
+    const current = newLegionState(initialState.project, initialState.cap);
+    const { controllerPendingNotices: _notices, gates: _gates, ...v17State } = current;
+    await writeFile(file, JSON.stringify({ ...v17State, version: 17 }), "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    expect(migrated.version).toBe(19);
+    expect(migrated.controllerPendingNotices).toEqual([]);
+    expect(migrated.gates).toEqual({});
   });
 
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {
