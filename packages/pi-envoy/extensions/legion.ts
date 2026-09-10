@@ -41,6 +41,54 @@ export function setLegionBootstrapExitForTests(hook: (code: number) => never): v
   exitProcess = hook;
 }
 
+// Bounds how many times bootstrap retries a `/process/ready` or `/worker/ready` call before
+// giving up and letting the daemon's own boot watchdog take over -- see `callReadyWithRetry`.
+const READY_RETRY_ATTEMPTS = 3;
+const READY_RETRY_DELAY_MS = 1_000;
+
+/**
+ * Calls a role's `/process/ready` or `/worker/ready` daemon request -- the one bootstrap step
+ * that no longer needs to succeed synchronously. The daemon closed the T18 deadlock by
+ * responding to that request before it ever dials back into this exact process's own shim
+ * socket (see `handleProcessReady`/`handleWorkerReady`), so a failure here is no longer this
+ * process's own socket refusing to answer itself. A 401/403 means the role registration itself
+ * was rejected -- genuinely fatal, exactly like the `processStarted`/`workerStarted` 403
+ * handling above -- so it rethrows immediately (no retry) for the caller's own catch-all to log
+ * and exit exactly once, the same path every other post-registration bootstrap failure takes;
+ * exiting directly from here too would double-exit once that catch-all also sees the error.
+ * Anything else (a 5xx, a network timeout, a transient daemon hiccup) is logged and retried a
+ * bounded number of times; if every attempt fails, this logs a final warning and returns
+ * normally instead of tearing the process down -- the daemon's own `WorkerBootWatchdog`
+ * (`worker_boot_timeout_seconds`) owns liveness from here, never this bootstrap step.
+ */
+const callReadyWithRetry = async (label: string, call: () => Promise<void>): Promise<void> => {
+  for (let attempt = 1; attempt <= READY_RETRY_ATTEMPTS; attempt++) {
+    try {
+      await call();
+      return;
+    } catch (error) {
+      if (
+        error instanceof LegionDaemonApiError &&
+        (error.status === 401 || error.status === 403)
+      ) {
+        throw error;
+      }
+      if (attempt === READY_RETRY_ATTEMPTS) {
+        console.error(
+          `[legion] ${label} failed after ${attempt} attempts; the daemon's boot watchdog owns liveness from here: ${messageFor(error)}`
+        );
+        return;
+      }
+      console.error(
+        `[legion] ${label} failed (attempt ${attempt}/${READY_RETRY_ATTEMPTS}), retrying: ${messageFor(error)}`
+      );
+      const retryDelay = Promise.withResolvers<void>();
+      setTimeout(retryDelay.resolve, READY_RETRY_DELAY_MS);
+      await retryDelay.promise;
+    }
+  }
+};
+
 async function persistedTranscript(
   context: SessionContext
 ): Promise<{ readonly sessionFile: string; readonly agentId: string }> {
@@ -264,11 +312,13 @@ export default function legionExtension(pi: PiApi): void {
         };
         await claimEnvoyRole(sessionID, roleToken, context);
         await startControlSubscription(sessionID);
-        await roleDaemon().processReady({
-          tree,
-          sessionId: sessionID,
-          secret: started.secret,
-        });
+        await callReadyWithRetry("root process/ready", () =>
+          roleDaemon().processReady({
+            tree,
+            sessionId: sessionID,
+            secret: started.secret,
+          })
+        );
         registerArchitectTools();
         await activateLegionTool();
       } catch (error) {
@@ -346,14 +396,16 @@ export default function legionExtension(pi: PiApi): void {
           registerArchitectTools();
           await activateLegionTool();
         }
-        await roleDaemon().workerReady({
-          tree,
-          issue,
-          role,
-          sessionId: sessionID,
-          secret: started.secret,
-          generation: generation(process.env),
-        });
+        await callReadyWithRetry("worker/ready", () =>
+          roleDaemon().workerReady({
+            tree,
+            issue,
+            role,
+            sessionId: sessionID,
+            secret: started.secret,
+            generation: generation(process.env),
+          })
+        );
       } catch (error) {
         console.error(
           `[legion] worker bootstrap failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`

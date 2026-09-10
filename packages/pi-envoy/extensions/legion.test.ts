@@ -1329,7 +1329,11 @@ describe("Legion OMP extension", () => {
     );
     expect(exits).toEqual([1]);
   });
-  test("exits the process when bootstrap fails after worker/started registers a role", async () => {
+  test("retries worker/ready after a 5xx and completes bootstrap without exiting (T18 hardening)", async () => {
+    // The daemon closed the T18 deadlock by responding to /worker/ready before it dials back
+    // into this exact process's own shim socket, so a transient 5xx here is no longer this
+    // process's own socket refusing to answer itself -- the daemon's boot watchdog owns
+    // liveness from here, not this bootstrap step (ruling 2). Never exits on this alone.
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
       exits.push(code);
@@ -1342,12 +1346,13 @@ describe("Legion OMP extension", () => {
     const token = roleToken("omp", issue, role);
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_BOOT_TOKEN = "boot-fatal-after-started";
+    process.env.LEGION_BOOT_TOKEN = "boot-retries-after-started";
     process.env.LEGION_GENERATION = "1";
     process.env.LEGION_TREE = tree;
     process.env.LEGION_ISSUE = issue;
     process.env.LEGION_ROLE = role;
     process.env.LEGION_WORKSPACE = workspace;
+    let readyAttempts = 0;
     globalThis.fetch = (async (input) => {
       const url = new URL(input.toString());
       if (url.pathname === "/legion/v1/worker/started") {
@@ -1359,10 +1364,11 @@ describe("Legion OMP extension", () => {
         });
       }
       if (url.pathname === "/legion/v1/worker/ready") {
+        readyAttempts += 1;
         return Response.json({ error: "daemon unavailable" }, { status: 500 });
       }
       return Response.json({
-        session_id: "ses_fatal_after_started",
+        session_id: "ses_retries_after_started",
         machine_id: "machine",
         dir: workspace,
         topics: [token],
@@ -1373,9 +1379,62 @@ describe("Legion OMP extension", () => {
     const sessionStart = fixture.handlers.get("session_start");
     if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
 
-    const context = { ...sessionContext("ses_fatal_after_started"), cwd: workspace };
+    const context = { ...sessionContext("ses_retries_after_started"), cwd: workspace };
+    await sessionStart({}, context);
+
+    expect(readyAttempts).toBe(3);
+    expect(exits).toEqual([]);
+  });
+  test("exits the process when worker/ready is rejected with 403 (auth)", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    const workspace = await createJjWorkspace();
+    const tree = "REPO-42";
+    const issue = "REPO-43";
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", issue, role);
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "boot-auth-rejected-after-started";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ISSUE = issue;
+    process.env.LEGION_ROLE = role;
+    process.env.LEGION_WORKSPACE = workspace;
+    let readyAttempts = 0;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json({
+          roleToken: token,
+          secret: "worker-secret",
+          gitName: "Legion Worker",
+          gitEmail: "worker@example.test",
+        });
+      }
+      if (url.pathname === "/legion/v1/worker/ready") {
+        readyAttempts += 1;
+        return Response.json({ error: "session capability revoked" }, { status: 403 });
+      }
+      return Response.json({
+        session_id: "ses_auth_rejected_after_started",
+        machine_id: "machine",
+        dir: workspace,
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
+
+    const context = { ...sessionContext("ses_auth_rejected_after_started"), cwd: workspace };
     await expect(sessionStart({}, context)).rejects.toThrow("process would exit");
     expect(exits).toEqual([1]);
+    expect(readyAttempts).toBe(1);
   });
   test("exits the process when the daemon rejects a stale boot token at process/started", async () => {
     const exits: number[] = [];
@@ -1408,7 +1467,10 @@ describe("Legion OMP extension", () => {
     );
     expect(exits).toEqual([1]);
   });
-  test("exits the process when root bootstrap fails after process/started registers a role", async () => {
+  test("retries process/ready after a 5xx and completes root bootstrap without exiting (T18 hardening)", async () => {
+    // Same hardening as worker/ready, for the root architect: the daemon responds to
+    // /process/ready before dialing back into the architect's own shim socket, so a transient
+    // 5xx is retried (bounded) and never fatal on its own (ruling 2).
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
       exits.push(code);
@@ -1419,10 +1481,11 @@ describe("Legion OMP extension", () => {
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
     process.env.LEGION_GENERATION = "3";
-    process.env.LEGION_BOOT_TOKEN = "boot-root-fatal-after-started";
+    process.env.LEGION_BOOT_TOKEN = "boot-root-retries-after-started";
     process.env.LEGION_TREE = tree;
     process.env.LEGION_ROLE = "architect";
     process.env.LEGION_ISSUE = tree;
+    let readyAttempts = 0;
     globalThis.fetch = (async (input) => {
       const url = new URL(input.toString());
       if (url.pathname === "/legion/v1/process/started") {
@@ -1433,10 +1496,11 @@ describe("Legion OMP extension", () => {
         });
       }
       if (url.pathname === "/legion/v1/process/ready") {
+        readyAttempts += 1;
         return Response.json({ error: "daemon unavailable" }, { status: 500 });
       }
       return Response.json({
-        session_id: "ses_root_fatal_after_started",
+        session_id: "ses_root_retries_after_started",
         machine_id: "machine",
         dir: "/tmp/legion-workspace",
         topics: [token],
@@ -1447,10 +1511,57 @@ describe("Legion OMP extension", () => {
     const sessionStart = fixture.handlers.get("session_start");
     if (sessionStart === undefined) throw new Error("root lifecycle handler was not registered");
 
-    await expect(sessionStart({}, sessionContext("ses_root_fatal_after_started"))).rejects.toThrow(
-      "process would exit"
-    );
+    await sessionStart({}, sessionContext("ses_root_retries_after_started"));
+
+    expect(readyAttempts).toBe(3);
+    expect(exits).toEqual([]);
+  });
+  test("exits the process when process/ready is rejected with 403 (auth)", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    const tree = "REPO-42";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-root-auth-rejected-after-started";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    let readyAttempts = 0;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      if (url.pathname === "/legion/v1/process/ready") {
+        readyAttempts += 1;
+        return Response.json({ error: "session capability revoked" }, { status: 403 });
+      }
+      return Response.json({
+        session_id: "ses_root_auth_rejected_after_started",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("root lifecycle handler was not registered");
+
+    await expect(
+      sessionStart({}, sessionContext("ses_root_auth_rejected_after_started"))
+    ).rejects.toThrow("process would exit");
     expect(exits).toEqual([1]);
+    expect(readyAttempts).toBe(1);
   });
   test("registers only the Legion tool for a confirmed architect session", async () => {
     const tree = "REPO-42";
