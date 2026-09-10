@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { type CreateProjectInput, DispatchEventSchema } from "./dispatch-api";
+import {
+  type Anchor,
+  type AnchorInput,
+  type CreateProjectInput,
+  DispatchEventSchema,
+} from "./dispatch-api";
 
 test("accepts the typed artifact version event payload", () => {
   const event = {
@@ -31,5 +36,33 @@ test("permits the actor supplied with an agent project creation request", () => 
     actor: { id: "session-1", kind: "session" },
     key: "DSP",
     name: "Dispatch",
+  });
+});
+
+test("models returned anchors and input selectors by mark id", () => {
+  const anchor: Anchor = {
+    artifact_id: "artifact-1",
+    mark_id: "mark-1",
+    version: 2,
+    quote: "selected text",
+    orphaned: false,
+  };
+  const quoteInput: AnchorInput = {
+    artifact: "spec",
+    quote: "selected text",
+    occurrence: 1,
+  };
+  const markInput: AnchorInput = { artifact: "spec", mark_id: "mark-1" };
+
+  expect({ anchor, quoteInput, markInput }).toEqual({
+    anchor: {
+      artifact_id: "artifact-1",
+      mark_id: "mark-1",
+      version: 2,
+      quote: "selected text",
+      orphaned: false,
+    },
+    quoteInput: { artifact: "spec", quote: "selected text", occurrence: 1 },
+    markInput: { artifact: "spec", mark_id: "mark-1" },
   });
 });

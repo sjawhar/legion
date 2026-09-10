@@ -27,12 +27,14 @@ async function setSheet(page: Page, project: string, open: boolean): Promise<voi
   if (project !== "iphone") {
     return;
   }
-  const toggle = page.getByRole("button", {
-    name: open ? /Open review panel/ : /Close review panel/,
-  });
-  if ((await toggle.count()) > 0) {
-    await toggle.click();
+  const sheet = page.getByTestId("margin-sheet");
+  const expanded = open ? "true" : "false";
+  if ((await sheet.getAttribute("data-expanded")) !== expanded) {
+    await page
+      .getByRole("button", { name: open ? /Open review panel/ : /Close review panel/ })
+      .click();
   }
+  await expect(sheet).toHaveAttribute("data-expanded", expanded);
 }
 
 test.beforeEach(async () => {
@@ -114,7 +116,9 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await alice.close();
 });
 
-test("an anchored comment replies to an agent-authored reply", async ({ browser }, testInfo) => {
+test("a comment replies to an agent-authored reply without copying its anchor", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -122,7 +126,7 @@ test("an anchored comment replies to an agent-authored reply", async ({ browser 
     title: "Nested comment replies",
   });
   const root = await createComment(issue.key, {
-    anchor: { artifact: "spec", from: 0, to: 4 },
+    anchor: { artifact: "spec", quote: "Keep" },
     body: "Root comment.",
   });
   const agentReply = await createComment(
@@ -149,7 +153,6 @@ test("an anchored comment replies to an agent-authored reply", async ({ browser 
     await expect(replyCard.getByRole("button", { name: "Reply" })).toBeVisible();
     await replyCard.getByRole("button", { name: "Reply" }).click();
     const composer = page.getByRole("form", { name: "Comment composer" });
-    await expect(composer).toContainText("Keep");
     await composer.getByLabel("Comment").fill("Human nested reply.");
     await composer.getByRole("button", { name: "Comment" }).click();
     await expect.poll(() => submittedReplies).toHaveLength(1);

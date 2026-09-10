@@ -60,10 +60,9 @@ const secondIssue: IssueDetails = {
 const comment: Comment = {
   anchor: {
     artifact_id: "artifact-1",
-    from: 10,
+    mark_id: "m-1",
     orphaned: false,
     quote: "brown",
-    to: 15,
     version: 1,
   },
   author: { id: "alice", kind: "user" },
@@ -95,10 +94,9 @@ const unanchoredRootComment: Comment = {
 const anchoredAsk: Ask = {
   anchor: {
     artifact_id: "artifact-1",
-    from: 0,
+    mark_id: "m-2",
     orphaned: false,
     quote: "Review",
-    to: 6,
     version: 1,
   },
   answer: null,
@@ -643,10 +641,9 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
   const answeredAsk: Ask = {
     anchor: {
       artifact_id: "artifact-1",
-      from: 10,
+      mark_id: "m-3",
       orphaned: false,
       quote: "brown",
-      to: 15,
       version: 1,
     },
     answer: {
@@ -670,10 +667,9 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
   const openAsk: Ask = {
     anchor: {
       artifact_id: "artifact-1",
-      from: 0,
+      mark_id: "m-4",
       orphaned: false,
       quote: "The",
-      to: 3,
       version: 1,
     },
     answer: null,

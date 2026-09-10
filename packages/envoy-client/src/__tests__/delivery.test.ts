@@ -71,7 +71,7 @@ const comment = {
   issue_key: "DSP-1",
   author: actor,
   body: "Please update this.",
-  anchor: { artifact_id: "artifact-1", quote: "old line", from: 0, to: 8, orphaned: false },
+  anchor: { artifact_id: "artifact-1", mark_id: "m-1", quote: "old line", orphaned: false },
   reply_to: "comment-0",
   resolved: false,
   suggestion: null,

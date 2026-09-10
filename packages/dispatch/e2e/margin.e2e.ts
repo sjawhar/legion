@@ -93,6 +93,10 @@ test("margin creates and preserves anchored review items", async ({ browser }, t
     if (comment === undefined) {
       throw new Error("The anchored comment was not created.");
     }
+    if (comment.anchor === null) {
+      throw new Error("The anchored comment has no anchor.");
+    }
+    expect(typeof comment.anchor.mark_id).toBe("string");
     await expect(page.getByTestId(`margin-comment-${comment.id}`)).toContainText("brown");
     await expect(page.getByTestId(`margin-comment-${foxComment.id}`)).toContainText("fox");
     await page.screenshot({

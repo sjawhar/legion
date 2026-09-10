@@ -413,10 +413,9 @@ test("IssuePage highlights a historical quote from its comment deep link", async
     {
       anchor: {
         artifact_id: primaryArtifact.id,
-        from: 0,
+        mark_id: "m-1",
         orphaned: false,
         quote: "SQLit",
-        to: 5,
         version: 1,
       },
       ask_id: null,
@@ -475,10 +474,9 @@ test("IssuePage reports an ambiguous historical quote as changed text", async ()
     {
       anchor: {
         artifact_id: primaryArtifact.id,
-        from: 0,
+        mark_id: "m-1",
         orphaned: false,
         quote: "SQLit",
-        to: 5,
         version: 1,
       },
       ask_id: null,

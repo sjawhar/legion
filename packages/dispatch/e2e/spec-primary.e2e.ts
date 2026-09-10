@@ -26,7 +26,7 @@ test("issue landing keeps Spec primary and puts open asks in Needs you", async (
   await createAsk(
     issue.key,
     {
-      anchor: { artifact: "spec", from: 0, to: 7 },
+      anchor: { artifact: "spec", quote: "Primary" },
       question: "Is this opening clear?",
     },
     session

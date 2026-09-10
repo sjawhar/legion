@@ -86,7 +86,7 @@ test("the inbox renders the dark palette in dark mode and the light palette in l
   });
   const ask = await createAsk(
     issue.key,
-    { anchor: { artifact: "spec", from: 0, to: 6 }, question: "Ship this week?" },
+    { anchor: { artifact: "spec", quote: "Decide" }, question: "Ship this week?" },
     session
   );
   const alice = await asUser(browser, "alice");
@@ -124,7 +124,7 @@ test("an issue's spec and log tabs render the dark palette in dark mode and the 
   });
   await createComment(
     issue.key,
-    { anchor: { artifact: "spec", from: 0, to: 6 }, body: "left a note" },
+    { anchor: { artifact: "spec", quote: "Decide" }, body: "left a note" },
     session
   );
   const alice = await asUser(browser, "alice");
@@ -176,7 +176,7 @@ test("the margin review sheet renders the dark palette in dark mode on an iPhone
   });
   await createComment(
     issue.key,
-    { anchor: { artifact: "spec", from: 0, to: 6 }, body: "left a note" },
+    { anchor: { artifact: "spec", quote: "Decide" }, body: "left a note" },
     session
   );
   const alice = await asUser(browser, "alice");
