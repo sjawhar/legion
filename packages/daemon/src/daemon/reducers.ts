@@ -844,13 +844,19 @@ export function reduceCiEmission(
     : [];
 }
 
-/** The decoded Dispatch envelope `events.ts`'s durable consumer produces: `type`/`key` pulled
- * from the underlying Dispatch `Event`, `payload` is that event's own inner payload object (the
- * full issue for `issue.*`, `{child_key, from, to}` for `child.status`, the `Ask` for `ask.*`),
- * `eventId` is `dispatch-<id>`. */
+/** The decoded Dispatch envelope `events.ts`'s durable consumer produces: `type`/`key`/`seq`
+ * pulled from the underlying Dispatch `Event`, `payload` is that event's own inner payload object
+ * (the full issue for `issue.*`, `{child_key, from, to}` for `child.status`, the `Ask` for
+ * `ask.*`), `eventId` is `dispatch-<id>`. `seq` is the per-issue at-most-once fence
+ * `reduceDispatchEvent` enforces (see `IssueNode.lastAppliedSeq`). `notify` is decoded for
+ * completeness (the Dispatch event header always carries it) but never branched on: the issue
+ * topic now carries every event regardless of `notify`, which only marks whether Dispatch itself
+ * woke a human — irrelevant to what the daemon derives from the event. */
 export interface DispatchIssueEvent {
   type: EventType;
   key: IssueKey;
+  seq: number;
+  notify: boolean;
   payload: unknown;
   eventId: string;
 }
@@ -869,7 +875,6 @@ interface DispatchIssuePayload {
   title: string;
   status: IssueStatus;
   parent: IssueKey | null;
-  updatedAtMs: number | undefined;
 }
 
 function dispatchIssuePayload(payload: unknown): DispatchIssuePayload | undefined {
@@ -879,45 +884,25 @@ function dispatchIssuePayload(payload: unknown): DispatchIssuePayload | undefine
   const status = stringValue(raw?.status);
   if (!raw || !key || !title || !status || !isIssueStatus(status)) return undefined;
   const parent = typeof raw.parent === "string" ? raw.parent : null;
-  const updatedAtRaw = stringValue(raw.updated_at);
-  const parsedUpdatedAt = updatedAtRaw === undefined ? undefined : Date.parse(updatedAtRaw);
-  return {
-    key,
-    title,
-    status,
-    parent,
-    updatedAtMs:
-      parsedUpdatedAt === undefined || Number.isNaN(parsedUpdatedAt) ? undefined : parsedUpdatedAt,
-  };
-}
-
-/** True when `incoming`'s Dispatch `updated_at` is strictly older than the fence already applied
- * to `node` — the same out-of-order-redelivery guard `supersededBy` applies to GitHub events,
- * scoped to the single timestamp Dispatch's `issue.updated`/`issue.closed` payload carries. */
-function supersededByDispatchUpdate(
-  node: IssueNode,
-  incomingUpdatedAtMs: number | undefined
-): boolean {
-  return (
-    incomingUpdatedAtMs !== undefined &&
-    node.updatedAt !== undefined &&
-    incomingUpdatedAtMs < node.updatedAt
-  );
+  return { key, title, status, parent };
 }
 
 function applyDispatchIssueFields(node: IssueNode, issue: DispatchIssuePayload): void {
   node.title = issue.title;
   node.status = issue.status;
   node.state = issue.status === "done" ? "closed" : "open";
-  if (issue.updatedAtMs !== undefined) {
-    node.updatedAt = issue.updatedAtMs;
-    node.updatedAtSource = "webhook";
-  }
 }
 
+/** Creates a `issue.created` node. Idempotent against a redelivered or reordered duplicate that
+ * slips past the outer seq fence (e.g. an older create landing after a resync-derived seq bump
+ * for the same key): once a node exists for this key, this is a no-op — no field is overwritten,
+ * no controller/child-adopted effect is re-emitted — never a replace, since a later event (a
+ * status update, another child's adoption) may have already advanced fields a blind replace would
+ * roll back. */
 function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effect[] {
   const issue = dispatchIssuePayload(event.payload);
   if (!issue) return [];
+  if (state.issues[issue.key]) return [];
   const node: IssueNode = {
     key: issue.key,
     title: issue.title,
@@ -926,9 +911,6 @@ function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effe
     released: true,
     labels: [],
     status: issue.status,
-    ...(issue.updatedAtMs === undefined
-      ? {}
-      : { updatedAt: issue.updatedAtMs, updatedAtSource: "webhook" as const }),
   };
   if (issue.parent) node.parent = issue.parent;
   state.issues[issue.key] = node;
@@ -950,7 +932,6 @@ function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effe
   const issue = dispatchIssuePayload(event.payload);
   const node = issue ? state.issues[issue.key] : undefined;
   if (!issue || !node) return [];
-  if (supersededByDispatchUpdate(node, issue.updatedAtMs)) return [];
   const statusChanged = node.status !== issue.status;
   applyDispatchIssueFields(node, issue);
   if (!statusChanged) return [];
@@ -966,7 +947,6 @@ function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effec
   const issue = dispatchIssuePayload(event.payload);
   const node = issue ? state.issues[issue.key] : undefined;
   if (!issue || !node) return [];
-  if (supersededByDispatchUpdate(node, issue.updatedAtMs)) return [];
   const wasOpen = node.state === "open";
   applyDispatchIssueFields(node, issue);
   if (!node.parent) {
@@ -1009,6 +989,11 @@ function reduceChildStatus(state: LegionState, event: DispatchIssueEvent): Effec
   );
 }
 
+/** Approves the design gate. Idempotent independent of the outer seq fence: once
+ * `gates[key].designApproved` is set, this is a no-op regardless of `event.seq` — a later,
+ * unrelated ask (or an ask reply thread growing after approval) on the same issue would still
+ * pass the per-issue seq fence, so the approval itself needs its own guard against re-emitting
+ * `design-approved` a second time. */
 function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effect[] {
   const raw = asRecord(event.payload);
   const askId = stringValue(raw?.id);
@@ -1017,7 +1002,8 @@ function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effec
     ? answer.selected.filter((value): value is string => typeof value === "string")
     : [];
   const gate = state.gates[event.key];
-  if (!askId || !gate || gate.designAskId !== askId || !selected.includes("Approve")) return [];
+  if (!askId || !gate || gate.designApproved !== undefined) return [];
+  if (gate.designAskId !== askId || !selected.includes("Approve")) return [];
   gate.designApproved = askId;
   return routeActive(
     state,
@@ -1035,12 +1021,26 @@ function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effec
  * Dispatch's own routing (see the design's "Intake and events" section) and produces no effect
  * here. `config` is accepted for signature parity with `reduceGithubEvent`; no Dispatch event
  * currently needs it.
+ *
+ * At-most-once per (issue, seq): before dispatching to a sub-reducer, an event whose `seq` is not
+ * strictly newer than `state.issues[event.key].lastAppliedSeq` is dropped outright — no mutation,
+ * no effect, not even a re-derived one — since Dispatch's own `Issue.last_seq` is monotonic per
+ * issue and a redelivery or reorder can only repeat or regress it, never legitimately reuse it.
+ * After a sub-reducer runs (whether or not it produced an effect — a no-op redelivered again must
+ * stay a no-op), `lastAppliedSeq` is stamped to `event.seq` on `state.issues[event.key]` if that
+ * node exists. `child.status`/`ask.answered` against a key this daemon has no node for skip the
+ * stamp — harmless, since `reduceChildStatus`/`reduceAskAnswered` are themselves unconditional
+ * no-ops without a node or a registered gate to route through, so there is nothing a redelivery
+ * could corrupt.
  */
 export function reduceDispatchEvent(
   state: LegionState,
   event: DispatchIssueEvent,
   _config: ReducerConfig
 ): Effect[] {
+  const lastAppliedSeq = state.issues[event.key]?.lastAppliedSeq;
+  if (lastAppliedSeq !== undefined && event.seq <= lastAppliedSeq) return [];
+
   let effects: Effect[];
   switch (event.type) {
     case "issue.created":
@@ -1061,5 +1061,9 @@ export function reduceDispatchEvent(
     default:
       effects = [];
   }
+
+  const node = state.issues[event.key];
+  if (node) node.lastAppliedSeq = event.seq;
+
   return collapseClosedTreeWakes(effects);
 }

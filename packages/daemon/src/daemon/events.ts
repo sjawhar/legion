@@ -112,6 +112,23 @@ class DurableFatalFailure extends Error {
   }
 }
 
+/**
+ * Thrown when a Dispatch durable message's inner `Event` fails to decode — malformed JSON, a
+ * missing or invalid `id`/`seq`/`notify`/`issue_key`/`type`, or a payload's `issue_key`
+ * disagreeing with the subject's own key. Decoded and checked in `handleEnvelope` before
+ * `applyDurableEvent` ever runs a reducer, so this is poison exactly like the top-level
+ * `EnvelopeSchema` parse failure `processDurableMessage` already handles: termed and logged, no
+ * reducer has touched live state, and the daemon never goes fatal for it (unlike
+ * `DurableReducerFailure`, which can only be thrown after a reducer call and therefore always
+ * pairs its term with a restart).
+ */
+class DispatchDecodeFailure extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "DispatchDecodeFailure";
+  }
+}
+
 type JsonRecord = Record<string, unknown>;
 
 export interface UndeliverableInfo {
@@ -202,6 +219,8 @@ function dispatchIssueEvent(envelope: EnvelopeJson): DispatchIssueEvent {
   const event = recordPayload(envelope);
   const id = event?.id;
   const key = event?.issue_key;
+  const seq = event?.seq;
+  const notify = event?.notify;
   const type = event?.type;
   const payload = event?.payload;
   if (
@@ -210,12 +229,16 @@ function dispatchIssueEvent(envelope: EnvelopeJson): DispatchIssueEvent {
     id <= 0 ||
     typeof key !== "string" ||
     !/^[A-Z][A-Z0-9]*-[0-9]+$/.test(key) ||
+    typeof seq !== "number" ||
+    !Number.isSafeInteger(seq) ||
+    seq <= 0 ||
+    typeof notify !== "boolean" ||
     !isDispatchEventType(type) ||
     !asRecord(payload)
   ) {
     throw new Error("Dispatch durable message payload is not a valid Dispatch event");
   }
-  return { type, key, payload, eventId: `dispatch-${id}` };
+  return { type, key, seq, notify, payload, eventId: `dispatch-${id}` };
 }
 
 function statusGroup(
@@ -797,17 +820,28 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
     } else if (subject.startsWith("notifications.dispatch.issue.")) {
       const subjectKey = subject.split(".")[3];
-      if (!subjectKey) throw new Error(`Dispatch durable subject has no issue key: ${subject}`);
+      if (!subjectKey) {
+        throw new DispatchDecodeFailure(`Dispatch durable subject has no issue key: ${subject}`);
+      }
       if (!subjectKey.startsWith(`${deps.config.dispatchProject}-`)) return;
-      await applyDurableEvent(subject, envelope, (state) => {
-        const event = dispatchIssueEvent(envelope);
-        if (event.key !== subjectKey) {
-          throw new Error(
-            `Dispatch durable subject key ${subjectKey} disagrees with payload key ${event.key}`
-          );
-        }
-        return reduceDispatchEvent(state, event, deps.config);
-      });
+      // Decoded and cross-checked here, before `applyDurableEvent` ever calls a reducer: a
+      // malformed inner Event or a subject/payload key mismatch is poison the daemon can log and
+      // move past (see `DispatchDecodeFailure`), not a `DurableReducerFailure` that would also
+      // restart the process for a message no redelivery can ever fix.
+      let event: DispatchIssueEvent;
+      try {
+        event = dispatchIssueEvent(envelope);
+      } catch (error) {
+        throw new DispatchDecodeFailure(error);
+      }
+      if (event.key !== subjectKey) {
+        throw new DispatchDecodeFailure(
+          `Dispatch durable subject key ${subjectKey} disagrees with payload key ${event.key}`
+        );
+      }
+      await applyDurableEvent(subject, envelope, (state) =>
+        reduceDispatchEvent(state, event, deps.config)
+      );
     } else {
       const rawPayload = recordPayload(envelope);
       if (
@@ -862,6 +896,9 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    * - A reducer throw (`DurableReducerFailure`) is poison too — termed,
    *   then fatal (the reducer may have partially mutated live state
    *   before throwing; see `applyDurableEvent`'s doc comment).
+   * - A malformed Dispatch inner Event or a subject/payload key mismatch
+   *   (`DispatchDecodeFailure`) is poison only, never fatal: decoded before
+   *   any reducer runs, so live state was never touched.
    * - Any other failure from a reducer-derived event (`DurableFatalFailure`
    *   — a non-404 effect dispatch or a rejected `saveState`) is fatal:
    *   logged once, then `deps.fatal`, with no ack or nak — the broker
@@ -915,6 +952,10 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
           );
         }
         await runFatal(error);
+        return;
+      }
+      if (error instanceof DispatchDecodeFailure) {
+        poisonMessage(subject, control, error.message, envelope.event_id);
         return;
       }
       if (error instanceof DurableFatalFailure) {

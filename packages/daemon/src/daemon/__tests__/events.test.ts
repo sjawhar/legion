@@ -170,13 +170,17 @@ describe("Dispatch durable intake", () => {
     }
   });
 
-  it("terms and logs malformed Dispatch envelopes instead of acknowledging them", async () => {
+  it("terms and logs malformed Dispatch envelopes instead of acknowledging them, and never fatals the daemon for them", async () => {
     const { state } = stateForIssue();
     const nats = new FakeNats();
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fatalCalls: unknown[] = [];
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
       config: { ...config(), dispatchProject: "LEGSMOKE" },
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
     });
 
     try {
@@ -193,6 +197,45 @@ describe("Dispatch durable intake", () => {
       expect(errorLog).toHaveBeenCalledWith(
         expect.stringContaining("notifications.dispatch.issue.LEGSMOKE-1.issue.updated")
       );
+      // A malformed inner payload is decoded and rejected before any reducer runs — poison, not
+      // a `DurableReducerFailure`, so it must never restart the daemon.
+      expect(fatalCalls).toEqual([]);
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("terms and logs a Dispatch event whose payload issue_key disagrees with its subject, without fataling", async () => {
+    const state = newLegionState("omp", 4);
+    const nats = new FakeNats();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fatalCalls: unknown[] = [];
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {}),
+      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
+
+    try {
+      const mismatched = { ...dispatchIssueCreatedRoot, issue_key: "LEGSMOKE-9" };
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.dispatch.issue.LEGSMOKE-1.issue.created",
+        dispatchEnvelope(mismatched, "dispatch-key-mismatch"),
+        { streamSequence: 9, deliverySequence: 3 },
+        calls
+      );
+      await flush();
+
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [expect.any(String)] });
+      expect(state.issues["LEGSMOKE-1"]).toBeUndefined();
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("notifications.dispatch.issue.LEGSMOKE-1.issue.created")
+      );
+      expect(fatalCalls).toEqual([]);
     } finally {
       errorLog.mockRestore();
       pump.stop();

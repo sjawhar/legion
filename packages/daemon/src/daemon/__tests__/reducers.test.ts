@@ -53,6 +53,8 @@ const PARKED_STATUS_FIXTURES: ReadonlyArray<readonly [IssueStatus, DispatchFixtu
 interface DispatchFixture {
   readonly id: number;
   readonly issue_key: string;
+  readonly seq: number;
+  readonly notify: boolean;
   readonly type: DispatchIssueEvent["type"];
   readonly payload: unknown;
 }
@@ -61,6 +63,8 @@ function dispatch(fixture: DispatchFixture): DispatchIssueEvent {
   return {
     type: fixture.type,
     key: fixture.issue_key as IssueKey,
+    seq: fixture.seq,
+    notify: fixture.notify,
     payload: fixture.payload,
     eventId: `dispatch-${fixture.id}`,
   };
@@ -327,18 +331,55 @@ describe("reduceDispatchEvent", () => {
     ) {
       throw new Error("ask.answered fixture payload must be an object");
     }
+    // A higher seq than the approval's own (4), so this is fenced out by askId mismatch inside
+    // reduceAskAnswered, not by the outer at-most-once seq fence — the seq fence alone would
+    // also produce `[]` here (the raw fixture's own seq, 3, is lower than the approval's), which
+    // would silently pass this assertion for the wrong reason.
     expect(
       reduceDispatchEvent(
         state,
         {
           ...unrelatedAsk,
           key: issue,
+          seq: 100,
           payload: { ...unrelatedAsk.payload, id: "unrelated-ask" },
         },
         config
       )
     ).toEqual([]);
     expect(state.gates[issue].designApproved).toBeUndefined();
+  });
+
+  it("never re-approves or re-emits design-approved once the gate is already approved, even at a newer seq", () => {
+    const state = newLegionState("omp", 4);
+    const issue = "LEGSMOKE-3" as IssueKey;
+    state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+    state.trees[issue] = {
+      root: issue,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+    };
+    const architect = claim(state, issue, "architect");
+    state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+
+    expect(
+      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "design-approved" } }]);
+    expect(state.gates[issue].designApproved).toBe("36e95e78-81d5-4da3-ae7b-789a16640bd9");
+
+    // Same ask, same answer, a strictly newer seq than the approval it already applied: the
+    // outer at-most-once fence alone would let this through (100 > lastAppliedSeq), so only the
+    // dedicated `gate.designApproved !== undefined` guard inside reduceAskAnswered stops the
+    // re-approval and the duplicate design-approved wake.
+    expect(
+      reduceDispatchEvent(
+        state,
+        { ...dispatch(humanApproved as unknown as DispatchFixture), seq: 100 },
+        config
+      )
+    ).toEqual([]);
+    expect(state.gates[issue].designApproved).toBe("36e95e78-81d5-4da3-ae7b-789a16640bd9");
   });
 
   it("ignores GitHub issue webhooks without changing Dispatch lifecycle state", () => {
@@ -364,19 +405,65 @@ describe("reduceDispatchEvent", () => {
     expect(state).toEqual(before);
   });
 
-  it("ignores an older Dispatch status update after a newer observation", () => {
+  it("ignores a status update whose seq is not newer than the last one applied to the issue", () => {
     const state = newLegionState("omp", 4);
-    state.issues[root] = {
-      ...issueNode(root, "Root", "testing"),
-      updatedAt: Date.parse("2026-09-10T03:00:00.000Z"),
-      updatedAtSource: "webhook",
-    };
+    state.issues[root] = { ...issueNode(root, "Root", "testing"), lastAppliedSeq: 999 };
     const before = structuredClone(state.issues[root]);
 
     expect(
       reduceDispatchEvent(state, dispatch(issueUpdatedTodo as unknown as DispatchFixture), config)
     ).toEqual([]);
     expect(state.issues[root]).toEqual(before);
+  });
+
+  it("applies a redelivered event with the same seq exactly once", () => {
+    const state = newLegionState("omp", 4);
+    const event = dispatch(issueCreatedRoot as unknown as DispatchFixture);
+
+    expect(reduceDispatchEvent(state, event, config)).toEqual([
+      { kind: "controller", payload: { type: "triage", issue: root } },
+    ]);
+    const afterFirst = structuredClone(state.issues[root]);
+    expect(afterFirst.lastAppliedSeq).toBe(event.seq);
+
+    // Exact redelivery: same event object, same seq. Must be a total no-op — no mutation
+    // (including no re-derived one) and no re-emitted effect.
+    expect(reduceDispatchEvent(state, event, config)).toEqual([]);
+    expect(state.issues[root]).toEqual(afterFirst);
+  });
+
+  it("leaves status and children intact when an older issue.created is redelivered after a newer issue.updated", () => {
+    const state = newLegionState("omp", 4);
+    const createEvent = dispatch(issueCreatedRoot as unknown as DispatchFixture);
+    const updateEvent = dispatch(issueUpdatedTodo as unknown as DispatchFixture);
+    expect(createEvent.seq).toBeLessThan(updateEvent.seq);
+
+    reduceDispatchEvent(state, createEvent, config);
+    expect(reduceDispatchEvent(state, updateEvent, config)).toEqual([
+      { kind: "admit", issue: root },
+    ]);
+    expect(state.issues[root].status).toBe("todo");
+    const afterUpdate = structuredClone(state.issues[root]);
+
+    // The stale create (an out-of-order redelivery) must not roll the status back to "triage",
+    // touch children, or re-emit the triage wake.
+    expect(reduceDispatchEvent(state, createEvent, config)).toEqual([]);
+    expect(state.issues[root]).toEqual(afterUpdate);
+  });
+
+  it("never replaces an existing node on issue.created, even one whose seq clears the outer fence", () => {
+    const state = newLegionState("omp", 4);
+    // Constructed directly (not through a prior reduceDispatchEvent call) with a lower seq than
+    // the create fixture below, so the outer at-most-once fence alone would let the create
+    // through — only reduceIssueCreated's own existing-node guard must stop it from here.
+    state.issues[root] = { ...issueNode(root, "Root", "todo"), lastAppliedSeq: 0 };
+    state.issues[root].children.push(child);
+    const before = structuredClone(state.issues[root]);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(issueCreatedRoot as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    expect(state.issues[root]).toEqual({ ...before, lastAppliedSeq: 1 });
   });
 });
 

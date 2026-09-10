@@ -31,6 +31,9 @@ and closed; nothing here touches the real `LEGION` project.
 GitHub `issues.opened` (for the "GitHub webhook events are ignored" reducer test) reuses the
 existing fixture in `envelope-goldens.test.ts`; it is not a Dispatch event and needed no capture.
 
+The issue topic carries every event (the outbox does not gate `notifications.dispatch.issue.>` on
+`notify`); `notify` is the human-wake flag, and the daemon's own consumer ignores it entirely.
+
 ## Human-authored fixtures (captured 2026-09-10 02:30Z via Sami's dashboard session)
 
 - `legsmoke-3-issue.updated-human-todo.json` — a human moving LEGSMOKE-3 from `triage` to `todo`

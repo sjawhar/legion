@@ -16,16 +16,21 @@ export class DispatchHttpError extends Error {
 
 /** The daemon's thin client for Dispatch's native-tool API: the lifecycle statuses it owns
  * (see events.ts/processes.ts) and the issue reads resync needs to detect drift. Every write
- * carries the daemon's own actor identity (D4): `{kind:"session", id:"legion-daemon:<project>"}`
- * with `origin.session_title`, so session-authored status writes are attributed to the daemon and
- * carry `notify=false`. A non-2xx response throws `DispatchHttpError`; the client never retries —
- * resync is the retry mechanism for a failed lifecycle-status write (see processes.ts). */
+ * carries the daemon's own actor identity (D4): `{kind:"session", id:"legion-daemon:<project>",
+ * origin:{session_title}}` — `origin` nests inside the session actor per the contract
+ * (`packages/contracts/src/dispatch-api.ts`'s `Actor` union), never a sibling of `actor`: the
+ * PATCH decoder rejects unknown top-level fields
+ * (`packages/envoy/internal/dispatch/api/issues.go`'s `patchIssue`,
+ * `server.go`'s `decodeJSON`'s `DisallowUnknownFields`), so a top-level `origin` would 400 every
+ * write. Session-authored writes carry `notify=false`. A non-2xx response throws
+ * `DispatchHttpError`; the client never retries — resync is the retry mechanism for a failed
+ * lifecycle-status write (see processes.ts). */
 export interface DispatchClient {
   /** `GET /api/v1/issues?project=<project>`. */
   listIssues(project: string): Promise<IssueSummary[]>;
   /** `GET /api/v1/issues/<key>`. */
   getIssue(key: string): Promise<IssueDetails>;
-  /** `PATCH /api/v1/issues/<key>` with `{status, actor, origin}`. */
+  /** `PATCH /api/v1/issues/<key>` with `{status, actor: {kind, id, origin}}`. */
   setStatus(key: string, status: IssueStatus): Promise<void>;
 }
 
@@ -50,8 +55,11 @@ function errorMessage(payload: unknown, response: Response): string {
 export function createDispatchClient(options: DispatchClientOptions): DispatchClient {
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
   const fetchImpl = options.fetch ?? fetch;
-  const actor = { kind: "session" as const, id: `legion-daemon:${options.project}` };
-  const origin = { session_title: `Legion daemon · ${options.project}` };
+  const actor = {
+    kind: "session" as const,
+    id: `legion-daemon:${options.project}`,
+    origin: { session_title: `Legion daemon · ${options.project}` },
+  };
 
   async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = {
@@ -87,7 +95,6 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
       await request("PATCH", `/api/v1/issues/${encodeURIComponent(key)}`, {
         status,
         actor,
-        origin,
       });
     },
   };
