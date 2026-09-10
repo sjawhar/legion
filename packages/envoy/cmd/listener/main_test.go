@@ -446,7 +446,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "legion-delivery"
 	roleTopic := contracts.RoleTopicPrefix + role
-	if _, err := harness.registry.SetRole("ses_role_a", "test-machine", role); err != nil {
+	if _, err := harness.registry.SetRole("ses_role_a", "test-machine", role, false); err != nil {
 		t.Fatalf("claim role for A: %v", err)
 	}
 	// Set B as the KV value that the core handler must resolve. This models a
@@ -1964,10 +1964,10 @@ func TestIsControlTopic(t *testing.T) {
 func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const controller = "legion-controller"
-	if _, err := harness.registry.SetRole("ses_role", "test-machine", controller); err != nil {
+	if _, err := harness.registry.SetRole("ses_role", "test-machine", controller, false); err != nil {
 		t.Fatalf("claim controller role: %v", err)
 	}
-	if _, err := harness.registry.SetRole("ses_role", "test-machine", "legion-reviewer"); err != nil {
+	if _, err := harness.registry.SetRole("ses_role", "test-machine", "legion-reviewer", false); err != nil {
 		t.Fatalf("claim reviewer role: %v", err)
 	}
 	controllerTopic := contracts.RoleTopicPrefix + controller

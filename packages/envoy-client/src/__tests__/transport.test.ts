@@ -327,13 +327,81 @@ describe("EnvoyClient", () => {
     ]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
 
-    const interest = await client.setRole({ sessionID: "ses_sender", role: "controller" });
+    const result = await client.setRole({ sessionID: "ses_sender", role: "controller" });
 
-    expect(interest.topics).toEqual(["notifications.role.controller"]);
+    expect(result).toEqual({
+      claimed: true,
+      interest: expect.objectContaining({ topics: ["notifications.role.controller"] }),
+    });
+    // A hard claim sends no `soft` field, so an older listener sees an
+    // unchanged request.
     expect(await recorded.requests[0]?.json()).toEqual({
       session_id: "ses_sender",
       role: "controller",
     });
+  });
+
+  test("a soft claim sends soft:true and maps the listener's 409 to a not-claimed result", async () => {
+    const recorded = recordFetch([
+      Response.json(
+        { error: "role controller is held by ses_live", role: "controller", holder: "ses_live" },
+        { status: 409 }
+      ),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.setRole({
+      sessionID: "ses_resumer",
+      role: "controller",
+      soft: true,
+    });
+
+    expect(result).toEqual({ claimed: false, holder: "ses_live" });
+    expect(await recorded.requests[0]?.json()).toEqual({
+      session_id: "ses_resumer",
+      role: "controller",
+      soft: true,
+    });
+  });
+
+  test("previous_session_id is sent with a soft claim and dropped from a hard one", async () => {
+    const interest = { session_id: "ses_child", machine_id: "host-a", dir: "/work", topics: [] };
+    const recorded = recordFetch([jsonResponse(interest), jsonResponse(interest)]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.setRole({
+      sessionID: "ses_child",
+      role: "controller",
+      soft: true,
+      previousSessionID: "ses_parent",
+    });
+    await client.setRole({
+      sessionID: "ses_child",
+      role: "controller",
+      previousSessionID: "ses_parent",
+    });
+
+    expect(await recorded.requests[0]?.json()).toEqual({
+      session_id: "ses_child",
+      role: "controller",
+      soft: true,
+      previous_session_id: "ses_parent",
+    });
+    // A hard claim is last-claim-wins already; the predecessor is meaningless
+    // and stays off the wire.
+    expect(await recorded.requests[1]?.json()).toEqual({
+      session_id: "ses_child",
+      role: "controller",
+    });
+  });
+
+  test("a 409 without the held-role shape stays a typed API error", async () => {
+    const recorded = recordFetch([Response.json({ error: "duplicate" }, { status: 409 })]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await expect(
+      client.setRole({ sessionID: "ses_x", role: "controller", soft: true })
+    ).rejects.toBeInstanceOf(EnvoyApiError);
   });
 
   test("lists listener sessions and retains their registration metadata", async () => {

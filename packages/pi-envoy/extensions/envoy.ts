@@ -32,6 +32,32 @@ import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 
+/**
+ * Transcript entry recording the role this session holds. Written on every
+ * claim (`{ role }`) and release (`{ role: null }`); the last one on the branch
+ * is the truth a resumed process uses when deciding what to reclaim.
+ */
+const ROLE_CLAIM_ENTRY = "envoy-role-claim";
+
+interface RoleClaimEntry {
+  readonly type: "custom";
+  readonly customType: typeof ROLE_CLAIM_ENTRY;
+  readonly data: { readonly role: string | null };
+}
+
+interface EstablishSessionOptions {
+  readonly carryPreviousSessionRole?: boolean;
+}
+
+function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
+  if (typeof entry !== "object" || entry === null) return false;
+  if (!("type" in entry) || entry.type !== "custom") return false;
+  if (!("customType" in entry) || entry.customType !== ROLE_CLAIM_ENTRY) return false;
+  if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) return false;
+  if (!("role" in entry.data)) return false;
+  return entry.data.role === null || typeof entry.data.role === "string";
+}
+
 type LegionRoleClaim = (sessionID: string, role: string, context?: SessionContext) => Promise<void>;
 
 type LegionRoleClaimReady = {
@@ -319,6 +345,8 @@ export default function envoyExtension(pi: PiApi): void {
     // topics it registered before it died (e.g. dispatch thread replies).
     // Quiet on failure like rebind: a brand-new session has no registry
     // entry, and a listener outage must not fail session start.
+    // Role topics are not subscriptions (role deliveries arrive on the agent
+    // subject); they are re-claimed by reclaimHeldRoles once registered.
     const registry = await client.getInterest(sessionID).catch(() => undefined);
     if (registry === undefined) return;
     for (const topic of registry.topics) {
@@ -327,8 +355,137 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  const establishSession = async (context: SessionContext): Promise<void> => {
+  /**
+   * Claim `role` for this session. A hard claim (the default; what
+   * envoy_role_set does) is last-claim-wins. A soft claim is what automatic
+   * recovery uses: the listener grants it only when the role is unheld, its
+   * holder is no longer live, or its holder is the id this session continues
+   * (`previousSessionID` — a fork's parent is still heartbeating), and answers
+   * with the live holder otherwise — atomically, so two resumers cannot both
+   * believe they won. Returns whether the claim landed.
+   */
+  const setEnvoyRole = async (
+    role: string,
+    options: { soft?: boolean; previousSessionID?: string } = {}
+  ): Promise<boolean> => {
+    const topic = ROLE_TOPIC_PREFIX + role;
+    const previousTopic = claimedRoleTopic;
+    const result = await client.setRole({
+      sessionID,
+      role,
+      soft: options.soft,
+      previousSessionID: options.previousSessionID,
+    });
+    if (!result.claimed) {
+      logger.warn("envoy: role held by another live session; not reclaimed", {
+        role,
+        sessionID,
+        holder: result.holder,
+      });
+      claimedRoleTopic = undefined;
+      return false;
+    }
+    claimedRoleTopic = topic;
+    // The transcript is the one thing `omp --resume` guarantees, so it is
+    // the durable record of the claim: the listener reaps a dead session's
+    // interest row (role claim included) after its ten-minute stale-interest
+    // grace window, and this process's memory dies with it.
+    pi.appendEntry(ROLE_CLAIM_ENTRY, { role });
+    if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
+    if (previousTopic !== undefined && previousTopic !== topic) {
+      await client.unsubscribe({ sessionID, topics: [previousTopic] });
+    }
+    return true;
+  };
+
+  const releaseClaimedRole = (): void => {
+    claimedRoleTopic = undefined;
+    pi.appendEntry(ROLE_CLAIM_ENTRY, { role: null });
+  };
+
+  const transcriptClaimedRole = (branch: readonly unknown[]): string | null | undefined => {
+    // The last claim entry wins: a claim followed by a release is no claim.
+    let role: string | null | undefined;
+    for (const entry of branch) {
+      if (!isRoleClaimEntry(entry)) continue;
+      role = entry.data.role;
+    }
+    return role;
+  };
+
+  const roleSources = (
+    previousSessionID: string,
+    carryPreviousSessionRole: boolean
+  ): readonly string[] =>
+    previousSessionID === "" || previousSessionID === sessionID || !carryPreviousSessionRole
+      ? [sessionID]
+      : [sessionID, previousSessionID];
+
+  const reclaimHeldRoles = async (
+    previousSessionID: string,
+    branch: readonly unknown[],
+    carryPreviousSessionRole: boolean
+  ): Promise<void> => {
+    // A role claim outlives the process it was made in, and the process that
+    // resumes or rebinds the session must hold it again under its current
+    // id — otherwise every publish to the role gets `no holder` until someone
+    // re-runs envoy_role_set. A session holds at most one role, so the three
+    // records are consulted in precedence order and the first answer wins:
+    //  - the transcript entry written at claim time — the durable record
+    //    (survives `omp --resume` after the listener has reaped the dead
+    //    session's rows); a recorded release is final and vetoes the rest;
+    //  - this process's memory (a rebind within one process, where the
+    //    listener may be momentarily unreachable);
+    //  - the listener's interest rows for the current id (same-id resume
+    //    inside the reap window) and the previous id (rebind).
+    // A `new`/`resume` switch installs an unrelated transcript, so the
+    // outgoing session's memory and rows are not carried into it. setRole is
+    // last-claim-wins with old-holder cleanup, so a same-id reclaim is a no-op
+    // re-assert and a rebind is a clean move. Must run after registerSession:
+    // the listener rejects a claim from an unregistered session. Quiet on
+    // failure: session start must not depend on it.
+    if (!carryPreviousSessionRole) claimedRoleTopic = undefined;
+    const remembered = transcriptClaimedRole(branch);
+    if (remembered === null) {
+      claimedRoleTopic = undefined;
+      return;
+    }
+    let role = remembered ?? claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
+    if (role === undefined) {
+      for (const source of roleSources(previousSessionID, carryPreviousSessionRole)) {
+        const registry = await client.getInterest(source).catch(() => undefined);
+        const topic = registry?.topics.find((candidate) => candidate.startsWith(ROLE_TOPIC_PREFIX));
+        if (topic !== undefined) {
+          role = topic.slice(ROLE_TOPIC_PREFIX.length);
+          break;
+        }
+      }
+    }
+    if (role === undefined) return;
+    // An explicit envoy_role_set is last-claim-wins by contract. An automatic
+    // reclaim is not: this session's transcript may be stale evidence (the
+    // parent of a /fork whose role moved to the child; a second process on
+    // the same transcript), and it must not take a role a different live
+    // session holds. The listener decides that atomically for a soft claim;
+    // the id this session continues is the one live holder it may supersede.
+    const continued =
+      carryPreviousSessionRole && previousSessionID !== "" && previousSessionID !== sessionID
+        ? previousSessionID
+        : undefined;
+    await setEnvoyRole(role, { soft: true, previousSessionID: continued }).catch((error) => {
+      logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });
+    });
+  };
+
+  let sessionEstablishment = Promise.resolve();
+
+  const establishSessionNow = async (
+    context: SessionContext,
+    options: EstablishSessionOptions = {}
+  ): Promise<void> => {
+    const previousSessionID = sessionID;
     const previousTopic = sessionID === "" ? undefined : agentSubject(sessionID);
+    if (options.carryPreviousSessionRole === false) claimedRoleTopic = undefined;
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
     activeSessionContext = context;
@@ -345,24 +502,30 @@ export default function envoyExtension(pi: PiApi): void {
     await subscribe(currentTopic);
     // A resumed session (non-empty branch — the host's documented resume
     // signal) may hold registered interests from its previous life.
-    if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
+    const branch = context.sessionManager.getBranch?.() ?? [];
+    const resumed = branch.length > 0;
+    if (resumed) {
       await recoverRegisteredInterests();
     }
     // Every session subscribes to its own agent subject, so every session is
     // registered; envoy_send treats an unregistered id as dead.
     await registerSession();
+    if (resumed || previousSessionID !== "") {
+      await reclaimHeldRoles(previousSessionID, branch, options.carryPreviousSessionRole ?? true);
+    }
     ensureHeartbeat(context);
   };
 
-  const setEnvoyRole = async (role: string): Promise<void> => {
-    const topic = ROLE_TOPIC_PREFIX + role;
-    const previousTopic = claimedRoleTopic;
-    await client.setRole({ sessionID, role });
-    claimedRoleTopic = topic;
-    if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
-    if (previousTopic !== undefined && previousTopic !== topic) {
-      await client.unsubscribe({ sessionID, topics: [previousTopic] });
-    }
+  const establishSession = (
+    context: SessionContext,
+    options: EstablishSessionOptions = {}
+  ): Promise<void> => {
+    const run = sessionEstablishment.then(
+      () => establishSessionNow(context, options),
+      () => establishSessionNow(context, options)
+    );
+    sessionEstablishment = run.catch(() => undefined);
+    return run;
   };
 
   const bridge = legionRoleClaimBridge();
@@ -372,8 +535,10 @@ export default function envoyExtension(pi: PiApi): void {
       throw new Error(`Envoy has no active session for Legion role claim: ${targetSessionID}`);
     }
     if (sessionID !== targetSessionID) await establishSession(context);
-    await setEnvoyRole(role);
+    // The listener rejects a claim from a session it does not currently know
+    // (its registration may have expired), so register before claiming.
     await registerSession();
+    await setEnvoyRole(role);
   };
   bridge.claim = claim;
   bridge.ready.resolve(claim);
@@ -427,7 +592,8 @@ export default function envoyExtension(pi: PiApi): void {
     if (defaults.natsUrls.length === 0) return;
     const previousID = sessionID;
     try {
-      await establishSession(context);
+      const carryPreviousSessionRole = reason !== "new" && reason !== "resume";
+      await establishSession(context, { carryPreviousSessionRole });
     } catch (error) {
       // A switch during a network outage must degrade, not fail the handler;
       // the next switch or the NATS client's own reconnect re-establishes.
@@ -594,9 +760,8 @@ export default function envoyExtension(pi: PiApi): void {
           const removed = targets.filter(
             (topic) => closeIntentionally(topic) || topic === claimedRoleTopic
           );
-          if (claimedRoleTopic !== undefined && removed.includes(claimedRoleTopic)) {
-            claimedRoleTopic = undefined;
-          }
+          const releasingRole =
+            claimedRoleTopic !== undefined && removed.includes(claimedRoleTopic);
           const registrationError =
             removed.length === 0
               ? undefined
@@ -604,6 +769,10 @@ export default function envoyExtension(pi: PiApi): void {
                   .unsubscribe({ sessionID, topics: removed })
                   .then(registerSession)
                   .then(() => undefined, messageFor);
+          // The transcript release is final for automatic reclaim, so it is
+          // recorded only once the listener has actually let the role go; a
+          // failed release leaves the claim intact on both sides.
+          if (releasingRole && registrationError === undefined) releaseClaimedRole();
           return toolSuccess(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
             removed,
             ...(registrationError === undefined ? {} : { registrationError }),

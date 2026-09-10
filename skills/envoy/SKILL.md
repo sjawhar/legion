@@ -123,6 +123,21 @@ Publish to a role; do not subscribe as its holder. A successful `envoy_publish` 
 its live `holder`; an unheld role returns an error. Use `envoy_role_get(role="reviewer")` to find
 the live holder first when you need one.
 
+A claim belongs to the session, not the process. `omp --resume` re-claims the role recorded in
+the session transcript, including after the listener's stale-interest reaper has removed the old
+row. A `/fork`, `/branch`, `/handoff`, or other transcript-carrying switch checks the
+previous id and moves any held role to the new id while establishing the new session. A `/new`
+or `/resume` switch installs an unrelated transcript and carries nothing. A process that dies and
+is never resumed does not stay a live holder; once liveness expires, role publishes return
+`no holder` until that transcript resumes or another session claims the role.
+
+Automatic reclaim never steals. It is a *soft* claim, which the listener grants only when the role
+is unheld, held by a session that is no longer live, or held by the id this session continues (a
+fork's parent). If a different live session holds it — the parent of a `/fork` whose role moved to
+the child, or a second process on the same transcript — the listener refuses atomically and the
+resumed session logs a warning and holds nothing. Only an explicit `envoy_role_set` is
+last-claim-wins. Re-running `envoy_role_set` for a role this session already holds is harmless.
+
 ## Legion role claims
 
 Legion agents receive through a daemon-minted role token. Claim the assigned role with

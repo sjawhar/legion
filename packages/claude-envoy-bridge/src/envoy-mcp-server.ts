@@ -298,7 +298,10 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     }
     case EnvoyToolOperation.setRole: {
       const args = parseArguments(spec, input)
-      return client.setRole({ sessionID: sessionId, role: args.role })
+      const result = await client.setRole({ sessionID: sessionId, role: args.role })
+      // A hard claim always lands; the discriminant exists for soft claims.
+      if (!result.claimed) throw new Error(`role ${args.role} is held by ${result.holder}`)
+      return result.interest
     }
     case EnvoyToolOperation.getRole: {
       const args = parseArguments(spec, input)

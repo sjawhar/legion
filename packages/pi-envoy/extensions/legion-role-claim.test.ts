@@ -118,6 +118,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
       discriminatedUnion: () => ({}),
     },
     sendMessage: () => undefined,
+    appendEntry: () => undefined,
     getActiveTools: () => activeTools,
     setActiveTools: async (tools: string[]) => {
       activeTools.splice(0, activeTools.length, ...tools);

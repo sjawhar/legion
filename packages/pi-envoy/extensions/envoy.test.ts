@@ -66,6 +66,7 @@ type TestPi = {
     handler: (event: unknown, context: SessionContext) => Promise<unknown>
   ) => void;
   readonly sendMessage: (message: { readonly content: string }, options: unknown) => void;
+  readonly appendEntry: PiApi["appendEntry"];
 };
 
 type Subscription = {
@@ -241,6 +242,12 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
   const renderers = new Map<string, MessageRenderer>();
   const messages: string[] = [];
   const deliveries: { readonly content: string; readonly options: unknown }[] = [];
+  // Persisted custom entries, in the shape a later `getBranch()` returns them.
+  const entries: {
+    readonly type: "custom";
+    readonly customType: string;
+    readonly data: unknown;
+  }[] = [];
   const pi: TestPi = {
     zod: options.zod ?? z,
     registerTool: (tool) => tools.push(tool),
@@ -251,11 +258,15 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
       messages.push(message.content);
       deliveries.push({ content: message.content, options });
     },
+    appendEntry: (customType, data) => {
+      entries.push({ type: "custom", customType, data });
+    },
   };
   return {
     commands,
     copiedSessionIDs: clipboardState.copiedSessionIDs,
     deliveries,
+    entries,
     handlers,
     messages,
     pi,
@@ -617,7 +628,8 @@ describe("envoy OMP extension", () => {
     }
   });
 
-  test("re-subscribes persisted registry interests on resumed session start, skipping role lanes", async () => {
+  test("a resumed session re-subscribes its persisted interests and re-claims its held role", async () => {
+    const roleClaims: { readonly session_id: string; readonly role: string }[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       if (url.pathname === "/v1/interests/ses_omp") {
@@ -630,6 +642,16 @@ describe("envoy OMP extension", () => {
             "notifications.github.sjawhar.legion.issue.91.>",
             "notifications.role.legion-controller",
           ],
+        });
+      }
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}");
+        roleClaims.push({ session_id: body.session_id, role: body.role });
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [`notifications.role.${body.role}`],
         });
       }
       return responseWithRegistration(input, init, {});
@@ -646,7 +668,332 @@ describe("envoy OMP extension", () => {
     expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.91.>")).toBe(true);
     expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.91")).toBe(true);
 
+    // Role deliveries arrive on the agent subject; a role is never a NATS
+    // subscription of its own. It is a server-side claim, re-asserted so the
+    // extension knows it holds one again (envoy_unsubscribe can release it).
     expect(natsState.controls.has("notifications.role.legion-controller")).toBe(false);
+    expect(roleClaims).toEqual([{ session_id: "ses_omp", role: "legion-controller" }]);
+    const unsubscribe = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    const result = await unsubscribe?.execute("", {
+      topics: ["notifications.role.legion-controller"],
+    });
+    expect(result?.content[0]?.text).toContain("notifications.role.legion-controller");
+  });
+
+  test("a session rebind moves a held role from the dead id to the new one", async () => {
+    const roleClaims: { readonly session_id: string; readonly role: string }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/ses_before") {
+        return response({
+          session_id: "ses_before",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: ["notifications.agent.ses_before", "notifications.role.pr-queue"],
+        });
+      }
+      // The new id has no registry row yet — exactly the post-branch state.
+      if (url.pathname === "/v1/interests/ses_after") return response({ error: "not found" });
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}");
+        roleClaims.push({ session_id: body.session_id, role: body.role });
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [`notifications.role.${body.role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-rebind");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before"));
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    await roleTool?.execute("", { role: "pr-queue" });
+    expect(roleClaims).toEqual([{ session_id: "ses_before", role: "pr-queue" }]);
+
+    await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after"));
+
+    expect(roleClaims).toEqual([
+      { session_id: "ses_before", role: "pr-queue" },
+      { session_id: "ses_after", role: "pr-queue" },
+    ]);
+  });
+
+  test("a rebind re-claims a held role from memory when the registry rows are gone", async () => {
+    const registeredSessions = new Set<string>();
+    const roleClaims: { readonly session_id: string; readonly role: string }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id?: unknown;
+        };
+        if (typeof body.session_id === "string") registeredSessions.add(body.session_id);
+        return responseWithRegistration(input, init, {});
+      }
+      if (url.pathname === "/v1/interests/ses_before_memory")
+        return response({ error: "nats: key not found" });
+      if (url.pathname === "/v1/interests/ses_after_memory")
+        return response({ error: "nats: key not found" });
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id?: unknown;
+          readonly role?: unknown;
+        };
+        if (typeof body.session_id !== "string" || typeof body.role !== "string") {
+          return new Response(JSON.stringify({ error: "invalid role claim" }), { status: 400 });
+        }
+        if (!registeredSessions.has(body.session_id)) {
+          return new Response(JSON.stringify({ error: "session is not registered" }), {
+            status: 404,
+          });
+        }
+        roleClaims.push({ session_id: body.session_id, role: body.role });
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [`notifications.role.${body.role}`],
+        });
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-memory-rebind");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before_memory"));
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    await roleTool?.execute("", { role: "pr-queue" });
+    expect(roleClaims).toEqual([{ session_id: "ses_before_memory", role: "pr-queue" }]);
+
+    await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_memory"));
+
+    expect(roleClaims).toEqual([
+      { session_id: "ses_before_memory", role: "pr-queue" },
+      { session_id: "ses_after_memory", role: "pr-queue" },
+    ]);
+  });
+
+  test("new and resume switches do not carry the outgoing session role", async () => {
+    const roleClaims: { readonly session_id: string; readonly role: string }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        return responseWithRegistration(input, init, {});
+      }
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}");
+        roleClaims.push({ session_id: body.session_id, role: body.role });
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [`notifications.role.${body.role}`],
+        });
+      }
+      if (url.pathname.startsWith("/v1/interests/")) {
+        const session = url.pathname.slice("/v1/interests/".length);
+        const topics =
+          session === "ses_loaded"
+            ? [`notifications.agent.${session}`, "notifications.role.reviewer"]
+            : [`notifications.agent.${session}`];
+        return response({
+          session_id: session,
+          machine_id: "test",
+          dir: "/tmp",
+          topics,
+        });
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-new-resume-switch");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_outgoing"));
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    await roleTool?.execute("", { role: "pr-queue" });
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, sessionContext("ses_fresh"));
+    await roleTool?.execute("", { role: "reviewer" });
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "resume" },
+      {
+        ...sessionContext("ses_loaded"),
+        sessionManager: {
+          ...sessionContext("ses_loaded").sessionManager,
+          getBranch: () => [
+            { type: "custom", customType: "envoy-role-claim", data: { role: "sre" } },
+          ],
+        },
+      }
+    );
+
+    // The role held by ses_outgoing does not follow a `new` switch, and the
+    // `resume` switch claims what the loaded transcript itself recorded (sre),
+    // not what the outgoing process remembered (reviewer) or what a stale
+    // listener row for the loaded id says (reviewer).
+    expect(roleClaims).toEqual([
+      { session_id: "ses_outgoing", role: "pr-queue" },
+      { session_id: "ses_fresh", role: "reviewer" },
+      { session_id: "ses_loaded", role: "sre" },
+    ]);
+  });
+
+  test("resume after listener reaping re-claims the role from the transcript", async () => {
+    // Life 1: claim a role. The listener later reaps the dead session's rows,
+    // so life 2 finds no interest row at all — only the transcript remembers.
+    const roleClaims: { readonly session_id: string; readonly role: string }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/ses_reaped")
+        return response({ error: "nats: key not found" });
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}");
+        roleClaims.push({ session_id: body.session_id, role: body.role });
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [`notifications.role.${body.role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: firstLife } = await import("./envoy.ts?role-reaped-life-1");
+    const first = createPi();
+    firstLife(first.pi);
+    await first.handlers.get("session_start")?.({}, sessionContext("ses_reaped"));
+    await first.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role: "sre" });
+    expect(roleClaims).toEqual([{ session_id: "ses_reaped", role: "sre" }]);
+
+    const { default: secondLife } = await import("./envoy.ts?role-reaped-life-2");
+    const second = createPi();
+    secondLife(second.pi);
+    const resumed = {
+      ...sessionContext("ses_reaped"),
+      sessionManager: {
+        ...sessionContext("ses_reaped").sessionManager,
+        getBranch: () => first.entries,
+      },
+    };
+    await second.handlers.get("session_start")?.({}, resumed);
+
+    expect(roleClaims).toEqual([
+      { session_id: "ses_reaped", role: "sre" },
+      { session_id: "ses_reaped", role: "sre" },
+    ]);
+  });
+
+  test("automatic reclaim is a soft claim: a live holder's 409 is honoured, an explicit claim stays hard", async () => {
+    // The parent of a /fork: its transcript still records `pr-queue`, but the
+    // fork moved the live claim to the child. The listener arbitrates: the
+    // extension sends soft:true and the listener answers 409 with the holder.
+    const roleClaims: { readonly session_id: string; readonly soft: boolean | undefined }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/ses_fork_parent") {
+        return response({ error: "nats: key not found" });
+      }
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}");
+        roleClaims.push({ session_id: body.session_id, soft: body.soft });
+        if (body.soft === true) {
+          return Response.json(
+            { error: "role pr-queue is held by ses_fork_child", role: "pr-queue", holder: "ses_fork_child" },
+            { status: 409 }
+          );
+        }
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [`notifications.role.${body.role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-no-steal");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const resumedParent = {
+      ...sessionContext("ses_fork_parent"),
+      sessionManager: {
+        ...sessionContext("ses_fork_parent").sessionManager,
+        getBranch: () => [
+          { type: "custom", customType: "envoy-role-claim", data: { role: "pr-queue" } },
+        ],
+      },
+    };
+    await fixture.handlers.get("session_start")?.({}, resumedParent);
+
+    // One attempt, soft, refused — and the parent does not believe it holds
+    // the role afterwards.
+    expect(roleClaims).toEqual([{ session_id: "ses_fork_parent", soft: true }]);
+    const unsubscribe = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    const refused = await unsubscribe?.execute("", { topics: ["notifications.role.pr-queue"] });
+    expect(refused?.content[0]?.text).toBe("Unsubscribed: (none)");
+
+    // The user's explicit envoy_role_set is a hard claim and takes it.
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    await roleTool?.execute("", { role: "pr-queue" });
+    expect(roleClaims).toEqual([
+      { session_id: "ses_fork_parent", soft: true },
+      { session_id: "ses_fork_parent", soft: undefined },
+    ]);
+  });
+
+  test("a role released before the process died is not re-claimed on resume", async () => {
+    const roleClaims: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      // A stale listener row still names the role: the recorded release wins.
+      if (url.pathname === "/v1/interests/ses_released")
+        return response({
+          session_id: "ses_released",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: ["notifications.agent.ses_released", "notifications.role.sre"],
+        });
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}");
+        roleClaims.push(body.role);
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [`notifications.role.${body.role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: firstLife } = await import("./envoy.ts?role-released-life-1");
+    const first = createPi();
+    firstLife(first.pi);
+    await first.handlers.get("session_start")?.({}, sessionContext("ses_released"));
+    await first.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role: "sre" });
+    await first.tools
+      .find((tool) => tool.name === "envoy_unsubscribe")
+      ?.execute("", { topics: ["notifications.role.sre"] });
+    expect(roleClaims).toEqual(["sre"]);
+
+    const { default: secondLife } = await import("./envoy.ts?role-released-life-2");
+    const second = createPi();
+    secondLife(second.pi);
+    const resumed = {
+      ...sessionContext("ses_released"),
+      sessionManager: {
+        ...sessionContext("ses_released").sessionManager,
+        getBranch: () => first.entries,
+      },
+    };
+    await second.handlers.get("session_start")?.({}, resumed);
+
+    expect(roleClaims).toEqual(["sre"]);
   });
 
   test("does not subscribe when a tool result is an error or has no Dispatch topic", async () => {
