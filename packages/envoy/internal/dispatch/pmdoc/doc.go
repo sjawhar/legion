@@ -15,8 +15,8 @@
 //   - Update writes the minimal Yjs change that turns a fragment's current tree
 //     into a target *Node, porting y-prosemirror's updateYFragment diff so a
 //     one-word edit produces a one-word delta instead of a full-document replace.
-//   - FindQuote, FindMark, MarkRange, and Unmark locate and edit ranges by
-//     quoted text or existing marks.
+//   - FindQuote, FindMark, MarkRange, Unmark, and Splice locate and edit ranges
+//     within a tree by quoted text or existing marks.
 //
 // pmdoc has no Postgres, HTTP, or ygo-server dependency; it imports only
 // crdt, goldmark, and the standard library. The Dispatch server composes it.
@@ -40,17 +40,20 @@
 //
 // # Regenerating fixtures
 //
-// testdata/fixtures.json is generated, not hand-written. To add a document
-// fixture, drop a markdown file in testdata/corpus/ and regenerate:
+// testdata/fixtures.json and testdata/splices.json are generated, not
+// hand-written. To add a document fixture, drop a markdown file in
+// testdata/corpus/ and regenerate:
 //
 //	cd gen && bun install && bun run gen     # rewrite generated fixtures
 //	cd gen && bun run check                  # verify they are up to date (CI)
 //
 // gen/gen.ts parses corpus files with the headless engine, encodes their
 // ProseMirror docs as Yjs updates with y-prosemirror, and records markdown,
-// pm_json, and base64 updates side by side. Go tests decode Yjs updates with
-// Read, compare browser fixture JSON, and decode Update output with the
-// browser's y-prosemirror through gen/decode.ts.
+// pm_json, and base64 updates side by side. It also runs ProseMirror's
+// replaceRange for its documented splice cases and writes their engine JSON.
+// Go tests decode Yjs updates with Read, compare browser fixture JSON, and
+// compare Splice with those replaceRange results; Update output is decoded
+// by the browser's y-prosemirror through gen/decode.ts.
 //
 // # Temporary: building @sjawhar/proof-editor from source
 //
