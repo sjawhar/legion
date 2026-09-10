@@ -211,6 +211,17 @@ export class ProcessManager {
    * issue splits into it instead of racing to open its own. */
   private readonly issueWindowIds = new Map<IssueKey, string>();
   private controllerSpawn?: Promise<void>;
+  /** Set while a bounded wait for the controller to claim its role is in flight (see
+   * `ensureController`'s doc comment). Bound to the exact locator observed when armed, by
+   * reference: the expiry callback only ever acts if `controllerLocator` is still this same
+   * object -- a fresh spawn or an explicit cancel replaces or clears this field first, so a
+   * stale timer that still fires late can never touch whatever now occupies the role. `cancel`
+   * releases the underlying real timer (a no-op when a test's injected `sleep` stands in for
+   * one; the identity check above is what actually neutralizes a stale fire in that case). */
+  private controllerRegistrationWait?: {
+    locator: NonNullable<LegionState["controllerLocator"]>;
+    cancel: () => void;
+  };
   private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
@@ -269,6 +280,7 @@ export class ProcessManager {
     });
     this.bootWatchdog = new WorkerBootWatchdog({
       workerBootTimeoutSeconds: () => this.deps.config.workerBootTimeoutSeconds,
+      registrationDeadlineIntervals: () => this.deps.config.workerBootRegistrationDeadlineIntervals,
       now: () => this.deps.now(),
       run: this.deps.run,
       isOmpPane: (pid) => this.isOmpPane(pid),
@@ -300,12 +312,14 @@ export class ProcessManager {
     this.bootWatchdog.cancel(token, generation);
   }
 
-  /** Cancels every armed boot watchdog. Daemon shutdown calls this once before drain and again
-   * after — an in-flight handler during drain (a launch's own success path, `reconnectWorkers`)
-   * can still arm a watchdog after the first call, and this is the only guaranteed-safe way to
-   * catch that: no background timer may outlive the ProcessManager. Idempotent. */
+  /** Cancels every armed boot watchdog and any pending controller-registration wait. Daemon
+   * shutdown calls this once before drain and again after — an in-flight handler during drain (a
+   * launch's own success path, `reconnectWorkers`) can still arm a watchdog after the first call,
+   * and this is the only guaranteed-safe way to catch that: no background timer may outlive the
+   * ProcessManager. Idempotent. */
   dispose(): void {
     this.bootWatchdog.cancelAll();
+    this.cancelControllerRegistrationDeadline();
   }
 
   private serialize<T>(
@@ -1228,17 +1242,109 @@ export class ProcessManager {
     }
   }
 
+  /**
+   * A live pane is not proof of a role holder: `controllerAlive()` only confirms the tmux pane
+   * itself is running, not that it ever reached `/controller/ready` (a stuck plugin) or that its
+   * Envoy role claim survived while the pane did (lost independently of the pane dying). Either
+   * way, an alive-but-unclaimed controller would otherwise strand every pending notice forever,
+   * since nothing else ever retries a pane this method already considers "there". Arms a bounded
+   * wait bound to the exact locator observed -- an already-alive-but-unclaimed one here, or a
+   * freshly-spawned one below, since a brand new controller can just as easily never register --
+   * `workerBootTimeoutSeconds * workerBootRegistrationDeadlineIntervals` (the same budget a
+   * worker's own boot gets), rather than resetting the clock on every call. If the role is still
+   * unclaimed once that wait elapses, retires the stuck pane and spawns a fresh one in its place.
+   */
   async ensureController(): Promise<void> {
-    if (await this.controllerAlive()) return;
+    if (await this.controllerAlive()) {
+      const locator = this.deps.state.controllerLocator;
+      if (this.deps.state.roles[controllerToken(this.deps.state.project)]) {
+        this.cancelControllerRegistrationDeadline();
+      } else if (locator) {
+        this.armControllerRegistrationDeadline(locator);
+      }
+      return;
+    }
+    this.cancelControllerRegistrationDeadline();
     if (!this.controllerSpawn) {
       this.controllerSpawn = (async () => {
         const controllerSecret = await this.deps.mintControllerCapability();
         await this.spawnController(controllerSecret);
+        const freshLocator = this.deps.state.controllerLocator;
+        if (freshLocator) this.armControllerRegistrationDeadline(freshLocator);
       })().finally(() => {
         this.controllerSpawn = undefined;
       });
     }
     await this.controllerSpawn;
+  }
+
+  /** Arms a bounded wait for `locator` to be claimed, unless one is already armed (for this or
+   * any other locator) -- at most one wait is ever in flight, and only the wait that observed
+   * this exact locator may ever act on it (see `retireAndRespawnStuckController`'s doc
+   * comment). */
+  private armControllerRegistrationDeadline(
+    locator: NonNullable<LegionState["controllerLocator"]>
+  ): void {
+    if (this.controllerRegistrationWait) return;
+    const deadlineMs =
+      this.deps.config.workerBootTimeoutSeconds *
+      1_000 *
+      this.deps.config.workerBootRegistrationDeadlineIntervals;
+    const { timedOut, cancel } = this.stopTimeout(deadlineMs);
+    this.controllerRegistrationWait = { locator, cancel };
+    void timedOut.then(() =>
+      this.retireAndRespawnStuckController(locator).catch((error) => {
+        console.error("[legion] failed to retire and respawn a stuck controller:", error);
+      })
+    );
+  }
+
+  /** Cancels the armed controller-registration wait, if any -- releases its underlying real
+   * timer (a no-op for a test's injected `sleep`; see the field's own doc comment for why that
+   * is still safe) and clears the field so a late fire from it is recognized as stale by
+   * `retireAndRespawnStuckController`'s own identity check. */
+  private cancelControllerRegistrationDeadline(): void {
+    this.controllerRegistrationWait?.cancel();
+    this.controllerRegistrationWait = undefined;
+  }
+
+  /**
+   * Runs once the registration deadline armed above elapses for `locator`. A no-op unless this
+   * exact wait is still the one currently armed (by reference): an intervening `ensureController`
+   * call may have already cancelled it (role claimed) or superseded it (this pane died on its
+   * own and a fresh one was spawned, arming its own wait) before this stale timer got a chance
+   * to fire. Re-checks the role once before the liveness probe and again immediately after it --
+   * a `/controller/ready` landing during that probe's own await must still win over this
+   * stale-timeout decision, never be raced by it. A `state.controllerLocator` that no longer
+   * matches `locator` by reference is the same "superseded" case caught above, checked again
+   * directly against live state for good measure. On a failed stop/kill, logs and leaves the
+   * locator exactly as it was -- clearing it and spawning a second controller onto a pane that
+   * never actually stopped would orphan that pane with nothing tracking it; a later
+   * `ensureController` call re-observes this same stuck locator and re-arms a fresh wait for it
+   * instead.
+   */
+  private async retireAndRespawnStuckController(
+    locator: NonNullable<LegionState["controllerLocator"]>
+  ): Promise<void> {
+    if (this.controllerRegistrationWait?.locator !== locator) return;
+    this.controllerRegistrationWait = undefined;
+    const token = controllerToken(this.deps.state.project);
+    if (this.deps.state.roles[token]) return;
+    const stillAlive = await this.controllerAlive();
+    if (this.deps.state.roles[token]) return;
+    if (!stillAlive) return;
+    if (this.deps.state.controllerLocator !== locator) return;
+    try {
+      await this.stopProcess(token, locator, this.workerStopTimeoutMs);
+    } catch (error) {
+      console.error(
+        "[legion] failed to stop a stuck controller pane; leaving it in place rather than orphaning it:",
+        error
+      );
+      return;
+    }
+    delete this.deps.state.controllerLocator;
+    await this.ensureController();
   }
 
   /** Probes a tree's recorded locator for liveness. Backfills `locator.tmuxPaneId` once

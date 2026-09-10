@@ -167,6 +167,7 @@ function config(
     workerStopTimeoutSeconds: 1,
     treeStopTimeoutSeconds: 1,
     workerBootTimeoutSeconds: 120,
+    workerBootRegistrationDeadlineIntervals: 3,
     gates: { design: "off", merge: "off" },
     githubApps: {},
     stateDir,

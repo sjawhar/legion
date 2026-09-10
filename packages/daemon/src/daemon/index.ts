@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type IssueKey, parseRoleToken, roleToken, roleTopic } from "@legion/contracts";
+import {
+  controllerToken,
+  type IssueKey,
+  parseRoleToken,
+  roleToken,
+  roleTopic,
+} from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import {
   type CiFetchResult,
@@ -420,6 +426,29 @@ async function startDaemonLocked(
     config,
   };
   const eventPump: EventPump = startEventPump(eventDeps);
+  // A crash between `/controller/ready` persisting its own role claim (`ctx.save()`) and that
+  // same request finishing its own drain (`onControllerReady`, below) would otherwise strand
+  // every notice already recorded in `controllerPendingNotices` forever: the controller session
+  // that already claimed the role will never POST `/controller/ready` again this boot, so
+  // nothing else would ever trigger a drain for it. Keyed off the durable queue itself, not
+  // just a live claim: if no controller role exists at all (its own process died too, or one
+  // never existed for this project), nothing would ever reach `/controller/ready` to trigger a
+  // drain on its own -- `ensureController` spawns one directly, and its own eventual
+  // `/controller/ready` call drains these same notices through the ordinary path once it's
+  // live. Both branches are fire-and-forget: `drainControllerNotices` already retries a failed
+  // publish with its own bounded backoff, `ensureController` is idempotent, and nothing else in
+  // boot depends on either finishing.
+  if (state.controllerPendingNotices.length > 0) {
+    if (state.roles[controllerToken(state.project)]) {
+      void eventPump.drainControllerNotices().catch((error) => {
+        console.error(`[legion] boot-time controller notice drain failed:`, error);
+      });
+    } else {
+      void processManager.ensureController().catch((error) => {
+        console.error(`[legion] boot-time controller spawn for pending notices failed:`, error);
+      });
+    }
+  }
   const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 
   const emitResync = async (): Promise<void> => {

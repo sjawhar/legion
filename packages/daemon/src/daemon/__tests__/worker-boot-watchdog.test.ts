@@ -80,6 +80,9 @@ function baseDeps(overrides: Partial<WorkerBootWatchdogDeps> = {}): WorkerBootWa
     // connect-retry loop and the interval-remainder wait both genuinely exercise the real
     // setTimeout branch (no `sleep` override) without a slow test.
     workerBootTimeoutSeconds: () => 0.3,
+    // High enough that no existing test (which exercises re-arming, not the deadline itself)
+    // ever reaches it; tests of the deadline itself override this explicitly.
+    registrationDeadlineIntervals: () => 1_000,
     now: () => Date.now(),
     run: async () => ({ stdout: "", exitCode: 1 }),
     isOmpPane: async () => false,
@@ -219,4 +222,73 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
       timers.restore();
     }
   }, 2_000);
+});
+
+describe("WorkerBootWatchdog registration deadline", () => {
+  it("retires a boot whose pane/socket stays alive but never registers, once it exceeds registrationDeadlineIntervals", async () => {
+    const retirements: Array<{ token: string; generation: number | undefined }> = [];
+    const watchdog = new WorkerBootWatchdog(
+      baseDeps({
+        workerBootTimeoutSeconds: () => 0.01,
+        registrationDeadlineIntervals: () => 3,
+        sleep: async () => {},
+        yield: async () => {},
+        // Alive on every single probe -- the pane/socket never actually goes away, and
+        // `/worker/started` never confirms either. Without the deadline this would re-arm
+        // forever; with it, the watch must give up after exactly 3 consecutive alive intervals.
+        isOmpPane: async () => true,
+        run: async (cmd) => {
+          if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+          return { stdout: "", exitCode: 0 };
+        },
+        workerClient: async () => {
+          throw new Error("shim not listening");
+        },
+        retireUnconfirmedBoot: async (retireToken, _locator, generation) => {
+          retirements.push({ token: retireToken, generation });
+        },
+      })
+    );
+
+    watchdog.arm(root, child, role, token, locator, 1);
+    for (let i = 0; i < 200 && retirements.length === 0; i += 1) await Promise.resolve();
+
+    expect(retirements).toEqual([{ token, generation: 1 }]);
+  });
+
+  it("never treats a boot as failed while it stays under the registration deadline", async () => {
+    const retirements: unknown[] = [];
+    let probeCount = 0;
+    const watchdog = new WorkerBootWatchdog(
+      baseDeps({
+        workerBootTimeoutSeconds: () => 0.01,
+        registrationDeadlineIntervals: () => 3,
+        sleep: async () => {},
+        yield: async () => {},
+        isOmpPane: async () => {
+          probeCount += 1;
+          return true;
+        },
+        run: async (cmd) => {
+          if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+          return { stdout: "", exitCode: 0 };
+        },
+        workerClient: async () => {
+          throw new Error("shim not listening");
+        },
+        retireUnconfirmedBoot: async () => {
+          retirements.push(true);
+        },
+      })
+    );
+
+    watchdog.arm(root, child, role, token, locator, 1);
+    // Waits for exactly 2 completed probes -- one short of the 3-interval deadline -- then
+    // asserts immediately, before a 3rd probe (and the retirement it would trigger) can run.
+    for (let i = 0; i < 500 && probeCount < 2; i += 1) await Promise.resolve();
+
+    expect(probeCount).toBe(2);
+    expect(retirements).toEqual([]);
+    watchdog.cancel(token, 1);
+  });
 });

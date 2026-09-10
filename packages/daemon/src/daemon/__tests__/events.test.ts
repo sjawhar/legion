@@ -1637,6 +1637,208 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("retries a failed controller-notice publish with backoff instead of giving up after one attempt", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const published: string[] = [];
+    let attempts = 0;
+    const pump = startEventPump({
+      ...deps(state, nats, async (_topic, payloadJson) => {
+        attempts += 1;
+        if (attempts < 3) throw new Error("envoy unavailable");
+        published.push(payloadJson);
+      }),
+      controllerNoticeRetryDelayMs: () => 1,
+    });
+    const payloadJson = JSON.stringify({ text: "@legion please investigate" });
+    state.controllerPendingNotices.push({ payloadJson, eventId: "mention-1" });
+
+    await pump.drainControllerNotices();
+
+    expect(attempts).toBe(3);
+    expect(published).toEqual([payloadJson]);
+    expect(state.controllerPendingNotices).toEqual([]);
+    pump.stop();
+  });
+
+  it("stops retrying a failed controller-notice publish once the pump stops, without lingering", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    let attempts = 0;
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        attempts += 1;
+        throw new Error("envoy unavailable");
+      }),
+      controllerNoticeRetryDelayMs: () => 50,
+    });
+    state.controllerPendingNotices.push({
+      payloadJson: JSON.stringify({ text: "first" }),
+      eventId: "mention-1",
+    });
+
+    const drainPromise = pump.drainControllerNotices();
+    await Promise.resolve();
+    await Promise.resolve();
+    const attemptsBeforeStop = attempts;
+    pump.stop();
+
+    await drainPromise;
+
+    // The retry loop noticed `stop()` and exited instead of waiting out its 50ms backoff or
+    // retrying again — no attempt after the one already in flight when `stop()` ran.
+    expect(attempts).toBe(attemptsBeforeStop);
+    expect(state.controllerPendingNotices).toHaveLength(1);
+  });
+
+  it("never schedules a retry sleep after stop() when an in-flight publish rejects just after it ran", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const publishGate = Promise.withResolvers<void>();
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        await publishGate.promise;
+        throw new Error("envoy unavailable");
+      }),
+      // A large delay: if the retry loop ever schedules a real sleep after stop() runs, this
+      // test would take the full 5s instead of resolving promptly -- `stop()`'s own cancel()
+      // call cannot protect against a sleep scheduled *after* it already ran.
+      controllerNoticeRetryDelayMs: () => 5_000,
+    });
+    state.controllerPendingNotices.push({
+      payloadJson: JSON.stringify({ text: "first" }),
+      eventId: "mention-1",
+    });
+
+    const drainPromise = pump.drainControllerNotices();
+    await Promise.resolve();
+    await Promise.resolve();
+    pump.stop();
+    publishGate.resolve();
+
+    const start = Date.now();
+    await drainPromise;
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(1_000);
+    expect(state.controllerPendingNotices).toHaveLength(1);
+  });
+
+  it("routes a 404 no-holder failure during the drain loop through the same controller recovery as any other undelivered controller event, not a blind retry", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const undeliverable: Array<{ kind: string; role: string }> = [];
+    let attempts = 0;
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        attempts += 1;
+        if (attempts < 2) {
+          const error = new Error("no holder") as Error & { status?: number };
+          error.status = 404;
+          throw error;
+        }
+      }),
+      controllerNoticeRetryDelayMs: () => 1,
+      onUndeliverable: async (info) => {
+        undeliverable.push({ kind: info.kind, role: info.role });
+      },
+    });
+    const controllerRole = controllerToken(state.project);
+    state.controllerPendingNotices.push({
+      payloadJson: JSON.stringify({ text: "@legion please investigate" }),
+      eventId: "mention-1",
+    });
+
+    await pump.drainControllerNotices();
+
+    expect(attempts).toBe(2);
+    expect(undeliverable).toEqual([{ kind: "controller", role: controllerRole }]);
+    expect(state.controllerPendingNotices).toEqual([]);
+    pump.stop();
+  });
+
+  it("never schedules a retry sleep after stop() while a no-holder recovery call is still in flight", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const recoveryGate = Promise.withResolvers<void>();
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        const error = new Error("no holder") as Error & { status?: number };
+        error.status = 404;
+        throw error;
+      }),
+      // A large delay: if the retry loop ever schedules a real sleep after stop() runs, this
+      // test would take the full 5s instead of resolving promptly -- mirrors the earlier
+      // "never schedules a retry sleep after stop()" test, but for the recovery-call await
+      // specifically (the loop's *other* await before a sleep can be armed).
+      controllerNoticeRetryDelayMs: () => 5_000,
+      onUndeliverable: async () => {
+        await recoveryGate.promise;
+      },
+    });
+    state.controllerPendingNotices.push({
+      payloadJson: JSON.stringify({ text: "first" }),
+      eventId: "mention-1",
+    });
+
+    const drainPromise = pump.drainControllerNotices();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    pump.stop();
+    recoveryGate.resolve();
+
+    const start = Date.now();
+    await drainPromise;
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(1_000);
+    expect(state.controllerPendingNotices).toHaveLength(1);
+  });
+
+  it("drain() waits for an in-flight controller-notice publish that succeeds during shutdown, so its removal is saved before drain() resolves", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const publishGate = Promise.withResolvers<void>();
+    let saveStateCalls = 0;
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        await publishGate.promise;
+      }),
+      saveState: async () => {
+        saveStateCalls += 1;
+      },
+    });
+    state.controllerPendingNotices.push({
+      payloadJson: JSON.stringify({ text: "first" }),
+      eventId: "mention-1",
+    });
+
+    const drainNotices = pump.drainControllerNotices();
+    await Promise.resolve();
+    await Promise.resolve();
+    pump.stop();
+
+    let drainResolved = false;
+    const drainPromise = pump.drain().then(() => {
+      drainResolved = true;
+    });
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    // The publish (and its own splice+saveState once it succeeds) is still in flight, blocked
+    // on the gate below: drain() must not have resolved yet -- if it did, a shutdown racing this
+    // exact publish could finish its final save before this notice's removal was ever recorded.
+    expect(drainResolved).toBe(false);
+    expect(saveStateCalls).toBe(0);
+
+    publishGate.resolve();
+    await drainNotices;
+    await drainPromise;
+
+    expect(drainResolved).toBe(true);
+    expect(saveStateCalls).toBe(1);
+    expect(state.controllerPendingNotices).toEqual([]);
+  });
+
   it("does not ack when a GitHub mention's publish rejects", async () => {
     const { state } = stateForIssue();
     const nats = new FakeNats();

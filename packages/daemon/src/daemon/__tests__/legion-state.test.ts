@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -494,7 +494,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates v16 state to v17 by dropping the held-event plumbing (heldEvents, controllerHeldEvents, recoveryEvents), preserving workerAdmission and phases", async () => {
+  it("migrates v16 state to v18: drops the tree-scoped held-event plumbing (heldEvents, recoveryEvents) but converts controllerHeldEvents into controllerPendingNotices, preserving workerAdmission and phases", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -504,18 +504,35 @@ describe("legion state", () => {
       sessionId: "ses_123",
       completed: { summary: "implemented the thing", at: "2026-09-01T00:00:00.000Z" },
     };
+    // A controller-bound event has no other source of truth to recover it from, so migrating a
+    // v16 `controllerHeldEvents` entry must convert it into `controllerPendingNotices` rather
+    // than drop it like every other held-event field.
+    current.controllerPendingNotices = [
+      { payloadJson: '{"text":"@legion please investigate"}', eventId: "evt-controller" },
+    ];
+    const { controllerPendingNotices: _omitNotices, ...currentWithoutNotices } = current;
     const v16Input = {
-      ...current,
+      ...currentWithoutNotices,
       version: 16,
       controllerHeldEvents: [
-        { role: "controller", eventId: "evt-controller", subject: "s.controller", payload: "{}" },
+        {
+          role: "controller",
+          payloadJson: '{"text":"@legion please investigate"}',
+          heldAt: "2026-09-01T00:00:00.000Z",
+          eventId: "evt-controller",
+        },
       ],
       trees: {
         ...current.trees,
         [issue]: {
           ...current.trees[issue],
           heldEvents: [
-            { role: "architect", eventId: "evt-architect", subject: "s.architect", payload: "{}" },
+            {
+              role: "architect",
+              payloadJson: "{}",
+              heldAt: "2026-09-01T00:00:00.000Z",
+              eventId: "evt-architect",
+            },
           ],
           recoveryEvents: [
             {
@@ -532,8 +549,9 @@ describe("legion state", () => {
     const loaded = await loadState(file, initialState);
 
     expect(loaded).toEqual(current);
-    // The held-event plumbing being dropped is orthogonal to a queued admission retry and a
-    // completed-but-unrouted phase, both of which pre-date v16->v17 and must survive it intact.
+    // The held-event plumbing being dropped (or, for the controller, converted) is orthogonal
+    // to a queued admission retry and a completed-but-unrouted phase, both of which pre-date
+    // v16->v17 and must survive it intact.
     expect(loaded.workerAdmission).toEqual({
       queue: [roleToken(initialState.project, issue, "implementer")],
     });
@@ -544,7 +562,7 @@ describe("legion state", () => {
     });
   });
 
-  it("migrates v17 state to v18 by adding an empty controllerPendingNotices array", async () => {
+  it("migrates v17 state to v18 by adding an empty controllerPendingNotices array when there is no carried-forward controllerHeldEvents entry to convert", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -556,6 +574,144 @@ describe("legion state", () => {
 
     expect(loaded).toEqual(current);
     expect(loaded.controllerPendingNotices).toEqual([]);
+  });
+
+  it("discards a malformed v16 controllerHeldEvents entry during migration instead of carrying garbage into controllerPendingNotices, logging what it discarded", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-malformed-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v16Input = {
+      ...currentWithoutNotices,
+      version: 16,
+      controllerHeldEvents: [
+        // Missing `payloadJson` entirely -- not a shape this migration can convert.
+        { role: "controller", heldAt: "2026-09-01T00:00:00.000Z", eventId: "evt-malformed" },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const loaded = await loadState(file, initialState);
+
+      expect(loaded.controllerPendingNotices).toEqual([]);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      const [message] = errorLog.mock.calls[0] ?? [];
+      expect(message).toContain("evt-malformed");
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("merges converted v16 controllerHeldEvents entries with a controllerPendingNotices array already present on the raw state, rather than overwriting it", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-merge-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const alreadyPresent = { payloadJson: '{"text":"already queued"}', eventId: "evt-existing" };
+    const converted = {
+      payloadJson: '{"text":"@legion please investigate"}',
+      eventId: "evt-controller",
+    };
+    current.controllerPendingNotices = [alreadyPresent, converted];
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v16Input = {
+      ...currentWithoutNotices,
+      version: 16,
+      // An interrupted earlier migration attempt already wrote `controllerPendingNotices` for
+      // one entry, but the raw v16 `controllerHeldEvents` this migration reads still carries
+      // both -- neither may be lost: the already-present entry must survive untouched, and the
+      // held entry must still convert, merged alongside it.
+      controllerPendingNotices: [alreadyPresent],
+      controllerHeldEvents: [
+        {
+          role: "controller",
+          payloadJson: converted.payloadJson,
+          heldAt: "2026-09-01T00:00:00.000Z",
+          eventId: converted.eventId,
+        },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
+    expect(loaded).toEqual(current);
+    expect(loaded.controllerPendingNotices).toEqual([alreadyPresent, converted]);
+  });
+
+  it("dedupes a converted v16 controllerHeldEvents entry against an already-present controllerPendingNotices entry sharing the same eventId, keeping exactly one", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-dedupe-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const alreadyPresent = {
+      payloadJson: '{"text":"already queued"}',
+      eventId: "evt-shared",
+    };
+    current.controllerPendingNotices = [alreadyPresent];
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v16Input = {
+      ...currentWithoutNotices,
+      version: 16,
+      // Same eventId as the already-present notice, but with a different payload -- an
+      // interrupted earlier migration attempt already converted and recorded this exact event;
+      // the raw v16 controllerHeldEvents entry it converted from is still present too, but must
+      // not be converted a second time into a duplicate notice for the same underlying event.
+      controllerPendingNotices: [alreadyPresent],
+      controllerHeldEvents: [
+        {
+          role: "controller",
+          payloadJson: '{"text":"a stale re-read of the same held event"}',
+          heldAt: "2026-09-01T00:00:00.000Z",
+          eventId: "evt-shared",
+        },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
+    expect(loaded).toEqual(current);
+    expect(loaded.controllerPendingNotices).toEqual([alreadyPresent]);
+  });
+
+  it("dedupes two controllerHeldEvents entries sharing the same eventId, keeping exactly one notice, with no already-present controllerPendingNotices involved", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-dedupe-intra-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const firstConverted = {
+      payloadJson: '{"text":"first redelivery"}',
+      eventId: "evt-duplicated",
+    };
+    current.controllerPendingNotices = [firstConverted];
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v16Input = {
+      ...currentWithoutNotices,
+      version: 16,
+      // Two entries for the same underlying event (e.g. a redelivered Slack mention held
+      // twice before either drained) -- only the first accepted conversion may become a
+      // notice; the second, sharing its eventId, must be skipped rather than duplicated.
+      controllerHeldEvents: [
+        {
+          role: "controller",
+          payloadJson: firstConverted.payloadJson,
+          heldAt: "2026-09-01T00:00:00.000Z",
+          eventId: "evt-duplicated",
+        },
+        {
+          role: "controller",
+          payloadJson: '{"text":"second redelivery"}',
+          heldAt: "2026-09-01T00:05:00.000Z",
+          eventId: "evt-duplicated",
+        },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
+    expect(loaded).toEqual(current);
+    expect(loaded.controllerPendingNotices).toEqual([firstConverted]);
   });
 
   it("rejects removed v6 fields on current-version state", async () => {

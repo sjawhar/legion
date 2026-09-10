@@ -28,6 +28,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
     workerStopTimeoutSeconds: 10,
     treeStopTimeoutSeconds: 60,
     workerBootTimeoutSeconds: 120,
+    workerBootRegistrationDeadlineIntervals: 3,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir,
