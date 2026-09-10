@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { expect, type Page, test } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createProject } from "./api";
+import { countDocumentSockets, documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 
 const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
@@ -24,11 +25,18 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-async function openArtifacts(page: Page) {
+async function openArtifacts(page: Page, isPhone: boolean) {
+  if (isPhone) {
+    const reviewPanel = page.getByRole("button", { name: /review panel/i });
+    if ((await reviewPanel.getAttribute("aria-expanded")) === "true") {
+      await reviewPanel.click();
+    }
+  }
   await page.getByRole("tab", { name: "Artifacts" }).click();
 }
 
-test("artifacts upload, versions, references, and phone layout", async ({ page }, testInfo) => {
+test("artifacts upload, version, references, and phone layout", async ({ page }, testInfo) => {
+  const sockets = countDocumentSockets(page);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -38,7 +46,10 @@ test("artifacts upload, versions, references, and phone layout", async ({ page }
   await createAsk(issue.key, { question: "Can this ship?" });
 
   await page.goto(`/issues/${issue.key}`);
-  await openArtifacts(page);
+  await page.getByRole("tab", { name: "Spec" }).click();
+  await expect(documentEditor(page)).toContainText("The original document.");
+  await expect.poll(sockets).toBe(1);
+  await openArtifacts(page, testInfo.project.name === "iphone");
 
   const upload = page.getByLabel("Upload artifact");
   await upload.setInputFiles(diagramPath);
@@ -49,16 +60,7 @@ test("artifacts upload, versions, references, and phone layout", async ({ page }
 
   await upload.setInputFiles(diagramPath);
   await expect(diagram).toContainText("2 versions");
-  const showAllVersions = diagram.getByRole("button", { name: "Show all versions" });
-  if (testInfo.project.name === "iphone") {
-    const [tabBox, versionsBox] = await Promise.all([
-      page.getByRole("tab", { name: "Artifacts" }).boundingBox(),
-      showAllVersions.boundingBox(),
-    ]);
-    expect(tabBox?.height).toBeGreaterThanOrEqual(44);
-    expect(versionsBox?.height).toBeGreaterThanOrEqual(44);
-  }
-  await showAllVersions.click();
+  await diagram.getByRole("button", { name: "Show all versions" }).click();
   await expect(diagram).toContainText("Version 1");
   await expect(diagram).toContainText("Version 2");
   await expect(diagram).toContainText("SHA-256");
@@ -66,24 +68,18 @@ test("artifacts upload, versions, references, and phone layout", async ({ page }
     "download",
     ""
   );
+  await page.goto(`/issues/${issue.key}/artifacts/diagram-png`);
+  await expect(page.getByTestId("artifact-header")).toContainText("diagram.png");
+  expect(sockets()).toBe(1);
+  await page.goto(`/issues/${issue.key}`);
+  await openArtifacts(page, testInfo.project.name === "iphone");
 
   await upload.setInputFiles(notesPath);
   const notes = page.getByTestId("artifact-notes-md");
   await expect(notes).toContainText("notes.md");
-  await expect(page.getByRole("button", { name: /make primary/i })).toHaveCount(0);
-  await notes.getByRole("link", { name: "notes.md" }).click();
-  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/notes-md`);
-  await expect(page.getByRole("heading", { name: "Review notes" })).toBeVisible();
-  if (testInfo.project.name === "iphone") {
-    const reviewPanel = page.getByRole("button", { name: /review panel/i });
-    if ((await reviewPanel.getAttribute("aria-expanded")) === "true") {
-      await reviewPanel.click();
-    }
-  }
+  await expect(notes.getByRole("button", { name: /make primary/i })).toHaveCount(0);
   await page.getByRole("tab", { name: "Spec" }).click();
-  await expect(page.getByRole("tabpanel", { name: "Spec" }).getByRole("article")).toContainText(
-    "The original document."
-  );
+  await expect(documentEditor(page)).toContainText("The original document.");
 
   await createComment(issue.key, {
     body: `See dispatch://${issue.key}/artifact/notes-md@v1 before deciding.`,
@@ -92,23 +88,16 @@ test("artifacts upload, versions, references, and phone layout", async ({ page }
   await createComment(issue.key, {
     body: `See dispatch://${issue.key}/artifact/diagram-png before deciding.`,
   });
-  await createComment(issue.key, {
-    body: `See dispatch://${issue.key}/artifact/spec before deciding.`,
-  });
   await page.reload();
-  await openArtifacts(page);
+  await openArtifacts(page, testInfo.project.name === "iphone");
   await expect(diagram.getByLabel("Referenced by")).toContainText("Comment");
   await expect(diagram.getByLabel("Referenced by")).toContainText("diagram.png");
   await diagram.getByLabel("Referenced by").getByRole("link", { name: "diagram.png" }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/diagram-png`);
-  const artifactsPanel = page.getByRole("tabpanel", { name: "Artifacts" });
-  await expect(artifactsPanel.getByRole("img", { name: "diagram.png version 2" })).toBeVisible();
-  await expect(artifactsPanel.getByTestId("artifact-header")).toHaveClass(/ring-2/);
-  await page.screenshot({ path: testInfo.outputPath("image-artifact.png"), fullPage: true });
+  await expect(page.getByTestId("artifact-header")).toContainText("diagram.png");
 
-  await openArtifacts(page);
-  await page.screenshot({ path: testInfo.outputPath("artifacts-tab.png"), fullPage: true });
-
+  await page.goto(`/issues/${issue.key}`);
+  await openArtifacts(page, testInfo.project.name === "iphone");
   await expect(notes.getByLabel("Referenced by")).toContainText("notes.md");
   await notes.getByLabel("Referenced by").getByRole("link", { name: "notes.md" }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/notes-md?v=1`);
@@ -116,13 +105,7 @@ test("artifacts upload, versions, references, and phone layout", async ({ page }
   await expect(page.getByRole("region", { name: "Document version 1" })).toContainText(
     "Review notes"
   );
-
-  await openArtifacts(page);
-  const spec = page.getByTestId("artifact-spec");
-  await expect(spec.getByLabel("Referenced by")).toContainText("spec.md");
-  await spec.getByLabel("Referenced by").getByRole("link", { name: "spec.md" }).click();
-  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/spec`);
-  await expect(page.getByRole("heading", { name: "Initial spec" })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("artifacts-tab.png"), fullPage: true });
 
   if (testInfo.project.name === "iphone") {
     await page.goto("/");

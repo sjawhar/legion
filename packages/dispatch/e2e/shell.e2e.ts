@@ -79,7 +79,7 @@ test("signing out returns to the sign-in page", async ({ browser }, testInfo) =>
   await context.close();
 });
 
-test("the spec preview renders headings and ordered lists with real typography", async ({
+test("the document editor renders headings and ordered lists with real typography", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -98,7 +98,7 @@ test("the spec preview renders headings and ordered lists with real typography",
   await expect(page.getByRole("heading", { level: 2, name: "Section" })).toBeVisible();
 
   const sizes = await page.evaluate(() => {
-    const root = document.querySelector("article.prose");
+    const root = document.querySelector('[role="textbox"][aria-label="Document editor"]');
     const h1 = root?.querySelector("h1");
     const h2 = root?.querySelector("h2");
     const paragraph = root?.querySelector("p");

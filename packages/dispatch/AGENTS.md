@@ -80,6 +80,10 @@ E2E builds set `VITE_DISPATCH_E2E=1`. In that build only, `ProofDocument` expose
 `editor` and `view` as `window.__dispatchDocument` for Playwright state probes; production builds
 never create that property.
 
+Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
+layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
+post-update text selection; Yjs document transport and local editing remain active.
+
 `e2e/seed.ts` truncates the test database before each scenario. For a deployed
 server, set `PLAYWRIGHT_DATABASE_URL` for the same database and
 `E2E_AGENT_TOKEN` for bearer-seeded API calls.
