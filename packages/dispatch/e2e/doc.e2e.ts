@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject, editArtifact, getArtifact, getArtifactVersion } from "./api";
+import { enterEditMode } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -31,6 +32,7 @@ test("document edits synchronize, version, and compare across users", async ({
     const alicePage = await alice.newPage();
     await alicePage.goto(`/issues/${issue.key}`);
     await alicePage.getByRole("tab", { name: "Spec" }).click();
+    await enterEditMode(alicePage);
     const aliceEditor = alicePage.getByRole("textbox", { name: "Document editor" });
     await expect(aliceEditor).toContainText("Use SQLite");
     await aliceEditor.click();
@@ -51,6 +53,7 @@ test("document edits synchronize, version, and compare across users", async ({
     const bobPage = await bob.newPage();
     await bobPage.goto(`/issues/${issue.key}`);
     await bobPage.getByRole("tab", { name: "Spec" }).click();
+    await enterEditMode(bobPage);
     const bobEditor = bobPage.getByRole("textbox", { name: "Document editor" });
     await expect(bobEditor).toContainText("hello");
     await bobEditor.click();
@@ -105,6 +108,37 @@ test("document edits synchronize, version, and compare across users", async ({
     });
   } finally {
     await bob.close();
+    await alice.close();
+  }
+});
+
+test("the spec renders as a formatted document by default, with no click required", async ({
+  browser,
+}) => {
+  await createProject({ key: "READ", name: "Readable" });
+  const issue = await createIssue({
+    project: "READ",
+    spec: "# Database\n\nUse SQLite",
+    title: "Rendering check",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Spec" }).click();
+
+    const heading = page.getByRole("heading", { level: 1 });
+    const paragraph = page.getByRole("article").locator("p").first();
+    await expect(heading).toBeVisible();
+    await expect(paragraph).toBeVisible();
+
+    const [headingSize, paragraphSize] = await Promise.all([
+      heading.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)),
+      paragraph.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)),
+    ]);
+    expect(headingSize).toBeGreaterThan(paragraphSize);
+  } finally {
     await alice.close();
   }
 });

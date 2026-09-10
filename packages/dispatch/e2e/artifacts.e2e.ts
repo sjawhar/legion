@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { expect, type Page, test } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createProject } from "./api";
+import { enterEditMode } from "./editor";
 import { resetDatabase } from "./seed";
 
 const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
@@ -78,7 +79,14 @@ test("artifacts upload, version, primary selection, references, and phone layout
   await expect(notes).toContainText("Primary");
   await expect(page.getByTestId("artifact-spec")).toContainText("Not primary");
 
+  if (testInfo.project.name === "iphone") {
+    const reviewPanel = page.getByRole("button", { name: /review panel/i });
+    if ((await reviewPanel.getAttribute("aria-expanded")) === "true") {
+      await reviewPanel.click();
+    }
+  }
   await page.getByRole("tab", { name: "Spec" }).click();
+  await enterEditMode(page);
   await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
     "These notes replace the initial spec."
   );

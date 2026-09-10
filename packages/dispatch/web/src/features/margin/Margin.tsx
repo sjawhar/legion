@@ -14,6 +14,7 @@ import { api } from "../../api/client";
 import type { Anchor, Ask, Comment, Event } from "../../api/types";
 import { AskCard } from "../inbox/AskCard";
 import { pinnedEventIds } from "../issue/log-model";
+import { actorLabel } from "../refs/actor";
 import { buildIssuePath, parseIssuePath } from "../refs/routes";
 import { Unfurl } from "../refs/Unfurl";
 import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
@@ -547,7 +548,7 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
             {(pinned.data ?? []).map((event) => (
               <article className="rounded-lg border border-slate-200 p-3 text-sm" key={event.id}>
                 <p className="font-medium text-slate-900">{eventLabel(event)}</p>
-                <p className="mt-1 text-xs text-slate-500">{event.actor.id}</p>
+                <p className="mt-1 text-xs text-slate-500">{actorLabel(event.actor)}</p>
               </article>
             ))}
             {pinnedIds.length === 0 ? (
