@@ -75,7 +75,16 @@ export async function handleProcessReady(
   const tree = ctx.requireTree(body);
   ctx.auth.requireArchitectCapability(body, tree);
   await ctx.deps.onTreeReady?.(tree);
-  await ctx.deps.processManager.markTreeReady(tree);
+  // The root architect's own bootstrap is itself blocked awaiting this HTTP response — it
+  // cannot start its RPC dispatcher, and therefore cannot answer a `negotiate_protocol`
+  // request, until this call returns. Awaiting the shim connect here deadlocks forever under
+  // load (the daemon negotiates with an RPC loop that can never answer before this response
+  // returns). Record readiness and respond immediately instead; the connect happens in the
+  // background, retried on the next touch (spawnWorker/workerReady/probe) if it fails —
+  // exactly `markControllerReady`'s existing best-effort contract, extended here.
+  Promise.resolve(ctx.deps.processManager.markTreeReady(tree)).catch((error) => {
+    console.error(`[legion] failed to connect architect shim socket on ready for ${tree}:`, error);
+  });
   return Response.json(validateContractResponse(LegionDaemonApi.ProcessReady.response, {}));
 }
 

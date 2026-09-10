@@ -372,6 +372,57 @@ describe("daemon config", () => {
     expect(withoutEither.workerBootTimeoutSeconds).toBe(120);
   });
 
+  it("resolves workerRpcTimeoutSeconds: YAML beats env, env beats the 5 default", () => {
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "envoy_url: http://listener:9020",
+        "dispatch_project: ACME",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "repos:",
+        "  - acme/widgets",
+        "app_logins:",
+        "  - legion-implement[bot]",
+        "worker_rpc_timeout_seconds: 20",
+        "gates:",
+        "  design: off",
+        "  merge: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+
+    const fromYaml = resolveDaemonConfig({ configFile: file });
+    expect(fromYaml.config.workerRpcTimeoutSeconds).toBe(20);
+
+    // Config-file value wins over env, matching every other lifecycle setting's precedence
+    // (`resolveValue`: cli > config > env > default).
+    const fileBeatsEnv = resolveDaemonConfig({
+      configFile: file,
+      env: { LEGION_WORKER_RPC_TIMEOUT_SECONDS: "8" },
+    });
+    expect(fileBeatsEnv.config.workerRpcTimeoutSeconds).toBe(20);
+
+    const { config: fromEnvOnly } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_WORKER_RPC_TIMEOUT_SECONDS: "8",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(fromEnvOnly.workerRpcTimeoutSeconds).toBe(8);
+
+    const { config: withoutEither } = resolveDaemonConfig({
+      env: requiredEnv,
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(withoutEither.workerRpcTimeoutSeconds).toBe(5);
+  });
+
   it("resolves workerBootRegistrationDeadlineIntervals: YAML beats env, env beats the 3 default", () => {
     const file = loadConfigFromFile(
       [

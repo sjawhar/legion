@@ -19,7 +19,10 @@ export async function handleControllerReady(
     sessionId,
   };
   await ctx.save();
-  await ctx.deps.processManager.markControllerReady();
+  // Same deadlock shape as /process/ready — see handleProcessReady. markControllerReady
+  // already never rejects (its own internal try/catch), but it must still never be awaited
+  // here: even a caught failure costs the full RPC timeout before this call would return.
+  Promise.resolve(ctx.deps.processManager.markControllerReady()).catch(() => {});
   await ctx.deps.onControllerReady();
   return Response.json(validateContractResponse(LegionDaemonApi.ControllerReady.response, {}));
 }

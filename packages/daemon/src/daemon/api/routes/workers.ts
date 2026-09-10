@@ -190,11 +190,11 @@ export async function handleWorkerStarted(
       bootTokenHash: secretHash(bootToken).toString("hex"),
       locator: { ...current.locator, ompSessionFile },
     };
-    // A confirmed boot is the actual recovery signal — never a mere relaunch, which the boot
-    // watchdog's own accounting (`processes.ts`'s `launchWorker`) deliberately carries forward
-    // so a worker that keeps opening a pane but never gets this far still escalates to
-    // worker-died.
-    delete nextClaim.launchFailures;
+    // launchFailures is deliberately untouched here: a mere registration is not a recovery
+    // signal for launch accounting -- only a durably confirmed `/worker/ready` (`workerReady` in
+    // processes.ts) resets it, so a worker that keeps registering but never reaches ready
+    // confirmation still escalates to `worker-died` at the threshold instead of resetting every
+    // generation.
     ctx.deps.state.roles[token] = nextClaim;
     ctx.deps.state.phases[issue] = { phase: role, sessionId };
     try {
@@ -212,11 +212,6 @@ export async function handleWorkerStarted(
     // that case. `boot` is absent on the persisted-hash fallback path (the in-memory map never
     // had this token to begin with after a restart), so there is nothing to consume there.
     if (boot) boot.sessionId = sessionId;
-    // The boot is confirmed: cancel this generation's armed boot watchdog inside this same
-    // locked transition, not after it settles — a retirement decision queued behind this lock
-    // must see the watch already gone the moment its own turn comes, never a window where the
-    // save landed but the watch could still fire concurrently.
-    ctx.deps.processManager.cancelBootWatchdog(token, capturedGeneration);
     ctx.auth.setCapability(sessionId, { tree, issue, role, secretHash: secretHash(secret) });
     return Response.json(
       validateContractResponse(LegionDaemonApi.WorkerStarted.response, {
@@ -261,7 +256,20 @@ export async function handleWorkerReady(
 ): Promise<Response> {
   const { issue, role, sessionId } = requireWorkerSession(ctx, body, "worker/ready");
   const generation = requiredNumber(body, "generation");
-  await ctx.deps.processManager.workerReady(issue, role, sessionId, generation);
+  // Same deadlock shape as /process/ready (see handleProcessReady): the calling worker's own
+  // bootstrap cannot answer a negotiate_protocol request until this response returns, so the
+  // shim connect and the pending-prompt delivery it enables must happen after we respond, not
+  // before. A connect/prompt failure leaves pendingAssignment queued exactly as it is today —
+  // workerClient never caches a failed connect, so the next touch (a probe, a resume, another
+  // spawnWorker) retries it.
+  Promise.resolve(ctx.deps.processManager.workerReady(issue, role, sessionId, generation)).catch(
+    (error) => {
+      console.error(
+        `[legion] failed to deliver worker/ready assignment for ${issue}/${role}:`,
+        error
+      );
+    }
+  );
   return Response.json(validateContractResponse(LegionDaemonApi.WorkerReady.response, {}));
 }
 

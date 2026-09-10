@@ -158,6 +158,7 @@ export function config(): DaemonConfig {
     treeStopTimeoutSeconds: 60,
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
+    workerRpcTimeoutSeconds: 5,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir: "/state",

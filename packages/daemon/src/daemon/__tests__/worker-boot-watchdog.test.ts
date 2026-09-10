@@ -83,6 +83,7 @@ function baseDeps(overrides: Partial<WorkerBootWatchdogDeps> = {}): WorkerBootWa
     // High enough that no existing test (which exercises re-arming, not the deadline itself)
     // ever reaches it; tests of the deadline itself override this explicitly.
     registrationDeadlineIntervals: () => 1_000,
+    workerRpcTimeoutMs: () => 5_000,
     now: () => Date.now(),
     run: async () => ({ stdout: "", exitCode: 1 }),
     isOmpPane: async () => false,

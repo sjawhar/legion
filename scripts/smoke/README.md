@@ -26,7 +26,7 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | `LEGION_APP_LOGINS` | Comma-separated GitHub bot logins for both Legion Apps. | `legion-implementer[bot],legion-reviewer[bot]` |
 | `SMOKE_OMP_LAUNCH_PREFIX` | Whitespace-separated argv prefix written into the generated config's `omp_launch_prefix`, so daemon-spawned panes get provider credentials from `secretsd` instead of the daemon's own environment (see the "OMP invocation" section below). Set to an empty string to disable. | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` |
 
-`LEGSMOKE` must already exist on the server named by `DISPATCH_URL` before starting the rig (project creation is human-only); it is not configurable.
+`LEGSMOKE` must already exist on the server named by `DISPATCH_URL` before starting the rig (project creation is human-only); it is not configurable. `up.sh` creates this exercise's own root Dispatch issue inside that shared project (or reuses one already recorded under `SMOKE_DIR` from an earlier run of the same rig) and records its key at `${SMOKE_DIR}/root-issue`; checkpoints read that file (or `SMOKE_ROOT_ISSUE`, if set) rather than guessing which of the shared project's parentless issues belongs to this run.
 
 It also requires these secret inputs:
 
@@ -56,7 +56,6 @@ The sandbox repository includes the 20-second `ci` check and the `.fail-me`-cont
 ```sh
 export SMOKE_REPO=example-org/legion-smoke
 export SMOKE_PROJECT=example-org/24
-export SMOKE_PROJECT_ID=PVT_kwDODfEZEs4BhWFj
 export SMOKE_WEBHOOK_MODE=envoy
 export DISPATCH_URL=http://localhost:8766
 
@@ -64,15 +63,15 @@ secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_P
   bash -c 'GITHUB_WEBHOOK_SECRET="$ENVOY_GITHUB_WEBHOOK_SECRET" exec bash scripts/smoke/up.sh'
 ```
 
-The `secrets` command injects `ENVOY_GITHUB_WEBHOOK_SECRET`, so a wrapper must map it to the public rig interface name `GITHUB_WEBHOOK_SECRET` without printing it. In `none` mode, `up.sh` builds the Envoy listener binary, starts an isolated NATS container at `127.0.0.1:14222`, waits for listener health at `127.0.0.1:19020/healthz`, proves the listener accepts a locally signed GitHub `ping`, prints the explicit webhook-ingress block, then launches the daemon against the Dispatch server named by `DISPATCH_URL`/`DISPATCH_TOKEN`. The daemon and label setup use installation tokens minted from the GitHub Apps. In `forward` mode, the same local listener assertion runs before `gh webhook forward` and its GitHub hook registration; the rig waits fo…
+The `secrets` command injects `ENVOY_GITHUB_WEBHOOK_SECRET`, so a wrapper must map it to the public rig interface name `GITHUB_WEBHOOK_SECRET` without printing it. In `none` mode, `up.sh` builds the Envoy listener binary, starts an isolated NATS container at `127.0.0.1:14222`, waits for listener health at `127.0.0.1:19020/healthz`, proves the listener accepts a locally signed GitHub `ping`, prints the explicit webhook-ingress block, then launches the daemon against the Dispatch server named by `DISPATCH_URL`/`DISPATCH_TOKEN`. The daemon uses installation tokens minted from the GitHub Apps. In `forward` mode, the same local listener assertion runs before `gh webhook forward` and its GitHub hook registration; the rig waits fo…
 
-In `envoy` mode the bridge starts only after the local daemon is healthy, then subscribes to `notifications.github.<owner>.<repo>.>` on `SMOKE_UPSTREAM_NATS` and republishes each raw NATS message onto the same subject in the rig's isolated NATS. The source chain is GitHub → the production `<github-app-slug>` app → Sami's Envoy receiver → production NATS → bridge → isolated rig NATS. The bridge has no upstream publish path, subscribes only to the configured repository's literal subject prefix, and preserves the incoming NATS message rather than synthesizing a new envelope. It validates the first envelope against the daemon contract; a legacy shape logs exact missing and extra fields, marks the bridge unhealthy, and refuses to send that message to the daemon.
+In `envoy` mode the bridge starts only after the local daemon is healthy, then subscribes to `notifications.github.<owner>.<repo>.>` and `notifications.dispatch.issue.>` (every Dispatch issue project; the daemon's own reducer filters to its own project by key prefix) on `SMOKE_UPSTREAM_NATS` and republishes each raw NATS message onto the same subject in the rig's isolated NATS. The source chain is GitHub → the production `<github-app-slug>` app → Sami's Envoy receiver → production NATS → bridge → isolated rig NATS. The bridge has no upstream publish path, relays the configured repository's GitHub events and every Dispatch issue project's events, and preserves the incoming NATS message rather than synthesizing a new envelope. It validates the first envelope against the daemon contract; a legacy shape logs exact missing and extra fields, marks the bridge unhealthy, and refuses to send that message to the daemon.
 
 ```sh
 bun run packages/daemon/src/cli/index.ts start <owner>/<board-number> --config /path/to/legion.yaml
 ```
 
-The generated configuration uses `omp_invocation: mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp`. Before accepting work, the daemon asks `mise env --json` for the complete tool environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and resolves that pinned OMP binary with `mise where`. Its tmux panes receive the resulting full `PATH` and execute the resolved OMP path directly. Startup probes that exact OMP executable for `pi.agents`; it refuses to start before opening NATS or its API if the probe or any required tool fails.
+The generated configuration uses `omp_invocation: mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp` and `repos: [$SMOKE_REPO]` (required by `config.ts` for credential routing, PR lookups, and workspace provisioning). Before accepting work, the daemon asks `mise env --json` for the complete tool environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and resolves that pinned OMP binary with `mise where`. Its tmux panes receive the resulting full `PATH` and execute the resolved OMP path directly. Startup probes that exact OMP executable for `pi.agents`; it refuses to start before opening NATS or its API if the probe or any required tool fails.
 
 Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path when a tool cannot be discovered. `omp_invocation` must use the `mise x <tool> -- omp` form; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 
@@ -91,14 +90,7 @@ Do not use `LEGION_OMP_INVOCATION=omp` as this negative test: the daemon rejects
 
 The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, generated configuration, process IDs, and logs live in `/tmp/legion-smoke` by default; set `SMOKE_DIR` to use another location. `NATS_PORT`, `ENVOY_PORT`, and `LEGION_DAEMON_PORT` override the scratch defaults. `up.sh` refuses to start when any configured port is already occupied, except for a live process recorded in its own PID file and matching Linux `/proc/<pid>/stat` start time. Re-running `up.sh` reuses only those verified rig processes and the `legion-smoke-nats` container. In `envoy` mode, `envoy-bridge.log` records readiness, the first-envelope validation verdict, every forwarded subject, and byte size.
 
-`SMOKE_WEBHOOK_EVENTS` overrides the supported repository-webhook event list in `forward` mode. The default includes `issues`, `issue_comment`, `sub_issues`, `pull_request`, `pull_request_review`, and `check_run`; GitHub rejects `projects_v2_item` on repository hooks, so Project V2 ingress remains gated by `SMOKE_PROJECT_ID`.
-
-Before reporting `RIG READY`, the rig creates exactly these sandbox labels:
-
-- `needs-approval`
-- `human-approved`
-- `legion-child`
-- `legion-backlog`
+`SMOKE_WEBHOOK_EVENTS` overrides the supported repository-webhook event list in `forward` mode. The default includes `issues`, `issue_comment`, `sub_issues`, `pull_request`, `pull_request_review`, and `check_run`.
 
 When `SMOKE_BRANCH_PROTECTION=1` is set, the rig configures `main` to require one approving review, opens a disposable pull request, approves it through the reviewer App, and reads `reviewDecision`. If GitHub reports `APPROVED`, the rig adds the existing `legion-human-approval` status check to branch protection; otherwise it leaves that check unrequired. The disposable pull request number and result are recorded under the smoke directory. This optional gate uses the user-authenticated `gh` identity described above.
 
@@ -118,10 +110,12 @@ Keep `SMOKE_REPO` and `SMOKE_PROJECT` exported for teardown so it can close the 
 Run the numbered assertions during the end-to-end exercise:
 
 ```sh
-bash scripts/smoke/checkpoints.sh <1-12>
+secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <1-12>
 ```
 
-Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints infer the root issue and Legion pull request from daemon state where possible. Set the listed variable when a later exercise has more than one candidate:
+`DISPATCH_TOKEN` is a secret: the `secrets` wrapper injects it only for this one invocation and never persists it under `SMOKE_DIR` (the same wrapper the start command above uses for `up.sh`). `DISPATCH_URL` is not a secret and must already be exported in the shell, exactly as in "Start and stop" above.
+
+Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints 1–4, 9, and 12 read the root issue `up.sh` recorded at `${SMOKE_DIR}/root-issue`; checkpoint 5 infers the Legion pull request from `gh pr list` where possible. Set the listed variable when a later exercise has more than one candidate, or when checkpoints run against a `SMOKE_DIR` `up.sh` never populated:
 
 With a recorded `SMOKE_WEBHOOK_MODE=none`, resync-driven checkpoints 1–4 still run. Checkpoints 5–7 and 9–11 are blocked because they directly assert pull-request, check-run, issue-comment, or issue-event delivery. `envoy` and `forward` both count as live ingress.
 
@@ -140,10 +134,10 @@ Then post the comment and run checkpoint 10. The command captures the daemon-log
 
 | Checkpoint | Extra input when needed | Assertion |
 | --- | --- | --- |
-| 1 | `SMOKE_PROJECT_ID`, `SMOKE_ROOT_ISSUE` optional | The daemon records a sandbox issue and the controller tmux window exists. |
-| 2 | `SMOKE_PROJECT_ID`, `SMOKE_ROOT_ISSUE` optional | The root is admitted and its architect window exists. |
-| 3 | `SMOKE_PROJECT_ID`, `SMOKE_ROOT_ISSUE` optional | Root issue has a posted spec and `needs-approval`; a `legion-child` exists. |
-| 4 | `SMOKE_PROJECT_ID`, `SMOKE_ROOT_ISSUE` optional | A child is marked released in daemon state. |
+| 1 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue has progressed past `triage`; daemon state records a controller window/pane locator for a live tmux window. |
+| 2 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue is `in_progress`, is admitted, and has a recorded architect window/pane locator for a live tmux window. |
+| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact, its registered open design-gate ask offers `Approve`, and a Dispatch child issue exists. |
+| 4 | `SMOKE_ROOT_ISSUE` optional | A child in a released lifecycle status is tracked in active admission or an active/queued tree. |
 | 5 | `SMOKE_PR` optional | A Legion branch has implementation identity and `Legion-Session:` commit attribution. |
 | 6 | `SMOKE_ARCHITECT_WINDOW`, `SMOKE_VERDICT_FRAGMENT`, `SMOKE_RAW_CHECK_FRAGMENT` | One architect verdict appears in the pane; raw check noise is absent. |
 | 7 | `SMOKE_BRANCH_PROTECTION=1`, `SMOKE_PR`, `SMOKE_RETRO_COMMIT`, `SMOKE_REVIEWER_LOGIN` | Reviewer `.legion` deletion precedes its approval; retro is durable; final PR diff has no `.legion` path; records the pre-merge base for checkpoint 8. |
