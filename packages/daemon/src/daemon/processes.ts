@@ -1069,18 +1069,8 @@ export class ProcessManager {
 
     tree.status = "closed";
     delete tree.lingerUntil;
-    // The only two paths into `closeTreeLocked` are `expireLinger` (whose linger began on this
-    // same issue's own `issue.closed` event — `reduceIssueClosed` applies the closed payload's
-    // `status: "done"` onto `state.issues[treeKey]` before ever emitting the `linger` effect)
-    // and `reportRootExit` (gated on `state.issues[treeKey]?.status === "done"` by its caller,
-    // `handleProcessExit`). Every real caller therefore already has a Dispatch-side `done`
-    // status by the time it gets here — writing it again is not just redundant, it 404s: Dispatch
-    // refuses a further status PATCH on an issue it already considers closed ("issue is closed"),
-    // and that failure is permanent, not transient, so `writeStatus`'s catch would park it in
-    // `pendingStatusWrites` for resync to retry forever, never once succeeding. Only write when
-    // the local mirror disagrees — a hypothetical future caller that closes a tree without the
-    // issue already being done.
-    if (this.deps.state.issues[treeKey]?.status !== "done") {
+    const rootStatus = this.deps.state.issues[treeKey]?.status;
+    if (rootStatus !== "done" && rootStatus !== "backlog" && rootStatus !== "icebox") {
       await writeStatus(this.deps.state, this.deps.dispatchClient, treeKey, "done");
     }
     await this.releaseSlot(treeKey);
@@ -1755,6 +1745,26 @@ export class ProcessManager {
       priorSessionFile,
       "resurrecting"
     );
+    if (
+      this.deps.state.trees[tree.root] !== tree ||
+      tree.status === "lingering" ||
+      tree.status === "closed" ||
+      !this.deps.state.admission.active.includes(tree.root) ||
+      this.deps.state.issues[tree.root]?.status !== "todo"
+    ) {
+      if (this.deps.state.trees[tree.root] === tree) tree.locator = locator;
+      try {
+        await this.stopProcessSerialized(
+          roleToken(this.deps.state.project, tree.root, "architect"),
+          locator,
+          this.workerStopTimeoutMs
+        );
+        if (this.deps.state.trees[tree.root] === tree) delete tree.locator;
+      } catch (error) {
+        console.error(`[legion] failed to retire stale root pane for ${tree.root}:`, error);
+      }
+      return;
+    }
     tree.locator = locator;
     tree.status = "active";
     await writeStatus(this.deps.state, this.deps.dispatchClient, tree.root, "in_progress");

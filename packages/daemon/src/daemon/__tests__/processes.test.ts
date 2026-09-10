@@ -499,6 +499,9 @@ describe("ProcessManager", () => {
       },
     });
 
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
     await processes.spawnRoot(root);
 
     expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toBe("");
@@ -680,7 +683,11 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
     let sessionExists = false;
-    const { manager: processes, state: managedState } = manager(newLegionState("omp", 1), {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       dispatchClient: fakeDispatchClient({
         setStatus: async (issue, status) => {
@@ -719,6 +726,7 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     const state = newLegionState("omp", 1);
     state.issues[root] = { key: root, title: "Root", status: "done", children: [] };
+    tree(state);
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       dispatchClient: fakeDispatchClient({
@@ -734,18 +742,87 @@ describe("ProcessManager", () => {
       },
     });
 
-    await processes.spawnRoot(root);
     await processes.closeTree(root);
 
-    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(statusWrites).toEqual([]);
     expect(managedState.trees[root]?.status).toBe("closed");
     expect(managedState.pendingStatusWrites[root]).toBeUndefined();
+  });
+  it("closes a parked root on linger expiry without overwriting Dispatch with done", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Parked root", status: "backlog", children: [] };
+    tree(state);
+    state.trees[root].status = "lingering";
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+
+    await processes.expireLinger(root);
+
+    expect(managedState.trees[root]?.status).toBe("closed");
+    expect(statusWrites).toEqual([]);
+  });
+
+  it("retires a just-opened root pane without a status write when a human parks it during launch", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Racing root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.admission.active.push(root);
+    const launchStarted = Promise.withResolvers<void>();
+    const launchGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          launchStarted.resolve();
+          await launchGate.promise;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const spawning = processes.spawnRoot(root);
+    await launchStarted.promise;
+    state.issues[root].status = "backlog";
+    state.trees[root].status = "lingering";
+    state.admission.active.splice(state.admission.active.indexOf(root), 1);
+    launchGate.resolve();
+
+    await spawning;
+
+    expect(managedState.trees[root]).toMatchObject({ status: "lingering" });
+    expect(managedState.trees[root]?.locator).toBeUndefined();
+    expect(statusWrites).toEqual([]);
+    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
   });
 
   it("records a failed Dispatch status write in pendingStatusWrites without throwing, for both spawn and close", async () => {
     const stateDir = await temporaryDir();
     let sessionExists = false;
-    const { manager: processes, state: managedState } = manager(newLegionState("omp", 1), {
+    const state = newLegionState("omp", 1);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       dispatchClient: fakeDispatchClient({
         setStatus: async () => {
@@ -763,12 +840,12 @@ describe("ProcessManager", () => {
     await processes.spawnRoot(root);
 
     expect(managedState.trees[root]?.status).toBe("active");
-    expect(managedState.pendingStatusWrites[root]).toBe("in_progress");
+    expect(managedState.pendingStatusWrites[root]).toEqual({ status: "in_progress" });
 
     await processes.closeTree(root);
 
     expect(managedState.trees[root]?.status).toBe("closed");
-    expect(managedState.pendingStatusWrites[root]).toBe("done");
+    expect(managedState.pendingStatusWrites[root]).toEqual({ status: "done" });
   });
   it("gives collision-prone issue paths distinct escaped cosmetic window names", async () => {
     const stateDir = await temporaryDir();
@@ -833,6 +910,9 @@ describe("ProcessManager", () => {
       },
     });
 
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
     await processes.spawnRoot(root);
 
     expect(state.trees[root]?.locator).toMatchObject({
@@ -1091,6 +1171,8 @@ describe("ProcessManager", () => {
       config: config(stateDir, { admissionCap: 2 }),
     });
 
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.issues[child] = { key: child, title: "Child", status: "todo", children: [] };
     await processes.reconcileAdmission();
 
     expect(state.admission).toEqual({ cap: 2, active: [root, child], queue: [] });
@@ -1111,6 +1193,7 @@ describe("ProcessManager", () => {
       launchFailures: 0,
     };
     state.admission.active.push(root);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes } = manager(state, {
       config: config(stateDir),
@@ -1148,6 +1231,7 @@ describe("ProcessManager", () => {
       launchFailures: 0,
     };
     state.admission.active.push(root);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const killedWindows: string[] = [];
     let newWindowCalls = 0;
@@ -1380,6 +1464,8 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     state.admission.active.push(root);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
     const killedWindows: string[] = [];
     const { manager: processes } = manager(state, {
       config: config(stateDir),
@@ -1620,6 +1706,7 @@ describe("ProcessManager", () => {
     tree(state);
     state.admission.active.push(root);
     state.admission.queue.push(child);
+    state.issues[child] = { key: child, title: "Child", status: "todo", children: [] };
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
@@ -1651,6 +1738,7 @@ describe("ProcessManager", () => {
     tree(state);
     state.admission.active.push(root);
     state.admission.queue.push(child);
+    state.issues[child] = { key: child, title: "Child", status: "todo", children: [] };
     let saveCalls = 0;
     const { manager: processes } = manager(state, {
       config: config(stateDir),
@@ -3561,6 +3649,9 @@ describe("ProcessManager", () => {
       const stateDir = await temporaryDir();
       const project = `duplicate${Date.now()}`;
       const state = newLegionState(project, 1);
+      state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+      state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+      state.admission.active.push(root);
       const session = `legion-${project}`;
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
@@ -3608,6 +3699,9 @@ describe("ProcessManager", () => {
       const stateDir = await temporaryDir();
       const project = `defaultwindow${Date.now()}`;
       const state = newLegionState(project, 1);
+      state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+      state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+      state.admission.active.push(root);
       const session = `legion-${project}`;
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
@@ -3653,6 +3747,9 @@ describe("ProcessManager", () => {
       const stateDir = await temporaryDir();
       const project = `smoke${Date.now()}`;
       const state = newLegionState(project, 1);
+      state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+      state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+      state.admission.active.push(root);
       const session = `legion-${project}`;
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
