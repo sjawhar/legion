@@ -41,25 +41,38 @@ export function setLegionBootstrapExitForTests(hook: (code: number) => never): v
   exitProcess = hook;
 }
 
-// Bounds how many times bootstrap retries a `/process/ready` or `/worker/ready` call before
-// giving up and letting the daemon's own boot watchdog take over -- see `callReadyWithRetry`.
+// Bounds retries of the transient `/process/ready` and `/worker/ready` bootstrap requests.
 const READY_RETRY_ATTEMPTS = 3;
 const READY_RETRY_DELAY_MS = 1_000;
 
+function isNetworkOrTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "NetworkError" || error.name === "TimeoutError") return true;
+
+  const code =
+    "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return (
+    code === "ConnectionRefused" ||
+    code === "ConnectionTimeout" ||
+    code === "EAI_AGAIN" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    code === "ENOTFOUND" ||
+    code === "ETIMEDOUT" ||
+    (error instanceof TypeError &&
+      (error.message === "Failed to fetch" || error.message === "fetch failed"))
+  );
+}
+
 /**
- * Calls a role's `/process/ready` or `/worker/ready` daemon request -- the one bootstrap step
- * that no longer needs to succeed synchronously. The daemon closed the T18 deadlock by
- * responding to that request before it ever dials back into this exact process's own shim
- * socket (see `handleProcessReady`/`handleWorkerReady`), so a failure here is no longer this
- * process's own socket refusing to answer itself. A 401/403 means the role registration itself
- * was rejected -- genuinely fatal, exactly like the `processStarted`/`workerStarted` 403
- * handling above -- so it rethrows immediately (no retry) for the caller's own catch-all to log
- * and exit exactly once, the same path every other post-registration bootstrap failure takes;
- * exiting directly from here too would double-exit once that catch-all also sees the error.
- * Anything else (a 5xx, a network timeout, a transient daemon hiccup) is logged and retried a
- * bounded number of times; if every attempt fails, this logs a final warning and returns
- * normally instead of tearing the process down -- the daemon's own `WorkerBootWatchdog`
- * (`worker_boot_timeout_seconds`) owns liveness from here, never this bootstrap step.
+ * Calls a role's `/process/ready` or `/worker/ready` daemon request. The daemon acknowledges
+ * this request before dialing back into this process's shim socket, so retry only errors that can
+ * resolve on their own: daemon 5xx responses and network or timeout failures. A 401/403 or any
+ * other 4xx is definitive and propagates immediately. Once a retryable failure exhausts its
+ * bounded attempts, it also propagates for the bootstrap flow to finish naturally rather than
+ * explicitly terminating its own live process.
  */
 const callReadyWithRetry = async (label: string, call: () => Promise<void>): Promise<void> => {
   for (let attempt = 1; attempt <= READY_RETRY_ATTEMPTS; attempt++) {
@@ -67,17 +80,16 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
       await call();
       return;
     } catch (error) {
-      if (
-        error instanceof LegionDaemonApiError &&
-        (error.status === 401 || error.status === 403)
-      ) {
-        throw error;
-      }
+      const retryable =
+        error instanceof LegionDaemonApiError
+          ? error.status >= 500 && error.status < 600
+          : isNetworkOrTimeoutError(error);
+      if (!retryable) throw error;
       if (attempt === READY_RETRY_ATTEMPTS) {
         console.error(
-          `[legion] ${label} failed after ${attempt} attempts; the daemon's boot watchdog owns liveness from here: ${messageFor(error)}`
+          `[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`
         );
-        return;
+        throw error;
       }
       console.error(
         `[legion] ${label} failed (attempt ${attempt}/${READY_RETRY_ATTEMPTS}), retrying: ${messageFor(error)}`
@@ -322,10 +334,16 @@ export default function legionExtension(pi: PiApi): void {
         registerArchitectTools();
         await activateLegionTool();
       } catch (error) {
-        console.error(
-          `[legion] root bootstrap failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
-        );
-        exitProcess(1);
+        if (
+          error instanceof LegionDaemonApiError &&
+          (error.status === 401 || error.status === 403)
+        ) {
+          console.error(
+            `[legion] root bootstrap authorization failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+          );
+          exitProcess(1);
+        }
+        throw error;
       }
     })();
     try {
@@ -407,10 +425,16 @@ export default function legionExtension(pi: PiApi): void {
           })
         );
       } catch (error) {
-        console.error(
-          `[legion] worker bootstrap failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
-        );
-        exitProcess(1);
+        if (
+          error instanceof LegionDaemonApiError &&
+          (error.status === 401 || error.status === 403)
+        ) {
+          console.error(
+            `[legion] worker bootstrap authorization failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+          );
+          exitProcess(1);
+        }
+        throw error;
       }
     })();
     try {

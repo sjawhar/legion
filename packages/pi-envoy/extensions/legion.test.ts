@@ -1329,11 +1329,7 @@ describe("Legion OMP extension", () => {
     );
     expect(exits).toEqual([1]);
   });
-  test("retries worker/ready after a 5xx and completes bootstrap without exiting (T18 hardening)", async () => {
-    // The daemon closed the T18 deadlock by responding to /worker/ready before it dials back
-    // into this exact process's own shim socket, so a transient 5xx here is no longer this
-    // process's own socket refusing to answer itself -- the daemon's boot watchdog owns
-    // liveness from here, not this bootstrap step (ruling 2). Never exits on this alone.
+  test("retries worker/ready three times on a 503 then propagates without exiting (T18 hardening)", async () => {
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
       exits.push(code);
@@ -1365,7 +1361,7 @@ describe("Legion OMP extension", () => {
       }
       if (url.pathname === "/legion/v1/worker/ready") {
         readyAttempts += 1;
-        return Response.json({ error: "daemon unavailable" }, { status: 500 });
+        return Response.json({ error: "daemon unavailable" }, { status: 503 });
       }
       return Response.json({
         session_id: "ses_retries_after_started",
@@ -1380,9 +1376,65 @@ describe("Legion OMP extension", () => {
     if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
 
     const context = { ...sessionContext("ses_retries_after_started"), cwd: workspace };
-    await sessionStart({}, context);
+    await expect(sessionStart({}, context)).rejects.toThrow(
+      "POST /legion/v1/worker/ready failed with 503"
+    );
 
     expect(readyAttempts).toBe(3);
+    expect(exits).toEqual([]);
+  });
+  test("does not retry a worker/ready 404 and propagates without explicitly exiting", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    const workspace = await createJjWorkspace();
+    const tree = "REPO-42";
+    const issue = "REPO-43";
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", issue, role);
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "boot-ready-not-found";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ISSUE = issue;
+    process.env.LEGION_ROLE = role;
+    process.env.LEGION_WORKSPACE = workspace;
+    let readyAttempts = 0;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json({
+          roleToken: token,
+          secret: "worker-secret",
+          gitName: "Legion Worker",
+          gitEmail: "worker@example.test",
+        });
+      }
+      if (url.pathname === "/legion/v1/worker/ready") {
+        readyAttempts += 1;
+        return Response.json({ error: "ready endpoint not found" }, { status: 404 });
+      }
+      return Response.json({
+        session_id: "ses_ready_not_found",
+        machine_id: "machine",
+        dir: workspace,
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
+
+    const context = { ...sessionContext("ses_ready_not_found"), cwd: workspace };
+    await expect(sessionStart({}, context)).rejects.toThrow(
+      "POST /legion/v1/worker/ready failed with 404"
+    );
+
+    expect(readyAttempts).toBe(1);
     expect(exits).toEqual([]);
   });
   test("exits the process when worker/ready is rejected with 403 (auth)", async () => {
@@ -1467,10 +1519,7 @@ describe("Legion OMP extension", () => {
     );
     expect(exits).toEqual([1]);
   });
-  test("retries process/ready after a 5xx and completes root bootstrap without exiting (T18 hardening)", async () => {
-    // Same hardening as worker/ready, for the root architect: the daemon responds to
-    // /process/ready before dialing back into the architect's own shim socket, so a transient
-    // 5xx is retried (bounded) and never fatal on its own (ruling 2).
+  test("retries a transient 5xx process/ready and completes root bootstrap without exiting", async () => {
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
       exits.push(code);
@@ -1497,7 +1546,10 @@ describe("Legion OMP extension", () => {
       }
       if (url.pathname === "/legion/v1/process/ready") {
         readyAttempts += 1;
-        return Response.json({ error: "daemon unavailable" }, { status: 500 });
+        if (readyAttempts === 1) {
+          return Response.json({ error: "daemon unavailable" }, { status: 500 });
+        }
+        return Response.json({});
       }
       return Response.json({
         session_id: "ses_root_retries_after_started",
@@ -1513,7 +1565,7 @@ describe("Legion OMP extension", () => {
 
     await sessionStart({}, sessionContext("ses_root_retries_after_started"));
 
-    expect(readyAttempts).toBe(3);
+    expect(readyAttempts).toBe(2);
     expect(exits).toEqual([]);
   });
   test("exits the process when process/ready is rejected with 403 (auth)", async () => {
