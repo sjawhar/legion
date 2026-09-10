@@ -1,4 +1,4 @@
-import { type IssueKey, isLegionRole, type LegionRole, parseIssueKey } from "@legion/contracts";
+import { type IssueKey, isLegionRole, type LegionRole } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
 import { buildRoleEnv, modeToRole, type TokenManager } from "./github-apps";
 import type { LegionState, PrState } from "./legion-state";
@@ -18,7 +18,7 @@ const WORKER_MODE: Record<LegionRole, string> = {
 
 export interface CatchupOverseerPayload extends LegionEventPayload {
   type: "catchup-overseer";
-  gates: Record<IssueKey, { needsApproval: boolean; humanApproved: boolean }>;
+  gates: Record<IssueKey, { designAskId?: string; designApproved?: string }>;
   childCounts: Record<IssueKey, { total: number; open: number; closed: number }>;
   prVerdicts: Record<
     string,
@@ -64,12 +64,12 @@ export interface CatchupWorkerPayload extends LegionEventPayload {
 export interface WorkerCatchupDeps {
   runner: CommandRunner;
   tokenManager: Pick<TokenManager, "getToken">;
+  repo: `${string}/${string}`;
 }
 
 interface Artifact {
   repo: `${string}/${string}`;
   number: number;
-  isPullRequest: boolean;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -109,15 +109,12 @@ export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<L
   const childCounts = {} as CatchupOverseerPayload["childCounts"];
   for (const issue of [...issues].sort()) {
     const node = s.issues[issue];
-    gates[issue] = {
-      needsApproval: node.labels.includes("needs-approval"),
-      humanApproved: node.labels.includes("human-approved"),
-    };
+    gates[issue] = s.gates[issue] ?? {};
     let open = 0;
     let closed = 0;
     for (const child of node.children) {
-      if (s.issues[child]?.state === "open") open += 1;
-      else if (s.issues[child]?.state === "closed") closed += 1;
+      if (s.issues[child]?.status === "done") closed += 1;
+      else if (s.issues[child]) open += 1;
     }
     childCounts[issue] = { total: node.children.length, open, closed };
   }
@@ -156,20 +153,10 @@ export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<L
 }
 
 function artifactsFor(state: LegionState, issue: IssueKey): Artifact[] {
-  const prs = Object.values(state.prs)
+  return Object.values(state.prs)
     .filter((pr) => pr.key === issue)
     .sort((first, second) => first.number - second.number)
-    .map((pr) => ({ repo: pr.repo, number: pr.number, isPullRequest: true }));
-  if (prs.length > 0) return prs;
-  const parsed = parseIssueKey(issue);
-  if (!parsed) throw new Error(`Invalid IssueKey: ${issue}`);
-  return [
-    {
-      repo: `${parsed.owner}/${parsed.repo}`,
-      number: parsed.number,
-      isPullRequest: false,
-    },
-  ];
+    .map((pr) => ({ repo: pr.repo, number: pr.number }));
 }
 
 async function runJsonArray(
@@ -321,30 +308,24 @@ export async function workerCatchup(
   role: LegionRole,
   deps: WorkerCatchupDeps
 ): Promise<LegionEventPayload> {
-  const parsedIssue = parseIssueKey(issue);
-  if (!parsedIssue) throw new Error(`Invalid IssueKey: ${issue}`);
-  const credential = await deps.tokenManager.getToken(
-    modeToRole(WORKER_MODE[role]),
-    parsedIssue.owner
-  );
+  const [owner] = deps.repo.split("/") as [string, string];
+  const credential = await deps.tokenManager.getToken(modeToRole(WORKER_MODE[role]), owner);
   const options: CommandRunnerOptions = {
     env: buildRoleEnv(credential.token, credential.gitIdentity, process.env),
   };
   const unhandled: CatchupUnhandled[] = [];
   for (const artifact of artifactsFor(s, issue)) {
-    const commits = artifact.isPullRequest
-      ? await runJsonArray(
-          deps.runner,
-          [
-            "gh",
-            "api",
-            "--paginate",
-            "--slurp",
-            `repos/${artifact.repo}/pulls/${artifact.number}/commits`,
-          ],
-          options
-        )
-      : [];
+    const commits = await runJsonArray(
+      deps.runner,
+      [
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        `repos/${artifact.repo}/pulls/${artifact.number}/commits`,
+      ],
+      options
+    );
     const comments = await runJsonArray(
       deps.runner,
       [
@@ -356,19 +337,17 @@ export async function workerCatchup(
       ],
       options
     );
-    const reviewComments = artifact.isPullRequest
-      ? await runJsonArray(
-          deps.runner,
-          [
-            "gh",
-            "api",
-            "--paginate",
-            "--slurp",
-            `repos/${artifact.repo}/pulls/${artifact.number}/comments`,
-          ],
-          options
-        )
-      : [];
+    const reviewComments = await runJsonArray(
+      deps.runner,
+      [
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        `repos/${artifact.repo}/pulls/${artifact.number}/comments`,
+      ],
+      options
+    );
     const cursor = cursorFor(
       commits,
       [...comments, ...reviewComments],
@@ -379,20 +358,18 @@ export async function workerCatchup(
       ...unhandledComments(comments, cursor, credential.gitIdentity.name, "comment"),
       ...unhandledComments(reviewComments, cursor, credential.gitIdentity.name, "review-comment")
     );
-    if (artifact.isPullRequest) {
-      const reviews = await runJsonArray(
-        deps.runner,
-        [
-          "gh",
-          "api",
-          "--paginate",
-          "--slurp",
-          `repos/${artifact.repo}/pulls/${artifact.number}/reviews`,
-        ],
-        options
-      );
-      unhandled.push(...unhandledReviews(reviews, cursor, credential.gitIdentity.name));
-    }
+    const reviews = await runJsonArray(
+      deps.runner,
+      [
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        `repos/${artifact.repo}/pulls/${artifact.number}/reviews`,
+      ],
+      options
+    );
+    unhandled.push(...unhandledReviews(reviews, cursor, credential.gitIdentity.name));
   }
   unhandled.sort((first, second) => {
     const firstAt = "occurredAt" in first ? first.occurredAt : "";

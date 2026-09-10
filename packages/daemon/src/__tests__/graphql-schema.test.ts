@@ -5,7 +5,6 @@ import { gunzipSync } from "node:zlib";
 import { buildSchema, parse, validate } from "graphql";
 import type { CommandResult, CommandRunner } from "../state/fetch";
 import { getCiStatusBatch, getPrReviewStateBatch } from "../state/fetch";
-import { fetchGitHubProjectItems } from "../state/github-fetch";
 
 // GitHub's published GraphQL schema (https://docs.github.com/public/fpt/schema.docs.graphql).
 // Every query the daemon SENDS is validated against it, so an invalid field
@@ -47,11 +46,6 @@ function ok(payload: unknown): CommandResult {
   return { stdout: JSON.stringify(payload), stderr: "", exitCode: 0 };
 }
 
-const emptyPage = {
-  pageInfo: { hasNextPage: false, endCursor: null },
-  nodes: [],
-};
-
 describe("daemon GraphQL queries validate against GitHub's published schema", () => {
   it("schema file is real: a known-invalid query fails validation", () => {
     // The exact bug that shipped twice: CheckRun has no `app` field.
@@ -61,36 +55,6 @@ describe("daemon GraphQL queries validate against GitHub's published schema", ()
     expect(errors.map((error) => error.message).join("\n")).toContain(
       'Cannot query field "app" on type "CheckRun"'
     );
-  });
-
-  it("project items ORG and USER queries are schema-valid", async () => {
-    const org = captureRunner(() =>
-      ok({ data: { organization: { projectV2: { items: emptyPage } } } })
-    );
-    await fetchGitHubProjectItems("acme", 2, org.runner, async () => ({
-      env: { GH_TOKEN: "ghs_schema_test" },
-    }));
-
-    const user = captureRunner((call) =>
-      call === 1
-        ? ok({
-            errors: [
-              {
-                message: "Could not resolve to an Organization with the login of 'acme'.",
-              },
-            ],
-          })
-        : ok({ data: { user: { projectV2: { items: emptyPage } } } })
-    );
-    await fetchGitHubProjectItems("acme", 2, user.runner, async () => ({
-      env: { GH_TOKEN: "ghs_schema_test" },
-    }));
-
-    const captured = [...org.queries, ...user.queries];
-    expect(captured.length).toBeGreaterThanOrEqual(3);
-    for (const [index, query] of captured.entries()) {
-      expectValidQuery(query, `project-items[${index}]`);
-    }
   });
 
   it("PR review-state batch query is schema-valid", async () => {

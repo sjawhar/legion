@@ -15,7 +15,6 @@ describe("daemon config", () => {
       env: {
         ...requiredEnv,
         LEGION_DAEMON_PORT: "14000",
-        LEGION_BOARD_PROJECT_IDS: "PVT_alpha,PVT_beta",
         LEGION_APP_LOGINS: "legion-implement[bot],legion-review[bot]",
         LEGION_MAX_FIX_ATTEMPTS: "5",
         LEGION_ADMISSION_CAP: "7",
@@ -38,8 +37,6 @@ describe("daemon config", () => {
       envoyUrl: "http://127.0.0.1:9020",
       natsUrls: ["nats://one:4222", "nats://two:4222"],
       dispatchProject: "ACME",
-      boardProjectIds: ["PVT_alpha", "PVT_beta"],
-      repos: ["acme/widgets"],
       appLogins: ["legion-implement[bot]", "legion-review[bot]"],
       maxFixAttempts: 5,
       admissionCap: 7,
@@ -60,7 +57,6 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: {
           ...requiredEnv,
-          LEGION_BOARD_PROJECT_IDS: "PVT_x",
           DISPATCH_MCP_URL: "http://127.0.0.1:18766/mcp",
         },
         cliOverrides: {
@@ -75,7 +71,6 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: {
           ...requiredEnv,
-          LEGION_BOARD_PROJECT_IDS: "PVT_x",
           DISPATCH_URL: "http://127.0.0.1:18766",
         },
         cliOverrides: {
@@ -92,7 +87,6 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: {
           ...requiredEnv,
-          LEGION_BOARD_PROJECT_IDS: "PVT_x",
           DISPATCH_URL: "http://127.0.0.1:18766",
           DISPATCH_TOKEN: "   ",
         },
@@ -109,7 +103,6 @@ describe("daemon config", () => {
     const { config } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
-        LEGION_BOARD_PROJECT_IDS: "PVT_x",
         DISPATCH_TOKEN: "some-token",
       },
       cliOverrides: {
@@ -123,7 +116,6 @@ describe("daemon config", () => {
     const { config } = resolveDaemonConfig({
       env: requiredEnv,
       cliOverrides: {
-        boardProjectIds: ["PVT_x"],
         githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
       },
     });
@@ -134,7 +126,7 @@ describe("daemon config", () => {
   it("rejects the retired worker_budget key from the environment", () => {
     expect(() =>
       resolveDaemonConfig({
-        env: { ...requiredEnv, LEGION_BOARD_PROJECT_IDS: "PVT_x", LEGION_WORKER_BUDGET: "6" },
+        env: { ...requiredEnv, LEGION_WORKER_BUDGET: "6" },
         cliOverrides: {
           githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
         },
@@ -157,7 +149,6 @@ describe("daemon config", () => {
     const { config } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
-        LEGION_BOARD_PROJECT_IDS: "PVT_x",
         DISPATCH_URL: "http://127.0.0.1:18766",
         DISPATCH_TOKEN: "test-dispatch-token",
       },
@@ -173,7 +164,6 @@ describe("daemon config", () => {
     const { config } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
-        LEGION_BOARD_PROJECT_IDS: "PVT_x",
         DISPATCH_URL: "http://127.0.0.1:18766",
         DISPATCH_TOKEN: "  test-dispatch-token  \n",
       },
@@ -188,7 +178,6 @@ describe("daemon config", () => {
     const { config } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
-        LEGION_BOARD_PROJECT_IDS: "PVT_x",
         DISPATCH_URL: "http://127.0.0.1:18766/",
         DISPATCH_TOKEN: "test-dispatch-token",
       },
@@ -204,7 +193,6 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: {
           ...requiredEnv,
-          LEGION_BOARD_PROJECT_IDS: "PVT_x",
           DISPATCH_URL: "not a url",
         },
         cliOverrides: {
@@ -219,7 +207,6 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: {
           ...requiredEnv,
-          LEGION_BOARD_PROJECT_IDS: "PVT_x",
           DISPATCH_URL: "http://127.0.0.1:18766/mcp",
         },
         cliOverrides: {
@@ -231,7 +218,7 @@ describe("daemon config", () => {
 
   it("resolves dispatch_project from the environment", () => {
     const { config } = resolveDaemonConfig({
-      env: { ...requiredEnv, DISPATCH_PROJECT: "LEGION", LEGION_BOARD_PROJECT_IDS: "PVT_x" },
+      env: { ...requiredEnv, DISPATCH_PROJECT: "LEGION" },
       cliOverrides: {
         githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
       },
@@ -288,8 +275,6 @@ describe("daemon config", () => {
         "dispatch_project: ACME",
         "nats_urls:",
         "  - nats://one:4222",
-        "board_project_ids:",
-        "  - PVT_one",
         "repos:",
         "  - acme/widgets",
         "app_logins:",
@@ -319,7 +304,6 @@ describe("daemon config", () => {
       port: 14001,
       envoyUrl: "http://listener:9020",
       natsUrls: ["nats://one:4222"],
-      boardProjectIds: ["PVT_one"],
       repos: ["acme/widgets"],
       appLogins: ["legion-implement[bot]"],
       maxFixAttempts: 4,
@@ -345,8 +329,6 @@ describe("daemon config", () => {
         "dispatch_project: ACME",
         "nats_urls:",
         "  - nats://one:4222",
-        "board_project_ids:",
-        "  - PVT_one",
         "repos:",
         "  - acme/widgets",
         "app_logins:",
@@ -373,7 +355,6 @@ describe("daemon config", () => {
     const { config: fromEnvOnly } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
-        LEGION_BOARD_PROJECT_IDS: "PVT_alpha",
         LEGION_WORKER_BOOT_TIMEOUT_SECONDS: "45",
       },
       cliOverrides: {
@@ -383,7 +364,7 @@ describe("daemon config", () => {
     expect(fromEnvOnly.workerBootTimeoutSeconds).toBe(45);
 
     const { config: withoutEither } = resolveDaemonConfig({
-      env: { ...requiredEnv, LEGION_BOARD_PROJECT_IDS: "PVT_alpha" },
+      env: requiredEnv,
       cliOverrides: {
         githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
       },
@@ -399,8 +380,6 @@ describe("daemon config", () => {
         "nats_urls:",
         "  - nats://one:4222",
         "dispatch_project: LEGION",
-        "board_project_ids:",
-        "  - PVT_one",
         "repos:",
         "  - acme/widgets",
         "app_logins:",
@@ -427,7 +406,6 @@ describe("daemon config", () => {
     const { config: fromEnvOnly } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
-        LEGION_BOARD_PROJECT_IDS: "PVT_alpha",
         LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS: "2",
       },
       cliOverrides: {
@@ -437,7 +415,7 @@ describe("daemon config", () => {
     expect(fromEnvOnly.workerBootRegistrationDeadlineIntervals).toBe(2);
 
     const { config: withoutEither } = resolveDaemonConfig({
-      env: { ...requiredEnv, LEGION_BOARD_PROJECT_IDS: "PVT_alpha" },
+      env: requiredEnv,
       cliOverrides: {
         githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
       },
@@ -533,12 +511,6 @@ describe("daemon config", () => {
     expect(() =>
       loadConfigFromFile("project: acme/7\nworker_cap: 1.5\n", "/tmp/legion-config")
     ).toThrow("worker_cap");
-  });
-
-  it("rejects a design gate left on without board_project_ids configured", () => {
-    expect(() => resolveDaemonConfig({ env: requiredEnv })).toThrow(
-      "board_project_ids is required when the design gate is on"
-    );
   });
 
   it("rejects unknown config keys instead of silently tolerating drift", () => {

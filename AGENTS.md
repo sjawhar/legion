@@ -4,10 +4,12 @@ Autonomous development swarm using Oh My Pi agents. Root processes own issue tre
 
 ## Architecture
 
-Legion is event-driven. The daemon derives role and gate state from GitHub artifacts, records
-root-process session locators, and publishes only the verdict changes each role needs. Root
-processes run in tmux; phase workers are headless `omp --mode rpc` processes the daemon spawns
-directly, one tmux pane per worker, bridged through `legion worker-shim`.
+Legion's issue lifecycle lives entirely on native Dispatch (triage → done); the daemon never
+creates, reads, or writes a GitHub issue. It derives role and gate state from Dispatch issue
+events plus GitHub PR/CI artifacts, records root-process session locators, and publishes only the
+verdict changes each role needs. Root processes run in tmux; phase workers are headless
+`omp --mode rpc` processes the daemon spawns directly, one tmux pane per worker, bridged through
+`legion worker-shim`.
 
 - **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
   credential grants, resync, recovery, and human-gate backstops.
@@ -38,16 +40,14 @@ bun test                      # Test
 
 ```bash
 legion start <team> [-w path]        # Start swarm
-legion status <team>                 # Check status
+legion status <team>                 # Check daemon status
+legion status <issue> <status>       # Set an issue's Dispatch lifecycle status (todo|backlog|icebox); controller-capability
 legion stop <team>                   # Stop swarm
 legion restart <team>                # Restart daemon, preserve worker sessions
 legion legions                       # List registered Legion daemons
 legion gh -- <args>                  # Run gh with a session-bound GitHub token (refuses `pr merge`; the merge queue merges, not workers)
 legion credential                    # Git credential helper for Legion grants
 legion state                         # Read daemon state
-legion approve <issue>               # Apply a human approval
-legion admit <issue>                 # Admit a root issue
-legion backlog <issue> <marker>      # Mark an issue as deliberately backlogged
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
 legion handoff complete --summary <text>  # Workers: report phase completion to the tree's architect, keeping the role claimed (authenticates via LEGION_GRANT exactly like `legion gh`/`legion credential` — no session secret in the request)
 legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-worker OMP process to the daemon over a unix socket (daemon-spawned, not run by hand)
@@ -101,7 +101,14 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 **Phase roles:** architect → plan → implement → test → review → merge
 **Retro:** runs after reviewer cleanup and before human approval.
 
-**Labels:** `needs-approval`, `human-approved`, `legion-child`, `legion-backlog`
+Statuses above are native Dispatch issue statuses, not GitHub labels — the daemon owns every
+`in_progress`/`testing`/`needs_review`/`retro`/`done` write via `DispatchClient.setStatus`, and a
+human or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispatch dashboard or
+`legion status <issue> <status>`.
+
+**Gates:** design gate = the architect's `dispatch_ask` on the root issue with an `Approve`
+option; merge gate = a human `APPROVED` PR review at the head commit (unchanged, GitHub-native).
+No lifecycle labels exist; GitHub issues are never read or written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
 the phase-verdict artifacts. No lifecycle labels carry worker state.

@@ -5,6 +5,7 @@ import path from "node:path";
 import type { DaemonConfig } from "../config";
 import { type LegionState, newLegionState } from "../legion-state";
 import { ProcessManager, type ProcessManagerDeps } from "../processes";
+import { fakeDispatchClient } from "./ci-fixtures";
 
 const now = Date.parse("2026-08-26T00:00:00.000Z");
 
@@ -17,7 +18,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "/opt/omp",
     dispatchProject: "LEGSMOKE",
-    boardProjectIds: [],
+    repo: "sjawhar/legion",
     repos: ["sjawhar/legion"],
     appLogins: [],
     admissionCap: 1,
@@ -69,6 +70,7 @@ function manager(
     provisioningToken: async () => "installation-token",
     statPrompt: async () => {},
     workerCatchup: {
+      repo: "sjawhar/legion",
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
         getToken: async () => ({
@@ -79,6 +81,7 @@ function manager(
       },
     },
     now: () => now,
+    dispatchClient: fakeDispatchClient(),
   };
   return { manager: new ProcessManager(deps), state, commands };
 }

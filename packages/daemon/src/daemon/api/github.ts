@@ -1,5 +1,4 @@
-import type { IssueKey, LegionRole } from "@legion/contracts";
-import { parseIssueKey } from "@legion/contracts";
+import type { LegionRole } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import type { GitHubAppRole } from "../config";
 import { buildRoleEnv } from "../github-apps";
@@ -14,39 +13,32 @@ export interface GitHubTokenSource {
   getToken(role: GitHubAppRole, owner: string): Promise<TokenLease>;
 }
 
-export function issueUrl(issue: IssueKey): string {
-  const parsed = parseIssueKey(issue);
-  if (!parsed) {
-    throw new Error(`Invalid issue key in Legion state: ${issue}`);
-  }
-  return `repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}`;
-}
-
 export function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
   return role === "reviewer" ? "review" : "implement";
 }
 
-/** Fetches GitHub App tokens for an issue's repo and runs `gh` under that identity. */
+/** Fetches GitHub App tokens for Legion's single configured repo and runs `gh` under that
+ * identity. Every Legion issue is a Dispatch key with no owner/repo of its own (D1/D2 of the T20
+ * design) — the repo is `DaemonConfig.repo`, injected once at construction, never derived from
+ * an issue key. */
 export class GitHubService {
+  private readonly owner: string;
+
   constructor(
+    repo: `${string}/${string}`,
     private readonly tokenManager: GitHubTokenSource,
     private readonly runner: CommandRunner
-  ) {}
-
-  async tokenForIssue(issue: IssueKey, appRole: GitHubAppRole): Promise<TokenLease> {
-    const parsed = parseIssueKey(issue);
-    if (!parsed) {
-      throw new Error(`Invalid issue key in Legion state: ${issue}`);
-    }
-    return this.tokenManager.getToken(appRole, parsed.owner);
+  ) {
+    const [owner] = repo.split("/") as [string, string];
+    this.owner = owner;
   }
 
-  async gh(
-    issue: IssueKey,
-    command: string[],
-    appRole: GitHubAppRole = "implement"
-  ): Promise<string> {
-    const lease = await this.tokenForIssue(issue, appRole);
+  async tokenForIssue(appRole: GitHubAppRole): Promise<TokenLease> {
+    return this.tokenManager.getToken(appRole, this.owner);
+  }
+
+  async gh(command: string[], appRole: GitHubAppRole = "implement"): Promise<string> {
+    const lease = await this.tokenForIssue(appRole);
     const result = await this.runner(command, {
       env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
     });

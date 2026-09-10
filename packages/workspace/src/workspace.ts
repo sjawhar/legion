@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { type IssueKey, parseIssueKey } from "@legion/contracts";
+import type { IssueKey } from "@legion/contracts";
 
 export interface RunResult {
   readonly exitCode: number;
@@ -26,6 +26,9 @@ export interface ProvisionIssueWorkspaceDeps {
   readonly credentialHelper: string;
   readonly extensionPackage: string;
   readonly stateDir: string;
+  /** The single GitHub repository every Legion issue provisions against (`DaemonConfig.repo`) —
+   * a Dispatch issue key carries no owner/repo of its own. */
+  readonly repo: `${string}/${string}`;
 }
 
 function commandFailure(result: RunResult, cmd: string[]): Error {
@@ -174,14 +177,14 @@ export async function provisionIssueWorkspace(
   issue: IssueKey,
   deps: ProvisionIssueWorkspaceDeps
 ): Promise<WorkspaceSpec> {
-  const parsedIssue = parseIssueKey(issue);
-  if (!parsedIssue) throw new Error(`Invalid IssueKey: ${issue}`);
-
-  const { owner, repo, number } = parsedIssue;
+  const [owner, repo] = deps.repo.split("/") as [string, string];
+  const workspaceName = issue.toLowerCase();
   const repoCloneDir = path.join(deps.stateDir, "repos", "github.com", owner, repo);
-  const workspaceDir = path.join(deps.stateDir, "workspaces", owner, repo, `issue-${number}`);
+  const workspaceDir = path.join(deps.stateDir, "workspaces", owner, repo, workspaceName);
   const gitDir = path.join(repoCloneDir, ".git");
-  const bookmark = `legion/issue-${number}`;
+  // The design's PR ↔ issue linkage: branch `legion/<KEY>` (`reducers.ts`'s `issueForBranch`
+  // matches exactly this pattern for a Dispatch key).
+  const bookmark = `legion/${issue}`;
 
   const workspaceExists = existsSync(workspaceDir);
   if (workspaceExists) {
@@ -202,7 +205,7 @@ export async function provisionIssueWorkspace(
   }
 
   if (!workspaceExists) {
-    await createWorkspace(deps, repoCloneDir, workspaceDir, `issue-${number}`, bookmark);
+    await createWorkspace(deps, repoCloneDir, workspaceDir, workspaceName, bookmark);
   }
 
   await runChecked(deps, ["jj", "bookmark", "set", bookmark, "--allow-backwards"], {

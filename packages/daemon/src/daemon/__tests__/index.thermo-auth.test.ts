@@ -3,6 +3,7 @@ import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
 import { type DaemonHandle, startDaemon } from "../index";
 import { newLegionState } from "../legion-state";
+import { fakeDispatchClient } from "./ci-fixtures";
 
 const environment: DaemonEnvironment = {
   commands: {
@@ -24,8 +25,8 @@ function config(): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x omp",
     dispatchProject: "LEGSMOKE",
-    boardProjectIds: [],
     repos: ["acme/widgets"],
+    repo: "acme/widgets",
     appLogins: [],
     admissionCap: 1,
     workerCap: 1,
@@ -70,7 +71,7 @@ it("refuses to start a human merge gate with no resolvable GitHub App login", as
         resolveDaemonEnvironment: async () => environment,
         statPrompt: async () => {},
         envoyPublish: async () => {},
-        fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
+        dispatchClient: fakeDispatchClient(),
         tokenManager: {
           getToken: async () => ({
             token: "test-token",

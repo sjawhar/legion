@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { createDispatchClient, DispatchHttpError } from "../dispatch-client";
+import {
+  createDispatchClient,
+  type DispatchClient,
+  DispatchHttpError,
+  retryPendingWrite,
+  writeStatus,
+} from "../dispatch-client";
+import { newLegionState } from "../legion-state";
 
 function fakeFetch(handler: (url: string, init: RequestInit) => Response): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -94,5 +101,64 @@ describe("createDispatchClient", () => {
     expect(requests[0]?.init.body).toBeUndefined();
     expect(requests[1]?.url).toBe("http://127.0.0.1:8766/api/v1/issues/LEGION-7");
     expect(requests[1]?.init.method).toBe("GET");
+  });
+  it("records the issue's local status with a failed daemon status write", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues["LEGION-7"] = {
+      key: "LEGION-7",
+      title: "Pending update",
+      status: "in_progress",
+      children: [],
+    };
+    const client = createDispatchClient({
+      baseUrl: "http://127.0.0.1:8766",
+      token: "test-token",
+      project: "LEGION",
+      fetch: fakeFetch(() => new Response("unavailable", { status: 503 })),
+    });
+
+    await writeStatus(state, client, "LEGION-7", "testing");
+
+    expect(state.pendingStatusWrites["LEGION-7"]).toEqual({
+      status: "testing",
+      statusAtRecord: "in_progress",
+    });
+  });
+});
+describe("writeStatus / retryPendingWrite serialization", () => {
+  it("serializes a direct writeStatus behind an in-flight pending-write retry for the same issue, leaving the later write's status as final", async () => {
+    const state = newLegionState("omp", 1);
+    state.pendingStatusWrites["LEGION-7"] = { status: "testing", statusAtRecord: "in_progress" };
+    const applied: string[] = [];
+    const retryPatchStarted = Promise.withResolvers<void>();
+    const releaseRetryPatch = Promise.withResolvers<void>();
+    const client: DispatchClient = {
+      listIssues: async () => [],
+      getIssue: async () => ({ status: "in_progress" }) as never,
+      setStatus: async (_key, status) => {
+        if (status === "testing") {
+          retryPatchStarted.resolve();
+          await releaseRetryPatch.promise;
+        }
+        applied.push(status);
+      },
+    };
+
+    const retry = retryPendingWrite(
+      state,
+      client,
+      "LEGION-7",
+      { status: "in_progress" },
+      state.pendingStatusWrites["LEGION-7"]
+    );
+    await retryPatchStarted.promise;
+    // Issued while the retry's own PATCH is still in flight: it must not start (let alone land)
+    // until the retry's whole lane turn -- including its pending-write bookkeeping -- settles.
+    const direct = writeStatus(state, client, "LEGION-7", "needs_review");
+    releaseRetryPatch.resolve();
+    await Promise.all([retry, direct]);
+
+    expect(applied).toEqual(["testing", "needs_review"]);
+    expect(state.pendingStatusWrites["LEGION-7"]).toBeUndefined();
   });
 });

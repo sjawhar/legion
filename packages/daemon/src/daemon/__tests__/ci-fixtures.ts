@@ -1,10 +1,26 @@
 // Shared fixtures for the event-pump and resync tests: a fake core-NATS
 // connection, the daemon config, and the issue, tree, roles and PR literals the
 // CI scenarios build on.
-import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
+import { type IssueKey, roleToken } from "@legion/contracts";
 import type { DaemonConfig } from "../config";
+import type { DispatchClient } from "../dispatch-client";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
+
+/** A `DispatchClient` double for tests that need one wired (every `LegionApiDeps`,
+ * `ProcessManagerDeps`, and `RunResyncDeps` requires one) but do not assert on Dispatch writes
+ * themselves — `listIssues` returns empty, `setStatus` is a no-op spy, `getIssue` throws unless a
+ * scenario overrides it. */
+export function fakeDispatchClient(overrides: Partial<DispatchClient> = {}): DispatchClient {
+  return {
+    listIssues: async () => [],
+    getIssue: async (key) => {
+      throw new Error(`fakeDispatchClient.getIssue not stubbed for ${key}`);
+    },
+    setStatus: async () => {},
+    ...overrides,
+  };
+}
 
 interface Subscription {
   subject: string;
@@ -128,8 +144,8 @@ export function config(): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     dispatchProject: "LEGSMOKE",
-    boardProjectIds: ["PVT_board"],
     repos: ["acme/widgets"],
+    repo: "acme/widgets",
     appLogins: ["legion[bot]"],
     admissionCap: 4,
     workerCap: 6,
@@ -147,23 +163,21 @@ export function config(): DaemonConfig {
   };
 }
 
-export function stateForIssue(released = true): {
+export function stateForIssue(): {
   state: LegionState;
   issue: IssueKey;
   architect: string;
   implementer: string;
 } {
   const state = newLegionState("omp", 2);
-  const issue = formatIssueKey("acme", "widgets", 1);
+  const issue: IssueKey = "WIDGETS-1";
   const architect = roleToken("omp", issue, "architect");
   const implementer = roleToken("omp", issue, "implementer");
   state.issues[issue] = {
     key: issue,
     title: "Issue one",
-    state: "open",
+    status: "in_progress",
     children: [],
-    released,
-    labels: [],
   };
   state.trees[issue] = {
     root: issue,

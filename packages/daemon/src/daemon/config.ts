@@ -42,9 +42,14 @@ export interface DaemonConfig {
   dispatchProject: string;
   natsUrls: string[];
   ompInvocation: string;
-  boardProjectIds: string[];
   /** `owner/name` GitHub repositories the durable per-repo GitHub intake consumes; required, non-empty. */
   repos: string[];
+  /** The single GitHub repository every Legion issue/tree resolves to for credential routing,
+   * PR lookups, and workspace provisioning (`repos[0]`, validated at config load to be the only
+   * entry — a Dispatch issue key carries no owner/repo of its own, so this is now the sole
+   * source of that mapping; more than one configured repo has no way to pick one per issue and
+   * is rejected at config load instead of guessing). */
+  repo: `${string}/${string}`;
   appLogins: string[];
   admissionCap: number;
   workerCap: number;
@@ -134,6 +139,8 @@ const CONFIG_SCHEMA: ConfigSchema = {
   dispatch_project: null,
   nats_urls: null,
   omp_invocation: null,
+  // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_project
+  // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   board_project_ids: null,
   repos: null,
   app_logins: null,
@@ -478,8 +485,9 @@ export function loadConfigFromFile(
   if (ompInvocation !== undefined) {
     fields.ompInvocation = requireNonEmpty(ompInvocation, "omp_invocation");
   }
-  const boardProjectIds = readStringArray(config.board_project_ids, "board_project_ids");
-  if (boardProjectIds !== undefined) fields.boardProjectIds = boardProjectIds;
+  if (config.board_project_ids !== undefined) {
+    throw new Error("board_project_ids was replaced by dispatch_project");
+  }
   const repos = readStringArray(config.repos, "repos");
   if (repos !== undefined) fields.repos = repos.map((repo) => validateRepoSlug(repo, "repos"));
   const appLogins = readStringArray(config.app_logins, "app_logins");
@@ -582,6 +590,9 @@ export function resolveDaemonConfig(
   if (env.LEGION_WORKER_BUDGET !== undefined) {
     throw new Error("worker_budget was replaced by worker_cap");
   }
+  if (env.LEGION_BOARD_PROJECT_IDS !== undefined) {
+    throw new Error("LEGION_BOARD_PROJECT_IDS was replaced by DISPATCH_PROJECT");
+  }
   const natsUrls = resolveValue(
     opts.cliOverrides?.natsUrls,
     fileStringArray(fields, "natsUrls"),
@@ -600,12 +611,6 @@ export function resolveDaemonConfig(
     DEFAULT_OMP_INVOCATION
   );
 
-  const boardProjectIds = resolveValue(
-    opts.cliOverrides?.boardProjectIds,
-    fileStringArray(fields, "boardProjectIds"),
-    parseCsv(env.LEGION_BOARD_PROJECT_IDS, "LEGION_BOARD_PROJECT_IDS"),
-    []
-  );
   const repos = resolveValue(
     opts.cliOverrides?.repos,
     fileStringArray(fields, "repos"),
@@ -614,6 +619,10 @@ export function resolveDaemonConfig(
   );
   if (repos.value.length === 0) throw new Error("repos is required");
   for (const repo of repos.value) validateRepoSlug(repo, "LEGION_REPOS");
+  if (repos.value.length > 1) {
+    throw new Error("multiple repos require an issue→repo mapping; not supported");
+  }
+  const repo = repos.value[0] as `${string}/${string}`;
   const dispatchProject = resolveValue(
     opts.cliOverrides?.dispatchProject,
     fileString(fields, "dispatchProject"),
@@ -730,9 +739,6 @@ export function resolveDaemonConfig(
   } as const);
   const parsedGates = parseGates(gates.value, "gates");
   if (!parsedGates) throw new Error("gates must be configured");
-  if (parsedGates.design !== "off" && boardProjectIds.value.length === 0) {
-    throw new Error("board_project_ids is required when the design gate is on");
-  }
   const githubApps = resolveValue(
     opts.cliOverrides?.githubApps,
     fileGitHubApps(fields),
@@ -760,8 +766,8 @@ export function resolveDaemonConfig(
       dispatchProject: resolvedDispatchProject,
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
-      boardProjectIds: boardProjectIds.value,
       repos: repos.value,
+      repo,
       appLogins: appLogins.value,
       admissionCap: admissionCap.value,
       workerCap: workerCap.value,

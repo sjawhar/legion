@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { formatIssueKey } from "@legion/contracts";
+import type { IssueKey } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { type LegionState, newLegionState } from "../legion-state";
 import { reduceGithubEvent } from "../reducers";
-import { config } from "./ci-fixtures";
+import { config, fakeDispatchClient } from "./ci-fixtures";
 
-const root = formatIssueKey("acme", "widgets", 1);
+const root = "WIDGETS-1" as IssueKey;
 
 type StartedSession = { secret: string };
 
@@ -15,10 +15,8 @@ function stateWithRoot(): LegionState {
   state.issues[root] = {
     key: root,
     title: "Root",
-    state: "open",
+    status: "in_progress",
     children: [],
-    released: true,
-    labels: [],
   };
   state.trees[root] = {
     root,
@@ -76,6 +74,7 @@ function startApi(
         },
       }),
     },
+    dispatchClient: fakeDispatchClient(),
     processManager: {
       admit: () => "spawned",
       releaseSlot: () => {},
@@ -99,6 +98,7 @@ function startApi(
     {
       port: 0,
       hostname: "127.0.0.1",
+      repo: "acme/widgets",
       gates: { design: "root-issues", merge: "human" },
       ...(options.unresolvedAppLogins ? {} : { appLogins: ["legion-implementer[bot]"] }),
     },

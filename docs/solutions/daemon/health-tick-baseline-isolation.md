@@ -55,7 +55,7 @@ This keeps `runPostCollectionProcessing` as a single entry point rather than spl
 
 2. **Bug 2 was a symptom, not independent.** The "re-subscription on every tick" was actually `publishStateDelta` delivering via role routing because the oscillating baseline produced a delta every time. No subscription code was in the tick loop.
 
-3. **Injectable fetcher for testability.** `fetchAndProcessState` hardcoded `fetchGitHubProjectItems`. Changed to `opts.fetchProjectItems ?? fetchGitHubProjectItems` to match the existing DI pattern already used by `/state/fetch-and-collect`.
+3. **Inject the state collector for testability.** Pass the collector through the operation's dependency interface instead of replacing a module globally; tests then own their input without leaking it into unrelated work.
 
 ## Testing Pattern
 

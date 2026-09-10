@@ -6,7 +6,8 @@ import {
   roleToken,
   roleTopic,
 } from "@legion/contracts";
-import type { WorkerRoleClaim } from "../../legion-state";
+import { writeStatus } from "../../dispatch-client";
+import type { IssueStatus, WorkerRoleClaim } from "../../legion-state";
 import { equalSecretHash, secretHash, spawnCapabilityKey } from "../auth";
 import { type RouteContext, rootForIssue, treeContains } from "../context";
 import { appRoleForLegionRole } from "../github";
@@ -18,6 +19,15 @@ import {
   requiredString,
   validateContractResponse,
 } from "../http";
+
+/** Statuses the daemon owns off a phase's own completion, keyed by the role that just finished —
+ * `planner`/`merger` completions never PATCH a status here: planning still reads as
+ * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. */
+const PHASE_COMPLETE_STATUS: Partial<Record<LegionRole, IssueStatus>> = {
+  implementer: "testing",
+  tester: "needs_review",
+  reviewer: "retro",
+};
 
 export async function handleWorkerSession(
   ctx: RouteContext,
@@ -144,7 +154,7 @@ export async function handleWorkerStarted(
   // untouched, so a retry with the same {bootToken, sessionId} starts clean. The lock is
   // (re-)acquired below, after this await, to re-validate against whatever changed while it was
   // outstanding and commit atomically with that re-validation.
-  const lease = await ctx.github.tokenForIssue(issue, appRoleForLegionRole(role));
+  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(role));
   const secret = randomUUID();
 
   // Everything from here on runs inside this token's own critical section (rejecting with
@@ -299,6 +309,11 @@ export async function handlePhaseComplete(
 
   // Capture and clear the phase synchronously, before the publish await below.
   delete ctx.deps.state.phases[grant.issue];
+
+  const nextStatus = PHASE_COMPLETE_STATUS[grant.role];
+  if (nextStatus) {
+    await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, grant.issue, nextStatus);
+  }
 
   const architectToken = roleToken(ctx.deps.state.project, tree, "architect");
   let noHolder = false;

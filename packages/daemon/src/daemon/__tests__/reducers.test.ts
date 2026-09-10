@@ -34,7 +34,6 @@ const childBranch = `legion/${child}`;
 
 const prNumber = 17;
 const config: ReducerConfig = {
-  boardProjectIds: ["PVT_board"],
   appLogins: ["legion-author[bot]", "legion-reviewer[bot]"],
   maxFixAttempts: 3,
 };

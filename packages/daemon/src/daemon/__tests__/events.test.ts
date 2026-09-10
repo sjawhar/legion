@@ -125,10 +125,8 @@ describe("Dispatch durable intake", () => {
     state.issues["LEGSMOKE-1"] = {
       key: "LEGSMOKE-1",
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees["LEGSMOKE-1"] = {
       root: "LEGSMOKE-1",
@@ -235,6 +233,146 @@ describe("Dispatch durable intake", () => {
       expect(errorLog).toHaveBeenCalledWith(
         expect.stringContaining("notifications.dispatch.issue.LEGSMOKE-1.issue.created")
       );
+      expect(fatalCalls).toEqual([]);
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+  it("terms and logs a Dispatch issue event whose nested payload key targets another tracked issue", async () => {
+    const state = newLegionState("omp", 4);
+    state.issues["LEGSMOKE-1"] = {
+      key: "LEGSMOKE-1",
+      title: "First issue",
+      children: [],
+      status: "triage",
+    };
+    state.issues["LEGSMOKE-2"] = {
+      key: "LEGSMOKE-2",
+      title: "Second issue",
+      children: [],
+      status: "triage",
+    };
+    const beforeIssues = structuredClone(state.issues);
+    const nats = new FakeNats();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fatalCalls: unknown[] = [];
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {}),
+      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      const mismatched = {
+        ...dispatchIssueCreatedRoot,
+        payload: {
+          ...dispatchIssueCreatedRoot.payload,
+          key: "LEGSMOKE-2",
+          status: "todo",
+          title: "Corrupted second issue",
+        },
+      };
+      nats.emit(
+        "notifications.dispatch.issue.LEGSMOKE-1.issue.created",
+        dispatchEnvelope(mismatched, "dispatch-payload-key-mismatch"),
+        { streamSequence: 10, deliverySequence: 1 },
+        calls
+      );
+      await flush();
+
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [expect.any(String)] });
+      expect(state.issues).toEqual(beforeIssues);
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("notifications.dispatch.issue.LEGSMOKE-1.issue.created")
+      );
+      expect(fatalCalls).toEqual([]);
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("terms a Dispatch issue event whose parent is not a Dispatch issue key", async () => {
+    const state = newLegionState("omp", 4);
+    const nats = new FakeNats();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {}),
+      config: { ...config(), dispatchProject: "LEGSMOKE" },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      const malformedParent = {
+        ...dispatchIssueCreatedRoot,
+        issue_key: "LEGSMOKE-3",
+        payload: {
+          ...dispatchIssueCreatedRoot.payload,
+          key: "LEGSMOKE-3",
+          parent: "not-a-dispatch-key",
+        },
+      };
+      nats.emit(
+        "notifications.dispatch.issue.LEGSMOKE-3.issue.created",
+        dispatchEnvelope(malformedParent, "dispatch-parent-mismatch"),
+        { streamSequence: 11, deliverySequence: 1 },
+        calls
+      );
+      await flush();
+
+      expect(calls).toEqual({ acks: 0, naks: [], terms: [expect.any(String)] });
+      expect(state.issues).toEqual({});
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("notifications.dispatch.issue.LEGSMOKE-3.issue.created")
+      );
+    } finally {
+      errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+
+  it("acknowledges and ignores an unknown well-formed Dispatch event type", async () => {
+    const state = newLegionState("omp", 4);
+    state.issues["LEGSMOKE-1"] = {
+      key: "LEGSMOKE-1",
+      title: "Known issue",
+      children: [],
+      status: "triage",
+    };
+    const beforeIssues = structuredClone(state.issues);
+    const nats = new FakeNats();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fatalCalls: unknown[] = [];
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {}),
+      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      fatal: async (error) => {
+        fatalCalls.push(error);
+      },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      const unknown = {
+        ...dispatchIssueCreatedRoot,
+        type: "ask.resolved",
+        payload: { id: "ask-1" },
+      };
+      nats.emit(
+        "notifications.dispatch.issue.LEGSMOKE-1.ask.resolved",
+        dispatchEnvelope(unknown, "dispatch-unknown-event"),
+        { streamSequence: 12, deliverySequence: 1 },
+        calls
+      );
+      await flush();
+
+      expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
+      expect(state.issues).toEqual(beforeIssues);
+      expect(errorLog).not.toHaveBeenCalled();
       expect(fatalCalls).toEqual([]);
     } finally {
       errorLog.mockRestore();

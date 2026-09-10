@@ -7,17 +7,17 @@ const requiredUnknown = z.unknown().refine((value) => value !== undefined, {
   message: "Required",
 });
 
-// The daemon is the canonical enforcer of architect label policy: an architect may
-// only ever ADD these labels, never remove one. Label removal (needs-approval ->
-// human-approved on /gates/approve, legion-backlog on /backlog) is controller-only
-// and stays outside this contract.
-export const ARCHITECT_MUTABLE_LABELS = ["needs-approval"] as const;
-const architectMutableLabel = z.enum(ARCHITECT_MUTABLE_LABELS);
-export type ArchitectMutableLabel = (typeof ARCHITECT_MUTABLE_LABELS)[number];
-
-export function isArchitectMutableLabel(value: string): value is ArchitectMutableLabel {
-  return ARCHITECT_MUTABLE_LABELS.some((label) => label === value);
-}
+const LIFECYCLE_STATUSES = [
+  "triage",
+  "icebox",
+  "backlog",
+  "todo",
+  "in_progress",
+  "testing",
+  "needs_review",
+  "retro",
+  "done",
+] as const;
 
 const architectCapability = z.strictObject({
   tree: nonEmptyString,
@@ -75,42 +75,15 @@ export const LegionDaemonApi = {
     request: architectCapability.extend({ generation: z.number().int() }),
     response: z.object({}),
   },
-  IssueCreate: {
-    request: architectCapability.extend({
-      title: nonEmptyString,
-      body: nonEmptyString,
-      labels: z.array(architectMutableLabel).optional(),
-    }),
-    response: z.object({ issue: nonEmptyString, url: nonEmptyString }),
-  },
   WaveRelease: {
-    request: architectCapability.extend({ children: z.array(nonEmptyString).optional() }),
+    request: architectCapability.extend({ issues: z.array(nonEmptyString).optional() }),
     response: z.object({ released: z.array(nonEmptyString) }),
-  },
-  Comment: {
-    request: architectCapability.extend({ issue: nonEmptyString, body: nonEmptyString }),
-    response: z.object({ commentId: z.number().int(), url: nonEmptyString }),
-  },
-  PostBody: {
-    request: architectCapability.extend({ issue: nonEmptyString, body: nonEmptyString }),
-    response: z.object({}),
-  },
-  Labels: {
-    request: architectCapability.extend({
-      issue: nonEmptyString,
-      add: z.array(architectMutableLabel).optional(),
-    }),
-    response: z.object({ labels: z.array(nonEmptyString) }),
   },
   Escalate: {
     request: architectCapability.extend({
       kind: z.enum(["re-file", "capacity", "cross-tree"]),
       context: requiredUnknown,
     }),
-    response: z.object({}),
-  },
-  IssueClose: {
-    request: architectCapability.extend({ issue: nonEmptyString, comment: z.string().optional() }),
     response: z.object({}),
   },
   ProvisioningCredential: {
@@ -175,16 +148,20 @@ export const LegionDaemonApi = {
       secret: nonEmptyString,
     }),
   },
-  GatesApprove: {
-    request: controllerIssue,
+  // A bare controller credential sets `todo`/`backlog`/`icebox` project-wide. An architect
+  // credential includes both `tree` and `sessionId` and may set any status within that tree.
+  // Exactly one of `tree` or `sessionId` is invalid; neither selects controller access and both
+  // select architect access.
+  IssueStatus: {
+    request: controllerIssue.extend({
+      status: z.enum(LIFECYCLE_STATUSES),
+      tree: nonEmptyString.optional(),
+      sessionId: nonEmptyString.optional(),
+    }),
     response: z.object({}),
   },
-  Admission: {
-    request: controllerIssue,
-    response: z.object({ result: z.enum(["spawned", "queued"]) }),
-  },
-  Backlog: {
-    request: controllerIssue.extend({ marker: nonEmptyString }),
+  GatesRegister: {
+    request: architectCapability.extend({ issue: nonEmptyString, askId: nonEmptyString }),
     response: z.object({}),
   },
   Grant: {
@@ -214,16 +191,9 @@ export type ProcessReadyInput = InputOf<typeof LegionDaemonApi.ProcessReady.requ
 export type MergeGateInput = InputOf<typeof LegionDaemonApi.MergeGate.request>;
 export type MergeGateResponse = OutputOf<typeof LegionDaemonApi.MergeGate.response>;
 export type ProcessExitInput = InputOf<typeof LegionDaemonApi.ProcessExit.request>;
-export type IssueCreateInput = InputOf<typeof LegionDaemonApi.IssueCreate.request>;
-export type IssueCreateResponse = OutputOf<typeof LegionDaemonApi.IssueCreate.response>;
 export type WaveReleaseInput = InputOf<typeof LegionDaemonApi.WaveRelease.request>;
 export type WaveReleaseResponse = OutputOf<typeof LegionDaemonApi.WaveRelease.response>;
-export type IssueTextInput = InputOf<typeof LegionDaemonApi.Comment.request>;
-export type CommentResponse = OutputOf<typeof LegionDaemonApi.Comment.response>;
-export type LabelsInput = InputOf<typeof LegionDaemonApi.Labels.request>;
-export type LabelsResponse = OutputOf<typeof LegionDaemonApi.Labels.response>;
 export type EscalateInput = InputOf<typeof LegionDaemonApi.Escalate.request>;
-export type IssueCloseInput = InputOf<typeof LegionDaemonApi.IssueClose.request>;
 export type WorkerStartedInput = InputOf<typeof LegionDaemonApi.WorkerStarted.request>;
 export type WorkerStartedResponse = OutputOf<typeof LegionDaemonApi.WorkerStarted.response>;
 export type WorkerReadyInput = InputOf<typeof LegionDaemonApi.WorkerReady.request>;
@@ -232,9 +202,8 @@ export type SpawnWorkerInput = InputOf<typeof LegionDaemonApi.SpawnWorker.reques
 export type SpawnWorkerResponse = OutputOf<typeof LegionDaemonApi.SpawnWorker.response>;
 export type WorkerSessionInput = InputOf<typeof LegionDaemonApi.WorkerSession.request>;
 export type WorkerSessionResponse = OutputOf<typeof LegionDaemonApi.WorkerSession.response>;
-export type ControllerIssueInput = InputOf<typeof LegionDaemonApi.GatesApprove.request>;
-export type AdmissionResponse = OutputOf<typeof LegionDaemonApi.Admission.response>;
-export type BacklogInput = InputOf<typeof LegionDaemonApi.Backlog.request>;
+export type IssueStatusInput = InputOf<typeof LegionDaemonApi.IssueStatus.request>;
+export type GatesRegisterInput = InputOf<typeof LegionDaemonApi.GatesRegister.request>;
 export type GrantInput = InputOf<typeof LegionDaemonApi.Grant.request>;
 export type GrantResponse = OutputOf<typeof LegionDaemonApi.Grant.response>;
 export type GitHubTokenInput = InputOf<typeof LegionDaemonApi.GitHubToken.request>;

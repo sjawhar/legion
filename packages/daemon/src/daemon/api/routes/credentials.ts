@@ -8,9 +8,9 @@ export async function handleProvisioningCredential(
   ctx: RouteContext,
   body: Record<string, unknown>
 ): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
+  const { tree } = ctx.requireTreeIssue(body);
   ctx.auth.requireArchitectCapability(body, tree);
-  const lease = await ctx.github.tokenForIssue(issue, "implement");
+  const lease = await ctx.github.tokenForIssue("implement");
   return Response.json(
     validateContractResponse(LegionDaemonApi.ProvisioningCredential.response, {
       token: lease.token,
@@ -48,7 +48,7 @@ export async function handleGitCredential(
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
-  const lease = await ctx.github.tokenForIssue(grant.issue, appRoleForLegionRole(grant.role));
+  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role));
   ctx.auth.resolveGrant(body);
   return new Response(`username=x-access-token\npassword=${lease.token}`, {
     headers: { "content-type": "text/plain; charset=utf-8" },
@@ -61,7 +61,7 @@ export async function handleGhToken(
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
-  const lease = await ctx.github.tokenForIssue(grant.issue, appRoleForLegionRole(grant.role));
+  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role));
   ctx.auth.resolveGrant(body);
   return Response.json(
     validateContractResponse(LegionDaemonApi.GitHubToken.response, {

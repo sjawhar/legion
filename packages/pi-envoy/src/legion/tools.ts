@@ -1,10 +1,4 @@
-import {
-  ARCHITECT_MUTABLE_LABELS,
-  type ArchitectMutableLabel,
-  isArchitectMutableLabel,
-  LEGION_ROLES,
-  type LegionRole,
-} from "@legion/contracts";
+import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionDaemonClient } from "./daemon-client";
@@ -19,19 +13,35 @@ interface ArchitectSession {
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
 
+/** Legion's issue lifecycle, verbatim from Dispatch's `IssueStatuses`
+ * (`packages/envoy/internal/dispatch/model/model.go`). Duplicated from `legion-state.ts`'s
+ * `ISSUE_STATUSES`: the daemon and pi-envoy are independent packages with no shared runtime
+ * dependency between them. */
+const LIFECYCLE_STATUSES = [
+  "triage",
+  "icebox",
+  "backlog",
+  "todo",
+  "in_progress",
+  "testing",
+  "needs_review",
+  "retro",
+  "done",
+] as const;
+
+function isLifecycleStatus(value: string): value is (typeof LIFECYCLE_STATUSES)[number] {
+  return (LIFECYCLE_STATUSES as readonly string[]).includes(value);
+}
+
 // pi.zod exposes only object/string/number/array/enum/unknown (no union or
 // discriminatedUnion), so per-op typing cannot be expressed as a discriminated
 // union at the schema layer. The schema stays a flat optional-fields bag; execute()
 // below enforces, per op, which fields are actually accepted.
 const LEGION_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
-  issue_create: ["title", "body", "labels"],
-  wave_release: ["children"],
-  comment: ["issue", "body"],
-  post_spec: ["issue", "body"],
-  label_add: ["issue", "label"],
+  set_status: ["issue", "status"],
+  register_gate: ["issue", "askId"],
+  release_wave: ["issues"],
   escalate: ["kind", "context"],
-  request_refile: ["issue", "rationale"],
-  issue_close: ["issue", "comment"],
   merge_gate: ["pr"],
   spawn_worker: ["issue", "role", "task"],
 };
@@ -40,27 +50,20 @@ function legionToolSchema(pi: PiApi): unknown {
   const z = pi.zod;
   return z.object({
     op: z.enum([
-      "issue_create",
-      "wave_release",
-      "comment",
-      "post_spec",
-      "label_add",
+      "set_status",
+      "register_gate",
+      "release_wave",
       "escalate",
-      "request_refile",
-      "issue_close",
       "merge_gate",
       "spawn_worker",
     ]),
-    title: z.string().optional(),
-    body: z.string().optional(),
-    labels: z.array(z.enum(ARCHITECT_MUTABLE_LABELS)).optional(),
-    children: z.array(z.string()).optional(),
     issue: z.string().optional(),
-    label: z.enum(ARCHITECT_MUTABLE_LABELS).optional(),
+    status: z.enum(LIFECYCLE_STATUSES).optional(),
+    askId: z.string().optional(),
     kind: z.enum(["re-file", "capacity", "cross-tree"]).optional(),
     context: z.unknown().optional(),
+    issues: z.array(z.string()).optional(),
     rationale: z.string().optional(),
-    comment: z.string().optional(),
     pr: z.number().optional(),
     role: z.enum(LEGION_ROLES).optional(),
     task: z.string().optional(),
@@ -123,77 +126,43 @@ export function createLegionTool(deps: {
                 secret: architect.secret,
               })
             );
-          case "issue_create": {
-            const labels = parameters.labels;
-            if (
-              labels !== undefined &&
-              (!Array.isArray(labels) ||
-                !labels.every(
-                  (label: unknown): label is ArchitectMutableLabel =>
-                    typeof label === "string" && isArchitectMutableLabel(label)
-                ))
-            ) {
-              throw new Error("issue_create labels must use architect-mutable Legion labels");
+          case "set_status": {
+            const status = parameters.status;
+            if (typeof status !== "string" || !isLifecycleStatus(status)) {
+              throw new Error("set_status requires a valid Legion issue status");
             }
-            return jsonSuccess(
-              await daemon.issueCreate({
-                tree: architect.tree,
-                sessionId,
-                secret: architect.secret,
-                title: stringInput("title"),
-                body: stringInput("body"),
-                labels: labels ?? [],
-              })
-            );
-          }
-          case "wave_release": {
-            const children = parameters.children;
-            if (
-              !Array.isArray(children) ||
-              !children.every((child: unknown): child is string => typeof child === "string")
-            ) {
-              throw new Error("wave_release requires children");
-            }
-            return jsonSuccess(
-              await daemon.waveRelease({
-                tree: architect.tree,
-                children,
-                sessionId,
-                secret: architect.secret,
-              })
-            );
-          }
-          case "comment":
-            return jsonSuccess(
-              await daemon.comment({
-                tree: architect.tree,
-                sessionId,
-                secret: architect.secret,
-                issue: stringInput("issue"),
-                body: stringInput("body"),
-              })
-            );
-          case "post_spec":
-            await daemon.postBody({
+            await daemon.issueStatus({
               tree: architect.tree,
               sessionId,
               secret: architect.secret,
               issue: stringInput("issue"),
-              body: stringInput("body"),
+              status,
             });
             return jsonSuccess({});
-          case "label_add": {
-            const label = stringInput("label");
-            if (!isArchitectMutableLabel(label)) {
-              throw new Error("label changes must use architect-mutable Legion labels");
+          }
+          case "register_gate":
+            await daemon.gatesRegister({
+              tree: architect.tree,
+              sessionId,
+              secret: architect.secret,
+              issue: stringInput("issue"),
+              askId: stringInput("askId"),
+            });
+            return jsonSuccess({});
+          case "release_wave": {
+            const issues = parameters.issues;
+            if (
+              !Array.isArray(issues) ||
+              !issues.every((issue: unknown): issue is string => typeof issue === "string")
+            ) {
+              throw new Error("release_wave requires issues");
             }
             return jsonSuccess(
-              await daemon.labels({
+              await daemon.releaseWave({
                 tree: architect.tree,
+                issues,
                 sessionId,
                 secret: architect.secret,
-                issue: stringInput("issue"),
-                add: [label],
               })
             );
           }
@@ -210,28 +179,6 @@ export function createLegionTool(deps: {
               context: parameters.context,
               sessionId,
               secret: architect.secret,
-            });
-            return jsonSuccess({});
-          }
-          case "request_refile":
-            await daemon.escalate({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              kind: "re-file",
-              context: { issue: stringInput("issue"), rationale: stringInput("rationale") },
-            });
-            return jsonSuccess({});
-          case "issue_close": {
-            const comment = parameters.comment;
-            if (comment !== undefined && typeof comment !== "string")
-              throw new Error("issue_close comment must be a string");
-            await daemon.issueClose({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              issue: stringInput("issue"),
-              ...(comment === undefined ? {} : { comment }),
             });
             return jsonSuccess({});
           }

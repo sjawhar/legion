@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { link, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface InstanceLock {
@@ -27,17 +28,10 @@ function processAlive(pid: number): boolean {
  * left behind by a crashed process is detected by checking whether its pid
  * is still alive.
  *
- * Reclaiming a stale lock is itself race-free: rather than unlinking it
- * directly (two contenders could both see it as stale and both proceed,
- * each believing it alone removed it), each contender first `rename`s it
- * to a name unique to its own pid. `rename` is atomic, so at most one
- * contender's rename can succeed against the original path; that
- * contender alone unlinks the file (under its new name) and retries the
- * `wx` create. A contender whose rename fails with `ENOENT` lost the race
- * — the file it looked at is already gone — and simply retries the `wx`
- * create too, which will see either the winner's fresh live lock (correct
- * "already running" outcome) or an empty slot (if the winner's own daemon
- * has since exited).
+ * Reclaiming a stale lock moves it to a unique name atomically, then verifies the moved file still
+ * contains the stale value that was read. If another contender replaced the lock meanwhile, its
+ * live lock is restored with an exclusive hard link rather than overwritten; only the owner of an
+ * unchanged stale inode removes it before every contender retries exclusive creation.
  */
 export async function acquireInstanceLock(stateDir: string): Promise<InstanceLock> {
   await mkdir(stateDir, { recursive: true });
@@ -70,12 +64,28 @@ export async function acquireInstanceLock(stateDir: string): Promise<InstanceLoc
           `Legion daemon already running for this project (pid ${existingPid}, lock file ${lockFile})`
         );
       }
-      const staleName = `${lockFile}.stale-${pid}`;
+      const staleName = `${lockFile}.stale-${pid}-${randomUUID()}`;
       try {
         await rename(lockFile, staleName);
       } catch (renameError) {
         if (!hasErrnoCode(renameError, "ENOENT")) throw renameError;
-        continue; // lost the race to reclaim it; just retry the wx create
+        continue;
+      }
+      const staleText = await readFile(staleName, "utf8").catch(() => "");
+      const stalePid = Number(staleText.trim());
+      if (
+        staleText !== existingPidText ||
+        (Number.isSafeInteger(stalePid) && stalePid > 0 && processAlive(stalePid))
+      ) {
+        try {
+          await link(staleName, lockFile);
+        } catch (restoreError) {
+          if (!hasErrnoCode(restoreError, "EEXIST")) throw restoreError;
+        }
+        await unlink(staleName).catch((unlinkError) => {
+          if (!hasErrnoCode(unlinkError, "ENOENT")) throw unlinkError;
+        });
+        continue;
       }
       await unlink(staleName).catch((unlinkError) => {
         if (!hasErrnoCode(unlinkError, "ENOENT")) throw unlinkError;
