@@ -8,9 +8,9 @@ import {
   linkHoverText,
   linkText,
   textMutedOnSurface,
-  textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { EventBody, isAskEvent } from "../issue/EventBody";
 import { dismissedEventIds, eventDescription } from "../issue/log-model";
 import { actorLabel } from "../refs/actor";
 
@@ -51,11 +51,13 @@ export function PinnedTab({ events, issueKey, pinnedIds }: PinnedTabProps): Reac
   });
 
   return (
-    <div className="pt-3 md:max-h-[45dvh] md:overflow-y-auto">
+    <div className="pt-3">
       {events.map((event) => (
         <article className={`rounded-lg border p-3 text-sm ${borderDefault}`} key={event.id}>
-          <p className={`font-medium ${textPrimaryOnSurface}`}>{eventDescription(event)}</p>
-          <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(event.actor)}</p>
+          <EventBody event={event} />
+          {isAskEvent(event) ? null : (
+            <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(event.actor)}</p>
+          )}
         </article>
       ))}
       {pinnedIds.length === 0 ? (

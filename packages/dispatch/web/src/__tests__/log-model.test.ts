@@ -22,26 +22,55 @@ function event(overrides: Partial<Event> = {}): Event {
   } as Event;
 }
 
-test("log model reverses server events and folds events that resolve their item", () => {
-  const items = buildLogItems(
-    [
-      event({ id: 1, seq: 1, type: "ask.opened" }),
-      event({ id: 2, seq: 2, type: "ask.answered" }),
-      event({ id: 3, seq: 3, type: "comment.resolved" }),
-      event({ id: 4, seq: 4, type: "suggestion.accepted" }),
-      event({ id: 5, seq: 5, type: "suggestion.rejected" }),
-    ],
-    [],
-    5
-  );
+function askEvent(
+  type: "ask.opened" | "ask.answered",
+  id: number,
+  seq: number,
+  answer: { at: string; selected: string[]; text: string | null; user: string } | null = null
+): Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }> {
+  return {
+    actor: { kind: "session", id: "session-1" },
+    created_at: answer?.at ?? "2026-09-09T00:00:00Z",
+    id,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      anchor: null,
+      answer,
+      author: { kind: "session", id: "session-1" },
+      created_at: "2026-09-09T00:00:00Z",
+      id: "ask-1",
+      issue_key: "CORE-1",
+      multiple: false,
+      options: [{ description: "Ship immediately", label: "Ship" }, { label: "Hold" }],
+      question: "Which option should ship?",
+      state: answer === null ? "open" : "answered",
+      urgency: "med",
+    },
+    seq,
+    type,
+  };
+}
 
-  expect(items).toEqual([
-    { event: event({ id: 5, seq: 5, type: "suggestion.rejected" }), folded: true, kind: "event" },
-    { event: event({ id: 4, seq: 4, type: "suggestion.accepted" }), folded: true, kind: "event" },
-    { event: event({ id: 3, seq: 3, type: "comment.resolved" }), folded: true, kind: "event" },
-    { event: event({ id: 2, seq: 2, type: "ask.answered" }), folded: true, kind: "event" },
-    { event: event({ id: 1, seq: 1, type: "ask.opened" }), folded: false, kind: "event" },
-  ]);
+test("log model coalesces an opened and answered ask with both timestamps", () => {
+  const opened = askEvent("ask.opened", 1, 1);
+  const answered = askEvent("ask.answered", 2, 2, {
+    at: "2026-09-09T00:05:00Z",
+    selected: ["Ship"],
+    text: "Proceed.",
+    user: "alice",
+  });
+
+  const items = buildLogItems([opened, answered], [], 2);
+
+  expect(items).toHaveLength(1);
+  expect(items[0]).toEqual({ event: answered, folded: false, kind: "ask" });
+  const item = items[0];
+  if (item === undefined || item.kind !== "ask") {
+    throw new Error("Expected a coalesced ask item");
+  }
+  expect(item.event.payload.created_at).toBe("2026-09-09T00:00:00Z");
+  expect(item.event.payload.answer?.at).toBe("2026-09-09T00:05:00Z");
 });
 
 test("log model omits dismissed events and places a new divider at the read boundary", () => {
@@ -84,12 +113,12 @@ test("log model labels a resolved ask with the resolution actor and reason", () 
       urgency: "med",
     },
     type: "ask.resolved",
-  });
+  }) as Extract<Event, { type: "ask.resolved" }>;
 
   expect(eventDescription(resolved)).toBe(
     "Retracted by session-1 - A newer question supersedes this one."
   );
   expect(buildLogItems([resolved], [], 1)).toEqual([
-    { event: resolved, folded: true, kind: "event" },
+    { event: resolved, folded: false, kind: "ask" },
   ]);
 });

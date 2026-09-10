@@ -5,7 +5,7 @@ import { type MarginItem, type MarginTab, marginItemId } from "./useMarginItems"
 
 interface UseMarginListenersOptions {
   items: MarginItem[];
-  list: RefObject<HTMLDivElement | null>;
+  margin: RefObject<HTMLElement | null>;
   routeItemId: string | undefined;
   selectItem: (id: string) => void;
   setHoveredItemId: (id: string | undefined) => void;
@@ -17,7 +17,7 @@ interface UseMarginListenersOptions {
 
 export function useMarginListeners({
   items,
-  list,
+  margin,
   routeItemId,
   selectItem,
   setHoveredItemId,
@@ -48,7 +48,7 @@ export function useMarginListeners({
     ) {
       return;
     }
-    const container = list.current;
+    const container = margin.current;
     if (container === null) {
       return;
     }
@@ -65,13 +65,13 @@ export function useMarginListeners({
       container.clientHeight / 4;
     container.scrollTo({ top: Math.max(0, top) });
     scrolledRouteItem.current = routeItemId;
-  }, [items, list, routeItemId, sheetExpanded, tab]);
+  }, [items, margin, routeItemId, sheetExpanded, tab]);
 
-  // The list container mounts only on the Comments tab for a visible artifact, so the
-  // listeners must re-attach when either changes; the ref itself is not reactive.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: tab and artifact gate the container's existence
+  // The margin sheet stays mounted while comments change, so listeners must re-attach when the
+  // tab or artifact changes; the ref itself is not reactive.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tab and artifact gate the cards' existence
   useEffect(() => {
-    const container = list.current;
+    const container = margin.current;
     if (container === null) {
       return;
     }

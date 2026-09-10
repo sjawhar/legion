@@ -245,7 +245,9 @@ test("a session retraction leaves its reason in the thread and removes the human
   await expect(
     issuePage
       .getByRole("region", { name: "Issue log" })
-      .getByText("Retracted by e2e-session-bob - A newer question supersedes this one.")
+      .getByText("Resolved by e2e-session-bob (A newer question supersedes this one.)", {
+        exact: false,
+      })
   ).toBeVisible();
 
   await alice.close();

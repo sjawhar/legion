@@ -1,9 +1,20 @@
 import type { Event } from "../../api/types";
 import { describeAskResolution } from "../refs/actor";
 
-export type LogItem = { kind: "event"; event: Event; folded: boolean } | { kind: "new-divider" };
+type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
+
+export type LogItem =
+  | { kind: "ask"; event: AskEvent; folded: false }
+  | { kind: "event"; event: Event; folded: boolean }
+  | { kind: "new-divider" };
 
 const pinnedItemPrefix = "pinned_items:";
+
+function isAskEvent(event: Event): event is AskEvent {
+  return (
+    event.type === "ask.opened" || event.type === "ask.answered" || event.type === "ask.resolved"
+  );
+}
 
 export function eventItemId(event: Event): string {
   return `event:${event.id}`;
@@ -80,12 +91,30 @@ export function buildLogItems(
   lastReadSeq: number
 ): LogItem[] {
   const hidden = new Set(dismissed.filter((item) => item.startsWith("event:")));
+  const askEvents = new Map<string, AskEvent[]>();
+  for (const event of events) {
+    if (isAskEvent(event)) {
+      const group = askEvents.get(event.payload.id) ?? [];
+      group.push(event);
+      askEvents.set(event.payload.id, group);
+    }
+  }
   const items: LogItem[] = [];
+  const seenAsks = new Set<string>();
   let dividerAdded = false;
   let unreadAbove = false;
 
   for (const event of [...events].sort((left, right) => right.seq - left.seq)) {
-    if (hidden.has(eventItemId(event))) {
+    const askEvent = isAskEvent(event);
+    if (askEvent) {
+      if (seenAsks.has(event.payload.id)) {
+        continue;
+      }
+      seenAsks.add(event.payload.id);
+      if (askEvents.get(event.payload.id)?.some((item) => hidden.has(eventItemId(item)))) {
+        continue;
+      }
+    } else if (hidden.has(eventItemId(event))) {
       continue;
     }
     if (!dividerAdded && unreadAbove && event.seq <= lastReadSeq) {
@@ -95,11 +124,13 @@ export function buildLogItems(
     if (event.seq > lastReadSeq) {
       unreadAbove = true;
     }
+    if (askEvent) {
+      items.push({ event, folded: false, kind: "ask" });
+      continue;
+    }
     items.push({
       event,
       folded:
-        event.type === "ask.answered" ||
-        event.type === "ask.resolved" ||
         event.type === "comment.resolved" ||
         event.type === "suggestion.accepted" ||
         event.type === "suggestion.rejected",

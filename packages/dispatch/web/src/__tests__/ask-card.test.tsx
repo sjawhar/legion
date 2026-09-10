@@ -190,22 +190,34 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
 
 test("AskCard renders who answered, what was selected, and when, in place of the form", async () => {
   const now = spyOn(Date, "now").mockReturnValue(new Date("2026-09-09T00:06:00Z").getTime());
-  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const input = ask({
+    options: [
+      { description: "Ship immediately", label: "Ship" },
+      { description: "Wait for review", label: "Hold" },
+    ],
+  });
   const { view } = renderCard(
     <AskCard
       ask={input}
-      answerAsk={async () => answered(input, ["Ship"])}
+      answerAsk={async () => answered(input, ["Ship"], "Proceed.")}
       getAskThread={emptyThread(input)}
     />
   );
 
   try {
-    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(view.getByRole("radio", { name: /^Ship/ }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
     await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
     expect(view.getByTestId("ask-ask-1").textContent).toContain("alice answered");
-    expect(view.getByText(/Ship/)).toBeTruthy();
+    const options = within(view.getByTestId("ask-ask-1")).getByRole("list", {
+      name: "Answer options",
+    });
+    expect(options.textContent).toContain("✓");
+    expect(options.textContent).toContain("Ship immediately");
+    expect(options.textContent).toContain("Wait for review");
+    expect(view.getByText("Proceed.")).toBeTruthy();
+    expect(view.getByText("6 minutes ago")).toBeTruthy();
     expect(view.getByText("1 minute ago")).toBeTruthy();
     expect(view.getByText("1 minute ago").closest("time")?.getAttribute("dateTime")).toBe(
       "2026-09-09T00:05:00Z"
@@ -371,7 +383,6 @@ test("AskCard surfaces a retryable error when posting a reply fails", async () =
   try {
     fireEvent.change(view.getByLabelText("Reply"), { target: { value: "Retry me" } });
     fireEvent.click(view.getByRole("button", { name: "Reply" }));
-
     const alert = await view.findByRole("alert");
     expect(alert.textContent).toContain("Could not post your reply.");
     fireEvent.click(view.getByRole("button", { name: "Retry" }));
@@ -382,12 +393,20 @@ test("AskCard surfaces a retryable error when posting a reply fails", async () =
   }
 });
 
-test("AskCard collapses a retracted ask into its resolution line", async () => {
+test("AskCard shows a resolved ask's options and selection", async () => {
   const input = {
-    ...ask(),
+    ...ask({
+      answer: {
+        at: "2026-09-10T00:01:00Z",
+        selected: ["Ship"],
+        text: "Proceed.",
+        user: "alice",
+      },
+      options: [{ label: "Ship" }, { label: "Hold" }],
+    }),
     resolution: {
       actor: { kind: "session", id: "session-1" },
-      at: "2026-09-10T00:01:00Z",
+      at: "2026-09-10T00:02:00Z",
       kind: "retracted",
       reason: "A newer question supersedes this one.",
     },
@@ -401,6 +420,12 @@ test("AskCard collapses a retracted ask into its resolution line", async () => {
         view.getByText("Retracted by session-1 - A newer question supersedes this one.")
       ).toBeTruthy()
     );
+    const options = within(view.getByTestId("ask-ask-1")).getByRole("list", {
+      name: "Answer options",
+    });
+    expect(options.textContent).toContain("✓");
+    expect(options.textContent).toContain("Ship");
+    expect(options.textContent).toContain("Hold");
     expect(view.queryByRole("button", { name: "Submit answer" })).toBeNull();
     expect(view.queryByRole("button", { name: "Reply" })).toBeNull();
   } finally {

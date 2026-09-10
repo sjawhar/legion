@@ -34,7 +34,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
       comments,
       commentsError,
       commentsPending,
-      commentListRef,
+      marginRef,
       isClosed,
       issueError,
       issueKey,
@@ -82,10 +82,13 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
             : sheet.expanded
               ? "max-h-[85dvh] overflow-y-auto p-4"
               : "h-16 overflow-hidden"
-        } xl:static xl:order-3 xl:block xl:h-auto xl:max-h-none xl:w-96 xl:overflow-visible xl:border-t-0 xl:border-l xl:p-4 xl:shadow-none`}
+        } xl:sticky xl:top-0 xl:order-3 xl:block xl:h-auto xl:max-h-dvh xl:w-96 xl:overflow-y-auto xl:border-t-0 xl:border-l xl:p-4 xl:shadow-none`}
         data-expanded={sheet.expanded ? "true" : "false"}
         data-testid="margin-sheet"
-        ref={dialog.containerRef}
+        ref={(element) => {
+          dialog.containerRef.current = element;
+          marginRef.current = element;
+        }}
         role={sheet.expanded && isCompactViewport ? "dialog" : undefined}
       >
         {isCompactViewport ? (
@@ -185,7 +188,6 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
               issueKey={issueKey ?? ""}
               items={comments}
               needsYou={needsYou}
-              list={commentListRef}
               onAction={actions.onAction}
               onCloseComposer={actions.closeComposer}
               onReply={actions.onReply}

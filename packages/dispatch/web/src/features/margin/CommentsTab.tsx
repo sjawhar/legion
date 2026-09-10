@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import type { Ask, Comment } from "../../api/types";
@@ -54,7 +54,6 @@ interface CommentsTabProps {
   issueKey: string;
   items: MarginItem[];
   needsYou: Ask[];
-  list: RefObject<HTMLDivElement | null>;
   onAction: (id: string, action: MarginItemAction) => void;
   onCloseComposer: () => void;
   onReply: (comment: Comment) => void;
@@ -230,7 +229,6 @@ export function CommentsTab({
   isClosed,
   issueKey,
   items,
-  list,
   needsYou,
   onAction,
   onCloseComposer,
@@ -253,11 +251,7 @@ export function CommentsTab({
           replyTo={composer.replyTo}
         />
       )}
-      <section
-        aria-label="Margin review items"
-        className="space-y-3 md:max-h-[45dvh] md:overflow-y-auto"
-        ref={list}
-      >
+      <section aria-label="Margin review items" className="space-y-3">
         {needsYou.length === 0 ? null : (
           <section aria-label="Needs you" className={`space-y-3 border-b pb-3 ${borderDefault}`}>
             <h2 className={`text-sm font-semibold ${textPrimaryOnSurface}`}>Needs you</h2>
