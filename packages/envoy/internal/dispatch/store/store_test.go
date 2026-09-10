@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -116,6 +117,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_ask_id",
 		"refs_to",
 		"events_unpublished",
+		"asks_open_artifact",
 		"issues_search",
 		"comments_search",
 		"asks_search",
@@ -147,9 +149,11 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"issue_external_links_issue_key_fkey",
 		"artifacts_pkey",
 		"artifacts_issue_key_fkey",
-		"artifacts_issue_key_slug_key",
 		"artifacts_kind_check",
 		"artifacts_primary_is_doc",
+		"artifacts_project_key_fkey",
+		"artifacts_ref_key_key",
+		"artifacts_primary_has_issue",
 		"artifact_versions_pkey",
 		"artifact_versions_artifact_id_fkey",
 		"artifact_versions_artifact_id_number_key",
@@ -164,16 +168,23 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"asks_state_check",
 		"asks_resolution_state_check",
 		"asks_answer_state_check",
+		"asks_artifact_id_fkey",
+		"asks_one_owner",
 		"comments_pkey",
 		"comments_issue_key_fkey",
 		"comments_reply_to_fkey",
 		"comments_ask_id_fkey",
 		"messages_pkey",
+		"comments_artifact_id_fkey",
+		"comments_one_owner",
 		"messages_issue_key_fkey",
 		"refs_pkey",
 		"events_pkey",
 		"events_issue_key_fkey",
 		"events_issue_key_seq_key",
+		"events_artifact_id_fkey",
+		"events_one_owner",
+		"events_artifact_id_seq_key",
 		"user_issue_state_pkey",
 		"user_issue_state_issue_key_fkey",
 	}
@@ -182,6 +193,11 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		from pg_constraint
 		where connamespace = current_schema()::regnamespace
 	`, expectedConstraints)
+	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
+		select conname
+		from pg_constraint
+		where connamespace = current_schema()::regnamespace
+	`, []string{"artifacts_issue_key_slug_key"})
 
 	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
 	if err != nil {
@@ -218,6 +234,186 @@ func assertDatabaseObjects(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		if !objects[object] {
 			t.Errorf("migration did not create %s", object)
 		}
+	}
+}
+
+func assertDatabaseObjectsAbsent(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, unexpected []string) {
+	t.Helper()
+	rows, err := pool.Query(ctx, query)
+	if err != nil {
+		t.Fatalf("list database objects: %v", err)
+	}
+	defer rows.Close()
+	objects := map[string]bool{}
+	for rows.Next() {
+		var object string
+		if err := rows.Scan(&object); err != nil {
+			t.Fatalf("scan database object: %v", err)
+		}
+		objects[object] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate database objects: %v", err)
+	}
+	for _, object := range unexpected {
+		if objects[object] {
+			t.Errorf("migration left obsolete %s", object)
+		}
+	}
+}
+
+func migrateThrough(t *testing.T, store *Store, maxVersion int) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := store.Pool.Exec(ctx, `
+		create table if not exists schema_migrations (
+			version integer primary key,
+			applied_at timestamptz not null default now()
+		)
+	`); err != nil {
+		t.Fatalf("create schema migrations table: %v", err)
+	}
+	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	if err != nil {
+		t.Fatalf("list migrations: %v", err)
+	}
+	for _, filename := range files {
+		version, err := migrationVersion(filename)
+		if err != nil {
+			t.Fatalf("parse %s: %v", filename, err)
+		}
+		if version > maxVersion {
+			continue
+		}
+		contents, err := migrationFiles.ReadFile(filename)
+		if err != nil {
+			t.Fatalf("read %s: %v", filename, err)
+		}
+		if err := store.applyMigration(ctx, version, string(contents)); err != nil {
+			t.Fatalf("apply %s: %v", filename, err)
+		}
+	}
+}
+
+func seedGraphAt0007(t *testing.T, store *Store) string {
+	t.Helper()
+	ctx := context.Background()
+	const commentID = "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
+	for _, statement := range []string{
+		`insert into projects (key, name) values ('CORE', 'Core'), ('OPS', 'Operations')`,
+		`insert into issues (key, project_key, number, title, created_by) values
+			('CORE-1', 'CORE', 1, 'Core one', '{"kind":"user","id":"alice"}'),
+			('CORE-2', 'CORE', 2, 'Core two', '{"kind":"user","id":"alice"}'),
+			('OPS-1', 'OPS', 1, 'Operations one', '{"kind":"user","id":"alice"}')`,
+		`insert into artifacts (id, issue_key, slug, name, kind, is_primary, created_by) values
+			('3348cb25-ef50-432c-9aed-381326ebb1f3', 'CORE-1', 'spec', 'spec.md', 'doc', true, '{"kind":"user","id":"alice"}'),
+			('56d2b0bd-9ae7-47c9-8522-a13dfddcb5d5', 'CORE-2', 'spec', 'spec.md', 'doc', true, '{"kind":"user","id":"alice"}'),
+			('35bc0556-5ec1-4e58-9d3d-fec6ec1a9309', 'OPS-1', 'spec', 'spec.md', 'doc', true, '{"kind":"user","id":"alice"}'),
+			('6bd48de1-8b27-40e5-8a81-56b36dbd9661', 'CORE-2', 'diagram-png', 'diagram.png', 'image', false, '{"kind":"user","id":"alice"}')`,
+		`insert into asks (id, issue_key, author, question) values
+			('5a660655-04ad-4ce0-8a9b-93dd03c412b7', 'CORE-1', '{"kind":"session","id":"session-asker"}', 'Ship it?')`,
+		`insert into comments (id, issue_key, author, body) values
+			('8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b', 'CORE-1', '{"kind":"user","id":"alice"}', 'Looks good')`,
+		`insert into events (issue_key, seq, type, actor, payload, notify) values
+			('CORE-1', 1, 'issue.created', '{"kind":"user","id":"alice"}', '{}', false),
+			('CORE-2', 1, 'issue.created', '{"kind":"user","id":"alice"}', '{}', false),
+			('OPS-1', 1, 'issue.created', '{"kind":"user","id":"alice"}', '{}', false)`,
+		`insert into refs (from_kind, from_id, to_kind, to_id) values
+			('comment', '8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b', 'artifact', 'CORE-2/diagram-png'),
+			('artifact', '3348cb25-ef50-432c-9aed-381326ebb1f3', 'artifact', 'CORE-2/spec'),
+			('ask', '5a660655-04ad-4ce0-8a9b-93dd03c412b7', 'issue', 'CORE-2')`,
+	} {
+		if _, err := store.Pool.Exec(ctx, statement); err != nil {
+			t.Fatalf("seed 0007 graph: %v", err)
+		}
+	}
+	return commentID
+}
+
+func TestMigrate0009BackfillsProjectAndRefKeyFrom0007(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 7)
+	seedGraphAt0007(t, store)
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through 0009: %v", err)
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "artifact projects",
+			query: `select count(*) from artifacts a join issues i on i.key = a.issue_key where a.project_key <> i.project_key`,
+		},
+		{
+			name:  "artifact reference keys",
+			query: `select count(*) from artifacts where ref_key <> issue_key || '/' || slug`,
+		},
+		{
+			name:  "artifact references",
+			query: `select count(*) from refs r left join artifacts a on a.ref_key = r.to_id where r.to_kind = 'artifact' and a.id is null`,
+		},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			var count int
+			if err := store.Pool.QueryRow(ctx, check.query).Scan(&count); err != nil {
+				t.Fatalf("run check: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("migrated rows violating %s = %d, want 0", check.name, count)
+			}
+		})
+	}
+
+	var appliedAt time.Time
+	if err := store.Pool.QueryRow(ctx, `select applied_at from schema_migrations where version = 9`).Scan(&appliedAt); err != nil {
+		t.Fatalf("read 0009 migration record: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through 0009 again: %v", err)
+	}
+	var appliedAgain time.Time
+	if err := store.Pool.QueryRow(ctx, `select applied_at from schema_migrations where version = 9`).Scan(&appliedAgain); err != nil {
+		t.Fatalf("read 0009 migration record after second boot: %v", err)
+	}
+	if !appliedAgain.Equal(appliedAt) {
+		t.Errorf("0009 applied_at changed from %s to %s on second boot", appliedAt, appliedAgain)
+	}
+}
+
+func TestMigrate0009DropsMalformedArtifactReferences(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 7)
+	commentID := seedGraphAt0007(t, store)
+	const malformed = "CORE-2/diagram-png``"
+	if _, err := store.Pool.Exec(ctx, `
+		insert into refs (from_kind, from_id, to_kind, to_id)
+		values ('comment', $1, 'artifact', $2)
+	`, commentID, malformed); err != nil {
+		t.Fatalf("seed malformed artifact reference: %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate malformed artifact reference: %v", err)
+	}
+	var count int
+	if err := store.Pool.QueryRow(ctx, `
+		select count(*) from refs
+		where from_kind = 'comment' and from_id = $1 and to_kind = 'artifact' and to_id = $2
+	`, commentID, malformed).Scan(&count); err != nil {
+		t.Fatalf("count malformed artifact reference: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("malformed artifact reference rows = %d, want 0", count)
+	}
+	if err := store.Pool.QueryRow(ctx, `select count(*) from schema_migrations where version = 9`).Scan(&count); err != nil {
+		t.Fatalf("count 0009 migration records: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("0009 migration record count = %d, want 1", count)
 	}
 }
 

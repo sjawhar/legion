@@ -83,6 +83,40 @@ type roomState struct {
 	mu              sync.Mutex
 }
 
+type artifactOwner struct {
+	IssueKey *string
+	Project  string
+	Slug     string
+	Name     string
+}
+
+// lockArtifactOwner loads an artifact's owner, then locks that owner row.
+func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactOwner, bool, error) {
+	var owner artifactOwner
+	if err := tx.QueryRow(ctx, `
+		select issue_key, project_key, slug, name
+		from artifacts where id = $1
+	`, artifactID).Scan(&owner.IssueKey, &owner.Project, &owner.Slug, &owner.Name); err != nil {
+		return artifactOwner{}, false, fmt.Errorf("load document owner: %w", err)
+	}
+	if owner.IssueKey == nil {
+		var exists bool
+		if err := tx.QueryRow(ctx, `
+			select true from artifacts where id = $1 and issue_key is null for update
+		`, artifactID).Scan(&exists); err != nil {
+			return artifactOwner{}, false, fmt.Errorf("lock document artifact: %w", err)
+		}
+		return owner, true, nil
+	}
+	var open bool
+	if err := tx.QueryRow(ctx, `
+		select closed_at is null from issues where key = $1 for update
+	`, *owner.IssueKey).Scan(&open); err != nil {
+		return artifactOwner{}, false, fmt.Errorf("lock document issue: %w", err)
+	}
+	return owner, open, nil
+}
+
 type suppressSlot struct {
 	ready    chan struct{}
 	update   []byte
@@ -327,14 +361,9 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	defer tx.Rollback(ctx)
-	var issueKey, artifactName string
-	var open bool
-	if err := tx.QueryRow(ctx, `
-		select a.issue_key, a.name, i.closed_at is null
-		from artifacts a join issues i on i.key = a.issue_key
-		where a.id = $1 for update of i
-	`, room).Scan(&issueKey, &artifactName, &open); err != nil {
-		s.retrySettle(room, generation, fmt.Errorf("lock document issue: %w", err))
+	owner, open, err := lockArtifactOwner(ctx, tx, room)
+	if err != nil {
+		s.retrySettle(room, generation, err)
 		return
 	}
 	if !open {
@@ -390,12 +419,16 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if len(authors) > 0 {
 		eventActor = authors[0]
 	}
-	event, err := s.events.Append(ctx, tx, model.Event{
-		IssueKey: issueKey,
+	event := model.Event{
+		IssueKey: owner.IssueKey,
 		Type:     "artifact.version",
 		Actor:    eventActor,
-		Payload:  artifactVersionEventPayload(room, artifactName, version, nil),
-	})
+		Payload:  artifactVersionEventPayload(room, owner.Name, version, nil),
+	}
+	if owner.IssueKey == nil {
+		event.ArtifactID = &room
+	}
+	event, err = s.events.Append(ctx, tx, event)
 	if err != nil {
 		s.retrySettle(room, generation, err)
 		return
@@ -565,8 +598,8 @@ func (s *Service) roomClosed(room string) bool {
 func (s *Service) issueOpen(ctx context.Context, artifactID string) (bool, error) {
 	var open bool
 	if err := s.store.Pool.QueryRow(ctx, `
-		select i.closed_at is null
-		from artifacts a join issues i on i.key = a.issue_key
+		select coalesce(i.closed_at is null, true)
+		from artifacts a left join issues i on i.key = a.issue_key
 		where a.id = $1
 	`, artifactID).Scan(&open); err != nil {
 		return false, fmt.Errorf("check document issue: %w", err)

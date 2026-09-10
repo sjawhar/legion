@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	batchSize       = 100
-	retryInterval   = 5 * time.Second
-	compactInterval = 24 * time.Hour
-	compactKeep     = 500
+	batchSize           = 100
+	retryInterval       = 5 * time.Second
+	compactInterval     = 24 * time.Hour
+	compactKeep         = 500
+	documentTopicPrefix = "notifications.dispatch.document."
 )
 
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
@@ -80,9 +81,11 @@ func scan(ctx context.Context, deps Deps) {
 
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
-		select e.id, e.issue_key, e.seq, e.type, e.actor, e.notify, e.created_at, e.payload, i.route
+		select e.id, e.issue_key, e.artifact_id::text, coalesce(i.project_key, ar.project_key), e.seq,
+		       e.type, e.actor, e.notify, e.created_at, e.payload, coalesce(ar.slug, ''), i.route
 		from events e
-		join issues i on i.key = e.issue_key
+		left join issues i on i.key = e.issue_key
+		left join artifacts ar on ar.id = e.artifact_id
 		where e.published_at is null
 		order by e.id
 		limit $1
@@ -98,16 +101,20 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		count++
 		var event model.Event
 		var actor, payload []byte
+		var slug string
 		var route *string
 		if err := rows.Scan(
 			&event.ID,
 			&event.IssueKey,
+			&event.ArtifactID,
+			&event.Project,
 			&event.Seq,
 			&event.Type,
 			&actor,
 			&event.Notify,
 			&event.CreatedAt,
 			&payload,
+			&slug,
 			&route,
 		); err != nil {
 			slog.Error("dispatch outbox: read event", "error", err)
@@ -124,8 +131,8 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 			retryLater = true
 			continue
 		}
-		if err := publish(ctx, deps, event, route); err != nil {
-			slog.Error("dispatch outbox: publish issue event", "event_id", event.ID, "error", err)
+		if err := publish(ctx, deps, event, slug, route); err != nil {
+			slog.Error("dispatch outbox: publish event", "event_id", event.ID, "error", err)
 			retryLater = true
 			continue
 		}
@@ -142,8 +149,8 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	return count, retryLater, nil
 }
 
-func publish(ctx context.Context, deps Deps, event model.Event, route *string) error {
-	item, err := envelope(event)
+func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string) error {
+	item, err := envelope(event, slug)
 	if err != nil {
 		return err
 	}
@@ -153,17 +160,17 @@ func publish(ctx context.Context, deps Deps, event model.Event, route *string) e
 	if err := deps.Publisher.Publish(item); err != nil {
 		return err
 	}
-	if event.Notify {
+	if event.Notify && event.ArtifactID == nil {
 		publishRoute(deps.Publisher, item, route)
 		publishAskAuthorRoute(ctx, deps, item, event)
 	}
 	return nil
 }
 
-// publishAskAuthorRoute delivers a human reply or resolution on an ask directly to the asking
-// session's own topic, regardless of the issue's route. The issue's route (if any) may point at
-// an entirely different reviewer, so without this the agent that asked the question never learns
-// about the human action.
+// publishAskAuthorRoute delivers a human reply or resolution on an issue ask directly to the
+// asking session's own topic, regardless of the issue's route. The issue's route (if any) may
+// point at an entirely different reviewer, so without this the agent that asked the question
+// never learns about the human action.
 func publishAskAuthorRoute(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) {
 	var askID string
 	switch event.Type {
@@ -220,20 +227,31 @@ func publishRoute(publisher Publisher, item contracts.Envelope, route *string) {
 	}
 }
 
-func envelope(event model.Event) (contracts.Envelope, error) {
+func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return contracts.Envelope{}, fmt.Errorf("encode event: %w", err)
+	}
+	var topic string
+	if event.ArtifactID != nil {
+		if event.Project == "" || slug == "" {
+			return contracts.Envelope{}, fmt.Errorf("document event requires project and slug")
+		}
+		topic = documentTopicPrefix + event.Project + "." + slug + "." + event.Type
+	} else if event.IssueKey != nil {
+		topic = "notifications.dispatch.issue." + *event.IssueKey + "." + event.Type
+	} else {
+		return contracts.Envelope{}, fmt.Errorf("event requires exactly one owner")
 	}
 	eventID := fmt.Sprintf("dispatch-%d", event.ID)
 	item := contracts.Envelope{
 		EventID:        eventID,
 		Source:         "dispatch",
 		SourceEventID:  fmt.Sprint(event.ID),
-		Topic:          "notifications.dispatch.issue." + event.IssueKey + "." + event.Type,
+		Topic:          topic,
 		DedupeKey:      eventID,
 		IssuedAt:       event.CreatedAt.UnixMilli(),
-		PayloadSummary: payloadSummary(event),
+		PayloadSummary: payloadSummary(event, slug),
 		Payload:        string(payload),
 		TraceID:        eventID,
 	}
@@ -257,7 +275,7 @@ func envelope(event model.Event) (contracts.Envelope, error) {
 	return item, nil
 }
 
-func payloadSummary(event model.Event) string {
+func payloadSummary(event model.Event, slug string) string {
 	kind := strings.ReplaceAll(event.Type, ".", " ")
 	text := ""
 	switch {
@@ -268,7 +286,13 @@ func payloadSummary(event model.Event) string {
 	case strings.HasPrefix(event.Type, "comment."), strings.HasPrefix(event.Type, "suggestion."):
 		text = payloadString(event.Payload, "body")
 	}
-	summary := event.IssueKey + " " + kind
+	owner := ""
+	if event.ArtifactID != nil {
+		owner = event.Project + "/" + slug
+	} else if event.IssueKey != nil {
+		owner = *event.IssueKey
+	}
+	summary := owner + " " + kind
 	if text != "" {
 		summary += ": " + text
 	}

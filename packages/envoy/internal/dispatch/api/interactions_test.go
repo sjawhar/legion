@@ -1202,7 +1202,7 @@ func TestAskThreadRepliesStoredAndReturnedInOrder(t *testing.T) {
 	}
 
 	nestedReply := model.Comment{
-		IssueKey: issue.Key,
+		IssueKey: new(issue.Key),
 		Author:   model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
 		Body:     "Why option A?",
 		ReplyTo:  &firstReply.ID,
@@ -1571,7 +1571,7 @@ func TestGetCommentReturnsReplyChain(t *testing.T) {
 	root := createComment("root", nil)
 	first := createComment("first reply", &root.ID)
 	nested := model.Comment{
-		IssueKey: issue.Key,
+		IssueKey: new(issue.Key),
 		Author:   model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
 		Body:     "nested reply",
 		ReplyTo:  &first.ID,

@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 const maxArtifactBlobSize = 25 << 20
@@ -46,6 +47,18 @@ type artifactUploadInput struct {
 	blank       bool
 }
 
+type artifactTarget struct {
+	IssueKey *string
+	Project  string
+}
+
+func (target artifactTarget) refPrefix() string {
+	if target.IssueKey != nil {
+		return *target.IssueKey
+	}
+	return target.Project
+}
+
 type jsonArtifactUpload struct {
 	Name    string          `json:"name"`
 	Content *string         `json:"content"`
@@ -55,6 +68,11 @@ type jsonArtifactUpload struct {
 }
 
 func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
+	issueKey := r.PathValue("key")
+	s.uploadArtifactFor(w, r, artifactTarget{IssueKey: &issueKey})
+}
+
+func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, target artifactTarget) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
 	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil {
@@ -97,8 +115,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
 		return
 	}
-	kind := artifactKind(mediaType)
-	s.storeArtifact(w, r, input, actor, kind)
+	s.storeArtifact(w, r, input, actor, artifactKind(mediaType), target)
 }
 
 func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
@@ -197,6 +214,7 @@ func (s *server) storeArtifact(
 	input artifactUploadInput,
 	actor model.Actor,
 	kind string,
+	target artifactTarget,
 ) {
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -214,17 +232,30 @@ func (s *server) storeArtifact(
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	issueKey := r.PathValue("key")
-	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	var project string
+	if target.IssueKey != nil {
+		if err := s.requireOpenOwner(r.Context(), tx, issueOwner(*target.IssueKey)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if err := tx.QueryRow(r.Context(), `select project_key from issues where key = $1`, *target.IssueKey).Scan(&project); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	} else {
+		loaded, err := s.loadProject(r.Context(), tx, target.Project)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		project = loaded.Key
 	}
 	var artifact model.Artifact
 	var created bool
-	artifact, err = s.findArtifactByName(r.Context(), tx, issueKey, input.name)
+	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
-		slug, err := s.nextArtifactSlug(r.Context(), tx, issueKey, input.name)
+		slug, err := s.nextArtifactSlug(r.Context(), tx, target, input.name)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -235,11 +266,12 @@ func (s *server) storeArtifact(
 			return
 		}
 		if err := tx.QueryRow(r.Context(), `
-			insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
-			values ($1, $2, $3, $4, false, $5)
-			returning id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
-		`, issueKey, slug, input.name, kind, actorJSON).Scan(
-			&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &actorJSON, &artifact.CreatedAt,
+			insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+			values ($1, $2, $3, $4, $5, false, $6)
+			returning id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
+		`, target.IssueKey, project, slug, input.name, kind, actorJSON).Scan(
+			&artifact.ID, &artifact.IssueKey, &artifact.Project, &artifact.RefKey, &artifact.Slug, &artifact.Name,
+			&artifact.Kind, &artifact.Primary, &actorJSON, &artifact.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -251,11 +283,9 @@ func (s *server) storeArtifact(
 	} else if err != nil {
 		s.writeHandlerError(w, err)
 		return
-	} else {
-		if artifact.Kind != kind {
-			writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
-			return
-		}
+	} else if artifact.Kind != kind {
+		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
+		return
 	}
 
 	var nextNumber int
@@ -300,7 +330,7 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := s.replaceRefs(r.Context(), tx, "artifact", artifact.ID, markdown); err != nil {
+		if err := refs.Replace(r.Context(), tx, "artifact", artifact.ID, markdown, s.deps.ServerURL); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -337,7 +367,7 @@ func (s *server) storeArtifact(
 		artifact.Versions = []model.Version{version}
 		payload = map[string]any{"artifact": artifact}
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{IssueKey: issueKey, Type: eventType, Actor: actor, Payload: payload})
+	event, err := s.appendEvent(r.Context(), tx, ownerForArtifact(artifact).event(eventType, actor, payload))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -360,7 +390,7 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	referencedBy, err := s.loadReferencedBy(r.Context(), artifact)
+	referencedBy, err := refs.ReferencedBy(r.Context(), s.deps.Store.Pool, artifact.RefKey)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -469,7 +499,8 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
+	eventOwner := ownerForArtifact(artifact)
+	if err := s.requireOpenOwner(r.Context(), tx, eventOwner); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -487,12 +518,11 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: artifact.IssueKey,
-		Type:     "artifact.version",
-		Actor:    actor,
-		Payload:  versionEventPayload(artifact.ID, artifact.Name, version, diff),
-	})
+	event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
+		"artifact.version",
+		actor,
+		versionEventPayload(artifact.ID, artifact.Name, version, diff),
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -545,7 +575,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
+	eventOwner := ownerForArtifact(artifact)
+	if err := s.requireOpenOwner(r.Context(), tx, eventOwner); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -585,12 +616,11 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			event, err := s.appendEvent(r.Context(), tx, model.Event{
-				IssueKey: artifact.IssueKey,
-				Type:     "artifact.version",
-				Actor:    actor,
-				Payload:  versionEventPayload(artifact.ID, artifact.Name, *version, diff),
-			})
+			event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
+				"artifact.version",
+				actor,
+				versionEventPayload(artifact.ID, artifact.Name, *version, diff),
+			))
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -612,7 +642,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
 	rows, err := q.Query(ctx, `
-		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts where issue_key = $1 order by created_at, id
 	`, issueKey)
 	if err != nil {
@@ -654,8 +684,8 @@ func parseArtifactID(id string) (string, error) {
 }
 
 func (s *server) loadArtifactForRequest(ctx context.Context, q queryer, r *http.Request) (model.Artifact, error) {
-	if issueKey := r.PathValue("key"); issueKey != "" {
-		return s.loadArtifactBySlug(ctx, q, issueKey, r.PathValue("slug"))
+	if key := r.PathValue("key"); key != "" {
+		return s.loadArtifactByRefKey(ctx, q, key+"/"+r.PathValue("slug"))
 	}
 	return s.loadArtifact(ctx, q, r.PathValue("id"))
 }
@@ -666,16 +696,16 @@ func (s *server) loadArtifact(ctx context.Context, q queryer, id string) (model.
 		return model.Artifact{}, err
 	}
 	return s.loadArtifactRow(ctx, q, q.QueryRow(ctx, `
-		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
 		from artifacts where id = $1
 	`, parsed))
 }
 
-func (s *server) loadArtifactBySlug(ctx context.Context, q queryer, issueKey, slug string) (model.Artifact, error) {
+func (s *server) loadArtifactByRefKey(ctx context.Context, q queryer, refKey string) (model.Artifact, error) {
 	return s.loadArtifactRow(ctx, q, q.QueryRow(ctx, `
-		select id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
-		from artifacts where issue_key = $1 and slug = $2
-	`, issueKey, slug))
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
+		from artifacts where ref_key = $1
+	`, refKey))
 }
 
 func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (model.Artifact, error) {
@@ -695,11 +725,14 @@ func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (m
 }
 
 // scanArtifact reads the canonical artifact column list:
-// id::text, issue_key, slug, name, kind, is_primary, created_by, created_at.
+// id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at.
 func scanArtifact(row pgx.Row) (model.Artifact, error) {
 	var artifact model.Artifact
 	var createdBy []byte
-	if err := row.Scan(&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt); err != nil {
+	if err := row.Scan(
+		&artifact.ID, &artifact.IssueKey, &artifact.Project, &artifact.RefKey, &artifact.Slug, &artifact.Name,
+		&artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt,
+	); err != nil {
 		return model.Artifact{}, err
 	}
 	if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
@@ -708,17 +741,20 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 	return artifact, nil
 }
 
-func (s *server) findArtifactByName(ctx context.Context, q queryer, issueKey, name string) (model.Artifact, error) {
-	rows, err := s.loadArtifacts(ctx, q, issueKey)
+func (s *server) findArtifactByName(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	artifact, err := scanArtifact(q.QueryRow(ctx, `
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
+		from artifacts where coalesce(issue_key, project_key) = $1 and name = $2
+	`, target.refPrefix(), name))
 	if err != nil {
 		return model.Artifact{}, err
 	}
-	for _, artifact := range rows {
-		if artifact.Name == name {
-			return artifact, nil
-		}
+	versions, err := s.loadVersions(ctx, q, artifact.ID)
+	if err != nil {
+		return model.Artifact{}, err
 	}
-	return model.Artifact{}, pgx.ErrNoRows
+	artifact.Versions = versions
+	return artifact, nil
 }
 
 func (s *server) loadVersions(ctx context.Context, q queryer, artifactID string) ([]model.Version, error) {
@@ -794,7 +830,7 @@ func artifactSlug(name string) string {
 	return result
 }
 
-func (s *server) nextArtifactSlug(ctx context.Context, q queryer, issueKey, name string) (string, error) {
+func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {
 	base := artifactSlug(name)
 	for suffix := 1; ; suffix++ {
 		candidate := base
@@ -802,7 +838,7 @@ func (s *server) nextArtifactSlug(ctx context.Context, q queryer, issueKey, name
 			candidate = fmt.Sprintf("%s-%d", base, suffix)
 		}
 		var inUse bool
-		if err := q.QueryRow(ctx, `select exists(select 1 from artifacts where issue_key = $1 and slug = $2)`, issueKey, candidate).Scan(&inUse); err != nil {
+		if err := q.QueryRow(ctx, `select exists(select 1 from artifacts where coalesce(issue_key, project_key) = $1 and slug = $2)`, target.refPrefix(), candidate).Scan(&inUse); err != nil {
 			return "", err
 		}
 		if !inUse {

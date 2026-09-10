@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // listIssuesQuery aggregates each issue's open-ask count with a single
@@ -20,9 +21,23 @@ import (
 // clause on the joined rows, so it matches the partial asks_open(issue_key)
 // where state = 'open' index instead of forcing a sequential scan of asks.
 const listIssuesQuery = `
-	select i.key, i.title, i.status, i.parent_key, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.labels, i.parent_key, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null)
 	from issues i
+	left join asks a on a.issue_key = i.key and a.state = 'open'
+	where ($1 = '' or i.project_key = $1)
+	  and ($2 = '' or i.status = $2)
+	  and ($3 = '' or i.parent_key = $3)
+	  and ($4::timestamptz is null or i.updated_at >= $4)
+	group by i.key
+	order by i.updated_at desc, i.key desc
+`
+
+const listPinnedIssuesQuery = `
+	select i.key, i.title, i.status, i.labels, i.parent_key, i.updated_at, i.last_seq,
+	       count(a.id) filter (where i.closed_at is null)
+	from issues i
+	join user_issue_state s on s.issue_key = i.key and s.login = $5 and s.pinned
 	left join asks a on a.issue_key = i.key and a.state = 'open'
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
@@ -64,10 +79,18 @@ _List each considered alternative and the reason it was rejected._
 `
 
 func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
+	query := r.URL.Query()
+	pinned := query.Get("pinned") == "true"
+	login := ""
+	if pinned {
+		actor, ok := s.requireHuman(w, r)
+		if !ok {
+			return
+		}
+		login = actor.ID
+	} else if !s.requireAuthenticated(w, r) {
 		return
 	}
-	query := r.URL.Query()
 	project := strings.TrimSpace(query.Get("project"))
 	status := strings.TrimSpace(query.Get("status"))
 	parent := strings.TrimSpace(query.Get("parent"))
@@ -80,7 +103,13 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		updatedSince = &parsed
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), listIssuesQuery, project, status, parent, updatedSince)
+	listQuery := listIssuesQuery
+	arguments := []any{project, status, parent, updatedSince}
+	if pinned {
+		listQuery = listPinnedIssuesQuery
+		arguments = append(arguments, login)
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), listQuery, arguments...)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -89,7 +118,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	issues := []model.IssueSummary{}
 	for rows.Next() {
 		var issue model.IssueSummary
-		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
+		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Labels, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -252,10 +281,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 
 	var artifactID string
 	if err := tx.QueryRow(r.Context(), `
-		insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
-		values ($1, 'spec', 'spec.md', 'doc', true, $2)
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ($1, $2, 'spec', 'spec.md', 'doc', true, $3)
 		returning id::text
-	`, key, actorJSON).Scan(&artifactID); err != nil {
+	`, key, input.Project, actorJSON).Scan(&artifactID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -280,7 +309,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.replaceRefs(r.Context(), tx, "artifact", artifactID, markdown); err != nil {
+	if err := refs.Replace(r.Context(), tx, "artifact", artifactID, markdown, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -290,12 +319,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		IssueKey: key,
-		Type:     "issue.created",
-		Actor:    actor,
-		Payload:  issue,
-	})
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(
+		"issue.created",
+		actor,
+		issue,
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -492,19 +520,18 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		eventType = "issue.closed"
 	}
 	after.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, model.Event{IssueKey: key, Type: eventType, Actor: actor, Payload: after})
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, after))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	events = append(events, event)
 	if statusChanged && after.Parent != nil {
-		childEvent, err := s.appendEvent(r.Context(), tx, model.Event{
-			IssueKey: *after.Parent,
-			Type:     "child.status",
-			Actor:    actor,
-			Payload:  map[string]any{"child_key": after.Key, "from": before.Status, "to": after.Status},
-		})
+		childEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*after.Parent).event(
+			"child.status",
+			actor,
+			map[string]any{"child_key": after.Key, "from": before.Status, "to": after.Status},
+		))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

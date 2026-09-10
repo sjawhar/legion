@@ -203,12 +203,14 @@ const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
 const originalDispatchUrl = process.env.DISPATCH_URL;
 const originalDispatchToken = process.env.DISPATCH_TOKEN;
+const originalTmuxPane = process.env.TMUX_PANE;
 
 beforeEach(() => {
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;
   process.env.HOME = "/nonexistent-home-for-envoy-tests";
+  delete process.env.TMUX_PANE;
 });
 
 afterEach(() => {
@@ -223,6 +225,8 @@ afterEach(() => {
   else process.env.HOME = originalHome;
   if (originalPath === undefined) delete process.env.PATH;
   else process.env.PATH = originalPath;
+  if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+  else process.env.TMUX_PANE = originalTmuxPane;
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;

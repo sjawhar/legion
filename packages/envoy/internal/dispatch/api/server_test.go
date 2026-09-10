@@ -846,7 +846,7 @@ func TestListIssueEventsSupportsNewestCursorAndIDLookup(t *testing.T) {
 	eventIDs := make(map[int]int64, 249)
 	for wantSeq := 2; wantSeq <= 250; wantSeq++ {
 		event, err := broker.Append(ctx, tx, model.Event{
-			IssueKey: issue.Key,
+			IssueKey: new(issue.Key),
 			Type:     "test.seeded",
 			Actor:    model.Actor{Kind: "session", ID: "seed-session-0123456789"},
 			Payload:  map[string]any{"seq": wantSeq},
@@ -1923,7 +1923,7 @@ func TestSSELiveEventBelowSinceIsNotDropped(t *testing.T) {
 	broker.Publish(model.Event{
 		Actor:    model.Actor{Kind: "session", ID: "seed"},
 		ID:       highID,
-		IssueKey: issue.Key,
+		IssueKey: new(issue.Key),
 		Payload:  map[string]any{},
 		Seq:      101,
 		Type:     "seeded",
@@ -1956,7 +1956,7 @@ func TestSSELiveEventBelowSinceIsNotDropped(t *testing.T) {
 	broker.Publish(model.Event{
 		Actor:    model.Actor{Kind: "session", ID: "seed"},
 		ID:       lowID,
-		IssueKey: issue.Key,
+		IssueKey: new(issue.Key),
 		Payload:  map[string]any{},
 		Seq:      100,
 		Type:     "seeded",
@@ -2046,7 +2046,7 @@ func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T)
 	broker.Publish(model.Event{
 		Actor:    model.Actor{Kind: "session", ID: "seed"},
 		ID:       lowID,
-		IssueKey: issue.Key,
+		IssueKey: new(issue.Key),
 		Payload:  map[string]any{},
 		Seq:      100,
 		Type:     "seeded",
@@ -2120,7 +2120,7 @@ func TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost(t *testing
 	broker.Publish(model.Event{
 		Actor:    model.Actor{Kind: "session", ID: "seed"},
 		ID:       highID,
-		IssueKey: issue.Key,
+		IssueKey: new(issue.Key),
 		Payload:  map[string]any{},
 		Seq:      101,
 		Type:     "seeded",
@@ -2158,7 +2158,7 @@ func TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost(t *testing
 	broker.Publish(model.Event{
 		Actor:    model.Actor{Kind: "session", ID: "seed"},
 		ID:       lowID,
-		IssueKey: issue.Key,
+		IssueKey: new(issue.Key),
 		Payload:  map[string]any{},
 		Seq:      100,
 		Type:     "seeded",

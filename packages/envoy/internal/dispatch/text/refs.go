@@ -9,12 +9,17 @@ import (
 
 var referencePattern = regexp.MustCompile(`dispatch://[^\s<>"']+|https?://[^\s<>"']+`)
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$`)
+var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
+var artifactSlugPrefixPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*`)
+var artifactSlugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // Ref is a parsed Dispatch target. ID is the issue key for issue references,
-// artifact slug for artifacts, and the item identifier for asks and comments.
+// an artifact slug for artifacts, and the item identifier for asks and comments.
+// Project is set instead of IssueKey for unlinked project-document references.
 type Ref struct {
 	Kind     string
 	IssueKey string
+	Project  string
 	ID       string
 }
 
@@ -73,35 +78,74 @@ func trimReference(raw string) string {
 
 func parseDispatch(value string) (Ref, bool) {
 	key, tail, found := strings.Cut(value, "/")
-	if !issueKeyPattern.MatchString(key) {
-		return Ref{}, false
-	}
-	if !found || tail == "" {
-		return Ref{Kind: "issue", IssueKey: key, ID: key}, true
-	}
-	if tail == "spec" {
-		return Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, true
-	}
-	if artifact, ok := strings.CutPrefix(tail, "artifact/"); ok {
-		slug, version, hasVersion := strings.Cut(artifact, "@")
-		if hasVersion {
-			number, err := strconv.Atoi(strings.TrimPrefix(version, "v"))
-			if !strings.HasPrefix(version, "v") || err != nil || number < 1 {
-				return Ref{}, false
+	if issueKeyPattern.MatchString(key) {
+		if !found || tail == "" {
+			return Ref{Kind: "issue", IssueKey: key, ID: key}, true
+		}
+		if tail == "spec" {
+			return Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, true
+		}
+		if artifact, ok := strings.CutPrefix(tail, "artifact/"); ok {
+			slug, ok := parseArtifactSlug(artifact)
+			if ok {
+				return Ref{Kind: "artifact", IssueKey: key, ID: slug}, true
 			}
+			return Ref{}, false
 		}
-		if slug != "" && !strings.ContainsAny(slug, "/@") {
-			return Ref{Kind: "artifact", IssueKey: key, ID: slug}, true
+		if id, ok := strings.CutPrefix(tail, "ask/"); ok && validItemID(id) {
+			return Ref{Kind: "ask", IssueKey: key, ID: id}, true
+		}
+		if id, ok := strings.CutPrefix(tail, "comment/"); ok && validItemID(id) {
+			return Ref{Kind: "comment", IssueKey: key, ID: id}, true
 		}
 		return Ref{}, false
 	}
-	if id, ok := strings.CutPrefix(tail, "ask/"); ok && id != "" && !strings.Contains(id, "/") {
-		return Ref{Kind: "ask", IssueKey: key, ID: id}, true
+	if !projectKeyPattern.MatchString(key) || !found {
+		return Ref{}, false
 	}
-	if id, ok := strings.CutPrefix(tail, "comment/"); ok && id != "" && !strings.Contains(id, "/") {
-		return Ref{Kind: "comment", IssueKey: key, ID: id}, true
+	artifact, ok := strings.CutPrefix(tail, "artifact/")
+	if !ok {
+		return Ref{}, false
+	}
+	parts := strings.Split(artifact, "/")
+	if len(parts) == 1 {
+		slug, ok := parseArtifactSlug(parts[0])
+		if !ok {
+			return Ref{}, false
+		}
+		return Ref{Kind: "artifact", Project: key, ID: slug}, true
+	}
+	if len(parts) == 3 && !strings.Contains(parts[0], "@") && validItemID(parts[2]) {
+		switch parts[1] {
+		case "ask":
+			return Ref{Kind: "ask", Project: key, ID: parts[2]}, true
+		case "comment":
+			return Ref{Kind: "comment", Project: key, ID: parts[2]}, true
+		}
 	}
 	return Ref{}, false
+}
+
+func parseArtifactSlug(value string) (string, bool) {
+	slug, version, hasVersion := strings.Cut(value, "@")
+	if hasVersion {
+		number, err := strconv.Atoi(strings.TrimPrefix(version, "v"))
+		if !strings.HasPrefix(version, "v") || err != nil || number < 1 {
+			return "", false
+		}
+	}
+	if strings.Contains(slug, "/") {
+		return "", false
+	}
+	slug = artifactSlugPrefixPattern.FindString(slug)
+	if !artifactSlugPattern.MatchString(slug) {
+		return "", false
+	}
+	return slug, true
+}
+
+func validItemID(value string) bool {
+	return value != "" && !strings.Contains(value, "/")
 }
 
 func parseServer(raw, serverURL string) (Ref, bool) {
@@ -122,35 +166,67 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 		path = strings.TrimPrefix(path, basePath)
 	}
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(parts) < 2 || parts[0] != "issues" {
-		return Ref{}, false
-	}
-	key, err := url.PathUnescape(parts[1])
-	if err != nil || !issueKeyPattern.MatchString(key) {
-		return Ref{}, false
-	}
-	if len(parts) == 2 {
-		return Ref{Kind: "issue", IssueKey: key, ID: key}, true
-	}
-	if len(parts) == 3 && parts[2] == "spec" {
-		return Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, true
-	}
-	if len(parts) == 4 && parts[2] == "artifacts" {
-		slug, err := url.PathUnescape(parts[3])
-		if err == nil && slug != "" {
-			if rawVersion := value.Query().Get("v"); rawVersion != "" {
-				if _, err := strconv.Atoi(rawVersion); err != nil {
-					return Ref{}, false
+	if len(parts) >= 2 && parts[0] == "issues" {
+		key, err := url.PathUnescape(parts[1])
+		if err != nil || !issueKeyPattern.MatchString(key) {
+			return Ref{}, false
+		}
+		if len(parts) == 2 {
+			return Ref{Kind: "issue", IssueKey: key, ID: key}, true
+		}
+		if len(parts) == 3 && parts[2] == "spec" {
+			return Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, true
+		}
+		if len(parts) == 4 && parts[2] == "artifacts" {
+			slug, err := url.PathUnescape(parts[3])
+			if err == nil && artifactSlugPattern.MatchString(slug) {
+				if rawVersion := value.Query().Get("v"); rawVersion != "" {
+					number, err := strconv.Atoi(rawVersion)
+					if err != nil || number < 1 {
+						return Ref{}, false
+					}
 				}
+				return Ref{Kind: "artifact", IssueKey: key, ID: slug}, true
 			}
-			return Ref{Kind: "artifact", IssueKey: key, ID: slug}, true
+		}
+		if len(parts) == 4 && parts[2] == "asks" && validItemID(parts[3]) {
+			return Ref{Kind: "ask", IssueKey: key, ID: parts[3]}, true
+		}
+		if len(parts) == 4 && parts[2] == "comments" && validItemID(parts[3]) {
+			return Ref{Kind: "comment", IssueKey: key, ID: parts[3]}, true
+		}
+		return Ref{}, false
+	}
+	if len(parts) != 4 || parts[0] != "projects" || parts[2] != "documents" {
+		return Ref{}, false
+	}
+	project, err := url.PathUnescape(parts[1])
+	if err != nil || !projectKeyPattern.MatchString(project) {
+		return Ref{}, false
+	}
+	slug, err := url.PathUnescape(parts[3])
+	if err != nil || !artifactSlugPattern.MatchString(slug) {
+		return Ref{}, false
+	}
+	query := value.Query()
+	if rawVersion := query.Get("version"); rawVersion != "" {
+		number, err := strconv.Atoi(rawVersion)
+		if err != nil || number < 1 {
+			return Ref{}, false
 		}
 	}
-	if len(parts) == 4 && parts[2] == "asks" && parts[3] != "" {
-		return Ref{Kind: "ask", IssueKey: key, ID: parts[3]}, true
+	ask, comment := query.Get("ask"), query.Get("comment")
+	if ask != "" && comment != "" {
+		return Ref{}, false
 	}
-	if len(parts) == 4 && parts[2] == "comments" && parts[3] != "" {
-		return Ref{Kind: "comment", IssueKey: key, ID: parts[3]}, true
+	if validItemID(ask) {
+		return Ref{Kind: "ask", Project: project, ID: ask}, true
 	}
-	return Ref{}, false
+	if validItemID(comment) {
+		return Ref{Kind: "comment", Project: project, ID: comment}, true
+	}
+	if ask != "" || comment != "" {
+		return Ref{}, false
+	}
+	return Ref{Kind: "artifact", Project: project, ID: slug}, true
 }

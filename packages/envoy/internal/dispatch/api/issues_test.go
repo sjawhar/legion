@@ -468,3 +468,65 @@ func TestListIssueAsksOpenQueryUsesAsksOpenIndex(t *testing.T) {
 		t.Fatalf("open asks generic query plan sequentially scans asks; want an index scan via asks_open:\n%s", planJSON)
 	}
 }
+
+func TestListIssuesPinnedFilterAndLabels(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	firstResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "CORE", "title": "First",
+	}, "alice")
+	if firstResponse.Code != http.StatusCreated {
+		t.Fatalf("create first issue: status=%d body=%s", firstResponse.Code, firstResponse.Body.String())
+	}
+	first := decodeBody[model.Issue](t, firstResponse)
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+first.Key, map[string][]string{"labels": {"repo:x"}}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("set issue labels: status=%d body=%s", response.Code, response.Body.String())
+	}
+	secondResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "CORE", "title": "Second",
+	}, "alice")
+	if secondResponse.Code != http.StatusCreated {
+		t.Fatalf("create second issue: status=%d body=%s", secondResponse.Code, secondResponse.Body.String())
+	}
+	second := decodeBody[model.Issue](t, secondResponse)
+
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list project issues: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var listedIssues []model.IssueSummary
+	if listedIssues = decodeBody[[]model.IssueSummary](t, listed); len(listedIssues) != 2 {
+		t.Fatalf("project issues = %#v, want two", listedIssues)
+	}
+	foundLabels := false
+	for _, issue := range listedIssues {
+		if issue.Key == first.Key && len(issue.Labels) == 1 && issue.Labels[0] == "repo:x" {
+			foundLabels = true
+		}
+	}
+	if !foundLabels {
+		t.Fatalf("project issue labels = %#v, want repo:x on %s", listedIssues, first.Key)
+	}
+
+	pinned := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+second.Key+"/state", map[string]bool{"pinned": true}, "alice")
+	if pinned.Code != http.StatusOK {
+		t.Fatalf("pin second issue: status=%d body=%s", pinned.Code, pinned.Body.String())
+	}
+	onlyPinned := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?pinned=true", nil, "alice")
+	if onlyPinned.Code != http.StatusOK {
+		t.Fatalf("list pinned issues: status=%d body=%s", onlyPinned.Code, onlyPinned.Body.String())
+	}
+	if issues := decodeBody[[]model.IssueSummary](t, onlyPinned); len(issues) != 1 || issues[0].Key != second.Key {
+		t.Fatalf("alice pinned issues = %#v, want %s", issues, second.Key)
+	}
+	if other := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?pinned=true", nil, "bob"); other.Code != http.StatusOK || len(decodeBody[[]model.IssueSummary](t, other)) != 0 {
+		t.Fatalf("bob pinned issues: status=%d body=%s", other.Code, other.Body.String())
+	}
+	if bearer := agentRequest(t, handler, http.MethodGet, "/api/v1/issues?pinned=true", nil, "agent-token"); bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"HUMAN_ONLY"`) {
+		t.Fatalf("bearer pinned issues: status=%d body=%s", bearer.Code, bearer.Body.String())
+	}
+}

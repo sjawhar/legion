@@ -88,8 +88,8 @@ func createDocument(t *testing.T, database *store.Store, markdown string) string
 	}
 	var artifactID string
 	if err := tx.QueryRow(ctx, `
-		insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
-		values ('DOC-1', $1, 'document.md', 'doc', false, '{"kind":"user","id":"alice"}')
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ('DOC-1', 'DOC', $1, 'document.md', 'doc', false, '{"kind":"user","id":"alice"}')
 		returning id::text
 	`, "document-"+genRandomSuffix(t)).Scan(&artifactID); err != nil {
 		t.Fatalf("create test artifact: %v", err)
@@ -102,6 +102,48 @@ func createDocument(t *testing.T, database *store.Store, markdown string) string
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit create document: %v", err)
+	}
+	return artifactID
+}
+
+func createProjectDocument(t *testing.T, database *store.Store, markdown string) string {
+	t.Helper()
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse test project document: %v", err)
+	}
+	markdown, _, err = pmdoc.Render(pmdoc.StripAnchorMarks(tree))
+	if err != nil {
+		t.Fatalf("render test project document: %v", err)
+	}
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin create project document: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		insert into projects (key, name) values ('DOC', 'Documents')
+		on conflict (key) do nothing
+	`); err != nil {
+		t.Fatalf("create test project: %v", err)
+	}
+	var artifactID string
+	if err := tx.QueryRow(ctx, `
+		insert into artifacts (project_key, slug, name, kind, is_primary, created_by)
+		values ('DOC', $1, 'document.md', 'doc', false, '{"kind":"user","id":"alice"}')
+		returning id::text
+	`, "document-"+genRandomSuffix(t)).Scan(&artifactID); err != nil {
+		t.Fatalf("create test project artifact: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		values ($1, 1, $2, '[{"kind":"user","id":"alice"}]')
+	`, artifactID, markdown); err != nil {
+		t.Fatalf("create initial project document version: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit create project document: %v", err)
 	}
 	return artifactID
 }

@@ -11,7 +11,8 @@ Envoy owns transport, routing, delivery, and the native Dispatch event path:
 - resolves target OpenCode sessions
 - delivers by hot `prompt_async` (ordinary events stay in JetStream for retry if a session is unavailable)
 - runs the Dispatch server, which persists native issues, documents, and events in Postgres and
-  publishes retained `notifications.dispatch.issue.<KEY>.<type>` envelopes
+  publishes retained `notifications.dispatch.issue.<KEY>.<type>` and
+  `notifications.dispatch.document.<PROJECT>.<slug>.<type>` envelopes
 
 It does not own Legion workflow policy. The daemon/controller decides what to do; Envoy moves
 events to the right session.
@@ -89,6 +90,8 @@ caller must provide a field.
 - Dispatch issue events use `notifications.dispatch.issue.<KEY>.<type>`, carry every event, and
   are retained in JetStream; `notify` only controls agent wake and routing the same envelope to
   `notifications.role.<role>` or `notifications.agent.<session_id>`.
+- Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and
+  are retained in JetStream. Consumers subscribe or tail that document topic directly.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,
   rather than subscribed to by role holders.

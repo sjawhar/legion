@@ -11,7 +11,19 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `select key, name, created_at from projects order by key`)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `
+		select p.key, p.name, (
+			select count(*)
+			from asks a
+			left join issues i on i.key = a.issue_key
+			left join artifacts ar on ar.id = a.artifact_id
+			where a.state = 'open'
+			  and coalesce(i.project_key, ar.project_key) = p.key
+			  and (i.key is null or i.closed_at is null)
+		), p.created_at
+		from projects p
+		order by p.key
+	`)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -20,7 +32,7 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 	projects := []model.Project{}
 	for rows.Next() {
 		var project model.Project
-		if err := rows.Scan(&project.Key, &project.Name, &project.CreatedAt); err != nil {
+		if err := rows.Scan(&project.Key, &project.Name, &project.OpenAsks, &project.CreatedAt); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

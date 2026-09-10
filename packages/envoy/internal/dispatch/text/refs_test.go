@@ -59,3 +59,44 @@ func TestExtractTrimsParenthesizedDispatchReference(t *testing.T) {
 		t.Fatalf("Extract() = %#v; want %#v", got, want)
 	}
 }
+
+func TestExtractTerminatesArtifactSlugsAtMarkdownPunctuation(t *testing.T) {
+	body := "`dispatch://CORE-2/artifact/diagram-png`` See dispatch://CORE-2/artifact/design-md. " +
+		`See dispatch://CORE-2/artifact/quoted-md".`
+	want := []Ref{
+		{Kind: "artifact", IssueKey: "CORE-2", ID: "diagram-png"},
+		{Kind: "artifact", IssueKey: "CORE-2", ID: "design-md"},
+		{Kind: "artifact", IssueKey: "CORE-2", ID: "quoted-md"},
+	}
+	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v, want %#v", got, want)
+	}
+}
+
+func TestInvalidArtifactReferencesDoNotProduceGraphEdges(t *testing.T) {
+	body := "dispatch://CORE-1/artifact/design-notes/extra " +
+		"https://dispatch.example/projects/CORE/documents/design%2Fnotes " +
+		"https://dispatch.example/projects/CORE/documents/Design-notes"
+	want := []Ref{
+		{Kind: "url", ID: "https://dispatch.example/projects/CORE/documents/design%2Fnotes"},
+		{Kind: "url", ID: "https://dispatch.example/projects/CORE/documents/Design-notes"},
+	}
+	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v, want only non-graph URLs", got)
+	}
+}
+
+func TestExtractParsesProjectDocumentReferences(t *testing.T) {
+	body := `dispatch://CORE/artifact/design-notes dispatch://CORE/artifact/design-notes@v2 dispatch://CORE/artifact/design-notes/ask/a1 dispatch://CORE/artifact/design-notes/comment/c1 dispatch://CORE dispatch://CORE/spec https://dispatch.example/projects/CORE/documents/design-notes?version=3 https://dispatch.example/projects/CORE/documents/design-notes?ask=a2`
+	want := []Ref{
+		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
+		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
+		{Kind: "ask", Project: "CORE", ID: "a1"},
+		{Kind: "comment", Project: "CORE", ID: "c1"},
+		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
+		{Kind: "ask", Project: "CORE", ID: "a2"},
+	}
+	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v; want %#v", got, want)
+	}
+}
