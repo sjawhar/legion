@@ -8,7 +8,6 @@ import (
 	"unicode/utf16"
 
 	"github.com/reearth/ygo/crdt"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // Range is a half-open ProseMirror position range.
@@ -19,7 +18,7 @@ type Range struct {
 
 var ErrTargetNotFound = errors.New("pmdoc: target not found")
 
-// Candidate gives one matching range and enough surrounding markdown to
+// Candidate gives one matching range and enough surrounding document text to
 // disambiguate it.
 type Candidate struct {
 	Range
@@ -33,18 +32,20 @@ type ErrTargetAmbiguous struct {
 
 func (e *ErrTargetAmbiguous) Error() string { return "pmdoc: target is ambiguous" }
 
-// FindQuote finds quote in the rendered markdown and returns its ProseMirror
+// FindQuote finds quote in the document text and returns its ProseMirror
 // range. occurrence is zero-based. When several exact matches exist, near
 // chooses the range whose start is nearest the ProseMirror position hint.
 func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, error) {
-	markdown, positions, err := Render(doc)
-	if err != nil {
+	if doc == nil {
+		return Range{}, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
+	}
+	if err := doc.Validate(); err != nil {
 		return Range{}, err
 	}
-
-	matches := exactQuoteMatches(markdown, quote, positions)
+	text := buildDocumentText(doc)
+	matches := exactQuoteMatches(text, quote)
 	if len(matches) == 0 {
-		matches = normalizedQuoteMatches(markdown, quote, positions)
+		matches = normalizedQuoteMatches(text, quote)
 	}
 	if len(matches) == 0 {
 		return Range{}, ErrTargetNotFound
@@ -75,26 +76,63 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	for _, match := range matches {
 		candidates = append(candidates, Candidate{
 			Range:   match.Range,
-			Context: text.Slice16(markdown, max(0, match.mdFrom-40), min(len16(markdown), match.mdTo+40)),
+			Context: slice16(text.value, max(0, match.textFrom-40), min(len16(text.value), match.textTo+40)),
 		})
 	}
 	return Range{}, &ErrTargetAmbiguous{Candidates: candidates}
 }
 
-type quoteMatch struct {
-	Range
-	mdFrom int
-	mdTo   int
+type documentText struct {
+	value     string
+	positions []int
 }
 
-func exactQuoteMatches(markdown, quote string, positions *PositionMap) []quoteMatch {
+func buildDocumentText(doc *Node) documentText {
+	var out strings.Builder
+	var positions []int
+	lastEnd := -1
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if node.Type != "text" {
+			return true
+		}
+		if lastEnd >= 0 && lastEnd != pos {
+			out.WriteByte(' ')
+			positions = append(positions, lastEnd)
+		}
+		for _, char := range node.Text {
+			out.WriteRune(char)
+			width := 1
+			if char > 0xffff {
+				width = 2
+			}
+			for offset := range width {
+				positions = append(positions, pos+offset)
+			}
+			pos += width
+		}
+		lastEnd = end
+		return true
+	})
+	return documentText{value: out.String(), positions: positions}
+}
+
+type quoteMatch struct {
+	Range
+	textFrom int
+	textTo   int
+}
+
+func exactQuoteMatches(text documentText, quote string) []quoteMatch {
 	needle := utf16.Encode([]rune(quote))
 	var matches []quoteMatch
-	for _, offset := range findAllUnits(utf16.Encode([]rune(markdown)), needle) {
+	for _, offset := range findAllUnits(utf16.Encode([]rune(text.value)), needle) {
 		matches = append(matches, quoteMatch{
-			Range:  Range{From: positions.ToPM(offset), To: positions.ToPM(offset + len(needle))},
-			mdFrom: offset,
-			mdTo:   offset + len(needle),
+			Range: Range{
+				From: text.positions[offset],
+				To:   text.positions[offset+len(needle)-1] + 1,
+			},
+			textFrom: offset,
+			textTo:   offset + len(needle),
 		})
 	}
 	return matches
@@ -105,22 +143,25 @@ type range16 struct {
 	to   int
 }
 
-func normalizedQuoteMatches(markdown, quote string, positions *PositionMap) []quoteMatch {
-	normalizedMarkdown, markdownSpans := normalizedRanges(markdown)
+func normalizedQuoteMatches(text documentText, quote string) []quoteMatch {
+	normalizedText, textSpans := normalizedRanges(text.value)
 	normalizedQuote, quoteSpans := normalizedRanges(quote)
-	if normalizedQuote == "" || len(markdownSpans) == 0 || len(quoteSpans) == 0 {
+	if normalizedQuote == "" || len(textSpans) == 0 || len(quoteSpans) == 0 {
 		return nil
 	}
 
 	needle := []rune(normalizedQuote)
 	var matches []quoteMatch
-	for _, offset := range findAllRunes([]rune(normalizedMarkdown), needle) {
-		from := markdownSpans[offset].from
-		to := markdownSpans[offset+len(needle)-1].to
+	for _, offset := range findAllRunes([]rune(normalizedText), needle) {
+		from := textSpans[offset].from
+		to := textSpans[offset+len(needle)-1].to
 		matches = append(matches, quoteMatch{
-			Range:  Range{From: positions.ToPM(from), To: positions.ToPM(to)},
-			mdFrom: from,
-			mdTo:   to,
+			Range: Range{
+				From: text.positions[from],
+				To:   text.positions[to-1] + 1,
+			},
+			textFrom: from,
+			textTo:   to,
 		})
 	}
 	return matches
@@ -207,12 +248,11 @@ func distance(left, right int) int {
 // FindMark finds the first contiguous text range covered by a mark identity.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 	var matches []markedText
-	position := 0
-	walkTextNodes(doc, &position, func(node *Node, from int) {
-		if nodeMarkID(node, markType) != id {
-			return
+	walk(doc, func(node *Node, _ []int, pos, _ int) bool {
+		if node.Type == "text" && nodeMarkID(node, markType) == id {
+			matches = append(matches, markedText{Range: Range{From: pos, To: pos + len16(node.Text)}, text: node.Text})
 		}
-		matches = append(matches, markedText{Range: Range{From: from, To: from + len16(node.Text)}, text: node.Text})
+		return true
 	})
 	if len(matches) == 0 {
 		return Range{}, "", false
@@ -249,43 +289,8 @@ func nodeMarkID(node *Node, markType string) string {
 	return ""
 }
 
-func walkTextNodes(node *Node, position *int, visit func(*Node, int)) {
-	if node == nil {
-		return
-	}
-	if node.Type == "doc" {
-		for _, child := range node.Children {
-			walkTextNodes(child, position, visit)
-		}
-		return
-	}
-	if node.Type == "text" {
-		visit(node, *position)
-		*position += len16(node.Text)
-		return
-	}
-	if isLeafNodeType(node.Type) {
-		*position++
-		return
-	}
-	*position++
-	for _, child := range node.Children {
-		walkTextNodes(child, position, visit)
-	}
-	*position++
-}
-
-func isLeafNodeType(nodeType string) bool {
-	switch nodeType {
-	case "hr", "hardbreak", "image", "html", "footnote_reference":
-		return true
-	default:
-		return false
-	}
-}
-
-// MarkRange adds mark to the text covered by r. Marks cannot span distinct
-// inline containers such as paragraphs or table cells.
+// MarkRange adds mark to every selected text run. A mark may cross textblocks
+// when the target schema allows it in each textblock.
 func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mark) error {
 	if txn == nil || frag == nil || r.From >= r.To {
 		return fmt.Errorf("%w: invalid mark range", ErrSchema)
@@ -301,20 +306,14 @@ func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mar
 	var affected []yTextRange
 	for _, span := range spans {
 		if span.From < r.To && r.From < span.To {
+			if !markAllowedInTextblock(mark.Type, span.textblock) {
+				return fmt.Errorf("%w: mark %q is not allowed in %s", ErrSchema, mark.Type, span.textblock)
+			}
 			affected = append(affected, span)
 		}
 	}
 	if len(affected) == 0 {
 		return ErrTargetNotFound
-	}
-	block := affected[0].block
-	if block == nil {
-		return fmt.Errorf("%w: mark range is outside an inline container", ErrSchema)
-	}
-	for _, span := range affected[1:] {
-		if span.block != block {
-			return fmt.Errorf("%w: mark range spans blocks", ErrSchema)
-		}
 	}
 
 	attributes := crdt.Attributes{mark.Type: markAttributeValue(mark)}
@@ -326,6 +325,18 @@ func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mar
 	return nil
 }
 
+func markAllowedInTextblock(markType, textblock string) bool {
+	if textblock != "code_block" {
+		return textblock == "paragraph" || textblock == "heading"
+	}
+	switch markType {
+	case "proofAuthored", "proofSuggestion", "proofComment", "proofFlagged", "proofApproved":
+		return true
+	default:
+		return false
+	}
+}
+
 func markAttributeValue(mark Mark) crdt.Attributes {
 	value := make(crdt.Attributes, len(mark.Attrs))
 	for key, attr := range mark.Attrs {
@@ -335,41 +346,87 @@ func markAttributeValue(mark Mark) crdt.Attributes {
 }
 
 type yTextRange struct {
-	text  *crdt.YXmlText
-	block *crdt.YXmlElement
+	text      *crdt.YXmlText
+	textblock string
 	Range
 }
 
+type yTextNode struct {
+	text      *crdt.YXmlText
+	textblock string
+}
+
+type textLocation struct {
+	pos int
+	end int
+}
+
 func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
-	position := 0
-	var ranges []yTextRange
-	if err := walkYFragment(frag, &position, nil, &ranges); err != nil {
+	doc, err := yFragmentShape(frag)
+	if err != nil {
 		return nil, err
+	}
+	var locations []textLocation
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if node.Type == "text" {
+			locations = append(locations, textLocation{pos: pos, end: end})
+		}
+		return true
+	})
+
+	var texts []yTextNode
+	if err := collectYTexts(frag, "", &texts); err != nil {
+		return nil, err
+	}
+	ranges := make([]yTextRange, 0, len(texts))
+	location := 0
+	for _, current := range texts {
+		length := current.text.Len()
+		if length == 0 {
+			continue
+		}
+		if location == len(locations) {
+			return nil, fmt.Errorf("%w: Yjs text has no ProseMirror text node", ErrSchema)
+		}
+		from := locations[location].pos
+		to := from
+		for remaining := length; remaining > 0; location++ {
+			if location == len(locations) || locations[location].pos != to {
+				return nil, fmt.Errorf("%w: Yjs text does not align with ProseMirror text runs", ErrSchema)
+			}
+			width := locations[location].end - locations[location].pos
+			if width > remaining {
+				return nil, fmt.Errorf("%w: Yjs text splits a ProseMirror text run", ErrSchema)
+			}
+			to = locations[location].end
+			remaining -= width
+		}
+		ranges = append(ranges, yTextRange{
+			text:      current.text,
+			textblock: current.textblock,
+			Range:     Range{From: from, To: to},
+		})
+	}
+	if location != len(locations) {
+		return nil, fmt.Errorf("%w: ProseMirror text has no Yjs text", ErrSchema)
 	}
 	return ranges, nil
 }
 
-func walkYFragment(frag *crdt.YXmlFragment, position *int, block *crdt.YXmlElement, ranges *[]yTextRange) error {
+func collectYTexts(frag *crdt.YXmlFragment, textblock string, out *[]yTextNode) error {
 	for _, child := range frag.Children() {
 		switch current := child.(type) {
 		case *crdt.YXmlText:
-			length := current.Len()
-			*ranges = append(*ranges, yTextRange{text: current, block: block, Range: Range{From: *position, To: *position + length}})
-			*position += length
+			*out = append(*out, yTextNode{text: current, textblock: textblock})
 		case *crdt.YXmlElement:
-			if isLeafNodeType(current.NodeName) {
-				*position++
-				continue
+			next := textblock
+			switch current.NodeName {
+			case "paragraph", "heading", "code_block":
+				next = current.NodeName
 			}
-			*position++
-			nextBlock := block
-			if isInlineContainerType(current.NodeName) {
-				nextBlock = current
-			}
-			if err := walkYFragment(&current.YXmlFragment, position, nextBlock, ranges); err != nil {
+			if err := collectYTexts(&current.YXmlFragment, next, out); err != nil {
 				return err
 			}
-			*position++
 		default:
 			return fmt.Errorf("%w: unexpected Yjs child %T", ErrSchema, child)
 		}
@@ -377,13 +434,41 @@ func walkYFragment(frag *crdt.YXmlFragment, position *int, block *crdt.YXmlEleme
 	return nil
 }
 
-func isInlineContainerType(nodeType string) bool {
-	switch nodeType {
-	case "paragraph", "heading":
-		return true
-	default:
-		return false
+func yFragmentShape(frag *crdt.YXmlFragment) (*Node, error) {
+	children, err := yFragmentShapeChildren(frag)
+	if err != nil {
+		return nil, err
 	}
+	return &Node{Type: "doc", Children: children}, nil
+}
+
+func yFragmentShapeChildren(frag *crdt.YXmlFragment) ([]*Node, error) {
+	var children []*Node
+	for _, child := range frag.Children() {
+		switch current := child.(type) {
+		case *crdt.YXmlText:
+			delta, err := yTextDeltaInTransaction(current)
+			if err != nil {
+				return nil, err
+			}
+			for _, operation := range delta {
+				value, ok := operation.Insert.(string)
+				if !ok {
+					return nil, fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
+				}
+				children = append(children, &Node{Type: "text", Text: value})
+			}
+		case *crdt.YXmlElement:
+			grandchildren, err := yFragmentShapeChildren(&current.YXmlFragment)
+			if err != nil {
+				return nil, err
+			}
+			children = append(children, &Node{Type: current.NodeName, Children: grandchildren})
+		default:
+			return nil, fmt.Errorf("%w: unexpected Yjs child %T", ErrSchema, child)
+		}
+	}
+	return children, nil
 }
 
 // Unmark removes every markType mark whose id attribute equals id.
@@ -395,13 +480,13 @@ func Unmark(txn *crdt.Transaction, frag *crdt.YXmlFragment, markType, id string)
 		return fmt.Errorf("%w: mark %q", ErrSchema, markType)
 	}
 
-	var texts []*crdt.YXmlText
-	if err := walkYTexts(frag, &texts); err != nil {
+	spans, err := yTextRanges(frag)
+	if err != nil {
 		return err
 	}
 	found := false
-	for _, ytext := range texts {
-		operations, err := yTextDeltaInTransaction(ytext)
+	for _, span := range spans {
+		operations, err := yTextDeltaInTransaction(span.text)
 		if err != nil {
 			return err
 		}
@@ -413,7 +498,7 @@ func Unmark(txn *crdt.Transaction, frag *crdt.YXmlFragment, markType, id string)
 			}
 			for attributeName, attributeValue := range operation.Attributes {
 				if yattrToMarkName(attributeName) == markType && markAttributeID(attributeValue) == id {
-					ytext.Format(txn, offset, len16(value), crdt.Attributes{attributeName: nil})
+					span.text.Format(txn, offset, len16(value), crdt.Attributes{attributeName: nil})
 					found = true
 				}
 			}
@@ -433,155 +518,6 @@ func markAttributeID(value any) string {
 	}
 	id, _ := attrs["id"].(string)
 	return id
-}
-
-func walkYTexts(frag *crdt.YXmlFragment, texts *[]*crdt.YXmlText) error {
-	for _, child := range frag.Children() {
-		switch current := child.(type) {
-		case *crdt.YXmlText:
-			*texts = append(*texts, current)
-		case *crdt.YXmlElement:
-			if err := walkYTexts(&current.YXmlFragment, texts); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("%w: unexpected Yjs child %T", ErrSchema, child)
-		}
-	}
-	return nil
-}
-
-// Splice returns a copy of doc with r replaced by with. An inline replacement
-// is used only when r and with are both contained in one inline block.
-func Splice(doc *Node, r Range, with *Node) (*Node, error) {
-	if doc == nil || with == nil || doc.Type != "doc" || with.Type != "doc" || r.From >= r.To {
-		return nil, fmt.Errorf("%w: invalid splice", ErrSchema)
-	}
-	if err := doc.Validate(); err != nil {
-		return nil, err
-	}
-	if err := with.Validate(); err != nil {
-		return nil, err
-	}
-
-	fromIndex, fromStart, ok := blockContaining(doc, r.From)
-	if !ok {
-		return nil, ErrTargetNotFound
-	}
-	toIndex, _, ok := blockContaining(doc, r.To)
-	if !ok {
-		return nil, ErrTargetNotFound
-	}
-	out := cloneNode(doc)
-	if fromIndex == toIndex && isInlineContainerType(out.Children[fromIndex].Type) && inlineDocument(with) {
-		if err := spliceInline(out.Children[fromIndex], r, fromStart, with.Children[0].Children); err != nil {
-			return nil, err
-		}
-		return out, nil
-	}
-
-	replacement := make([]*Node, 0, len(with.Children))
-	for _, node := range with.Children {
-		replacement = append(replacement, cloneNode(node))
-	}
-	out.Children = append(out.Children[:fromIndex:fromIndex], append(replacement, out.Children[toIndex+1:]...)...)
-	return out, nil
-}
-
-func blockContaining(doc *Node, position int) (index, start int, ok bool) {
-	for index, block := range doc.Children {
-		size := nodeSize(block)
-		if position >= start+1 && position <= start+size-1 {
-			return index, start, true
-		}
-		start += size
-	}
-	return 0, 0, false
-}
-
-func inlineDocument(doc *Node) bool {
-	if len(doc.Children) != 1 || !isInlineContainerType(doc.Children[0].Type) {
-		return false
-	}
-	for _, child := range doc.Children[0].Children {
-		if child.Type != "text" && !isLeafNodeType(child.Type) {
-			return false
-		}
-	}
-	return true
-}
-
-func spliceInline(block *Node, r Range, blockStart int, replacement []*Node) error {
-	position := blockStart + 1
-	children := make([]*Node, 0, len(block.Children)+len(replacement))
-	inserted := false
-	for _, child := range block.Children {
-		size := nodeSize(child)
-		end := position + size
-		if r.To <= position || r.From >= end {
-			appendInline(&children, []*Node{cloneNode(child)})
-			position = end
-			continue
-		}
-		if child.Type == "text" {
-			if r.From > position {
-				appendText(&children, text.Slice16(child.Text, 0, r.From-position), child.Marks)
-			}
-			if !inserted {
-				for _, node := range replacement {
-					appendInline(&children, []*Node{cloneNode(node)})
-				}
-				inserted = true
-			}
-			if r.To < end {
-				appendText(&children, text.Slice16(child.Text, r.To-position, size), child.Marks)
-			}
-		} else {
-			if r.From > position || r.To < end {
-				return fmt.Errorf("%w: splice partially selects inline leaf", ErrSchema)
-			}
-			if !inserted {
-				for _, node := range replacement {
-					appendInline(&children, []*Node{cloneNode(node)})
-				}
-				inserted = true
-			}
-		}
-		position = end
-	}
-	if !inserted {
-		return ErrTargetNotFound
-	}
-	block.Children = children
-	return nil
-}
-
-func nodeSize(node *Node) int {
-	if node == nil {
-		return 0
-	}
-	if node.Type == "text" {
-		return len16(node.Text)
-	}
-	if isLeafNodeType(node.Type) {
-		return 1
-	}
-	size := 2
-	for _, child := range node.Children {
-		size += nodeSize(child)
-	}
-	return size
-}
-
-func cloneNode(node *Node) *Node {
-	if node == nil {
-		return nil
-	}
-	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: node.Text, Marks: cloneMarks(node.Marks)}
-	for _, child := range node.Children {
-		out.Children = append(out.Children, cloneNode(child))
-	}
-	return out
 }
 
 func cloneAttrs(attrs Attrs) Attrs {

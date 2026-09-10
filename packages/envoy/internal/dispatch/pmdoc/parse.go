@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"regexp"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/yuin/goldmark/extension"
 	extensionast "github.com/yuin/goldmark/extension/ast"
 	gmtext "github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 	"go.abhg.dev/goldmark/frontmatter"
 )
 
@@ -197,9 +199,21 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, 
 		nodeType = "ordered_list"
 		attrs["order"] = list.Start
 	}
-	children, err := parseBlocks(list, source, footnotes)
-	if err != nil {
-		return nil, err
+	children := make([]*Node, 0, list.ChildCount())
+	for child := list.FirstChild(); child != nil; child = child.NextSibling() {
+		item, ok := child.(*ast.ListItem)
+		if !ok {
+			return nil, fmt.Errorf("%w: list contains %T", ErrSchema, child)
+		}
+		parsed, err := parseListItem(item, source, footnotes)
+		if err != nil {
+			return nil, err
+		}
+		parsed.Attrs["spread"] = !list.IsTight && item.ChildCount() > 1
+		if parsed.Attrs["spread"] == true {
+			attrs["spread"] = false
+		}
+		children = append(children, parsed)
 	}
 	return &Node{Type: nodeType, Attrs: attrs, Children: children}, nil
 }
@@ -290,9 +304,9 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{
-		"src":   string(image.Destination),
+		"src":   unescapeMarkdownText(image.Destination),
 		"alt":   text.String(),
-		"title": string(image.Title),
+		"title": titleOrNil(image.Title),
 	}}, nil
 }
 
@@ -302,7 +316,7 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
 		switch current := child.(type) {
 		case *ast.Text:
-			value := string(current.Value(source))
+			value := parseTextValue(current.Value(source), active)
 			if current.HardLineBreak() {
 				value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "  ")
 			}
@@ -314,7 +328,7 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 				appendText(&children, "\n", active)
 			}
 		case *ast.String:
-			appendText(&children, string(current.Value), active)
+			appendText(&children, parseTextValue(current.Value, active), active)
 		case *ast.Emphasis:
 			next := append([]Mark(nil), active...)
 			if current.Level >= 2 {
@@ -386,6 +400,19 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 	return children, nil
 }
 
+func unescapeMarkdownText(value []byte) string {
+	return html.UnescapeString(string(util.UnescapePunctuations(value)))
+}
+
+func parseTextValue(value []byte, marks []Mark) string {
+	for _, mark := range marks {
+		if mark.Type == "inlineCode" {
+			return string(value)
+		}
+	}
+	return unescapeMarkdownText(value)
+}
+
 func appendInline(target *[]*Node, nodes []*Node) {
 	for _, node := range nodes {
 		if node.Type == "text" {
@@ -416,7 +443,7 @@ func titleOrNil(title []byte) any {
 	if len(title) == 0 {
 		return nil
 	}
-	return string(title)
+	return unescapeMarkdownText(title)
 }
 
 func parseAnchorMark(value string) (Mark, bool) {

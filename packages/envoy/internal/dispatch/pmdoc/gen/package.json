@@ -4,8 +4,7 @@
   "type": "module",
   "scripts": {
     "gen": "bun run gen.ts",
-    "check": "bun run gen.ts --check",
-    "interim": "bun run interim.ts"
+    "check": "bun run gen.ts --check"
   },
   "dependencies": {
     "@sjawhar/proof-editor": "file:./proof-editor-dist",

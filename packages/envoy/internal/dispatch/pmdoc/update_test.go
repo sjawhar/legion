@@ -106,6 +106,12 @@ func TestUpdateEditsOnlyTheChangedRun(t *testing.T) {
 	delta := crdt.EncodeStateAsUpdateV1(doc, stateVector)
 	t.Logf("one-word update delta = %d bytes", len(delta))
 
+	for _, mark := range []string{"proofComment", "dispatchAsk", "proofSuggestion"} {
+		if bytes.Contains(delta, []byte(mark)) {
+			t.Fatalf("update rewrote untouched %s formatting", mark)
+		}
+	}
+
 	got, err := Read(frag)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +127,7 @@ func TestUpdateEditsOnlyTheChangedRun(t *testing.T) {
 	}
 }
 
-func fixtureNamed(t *testing.T, name string) Fixture {
+func fixtureNamed(t *testing.T, name string) fixture {
 	t.Helper()
 	for _, fx := range loadFixtures(t) {
 		if fx.Name == name {
@@ -129,7 +135,7 @@ func fixtureNamed(t *testing.T, name string) Fixture {
 		}
 	}
 	t.Fatalf("fixture %q not found", name)
-	return Fixture{}
+	return fixture{}
 }
 
 func hasMark(node *Node, markType string) bool {
@@ -179,4 +185,71 @@ func runDecoder(script, encoded string) ([]byte, []byte, error) {
 		stderr = exitErr.Stderr
 	}
 	return output, stderr, err
+}
+
+func TestUpdateAppliesMarksToInsertedTextAtRunBoundary(t *testing.T) {
+	seed, err := Parse("A **B**\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Parse("A **XB**\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := crdt.New()
+	frag := doc.GetXmlFragment("prosemirror")
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, seed)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, want)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, _, err := Render(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "A **XB**\n" {
+		t.Fatalf("Update() rendered %q, want %q", markdown, "A **XB**\n")
+	}
+	if decoded := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil)); !decoded.Equal(want) {
+		t.Fatal("y-prosemirror decoded tree differs after marked insertion")
+	}
+}
+
+func TestUpdatePreservesMarksAcrossAstralEdit(t *testing.T) {
+	seed, err := Parse("😀 before **marked**\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Parse("😀 after **marked**\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := crdt.New()
+	frag := doc.GetXmlFragment("prosemirror")
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, seed)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, want)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil)); !decoded.Equal(want) {
+		t.Fatal("y-prosemirror decoded tree differs after astral edit")
+	}
 }

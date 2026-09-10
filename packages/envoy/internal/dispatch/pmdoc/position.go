@@ -1,5 +1,7 @@
 package pmdoc
 
+import "unicode/utf16"
+
 type Span struct {
 	MdFrom int
 	MdTo   int
@@ -37,4 +39,12 @@ func (p *PositionMap) ToMd(pm int) (int, bool) {
 		return s.MdFrom + (pm - s.PmFrom), true
 	}
 	return 0, false
+}
+
+func len16(value string) int {
+	return len(utf16.Encode([]rune(value)))
+}
+
+func slice16(value string, from, to int) string {
+	return string(utf16.Decode(utf16.Encode([]rune(value))[from:to]))
 }

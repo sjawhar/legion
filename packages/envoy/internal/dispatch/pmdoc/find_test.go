@@ -97,58 +97,49 @@ func TestMarkRangeThenFindMark(t *testing.T) {
 	}
 }
 
-func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
-	doc, err := Parse("Keep **this** and change that.\n")
+func TestMarkRangeSupportsCodeBlocksAndMultipleBlocks(t *testing.T) {
+	doc, err := Parse("```\ncode\n```\n\none\n\ntwo\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rangeChange, err := FindQuote(doc, "change that", nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	with, err := Parse("*alter* those")
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := Splice(doc, rangeChange, with)
-	if err != nil {
-		t.Fatal(err)
-	}
-	markdown, _, err := Render(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if markdown != "Keep **this** and *alter* those.\n" {
-		t.Fatalf("md = %q", markdown)
-	}
-}
 
-func TestSpliceAcrossBlocksReplacesBlocks(t *testing.T) {
-	doc, err := Parse("# Title\n\nOne.\n\nTwo.\n\nThree.\n")
+	state := crdt.New()
+	frag := state.GetXmlFragment("prosemirror")
+	state.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, doc)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	from, err := FindQuote(doc, "One.", nil, nil)
+	code, err := FindQuote(doc, "code", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	to, err := FindQuote(doc, "Two.", nil, nil)
+	state.Transact(func(txn *crdt.Transaction) {
+		err = MarkRange(txn, frag, code, Mark{Type: "proofComment", Attrs: Attrs{"id": "code", "by": "session:x"}})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	with, err := Parse("- a\n- b\n")
+	one, err := FindQuote(doc, "one", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Splice(doc, Range{From: from.From, To: to.To}, with)
+	two, err := FindQuote(doc, "two", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(out)
+	state.Transact(func(txn *crdt.Transaction) {
+		err = MarkRange(txn, frag, Range{From: one.From, To: two.To}, Mark{Type: "dispatchAsk", Attrs: Attrs{"id": "both", "by": "session:x"}})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markdown != "# Title\n\n- a\n- b\n\nThree.\n" {
-		t.Fatalf("md = %q", markdown)
+	got, err := Read(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasMark(got, "proofComment") || !hasMark(got, "dispatchAsk") {
+		t.Fatal("marks were not applied across every selected text span")
 	}
 }

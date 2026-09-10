@@ -15,8 +15,8 @@
 //   - Update writes the minimal Yjs change that turns a fragment's current tree
 //     into a target *Node, porting y-prosemirror's updateYFragment diff so a
 //     one-word edit produces a one-word delta instead of a full-document replace.
-//   - FindQuote, FindMark, MarkRange, Unmark, and Splice locate and edit ranges
-//     within a tree by quoted text or existing marks.
+//   - FindQuote, FindMark, MarkRange, and Unmark locate and edit ranges by
+//     quoted text or existing marks.
 //
 // pmdoc has no Postgres, HTTP, or ygo-server dependency; it imports only
 // crdt, goldmark, and the standard library. The Dispatch server composes it.
@@ -40,19 +40,17 @@
 //
 // # Regenerating fixtures
 //
-// testdata/fixtures.json is generated, not hand-written. To add a fixture,
-// drop a markdown file in testdata/corpus/ and regenerate:
+// testdata/fixtures.json is generated, not hand-written. To add a document
+// fixture, drop a markdown file in testdata/corpus/ and regenerate:
 //
-//	cd gen && bun install && bun run gen     # rewrite testdata/fixtures.json
-//	cd gen && bun run check                  # verify it's already up to date (CI)
+//	cd gen && bun install && bun run gen     # rewrite generated fixtures
+//	cd gen && bun run check                  # verify they are up to date (CI)
 //
-// gen/gen.ts parses each corpus file with the headless engine, encodes the
-// resulting ProseMirror doc as a Yjs update with y-prosemirror, and records
-// the markdown, the engine's pm_json, and the base64 Yjs update side by side.
-// Go tests decode those Yjs updates with this package's Read and compare
-// against pm_json, and decode this package's Update output with the
-// browser's y-prosemirror (via gen/decode.ts, invoked as a subprocess) to
-// compare the other direction.
+// gen/gen.ts parses corpus files with the headless engine, encodes their
+// ProseMirror docs as Yjs updates with y-prosemirror, and records markdown,
+// pm_json, and base64 updates side by side. Go tests decode Yjs updates with
+// Read, compare browser fixture JSON, and decode Update output with the
+// browser's y-prosemirror through gen/decode.ts.
 //
 // # Temporary: building @sjawhar/proof-editor from source
 //
@@ -61,9 +59,10 @@
 // yet. Until it is published, gen/package.json points at a local
 // "file:./proof-editor-dist" dependency that gen/prepare-dist.sh populates
 // before `bun install`: it copies an already-built checkout when
-// $PROOF_EDITOR_DIST is set (local dev), or clones sjawhar/proof-sdk at
-// branch main and runs `npm install && npm run build:lib` to produce one
-// (CI). gen/proof-editor-dist/ is gitignored — every environment rebuilds it.
+// $PROOF_EDITOR_DIST is set (local dev), or clones sjawhar/proof-sdk at the
+// pinned revision in gen/prepare-dist.sh and runs `npm install && npm run
+// build:lib` to produce one (CI). gen/proof-editor-dist/ is gitignored —
+// every environment rebuilds it.
 // Once the package is published, replace the file: dependency with
 // "@sjawhar/proof-editor": "^0.1.0", delete prepare-dist.sh and its CI step,
 // and drop this section.

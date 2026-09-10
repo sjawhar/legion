@@ -1,5 +1,42 @@
 [
   {
+    "name": "bare-url",
+    "markdown": "see https://example.com/x now\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "see "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/x",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://example.com/x"
+            },
+            {
+              "type": "text",
+              "text": " now"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQcBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEEc2VlIIYBBQRsaW5rLXsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20veCIsInRpdGxlIjpudWxsfYQBBhVodHRwczovL2V4YW1wbGUuY29tL3iGARsEbGluawRudWxshAEcBCBub3cA",
+    "rendered_by_milkdown": "see <https://example.com/x> now\n"
+  },
+  {
     "name": "blockquote",
     "markdown": "> A nested quote paragraph.\n>\n> - quoted item\n> - second item\n",
     "pm_json": {
@@ -71,6 +108,29 @@
     },
     "yjs_update_v1_b64": "ARQBAAcBC3Byb3NlbWlycm9yAwpibG9ja3F1b3RlBwABAAMJcGFyYWdyYXBoBwABAQYEAAECGUEgbmVzdGVkIHF1b3RlIHBhcmFncmFwaC6HAQEDC2J1bGxldF9saXN0BwABHAMJbGlzdF9pdGVtBwABHQMJcGFyYWdyYXBoBwABHgYEAAEfC3F1b3RlZCBpdGVtKAABHQVsYWJlbAF3A+KAoigAAR0IbGlzdFR5cGUBdwZidWxsZXQoAAEdBnNwcmVhZAF5hwEdAwlsaXN0X2l0ZW0HAAEuAwlwYXJhZ3JhcGgHAAEvBgQAATALc2Vjb25kIGl0ZW0oAAEuBWxhYmVsAXcD4oCiKAABLghsaXN0VHlwZQF3BmJ1bGxldCgAAS4Gc3ByZWFkAXkoAAEcBnNwcmVhZAF5AA==",
     "rendered_by_milkdown": "> A nested quote paragraph.\n>\n> * quoted item\n> * second item\n"
+  },
+  {
+    "name": "code-fence",
+    "markdown": "````markdown\n```\nexample\n```\n````\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": "markdown"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "```\nexample\n```"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQQBAAcBC3Byb3NlbWlycm9yAwpjb2RlX2Jsb2NrBwABAAYEAAEBD2BgYApleGFtcGxlCmBgYCgAAQAIbGFuZ3VhZ2UBdwhtYXJrZG93bgA=",
+    "rendered_by_milkdown": "````markdown\n```\nexample\n```\n````\n"
   },
   {
     "name": "code",
@@ -224,6 +284,84 @@
     },
     "yjs_update_v1_b64": "AQEBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgA",
     "rendered_by_milkdown": ""
+  },
+  {
+    "name": "escapes",
+    "markdown": "literal \\*\\*not bold\\*\\* and \\`not code\\` and \\[not link\\](x)\nTom &amp; Jerry and \\*not emphasis\\* and \\<tag\\> and \\| pipe\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "literal **not bold** and `not code` and [not link](x)\nTom & Jerry and *not emphasis* and <tag> and | pipe"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQFpbGl0ZXJhbCAqKm5vdCBib2xkKiogYW5kIGBub3QgY29kZWAgYW5kIFtub3QgbGlua10oeCkKVG9tICYgSmVycnkgYW5kICpub3QgZW1waGFzaXMqIGFuZCA8dGFnPiBhbmQgfCBwaXBlAA==",
+    "rendered_by_milkdown": "literal \\*\\*not bold\\*\\* and \\`not code\\` and \\[not link]\\(x)\nTom & Jerry and \\*not emphasis\\* and \\<tag> and | pipe\n"
+  },
+  {
+    "name": "explicit-url-space",
+    "markdown": "[https://example.com/a b](<https://example.com/a b>)\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/a b",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://example.com/a b"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQUBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgYAAQEEbGluay97ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL2EgYiIsInRpdGxlIjpudWxsfYQBAhdodHRwczovL2V4YW1wbGUuY29tL2EgYoYBGQRsaW5rBG51bGwA",
+    "rendered_by_milkdown": "[https://example.com/a b](<https://example.com/a b>)\n"
+  },
+  {
+    "name": "explicit-url-title",
+    "markdown": "[https://example.com/x](https://example.com/x \"title\")\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/x",
+                    "title": "title"
+                  }
+                }
+              ],
+              "text": "https://example.com/x"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQUBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgYAAQEEbGluazB7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL3giLCJ0aXRsZSI6InRpdGxlIn2EAQIVaHR0cHM6Ly9leGFtcGxlLmNvbS94hgEXBGxpbmsEbnVsbAA=",
+    "rendered_by_milkdown": "[https://example.com/x](https://example.com/x \"title\")\n"
   },
   {
     "name": "footnote",
@@ -420,6 +558,30 @@
     "rendered_by_milkdown": "Before <details>More details</details> after.\n"
   },
   {
+    "name": "image-delimiters",
+    "markdown": "![a\\]b](<https://example.com/a (b)> \"say \\\"hi\\\"\")\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.com/a (b)",
+                "alt": "a]b",
+                "title": "say \"hi\""
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQUBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEAAwVpbWFnZSgAAQEDc3JjAXcZaHR0cHM6Ly9leGFtcGxlLmNvbS9hIChiKSgAAQEDYWx0AXcDYV1iKAABAQV0aXRsZQF3CHNheSAiaGkiAA==",
+    "rendered_by_milkdown": "![a\\]b](<https://example.com/a (b)> \"say \\\"hi\\\"\")\n"
+  },
+  {
     "name": "image",
     "markdown": "![Fixture image](https://example.com/image.png \"Image title\")\n",
     "pm_json": {
@@ -442,6 +604,127 @@
     },
     "yjs_update_v1_b64": "AQUBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEAAwVpbWFnZSgAAQEDc3JjAXcdaHR0cHM6Ly9leGFtcGxlLmNvbS9pbWFnZS5wbmcoAAEBA2FsdAF3DUZpeHR1cmUgaW1hZ2UoAAEBBXRpdGxlAXcLSW1hZ2UgdGl0bGUA",
     "rendered_by_milkdown": "![Fixture image](https://example.com/image.png \"Image title\")\n"
+  },
+  {
+    "name": "inline-code-backticks",
+    "markdown": "Internal ``a ` b`` and edge `` `edge` ``.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Internal "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ],
+              "text": "a ` b"
+            },
+            {
+              "type": "text",
+              "text": " and edge "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ],
+              "text": "`edge`"
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQsBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEJSW50ZXJuYWwghgEKCmlubGluZUNvZGUCe32EAQsFYSBgIGKGARAKaW5saW5lQ29kZQRudWxshAERCiBhbmQgZWRnZSCGARsKaW5saW5lQ29kZQJ7fYQBHAZgZWRnZWCGASIKaW5saW5lQ29kZQRudWxshAEjAS4A",
+    "rendered_by_milkdown": "Internal ``a ` b`` and edge `` `edge` ``.\n"
+  },
+  {
+    "name": "inline-code-spaces",
+    "markdown": "around ` x ` and all-space `   `.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "around "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ],
+              "text": "x"
+            },
+            {
+              "type": "text",
+              "text": " and all-space "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ],
+              "text": "   "
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQsBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEHYXJvdW5kIIYBCAppbmxpbmVDb2RlAnt9hAEJAXiGAQoKaW5saW5lQ29kZQRudWxshAELDyBhbmQgYWxsLXNwYWNlIIYBGgppbmxpbmVDb2RlAnt9hAEbAyAgIIYBHgppbmxpbmVDb2RlBG51bGyEAR8BLgA=",
+    "rendered_by_milkdown": "around `x` and all-space `   `.\n"
+  },
+  {
+    "name": "link-delimiters",
+    "markdown": "[paren](<https://example.com/a(b)> \"say \\\"hi\\\"\")\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/a(b)",
+                    "title": "say \"hi\""
+                  }
+                }
+              ],
+              "text": "paren"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQUBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgYAAQEEbGluazh7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL2EoYikiLCJ0aXRsZSI6InNheSBcImhpXCIifYQBAgVwYXJlboYBBwRsaW5rBG51bGwA",
+    "rendered_by_milkdown": "[paren](https://example.com/a\\(b\\) \"say \\\"hi\\\"\")\n"
   },
   {
     "name": "links",
@@ -1476,6 +1759,82 @@
     },
     "yjs_update_v1_b64": "ARIBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEQQSBzZW50ZW5jZSB3aXRoIIYBEQxwcm9vZkNvbW1lbnQceyJpZCI6ImMxIiwiYnkiOiJ1c2VyOnNhbWkifYQBEhBhIGNvbW1lbnRlZCBzcGFuhgEiDHByb29mQ29tbWVudARudWxshAEjBSBhbmQghgEoC2Rpc3BhdGNoQXNrH3siaWQiOiJhMSIsImJ5Ijoic2Vzc2lvbjowMWEwIn2EASkLYW4gYXNrIHNwYW6GATQLZGlzcGF0Y2hBc2sEbnVsbIQBNQEuhwEAAwlwYXJhZ3JhcGgHAAE3BgQAATgJUHJvcG9zZWQghgFBD3Byb29mU3VnZ2VzdGlvbpkCeyJpZCI6InMxIiwia2luZCI6InJlcGxhY2UiLCJieSI6InNlc3Npb246MDFhMCIsImNvbnRlbnQiOm51bGwsInN0YXR1cyI6bnVsbCwiY3JlYXRlZEF0IjpudWxsLCJydW5JZCI6bnVsbCwiZm9jdXNBcmVhSWQiOm51bGwsImZvY3VzQXJlYU5hbWUiOm51bGwsImFnZW50SWQiOm51bGwsInByb3Bvc2FsSWQiOm51bGwsInByb3Zpc2lvbmFsIjpudWxsLCJvcmNoZXN0cmF0b3IiOm51bGwsImRlYnVnQXV0b0ZpeGVkUXVvdGVzIjpudWxsLCJkZWJ1Z0F1dG9GaXhlZFF1b3Rlc1JlYXNvbiI6bnVsbH2EAUILcmVwbGFjZW1lbnSGAU0PcHJvb2ZTdWdnZXN0aW9uBG51bGyEAU4GIGhlcmUuAA==",
     "rendered_by_milkdown": "A sentence with <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:sami\">a commented span</span> and <span data-dispatch=\"ask\" data-id=\"a1\" data-by=\"session:01a0\">an ask span</span>.\n\nProposed <span data-proof=\"suggestion\" data-id=\"s1\" data-by=\"session:01a0\" data-kind=\"replace\">replacement</span> here.\n"
+  },
+  {
+    "name": "nested-code",
+    "markdown": "> - item\n>\n>       code\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "blockquote",
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "code"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQ0BAAcBC3Byb3NlbWlycm9yAwpibG9ja3F1b3RlBwABAAMLYnVsbGV0X2xpc3QHAAEBAwlsaXN0X2l0ZW0HAAECAwlwYXJhZ3JhcGgHAAEDBgQAAQQEaXRlbYcBAwMKY29kZV9ibG9jawcAAQkGBAABCgRjb2RlKAABAgVsYWJlbAF3A+KAoigAAQIIbGlzdFR5cGUBdwZidWxsZXQoAAECBnNwcmVhZAF4KAABAQZzcHJlYWQBeQA=",
+    "rendered_by_milkdown": "> * item\n>\n>   ```\n>   code\n>   ```\n"
+  },
+  {
+    "name": "ordered-list-prefixes",
+    "markdown": "1\\. not a list\n2\\) also not a list\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "1. not a list\n2) also not a list"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEgMS4gbm90IGEgbGlzdAoyKSBhbHNvIG5vdCBhIGxpc3QA",
+    "rendered_by_milkdown": "1\\. not a list\n2\\) also not a list\n"
   },
   {
     "name": "paragraphs",

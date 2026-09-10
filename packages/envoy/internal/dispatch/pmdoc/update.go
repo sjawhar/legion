@@ -310,16 +310,12 @@ func updateYText(txn *crdt.Transaction, text *crdt.YXmlText, want []*Node) error
 		return err
 	}
 	var current string
-	staleAttributes := make(crdt.Attributes)
 	for _, operation := range operations {
 		value, ok := operation.Insert.(string)
 		if !ok {
 			return fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
 		}
 		current += value
-		for key := range operation.Attributes {
-			staleAttributes[key] = nil
-		}
 	}
 
 	var desired string
@@ -329,7 +325,6 @@ func updateYText(txn *crdt.Transaction, text *crdt.YXmlText, want []*Node) error
 		}
 		desired += node.Text
 	}
-	marksChanged := !equalYTextMarks(operations, want)
 	index, remove, insert := simpleDiff(current, desired)
 	if remove > 0 {
 		text.Delete(txn, index, remove)
@@ -337,39 +332,62 @@ func updateYText(txn *crdt.Transaction, text *crdt.YXmlText, want []*Node) error
 	if insert != "" {
 		text.Insert(txn, index, insert, nil)
 	}
-	if !marksChanged {
-		return nil
-	}
 
-	delta := make([]crdt.Delta, 0, len(want))
-	for _, node := range want {
-		attributes := make(crdt.Attributes, len(staleAttributes)+len(node.Marks))
-		for key := range staleAttributes {
-			attributes[key] = nil
-		}
-		for key, value := range marksToAttributes(node.Marks) {
-			attributes[key] = value
-		}
-		delta = append(delta, crdt.Delta{
-			Op:         crdt.DeltaOpRetain,
-			Retain:     len16(node.Text),
-			Attributes: attributes,
-		})
+	actual, err := yTextDeltaInTransaction(text)
+	if err != nil {
+		return err
 	}
-	text.ApplyDelta(txn, delta)
+	offset := 0
+	for _, node := range want {
+		length := len16(node.Text)
+		attributes, matches, err := textRangeMarks(actual, offset, length, node.Marks)
+		if err != nil {
+			return err
+		}
+		if !matches {
+			text.Format(txn, offset, length, formatAttributes(attributes, node.Marks))
+		}
+		offset += length
+	}
 	return nil
 }
 
-func equalYTextMarks(operations []crdt.Delta, nodes []*Node) bool {
-	if len(operations) != len(nodes) {
-		return false
-	}
-	for index, operation := range operations {
-		if operation.Op != crdt.DeltaOpInsert || !equalYMarks(operation.Attributes, nodes[index].Marks) {
-			return false
+func textRangeMarks(operations []crdt.Delta, from, length int, marks []Mark) (crdt.Attributes, bool, error) {
+	to := from + length
+	offset := 0
+	matches := true
+	attributes := make(crdt.Attributes)
+	for _, operation := range operations {
+		value, ok := operation.Insert.(string)
+		if !ok {
+			return nil, false, fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
 		}
+		end := offset + len16(value)
+		if from < end && offset < to {
+			if !equalYMarks(operation.Attributes, marks) {
+				matches = false
+			}
+			for key := range operation.Attributes {
+				attributes[key] = nil
+			}
+		}
+		offset = end
 	}
-	return true
+	if offset != to && offset < to {
+		return nil, false, fmt.Errorf("%w: Yjs text is shorter than target", ErrSchema)
+	}
+	return attributes, matches, nil
+}
+
+func formatAttributes(existing crdt.Attributes, marks []Mark) crdt.Attributes {
+	attributes := make(crdt.Attributes, len(existing)+len(marks))
+	for key := range existing {
+		attributes[key] = nil
+	}
+	for key, value := range marksToAttributes(marks) {
+		attributes[key] = value
+	}
+	return attributes
 }
 
 func marksToAttributes(marks []Mark) crdt.Attributes {

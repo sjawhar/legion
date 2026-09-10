@@ -71,3 +71,18 @@ func TestParsePreservesInlineHTMLAtom(t *testing.T) {
 		t.Fatalf("Parse(inline HTML) = %#v, want %#v", got, want)
 	}
 }
+
+func TestParsePreservesLiteralEscapesInsideCodeSpan(t *testing.T) {
+	got, err := Parse("`\\*literal\\* &amp;`\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
+		Type:  "text",
+		Text:  "\\*literal\\* &amp;",
+		Marks: []Mark{{Type: "inlineCode"}},
+	}}}}}
+	if !got.Equal(want) {
+		t.Fatalf("Parse(code span) = %#v, want %#v", got, want)
+	}
+}
