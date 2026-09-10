@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import { ApiError, api } from "../../api/client";
+import type { AskOption, AskUrgency } from "../../api/types";
 import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import {
@@ -35,6 +36,38 @@ export interface ComposerAnchor {
 }
 
 export type ComposerKind = "ask" | "comment" | "suggestion";
+
+interface AskOptionDraft {
+  description: string;
+  id: number;
+  label: string;
+}
+
+const askUrgencies = [
+  ["low", "Low"],
+  ["med", "Medium"],
+  ["high", "High"],
+  ["blocking", "Blocking"],
+] as const satisfies readonly (readonly [AskUrgency, string])[];
+
+let nextAskOptionId = 0;
+
+function emptyAskOption(): AskOptionDraft {
+  nextAskOptionId += 1;
+  return { description: "", id: nextAskOptionId, label: "" };
+}
+
+function submittedAskOptions(options: readonly AskOptionDraft[]): AskOption[] {
+  const submitted: AskOption[] = [];
+  for (const option of options) {
+    const label = option.label.trim();
+    const description = option.description.trim();
+    if (label !== "") {
+      submitted.push(description === "" ? { label } : { description, label });
+    }
+  }
+  return submitted;
+}
 
 interface ComposerProps {
   anchor: ComposerAnchor;
@@ -106,8 +139,16 @@ export function hasDraft(kind: ComposerKind, body: string, replacement: string):
  * field a given kind actually saves), this counts every field so a suggestion's optional
  * "Reason" alone still triggers the discard prompt even though it alone cannot be submitted.
  */
-export function hasUnsavedInput(body: string, replacement: string): boolean {
-  return body.trim().length > 0 || replacement.trim().length > 0;
+export function hasUnsavedInput(
+  body: string,
+  replacement: string,
+  options: readonly Pick<AskOptionDraft, "description" | "label">[] = []
+): boolean {
+  return (
+    body.trim().length > 0 ||
+    replacement.trim().length > 0 ||
+    options.some((option) => option.label.trim().length > 0 || option.description.trim().length > 0)
+  );
 }
 
 export function canSubmitComposer(
@@ -131,10 +172,15 @@ export function Composer({
   const queryClient = useQueryClient();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const replacementTextarea = useRef<HTMLTextAreaElement>(null);
+  const optionLabelRefs = useRef<Array<HTMLInputElement | null>>([]);
   const formRef = useRef<HTMLFormElement>(null);
-  const lastFocusedField = useRef<HTMLTextAreaElement | null>(null);
+  const lastFocusedField = useRef<HTMLElement | null>(null);
+  const focusAddedOption = useRef(false);
   const [body, setBody] = useState("");
   const [replacement, setReplacement] = useState("");
+  const [askOptions, setAskOptions] = useState<AskOptionDraft[]>(() => [emptyAskOption()]);
+  const [multiple, setMultiple] = useState(false);
+  const [urgency, setUrgency] = useState<AskUrgency>("med");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pendingUploads, setPendingUploads] = useState(0);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
@@ -143,6 +189,12 @@ export function Composer({
       textarea.current?.focus();
     }
   }, [autoFocus]);
+  useEffect(() => {
+    if (focusAddedOption.current) {
+      optionLabelRefs.current[askOptions.length - 1]?.focus();
+      focusAddedOption.current = false;
+    }
+  }, [askOptions.length]);
   // Attached to the form (not `document`) so a nested dialog — the reference picker, or the
   // phone bottom sheet this composer can sit inside — claims Escape first during the native
   // bubble phase; only when nothing closer intercepts does closing the composer itself run.
@@ -156,19 +208,18 @@ export function Composer({
         return;
       }
       event.stopPropagation();
-      if (!hasUnsavedInput(body, replacement) || confirmingDiscard) {
+      if (!hasUnsavedInput(body, replacement, askOptions) || confirmingDiscard) {
         onClose();
         return;
       }
+      const activeElement = document.activeElement;
       lastFocusedField.current =
-        document.activeElement === replacementTextarea.current
-          ? replacementTextarea.current
-          : textarea.current;
+        activeElement instanceof HTMLElement && form.contains(activeElement) ? activeElement : null;
       setConfirmingDiscard(true);
     };
     form.addEventListener("keydown", handleEscape);
     return () => form.removeEventListener("keydown", handleEscape);
-  }, [body, confirmingDiscard, onClose, replacement]);
+  }, [askOptions, body, confirmingDiscard, onClose, replacement]);
   const references = useMemo(() => composerReferences(body), [body]);
   const save = useMutation({
     mutationFn: async () => {
@@ -180,7 +231,13 @@ export function Composer({
         to: anchor.to,
       };
       if (kind === "ask") {
-        return api.createAsk(issueKey, { anchor: selection, question: body.trim() });
+        return api.createAsk(issueKey, {
+          anchor: selection,
+          multiple,
+          options: submittedAskOptions(askOptions),
+          question: body.trim(),
+          urgency,
+        });
       }
       return api.createComment(issueKey, {
         anchor: selection,
@@ -220,6 +277,29 @@ export function Composer({
     setBody((current) => appendReference(current, reference));
     setPickerOpen(false);
     textarea.current?.focus();
+  };
+  const addAskOption = () => {
+    focusAddedOption.current = true;
+    setAskOptions((current) => [...current, emptyAskOption()]);
+    setConfirmingDiscard(false);
+  };
+  const removeAskOption = (index: number) => {
+    setAskOptions((current) => current.filter((_option, currentIndex) => currentIndex !== index));
+    setConfirmingDiscard(false);
+  };
+  const updateAskOption = (index: number, field: "description" | "label", value: string) => {
+    setAskOptions((current) =>
+      current.map((option, currentIndex) =>
+        currentIndex === index ? { ...option, [field]: value } : option
+      )
+    );
+    setConfirmingDiscard(false);
+  };
+  const handleOptionLabelKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addAskOption();
+    }
   };
   const uploadFiles = (files: File[]) => {
     for (const file of files) {
@@ -325,6 +405,83 @@ export function Composer({
           value={body}
         />
       </label>
+      {kind === "ask" ? (
+        <>
+          <fieldset>
+            <legend className="text-sm font-medium text-slate-700">Urgency</legend>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {askUrgencies.map(([value, label]) => (
+                <button
+                  aria-pressed={urgency === value}
+                  className={`rounded-md px-2.5 py-1 text-sm font-medium ${
+                    urgency === value
+                      ? "bg-sky-600 text-white"
+                      : "border border-slate-300 bg-white text-slate-700 hover:border-sky-400"
+                  }`}
+                  key={value}
+                  onClick={() => setUrgency(value)}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+            <input
+              checked={multiple}
+              className="size-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+              onChange={(event) => setMultiple(event.target.checked)}
+              type="checkbox"
+            />
+            Allow multiple
+          </label>
+          <section aria-label="Options" className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium text-slate-700">Options</p>
+              <button
+                className="text-sm font-medium text-sky-700 hover:text-sky-900"
+                onClick={addAskOption}
+                type="button"
+              >
+                Add option
+              </button>
+            </div>
+            {askOptions.map((option, index) => (
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2" key={option.id}>
+                <div className="space-y-2">
+                  <input
+                    aria-label={`Option ${index + 1} label`}
+                    className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-sky-500"
+                    onChange={(event) => updateAskOption(index, "label", event.target.value)}
+                    onKeyDown={handleOptionLabelKeyDown}
+                    placeholder="Label"
+                    ref={(element) => {
+                      optionLabelRefs.current[index] = element;
+                    }}
+                    value={option.label}
+                  />
+                  <input
+                    aria-label={`Option ${index + 1} description`}
+                    className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-sky-500"
+                    onChange={(event) => updateAskOption(index, "description", event.target.value)}
+                    placeholder="Description (optional)"
+                    value={option.description}
+                  />
+                </div>
+                <button
+                  aria-label={`Remove option ${index + 1}`}
+                  className="self-start rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:border-rose-300 hover:text-rose-700"
+                  onClick={() => removeAskOption(index)}
+                  type="button"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </section>
+        </>
+      ) : null}
       <p className="text-xs text-slate-500">
         Paste or drop a file to add it as an artifact. Ctrl+K inserts a reference.
       </p>

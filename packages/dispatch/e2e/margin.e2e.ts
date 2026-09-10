@@ -291,3 +291,70 @@ test("margin anchors a whole-paragraph selection made in the rendered preview", 
     await alice.close();
   }
 });
+
+test("margin ask composer sends option choices that the inbox records as a selected answer", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "ASK", name: "Ask options" });
+  const issue = await createIssue({
+    project: "ASK",
+    spec: initialMarkdown,
+    title: "Choose a direction",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Spec" }).click();
+    await enterEditMode(page);
+    const editor = page.getByRole("textbox", { name: "Document editor" });
+    await selectEditorRange(editor, 10, 5);
+    await page.getByRole("button", { exact: true, name: "Ask" }).click();
+
+    const composer = page.getByRole("form", { name: "Ask composer" });
+    await composer.getByLabel("Question").fill("Which direction should we take?");
+    await composer.getByRole("button", { name: "High" }).click();
+    await composer.getByLabel("Allow multiple").check();
+    await composer.getByLabel("Option 1 label").fill("Ship");
+    await composer.getByLabel("Option 1 description").fill("Proceed this week");
+    await composer.getByRole("button", { name: "Add option" }).click();
+    await composer.getByLabel("Option 2 label").fill("Hold");
+    await page.screenshot({
+      path: testInfo.outputPath("ask-composer-options.png"),
+      fullPage: true,
+    });
+    await composer.getByRole("button", { exact: true, name: "Ask" }).click();
+
+    const createdCard = page
+      .getByRole("region", { name: "Issue board" })
+      .locator("[data-testid^=ask-]")
+      .filter({ hasText: "Which direction should we take?" });
+    await expect(createdCard).toBeVisible();
+    const askTestId = await createdCard.getAttribute("data-testid");
+    if (askTestId === null) {
+      throw new Error("The created ask has no test id.");
+    }
+    const askId = askTestId.slice("ask-".length);
+    await expect
+      .poll(() => getAsk(askId))
+      .toMatchObject({
+        multiple: true,
+        options: [{ description: "Proceed this week", label: "Ship" }, { label: "Hold" }],
+        urgency: "high",
+      });
+
+    await page.goto("/");
+    const inboxCard = page.getByTestId(askTestId);
+    await inboxCard.getByRole("checkbox", { name: "Ship" }).check();
+    await inboxCard.getByRole("button", { name: "Submit answer" }).click();
+    await expect
+      .poll(() => getAsk(askId))
+      .toMatchObject({
+        answer: { selected: ["Ship"], user: "alice" },
+        state: "answered",
+      });
+  } finally {
+    await alice.close();
+  }
+});

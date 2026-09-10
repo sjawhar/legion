@@ -44,3 +44,7 @@ test("hasUnsavedInput is false with every field blank", () => {
   expect(hasUnsavedInput("", "")).toBe(false);
   expect(hasUnsavedInput("   ", "  ")).toBe(false);
 });
+test("hasUnsavedInput counts typed option labels and descriptions", () => {
+  expect(hasUnsavedInput("", "", [{ description: "", label: "Ship" }])).toBe(true);
+  expect(hasUnsavedInput("", "", [{ description: "Explain why", label: "" }])).toBe(true);
+});
