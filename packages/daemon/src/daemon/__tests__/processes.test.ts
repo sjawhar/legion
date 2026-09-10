@@ -2928,11 +2928,22 @@ describe("ProcessManager", () => {
     };
     state.controllerLocator = { ...staleLocator };
     const sleepGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
     const commands: string[][] = [];
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
+      // Only the first armed deadline (for the stale locator this test is about) is under this
+      // test's control; the fresh controller `retireAndRespawnStuckController` spawns also arms
+      // its own deadline (see `ensureController`'s doc comment), which must stay pending here --
+      // otherwise, since `sleepGate` is already resolved by then, it would elapse immediately
+      // too and retire the fresh pane this test is asserting survived.
       sleep: async () => {
-        await sleepGate.promise;
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await sleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
       },
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
@@ -2950,7 +2961,15 @@ describe("ProcessManager", () => {
     await processes.ensureController();
     // The role never gets claimed -- the deadline elapses with nothing having changed.
     sleepGate.resolve();
-    await flushEventLoop();
+    // The respawn chain routes through real fs I/O (spawnController's own config write), which
+    // can take more than a fixed microtask/macrotask budget under load -- waits specifically for
+    // its terminal effect (the fresh window opening) rather than guessing a tick count.
+    await flushEventLoopUntil(
+      () =>
+        managedState.controllerLocator !== undefined &&
+        managedState.controllerLocator.tmuxWindowId !== staleLocator.tmuxWindowId,
+      20_000
+    );
 
     // The stuck pane was retired (no graceful shim response, so straight to kill-pane) and a
     // fresh one spawned in its place.
@@ -2965,6 +2984,268 @@ describe("ProcessManager", () => {
       tmuxPaneId: "%3",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
     });
+  });
+
+  it("dispose() cancels a pending controller-registration deadline so its stale expiry never retires or respawns", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+    };
+    state.controllerLocator = { ...locator };
+    const sleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@45 %4 76543\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.ensureController(); // arms the deadline
+    processes.dispose();
+    // The underlying wait may still be pending (a test's injected sleep has no real timer to
+    // cancel), but dispose() must have cleared the tracking `cancelControllerRegistrationDeadline`
+    // relies on, so this stale fire is recognized as such and does nothing.
+    sleepGate.resolve();
+    await flushEventLoop();
+
+    expect(commands.some((command) => command[1] === "kill-pane")).toBe(false);
+    expect(commands.some((command) => command[1] === "new-window")).toBe(false);
+    expect(managedState.controllerLocator).toEqual(locator);
+  });
+
+  it("arms a fresh registration deadline for a controller spawned from scratch, so one that itself never registers also gets retried", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    let sleepCalls = 0;
+    const firstSleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let windowCount = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      // Only the very first armed deadline (for the from-scratch spawn this test is about) is
+      // under this test's control; the *second* fresh spawn (once the first is retired) arms its
+      // own deadline too, which must stay pending so this test's own assertions see a stable
+      // result after exactly one retry cycle.
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await firstSleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@5${windowCount} %${windowCount} 8765${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // No locator at all: spawns fresh outright, then must arm a deadline for THIS spawn too --
+    // not merely for a controller that was already alive when observed.
+    await processes.ensureController();
+    const firstLocator = managedState.controllerLocator;
+    expect(firstLocator).toBeDefined();
+    expect(windowCount).toBe(1);
+
+    // The freshly-spawned controller never registers either -- its own armed deadline elapses.
+    firstSleepGate.resolve();
+    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+
+    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+      true
+    );
+    expect(windowCount).toBe(2);
+    expect(managedState.controllerLocator?.tmuxWindowId).not.toBe(firstLocator?.tmuxWindowId);
+  });
+
+  it("a stale registration-deadline expiry no-ops once a newer locator has replaced the one it observed", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const staleLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+    };
+    state.controllerLocator = { ...staleLocator };
+    const staleSleepGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    let panesAlive = true;
+    const commands: string[][] = [];
+    let windowCount = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      // Only the *first* armed wait (for `staleLocator`) is under this test's control; the fresh
+      // replacement spawned below arms its own separate wait, which must stay pending here -- a
+      // shared gate would resolve both simultaneously and make this test's own respawn
+      // indistinguishable from the stale callback wrongly acting a second time.
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await staleSleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-panes") {
+          return panesAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@6${windowCount} %${windowCount} 9876${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Arms the stale wait for `staleLocator`.
+    await processes.ensureController();
+    // The stale pane dies on its own, independent of the registration deadline: the next
+    // `ensureController` call observes this directly, cancels the stale wait, and spawns a
+    // fresh replacement (arming its own, separately-tracked wait for it).
+    panesAlive = false;
+    await processes.ensureController();
+    const freshLocator = managedState.controllerLocator;
+    expect(freshLocator).toBeDefined();
+    expect(freshLocator?.tmuxWindowId).not.toBe(staleLocator.tmuxWindowId);
+    panesAlive = true;
+
+    // The stale wait's own timer finally fires, late -- it must recognize itself as superseded
+    // and touch neither the fresh locator nor spawn yet another replacement.
+    staleSleepGate.resolve();
+    await flushEventLoop();
+
+    expect(windowCount).toBe(1);
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[1] === "kill-pane")
+    ).toHaveLength(0);
+    expect(managedState.controllerLocator).toEqual(freshLocator);
+  });
+
+  it("a role claim landing during the post-deadline liveness re-check wins over the stale-timeout decision, leaving the pane untouched", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+    };
+    state.controllerLocator = { ...locator };
+    const sleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let listPanesCalls = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-panes") {
+          listPanesCalls += 1;
+          // The 1st call is `ensureController`'s own initial liveness check (before the deadline
+          // is even armed); the 2nd is `retireAndRespawnStuckController`'s post-deadline
+          // re-check. A real `/controller/ready` lands exactly during that 2nd call's own await.
+          if (listPanesCalls === 2) {
+            managedState.roles[controllerToken("omp")] = {
+              role: "controller",
+              sessionId: "ses-controller",
+            };
+          }
+          return { stdout: "12345\n", exitCode: 0 };
+        }
+        if (command[1] === "new-window") return { stdout: "@70 %9 111111\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.ensureController();
+    sleepGate.resolve();
+    await flushEventLoop();
+
+    expect(listPanesCalls).toBeGreaterThanOrEqual(2);
+    expect(commands.some((command) => command[1] === "kill-pane")).toBe(false);
+    expect(commands.some((command) => command[1] === "new-window")).toBe(false);
+    expect(managedState.controllerLocator).toEqual(locator);
+  });
+
+  it("leaves the stale locator in place when the stop/kill attempt fails, instead of orphaning a still-live pane with no controller ever spawned onto it", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+    };
+    state.controllerLocator = { ...locator };
+    const sleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", stderr: "tmux: unable to kill pane", exitCode: 1 };
+        }
+        if (command[1] === "new-window") return { stdout: "@71 %10 222222\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.ensureController();
+    sleepGate.resolve();
+    await flushEventLoop();
+
+    // The kill-pane attempt ran and failed, but the locator survives exactly as it was -- never
+    // cleared, and no second controller spawned onto what may still be a live pane.
+    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+      true
+    );
+    expect(commands.some((command) => command[1] === "new-window")).toBe(false);
+    expect(managedState.controllerLocator).toEqual(locator);
   });
 
   it("spawns a replacement when a stale controller claim receives a delivery exception", async () => {
