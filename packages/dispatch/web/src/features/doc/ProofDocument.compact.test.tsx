@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import type { Artifact } from "../../api/types";
+import { MarginProvider } from "../margin/Margin";
 import { ProofDocument } from "./ProofDocument";
 import { DocumentRuntime } from "./runtime";
 
@@ -34,14 +35,16 @@ test("ProofDocument keeps transport active without cursor decorations in the com
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <DocumentRuntime.Provider value={runtime.runtime}>
-          <ProofDocument
-            artifact={artifact}
-            highlight={undefined}
-            isClosed={false}
-            issueKey="CORE-1"
-            onVersionChange={() => {}}
-            user={{ kind: "user", login: "alice" }}
-          />
+          <MarginProvider>
+            <ProofDocument
+              artifact={artifact}
+              highlight={undefined}
+              isClosed={false}
+              issueKey="CORE-1"
+              onVersionChange={() => {}}
+              user={{ kind: "user", login: "alice" }}
+            />
+          </MarginProvider>
         </DocumentRuntime.Provider>
       </QueryClientProvider>
     </MemoryRouter>

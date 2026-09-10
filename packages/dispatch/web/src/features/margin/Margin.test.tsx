@@ -873,6 +873,54 @@ test("composeForMark opens the composer with the mark anchor and resolves when i
   }
 });
 
+test("replying while a mark composer is pending rejects that mark instead of settling it on save", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [comment]);
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <MarkComposerProbe />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("First composer outcome").textContent).toBe(
+        "replaced by a newer composer"
+      )
+    );
+    const replyComposer = screen.getByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(replyComposer).getByLabelText("Comment"), {
+      target: { value: "reply" },
+    });
+    fireEvent.click(within(replyComposer).getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    expect(screen.getByLabelText("First composer outcome").textContent).toBe(
+      "replaced by a newer composer"
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
 test("composeForMark rejects when the composer is dismissed unsaved", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {

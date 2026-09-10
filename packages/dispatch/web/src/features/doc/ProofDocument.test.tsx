@@ -1,11 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
-import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
+import { MarginProvider, useMargin } from "../margin/Margin";
 import { colorForLogin } from "./connection";
 import { ProofDocument } from "./ProofDocument";
 import { DocumentRuntime } from "./runtime";
@@ -30,30 +32,57 @@ function createQueryClient(): QueryClient {
 
 function renderProofDocument({
   document = artifact,
+  fake = fakeDocumentRuntime({ text: "The live document" }),
   isClosed = false,
   queryClient = createQueryClient(),
   version,
 }: {
   document?: Artifact;
+  fake?: FakeDocumentRuntime;
   isClosed?: boolean;
   queryClient?: QueryClient;
   version?: number;
 } = {}) {
-  const fake = fakeDocumentRuntime({ text: "The live document" });
+  const margin = {
+    current: undefined as
+      | {
+          documentBridge:
+            | { focusMark(markId: string): void; setActiveMarks(markIds: string[]): void }
+            | undefined;
+          focusRequest: { markId: string; seq: number } | undefined;
+          markPositions: ReadonlyMap<string, number>;
+          pendingCompose:
+            | {
+                anchor: { artifact: string; mark_id: string; quote: string };
+                kind: "ask" | "comment" | "suggestion";
+                seq: number;
+              }
+            | undefined;
+          settleCompose(outcome: "saved" | "cancelled"): void;
+        }
+      | undefined,
+  };
   const onVersionChange = (_version: number | null) => {};
+  const MarginProbe = () => {
+    margin.current = useMargin();
+    return null;
+  };
   const renderDocument = (next: { isClosed?: boolean; version?: number } = {}) => (
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <DocumentRuntime.Provider value={fake.runtime}>
-          <ProofDocument
-            artifact={document}
-            highlight={undefined}
-            isClosed={next.isClosed ?? isClosed}
-            issueKey="CORE-1"
-            onVersionChange={onVersionChange}
-            user={{ kind: "user", login: "alice" }}
-            version={next.version ?? version}
-          />
+          <MarginProvider>
+            <MarginProbe />
+            <ProofDocument
+              artifact={document}
+              highlight={undefined}
+              isClosed={next.isClosed ?? isClosed}
+              issueKey="CORE-1"
+              onVersionChange={onVersionChange}
+              user={{ kind: "user", login: "alice" }}
+              version={next.version ?? version}
+            />
+          </MarginProvider>
         </DocumentRuntime.Provider>
       </QueryClientProvider>
     </MemoryRouter>
@@ -61,6 +90,7 @@ function renderProofDocument({
   const view = render(renderDocument());
   return {
     ...fake,
+    margin,
     rerender(next: { isClosed?: boolean; version?: number }) {
       view.rerender(renderDocument(next));
     },
@@ -245,5 +275,192 @@ test("ProofDocument links to the current version when a historic version is unav
   } finally {
     view.unmount();
     getArtifactVersion.mockRestore();
+  }
+});
+
+test("a selection-bar action opens the margin composer for the mark and settles the library promise", async () => {
+  const { editors, margin, sync, view } = renderProofDocument();
+
+  try {
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const onMarkAction = editors[0]?.options.onMarkAction;
+    if (onMarkAction === undefined) {
+      throw new Error("The editor did not receive an onMarkAction handler.");
+    }
+
+    let comment: Promise<void> | undefined;
+    act(() => {
+      comment = Promise.resolve(
+        onMarkAction({ from: 11, kind: "comment", markId: "m-9", quote: "brown", to: 16 })
+      );
+      void comment.catch(() => {});
+    });
+    if (comment === undefined) {
+      throw new Error("The comment action did not return a promise.");
+    }
+    expect(margin.current?.pendingCompose).toMatchObject({
+      anchor: { artifact: artifact.id, mark_id: "m-9", quote: "brown" },
+      kind: "comment",
+    });
+    act(() => margin.current?.settleCompose("saved"));
+    await expect(comment).resolves.toBeUndefined();
+
+    let suggest: Promise<void> | undefined;
+    act(() => {
+      suggest = Promise.resolve(
+        onMarkAction({ from: 11, kind: "suggest", markId: "m-10", quote: "brown", to: 16 })
+      );
+      void suggest.catch(() => {});
+    });
+    if (suggest === undefined) {
+      throw new Error("The suggestion action did not return a promise.");
+    }
+    expect(margin.current?.pendingCompose?.kind).toBe("suggestion");
+    act(() => margin.current?.settleCompose("saved"));
+    await expect(suggest).resolves.toBeUndefined();
+
+    let ask: Promise<void> | undefined;
+    act(() => {
+      ask = Promise.resolve(
+        onMarkAction({ from: 11, kind: "ask", markId: "m-11", quote: "brown", to: 16 })
+      );
+      void ask.catch(() => {});
+    });
+    if (ask === undefined) {
+      throw new Error("The ask action did not return a promise.");
+    }
+    expect(margin.current?.pendingCompose?.kind).toBe("ask");
+    act(() => margin.current?.settleCompose("cancelled"));
+    await expect(ask).rejects.toThrow("composer closed");
+
+    let unsupported: unknown;
+    try {
+      const outcome = onMarkAction({ kind: "resolve", markId: "m-9" });
+      if (outcome instanceof Promise) {
+        void outcome.catch(() => {});
+      }
+    } catch (error) {
+      unsupported = error;
+    }
+    expect(unsupported).toEqual(
+      new Error("Dispatch renders mark threads in the margin; popover action resolve cannot fire")
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a highlight click focuses its margin item and the margin drives the editor", async () => {
+  const { editors, margin, sync, view } = renderProofDocument();
+
+  try {
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const onMarkClick = editors[0]?.options.onMarkClick;
+    if (onMarkClick === undefined) {
+      throw new Error("The editor did not receive an onMarkClick handler.");
+    }
+    const span = document.createElement("span");
+    span.dataset.id = "m-9";
+    editors[0]?.root.replaceChildren(span);
+
+    act(() => onMarkClick("m-9"));
+    expect(margin.current?.focusRequest?.markId).toBe("m-9");
+
+    act(() => margin.current?.documentBridge?.focusMark("m-9"));
+    expect(editors[0]?.focused).toEqual(["m-9"]);
+
+    act(() => margin.current?.documentBridge?.setActiveMarks(["m-9"]));
+    expect(span.classList.contains("dispatch-mark-active")).toBe(true);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the marks projection reaches the editor on sync and on every change", async () => {
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  const projected: { metadata: object; options: { hydrateAnchors?: boolean } | undefined }[] = [];
+  const createEditor = fake.runtime.createEditor;
+  fake.runtime.createEditor = async (root, options) => {
+    const handle = await createEditor(root, options);
+    const applyRemoteMarks = handle.applyRemoteMarks.bind(handle);
+    handle.applyRemoteMarks = (metadata, applyOptions) => {
+      projected.push({ metadata, options: applyOptions });
+      applyRemoteMarks(metadata, applyOptions);
+    };
+    return handle;
+  };
+  const { connections, editors, sync, view } = renderProofDocument({ fake });
+  const storedMark = {
+    by: "user:alice",
+    kind: "comment",
+    replies: [],
+    resolved: false,
+    text: "why?",
+  };
+
+  try {
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    act(() => connections[0]?.doc.getMap("marks").set("c-1", storedMark));
+    await waitFor(() =>
+      expect(projected.at(-1)).toEqual({
+        metadata: { "c-1": storedMark },
+        options: { hydrateAnchors: false },
+      })
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("mark positions are published to the margin after document changes", async () => {
+  const schema = new Schema({
+    marks: {
+      dispatchAsk: { attrs: { by: {}, id: {} } },
+      proofComment: { attrs: { by: {}, id: {} } },
+    },
+    nodes: {
+      doc: { content: "paragraph+" },
+      paragraph: { content: "inline*", group: "block" },
+      text: { group: "inline" },
+    },
+  });
+  const comment = schema.marks.proofComment.create({ by: "alice", id: "c-1" });
+  const ask = schema.marks.dispatchAsk.create({ by: "bob", id: "a-1" });
+  const initialDocument = schema.node("doc", undefined, [
+    schema.node("paragraph", undefined, [schema.text("The "), schema.text("quick", [comment])]),
+  ]);
+  const changedDocument = schema.node("doc", undefined, [
+    schema.node("paragraph", undefined, [schema.text("The "), schema.text("quick", [ask])]),
+  ]);
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  let editorState: { doc: ProseMirrorNode } | undefined;
+  const createEditor = fake.runtime.createEditor;
+  fake.runtime.createEditor = async (root, options) => {
+    const handle = await createEditor(root, options);
+    editorState = handle.view.state as unknown as { doc: ProseMirrorNode };
+    editorState.doc = initialDocument;
+    return handle;
+  };
+  const { connections, editors, margin, sync, view } = renderProofDocument({ fake });
+
+  try {
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    await waitFor(() => expect(margin.current?.markPositions.get("c-1")).toBe(5));
+
+    if (editorState === undefined) {
+      throw new Error("The editor state was not captured.");
+    }
+    editorState.doc = changedDocument;
+    act(() => connections[0]?.doc.getXmlFragment("prosemirror").delete(0, 1));
+    await waitFor(() => {
+      expect(margin.current?.markPositions.get("c-1")).toBeUndefined();
+      expect(margin.current?.markPositions.get("a-1")).toBe(5);
+    });
+  } finally {
+    view.unmount();
   }
 });

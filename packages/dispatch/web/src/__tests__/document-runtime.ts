@@ -29,13 +29,15 @@ interface FakeConnection extends DocumentConnection {
   destroyed: boolean;
 }
 
-export function fakeDocumentRuntime(seed: { text?: string } = {}): {
+export interface FakeDocumentRuntime {
   connections: FakeConnection[];
   editors: FakeEditor[];
   runtime: DocumentRuntimeValue;
   status(state: ConnectionState): void;
   sync(): void;
-} {
+}
+
+export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentRuntime {
   const callbacks: ConnectionCallbacks[] = [];
   const connections: FakeConnection[] = [];
   const editors: FakeEditor[] = [];

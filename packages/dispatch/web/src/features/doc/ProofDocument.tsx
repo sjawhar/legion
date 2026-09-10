@@ -4,10 +4,12 @@ import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
+import { useMargin } from "../margin/Margin";
 import { buildIssuePath } from "../refs/routes";
 import { type ConnectionState, colorForLogin } from "./connection";
-import type { EditorHandle } from "./editor";
+import type { EditorHandle, StoredMark } from "./editor";
 import type { Highlight } from "./highlight";
+import { composerKindFor, markPositions, setActiveMarkClass } from "./marks";
 import { DocumentRuntime } from "./runtime";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
@@ -42,6 +44,15 @@ export function ProofDocument({
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [showDiff, setShowDiff] = useState(false);
   const { connect, createEditor } = useContext(DocumentRuntime);
+  const { composeForMark, focusItemForMark, registerDocument, setMarkPositions } = useMargin();
+  const composeForMarkRef = useRef(composeForMark);
+  const focusItemForMarkRef = useRef(focusItemForMark);
+  const registerDocumentRef = useRef(registerDocument);
+  const setMarkPositionsRef = useRef(setMarkPositions);
+  composeForMarkRef.current = composeForMark;
+  focusItemForMarkRef.current = focusItemForMark;
+  registerDocumentRef.current = registerDocument;
+  setMarkPositionsRef.current = setMarkPositions;
   const queryClient = useQueryClient();
   const artifactQuery = useQuery({
     queryKey: ["artifact", artifact.id],
@@ -90,6 +101,7 @@ export function ProofDocument({
     let mounted = true;
     let synced = false;
     let editor: EditorHandle | undefined;
+    let disposeEditorBindings: (() => void) | undefined;
     const inspectionWindow = window as Window & {
       __dispatchDocument?: { editor: EditorHandle; view: EditorHandle["view"] };
     };
@@ -110,8 +122,22 @@ export function ProofDocument({
               ? null
               : document.awareness,
           heatMapMode: "hidden",
-          onMarkAction: () => Promise.reject(new Error("mark actions are wired in Task 5")),
-          onMarkClick: () => {},
+          onMarkAction: (action) => {
+            switch (action.kind) {
+              case "comment":
+              case "suggest":
+              case "ask":
+                return composeForMarkRef.current({
+                  anchor: { artifact: artifact.id, mark_id: action.markId, quote: action.quote },
+                  kind: composerKindFor(action.kind),
+                });
+              default:
+                throw new Error(
+                  `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
+                );
+            }
+          },
+          onMarkClick: (markId) => focusItemForMarkRef.current(markId),
           readOnly: isClosedRef.current,
           user: {
             color: colorForLogin(userRef.current.login),
@@ -128,12 +154,41 @@ export function ProofDocument({
           if (import.meta.env.VITE_DISPATCH_E2E === "1") {
             inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
           }
+          registerDocumentRef.current({
+            focusMark: (markId) => handle.focusMark(markId),
+            setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
+          });
+          const marks = document.doc.getMap("marks");
+          const project = () => {
+            handle.applyRemoteMarks(marks.toJSON() as Record<string, StoredMark>, {
+              hydrateAnchors: false,
+            });
+          };
+          project();
+          marks.observe(project);
+          const fragment = document.doc.getXmlFragment("prosemirror");
+          let frame = 0;
+          const publishPositions = () => {
+            cancelAnimationFrame(frame);
+            frame = requestAnimationFrame(() => {
+              setMarkPositionsRef.current(markPositions(handle.view.state.doc));
+            });
+          };
+          publishPositions();
+          fragment.observeDeep(publishPositions);
+          disposeEditorBindings = () => {
+            cancelAnimationFrame(frame);
+            marks.unobserve(project);
+            fragment.unobserveDeep(publishPositions);
+            registerDocumentRef.current(undefined);
+          };
         });
       },
     });
 
     return () => {
       mounted = false;
+      disposeEditorBindings?.();
       editor?.destroy();
       document.destroy();
       if (editorRef.current === editor) {

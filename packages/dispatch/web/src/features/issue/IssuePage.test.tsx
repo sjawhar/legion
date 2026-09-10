@@ -7,6 +7,7 @@ import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api, type ListEventsOptions } from "../../api/client";
 import type { Ask, IssueDetails } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
+import { MarginProvider } from "../margin/Margin";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
@@ -92,11 +93,13 @@ function renderIssuePage(path = "/issues/CORE-1", navigateTo?: string, documentT
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <DocumentRuntime.Provider value={runtime.runtime}>
-          <CurrentRoute />
-          {navigateTo === undefined ? null : <Link to={navigateTo}>Navigate to test route</Link>}
-          <Routes>
-            <Route path="/issues/:key/*" element={<IssuePage />} />
-          </Routes>
+          <MarginProvider>
+            <CurrentRoute />
+            {navigateTo === undefined ? null : <Link to={navigateTo}>Navigate to test route</Link>}
+            <Routes>
+              <Route path="/issues/:key/*" element={<IssuePage />} />
+            </Routes>
+          </MarginProvider>
         </DocumentRuntime.Provider>
       </QueryClientProvider>
     </MemoryRouter>
@@ -127,9 +130,11 @@ test("IssuePage reads newest events when looking for active sessions", async () 
     const view = render(
       <MemoryRouter initialEntries={["/issues/CORE-1/log"]}>
         <QueryClientProvider client={queryClient}>
-          <Routes>
-            <Route path="/issues/:key/*" element={<IssuePage />} />
-          </Routes>
+          <MarginProvider>
+            <Routes>
+              <Route path="/issues/:key/*" element={<IssuePage />} />
+            </Routes>
+          </MarginProvider>
         </QueryClientProvider>
       </MemoryRouter>
     );
@@ -361,10 +366,12 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
     const view = render(
       <MemoryRouter initialEntries={["/issues/CORE-1"]}>
         <QueryClientProvider client={queryClient}>
-          <Link to="/issues/CORE-2">Go to CORE-2</Link>
-          <Routes>
-            <Route path="/issues/:key/*" element={<IssuePage />} />
-          </Routes>
+          <MarginProvider>
+            <Link to="/issues/CORE-2">Go to CORE-2</Link>
+            <Routes>
+              <Route path="/issues/:key/*" element={<IssuePage />} />
+            </Routes>
+          </MarginProvider>
         </QueryClientProvider>
       </MemoryRouter>
     );

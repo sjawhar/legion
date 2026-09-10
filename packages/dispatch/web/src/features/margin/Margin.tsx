@@ -48,6 +48,7 @@ interface MarginContextValue {
   markPositions: ReadonlyMap<string, number>;
   pendingCompose: (MarkComposeRequest & { seq: number }) | undefined;
   registerDocument(bridge: DocumentBridge | undefined): void;
+  replaceCompose(): void;
   selectItem(id: string): void;
   selectedItemId: string | undefined;
   setHoveredItemId(id: string | undefined): void;
@@ -113,6 +114,7 @@ const MarginContext = createContext<MarginContextValue>({
   markPositions: new Map(),
   pendingCompose: undefined,
   registerDocument: unavailableMargin,
+  replaceCompose: unavailableMargin,
   selectItem: unavailableMargin,
   selectedItemId: undefined,
   setHoveredItemId: unavailableMargin,
@@ -157,6 +159,12 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     }
     pending.reject(new Error("composer closed"));
   }, []);
+  const replaceCompose = useCallback(() => {
+    const pending = composePromise.current;
+    composePromise.current = undefined;
+    setPendingCompose(undefined);
+    pending?.reject(new Error("replaced by a newer composer"));
+  }, []);
   const focusItemForMark = useCallback((markId: string) => {
     sequence.current += 1;
     setFocusRequest({ markId, seq: sequence.current });
@@ -174,6 +182,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       markPositions,
       pendingCompose,
       registerDocument,
+      replaceCompose,
       selectItem: setSelectedItemId,
       selectedItemId,
       setHoveredItemId,
@@ -189,6 +198,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       markPositions,
       pendingCompose,
       registerDocument,
+      replaceCompose,
       selectedItemId,
       settleCompose,
     ]
@@ -212,6 +222,7 @@ function useMarginSheet(): MarginSheetModel {
     selectedItemId,
     setHoveredItemId,
     settleCompose,
+    replaceCompose,
   } = useMargin();
   const { pathname } = useLocation();
   const route = parseIssuePath(pathname);
@@ -268,9 +279,10 @@ function useMarginSheet(): MarginSheetModel {
   }, [settleCompose]);
   const openComposer = useCallback(
     (kind: ComposerKind, anchor: ComposerAnchor | undefined, replyTo?: string) => {
+      replaceCompose();
       setComposer({ anchor, kind, replyTo });
     },
-    []
+    [replaceCompose]
   );
 
   useEffect(() => {
