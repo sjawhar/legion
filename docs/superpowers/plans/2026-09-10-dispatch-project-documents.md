@@ -63,7 +63,7 @@ Merge order: **#881 → Task 1 (PR A) → Tasks 2–5 (PR B, server) → #882 �
 5. **Closure query**: seeds are `refs` rows with `to_kind = 'artifact'` whose source is one of the issue's asks, comments, messages, or artifacts; each step follows `refs.from_kind = 'artifact'` rows whose `from_id` is a member artifact's id (members join `artifacts` on `ref_key`); `UNION`; the recursive term stops at `depth < 9`. Members = rows with `depth ≤ 8`, one per `ref_key` (min depth; ties by `via_kind, via_id`); the issue's own artifacts and targets with no `artifacts` row are excluded. `truncated` = after the one-row-per-`ref_key` reduction, any row still has depth 9 (a target reachable only beyond the cut).
 6. **`via`** = `{ kind: "ask" | "comment" | "message" | "artifact", id }`: the item (depth 1) or artifact (depth ≥ 2) through which the member was first reached.
 7. **Owner routes on a linked artifact** (`GET/POST /artifacts/{id}/asks|comments`, `GET /artifacts/{id}/events`) → 400 `ARTIFACT_LINKED` naming the issue (`use /api/v1/issues/CORE-1/...`); never an empty list.
-8. **`refs.Replace`** lives in the new package `internal/dispatch/refs`; `text.Extract`/`text.Ref` stay in `text/refs.go` (PR 3 deletes other `text/` files, not this one). `Replace` stores every Dispatch target kind and **skips `url`** (external links are not graph edges; nothing reads `to_kind = 'url'` today — `api/refs.go` stored them, `docs.indexDocumentReferences` skipped them; the one writer skips).
+8. **`refs.Replace`** lives in the new package `internal/dispatch/refs`; `text.Extract`/`text.Ref` stay in `text/refs.go`. `Replace` stores every Dispatch target kind and **skips `url`** (external links are not graph edges; nothing reads `to_kind = 'url'` today); the one writer skips.
 9. **Document item references**: `dispatch://<PROJECT>/artifact/<slug>[@vN]` ↔ `/projects/<PROJECT>/documents/<slug>[?version=N]`; `dispatch://<PROJECT>/artifact/<slug>/ask/<id>` ↔ `…?ask=<id>`; `/comment/<id>` ↔ `…?comment=<id>`. A bare `dispatch://CORE` is not a reference (no `project` ref kind). `https://<server>/projects/CORE/documents/<slug>` parses like the `dispatch://` form.
 10. **`Event.project`** is derived by joining `issues`/`artifacts` at read time (`readEventRows`, SSE replay, outbox `scanBatch`) and set by `Append` from the owner lock query; `events` gains no `project_key` column (schema fidelity to the spec).
 11. **Document event routing**: the outbox publishes a document event to its document topic only — no issue-route copy (there is no issue) and no ask-author agent-topic copy (spec: "`notify` on a document event routes only to that topic's subscribers"). The asking session is subscribed to the document topic by its own tool result.
@@ -76,7 +76,10 @@ Merge order: **#881 → Task 1 (PR A) → Tasks 2–5 (PR B, server) → #882 �
 18. **TOON rendering** of a document event (`envoy-client/src/delivery.ts`): the `dispatch` block carries `document: "<PROJECT>/<slug>"` (from the topic's third and fourth segments) instead of `issue_key`; the non-notify skip applies to every `notifications.dispatch.` topic.
 19. **`dispatch_read({ project, artifact })`** returns a document summary: name, `dispatch://<PROJECT>/artifact/<slug>`, version count, open asks, last 10 events from `GET /artifacts/{id}/events`.
 20. **Tool `anchor` on a document**: `anchor.artifact` defaults to the tool's `artifact`; when both are given and differ → tool error `anchor.artifact must be the document itself`.
-21. **Migration preflight** is one `DO $$ … $$` block: first malformed `refs.to_id` (`to_kind = 'artifact'` and `to_id !~ '^[A-Z][A-Z0-9]{1,9}(-[0-9]+)?/.+$'`) → `raise exception` naming `(from_kind, from_id, to_id)`; first artifact whose issue has no row → `raise exception` naming the artifact id. Both are inside the migration's transaction, so nothing is recorded on failure.
+21. **Migration preflight** is one `DO $$ … $$` block: malformed derived `refs.to_id` artifact
+    targets are deleted with a `raise notice` count because the next source write re-derives them
+    under the parser grammar; an artifact whose issue has no row still raises an exception, so
+    nothing is recorded on failure.
 22. **`requireOpenOwner(ctx, tx, owner)`** replaces every `requireOpenIssue(ctx, tx, key)` call in collaboration handlers: linked → lock the issue row and reject closed issues (409 `ISSUE_CLOSED`); unlinked → `select 1 from artifacts where id = $1 and issue_key is null for update` (404 `ARTIFACT_NOT_FOUND` when absent). `requireOpenIssue` remains for issue-only handlers (`patchIssue` keeps its own lock).
 23. **Task 1 keeps a `primary` field** in the JSON and multipart upload decoders solely to reject it with 400 `ARTIFACT_INPUT` "primary is fixed at issue creation" (the spec's error row); without it `DisallowUnknownFields` would answer `INVALID_JSON`, which tells an agent nothing.
 24. **Routes naming in the SPA**: `parseIssuePath`/`buildIssuePath` stay issue-only (their ~20 callers in #881/#882/PR 3 files are untouched); `parseProjectPath`/`buildProjectPath` are the project family; `parseDispatchReference`/`buildDispatchReference` handle both. `DispatchRoute` is the union of `IssueRoute` and `ProjectRoute`.
@@ -298,15 +301,14 @@ func TestMigrate0009BackfillsProjectAndRefKeyFrom0007(t *testing.T) {
 	//  schema_migrations has 9; Migrate() again: nil error and the same applied_at for 9.
 }
 
-func TestMigrate0009FailsBootOnMalformedArtifactReference(t *testing.T) {
-	// migrateThrough(7); seedGraphAt0007; insert refs ('comment', <commentID>, 'artifact', 'not-a-ref-key');
-	// err := Migrate(): err != nil, strings.Contains(err.Error(), "not-a-ref-key") && strings.Contains(err.Error(), commentID);
-	// schema_migrations lacks 9; information_schema.columns has no artifacts.project_key.
+func TestMigrate0009DropsMalformedArtifactReferences(t *testing.T) {
+	// migrateThrough(7); seedGraphAt0007; insert a malformed derived artifact reference;
+	// Migrate() succeeds, deletes the malformed row, and records migration 9.
 }
 // TestMigrateCreatesEmptySchemaAndIsIdempotent: expectedConstraints += artifacts_project_key_fkey, artifacts_ref_key_key,
 // artifacts_primary_has_issue, asks_artifact_id_fkey, asks_one_owner, comments_artifact_id_fkey, comments_one_owner,
 // events_artifact_id_fkey, events_one_owner, events_artifact_id_seq_key; expectedIndexes += asks_open_artifact;
-// assert artifacts_issue_key_slug_key is ABSENT (new negative helper assertDatabaseObjectsAbsent); migrations count 7 → 8.
+// assert artifacts_issue_key_slug_key is ABSENT (new negative helper assertDatabaseObjectsAbsent); migration count derives from embedded files.
 
 // events/broker_test.go
 func TestAppendSequencesArtifactOwnedEvents(t *testing.T) {
@@ -851,10 +853,10 @@ No code. Runs after PR E merges and the server is deployed (or against the dev s
 | 6 | `TestIssueReferencesClosureDepthViaAndETag`, `TestClosureFollowsArtifactLinksToDepthEightAndReportsTruncation` | `curl -H 'If-None-Match: …' /api/v1/issues/CORE-1/references` | Go API + refs tests | `refs` package tests double as the closure oracle |
 | 7 | `project.e2e.ts` "an issue's Artifacts tab lists its reference closure…"; `ArtifactsTab.test.tsx` | `/issues/CORE-1/artifacts` → click → document page | Playwright | `e2e/api.ts` `getIssueReferences` |
 | 8 | `dispatch-execute.test.ts` project cases + `document-roundtrip.sh` (Task 9) | a real OMP session calling `dispatch_artifact`/`dispatch_doc_read`/`dispatch_doc_edit`; a NATS subscriber | Bun tests with mocked HTTP; the live script over tmux + OMP + `natstail` | **`cmd/natstail`** (Task 5) and **`document-roundtrip.sh`** (Task 6) — no NATS tail existed on this machine (`which nats` → none) |
-| 9 | `TestMigrate0009BackfillsProjectAndRefKeyFrom0007`, `TestMigrate0009FailsBootOnMalformedArtifactReference` | booting `go run ./cmd/dispatch` against an existing database | Go store tests on a database migrated through 0007 | `migrateThrough` test helper (store package) |
+| 9 | `TestMigrate0009BackfillsProjectAndRefKeyFrom0007`, `TestMigrate0009DropsMalformedArtifactReferences` | booting `go run ./cmd/dispatch` against an existing database | Go store tests on a database migrated through 0007 | `migrateThrough` test helper (store package) |
 | 10 | `phone.e2e.ts` (project page + document page) + Task 9 Step 3 | a phone on the tailnet | Playwright `iphone` project; the manual check AGENTS.md requires | — |
 
-Restricted real paths and their cheapest substitutes: production boot of the migration → a local `go run ./cmd/dispatch` against a `pg_dump`/restore of production (the migration's preflight names any bad row before anything is written); the deployed NATS → the dev stack with `ENVOY_NATS_URL` and `natstail`; a real GitHub login → header identity exactly as `run-server.sh` configures it (never a minted cookie).
+Restricted real paths and their cheapest substitutes: production boot of the migration → a local `go run ./cmd/dispatch` against a `pg_dump`/restore of production (migration 0009 removes malformed derived artifact refs with a notice before applying); the deployed NATS → the dev stack with `ENVOY_NATS_URL` and `natstail`; a real GitHub login → header identity exactly as `run-server.sh` configures it (never a minted cookie).
 
 Prose deliverables (READMEs, AGENTS.md, `skills/dispatch/SKILL.md`) are verified by reading each changed sentence against the running behaviour it describes (a `curl`, a tool call, a page), never by grepping for the new wording.
 

@@ -42,7 +42,7 @@ Borrowed: Linear's sidebar (Inbox, favorites, projects) and project page (issues
 | `artifacts.ref_key text generated always as (coalesce(issue_key, project_key) \|\| '/' \|\| slug) stored`, `unique (ref_key)` | one identity for `refs.to_id` and slug uniqueness: per issue when linked (`CORE-1/spec`), per project when not (`CORE/design-notes`); project keys have no `-`, so the two never collide |
 | `artifacts.last_seq integer not null default 0`; `check (not is_primary or issue_key is not null)` | an unlinked document owns its own event sequence and is never primary; `is_primary` is written once by `api/issues.go` issue creation; `POST .../primary` and the `primary` upload flag leave in the make-primary removal PR that follows #881 |
 | `asks`, `comments`, `events`: `issue_key` nullable, `artifact_id uuid references artifacts(id)`, `check ((issue_key is null) <> (artifact_id is null))` | exactly one owner; `events` gains `unique (artifact_id, seq)`; `asks_open_artifact` partial index; `messages`, `user_issue_state` unchanged |
-| Preflight in the same transaction | `raise exception` naming any `refs` artifact target not matching `^[A-Z][A-Z0-9]{1,9}(-[0-9]+)?/.+$`; the migration is skipped when `schema_migrations` has version 9 |
+| Preflight in the same transaction | malformed derived artifact targets are deleted with a notice count and re-derived from source text on its next write; an artifact without an owning issue still raises an exception, and migration 9 is skipped when `schema_migrations` already records it |
 
 | API (`api/server.go` routes) | Behaviour |
 | --- | --- |
@@ -52,7 +52,7 @@ Borrowed: Linear's sidebar (Inbox, favorites, projects) and project page (issues
 | `GET /api/v1/artifacts/{id}/references` | `outgoing` (this artifact's `refs`) and `referenced_by` (`refs_to`, now including artifact sources) |
 | `GET /api/v1/inbox` | `left join issues`, `left join artifacts`; a document ask carries `document: { project, slug, name }` instead of `issue` |
 | `requireOpenIssue`, `docs/service.go:299-303, 517-521` | `left join issues`; an artifact without an issue is always open |
-| `text/refs.go`, `api/refs.go`, `docs/service.go` reference indexing | `dispatch://<PROJECT>/artifact/<slug>[/ask/<id>|/comment/<id>]` parses when the first segment matches the project-key pattern; `to_id` is the `ref_key`; one `refs.Replace` writer replaces the two current ones |
+| `text/refs.go`, `api/references.go`, `docs/service.go` reference indexing | `dispatch://<PROJECT>/artifact/<slug>[/ask/<id>|/comment/<id>]` parses when the first segment matches the project-key pattern and the artifact slug is lowercase hyphenated; `to_id` is the `ref_key`; one `refs.Replace` writer owns index replacement |
 
 | Events and agents | Behaviour |
 | --- | --- |

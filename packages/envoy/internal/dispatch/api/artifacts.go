@@ -499,10 +499,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	eventOwner := documentOwner(artifact.ID)
-	if artifact.IssueKey != nil {
-		eventOwner = issueOwner(*artifact.IssueKey)
-	}
+	eventOwner := ownerForArtifact(artifact)
 	if err := s.requireOpenOwner(r.Context(), tx, eventOwner); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -578,10 +575,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	eventOwner := documentOwner(artifact.ID)
-	if artifact.IssueKey != nil {
-		eventOwner = issueOwner(*artifact.IssueKey)
-	}
+	eventOwner := ownerForArtifact(artifact)
 	if err := s.requireOpenOwner(r.Context(), tx, eventOwner); err != nil {
 		s.writeHandlerError(w, err)
 		return

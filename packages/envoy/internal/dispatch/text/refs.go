@@ -11,6 +11,7 @@ var referencePattern = regexp.MustCompile(`dispatch://[^\s<>"']+|https?://[^\s<>
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$`)
 var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
 var artifactSlugPrefixPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*`)
+var artifactSlugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // Ref is a parsed Dispatch target. ID is the issue key for issue references,
 // an artifact slug for artifacts, and the item identifier for asks and comments.
@@ -133,8 +134,11 @@ func parseArtifactSlug(value string) (string, bool) {
 			return "", false
 		}
 	}
+	if strings.Contains(slug, "/") {
+		return "", false
+	}
 	slug = artifactSlugPrefixPattern.FindString(slug)
-	if slug == "" {
+	if !artifactSlugPattern.MatchString(slug) {
 		return "", false
 	}
 	return slug, true
@@ -175,7 +179,7 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 		}
 		if len(parts) == 4 && parts[2] == "artifacts" {
 			slug, err := url.PathUnescape(parts[3])
-			if err == nil && slug != "" {
+			if err == nil && artifactSlugPattern.MatchString(slug) {
 				if rawVersion := value.Query().Get("v"); rawVersion != "" {
 					number, err := strconv.Atoi(rawVersion)
 					if err != nil || number < 1 {
@@ -201,7 +205,7 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 		return Ref{}, false
 	}
 	slug, err := url.PathUnescape(parts[3])
-	if err != nil || slug == "" {
+	if err != nil || !artifactSlugPattern.MatchString(slug) {
 		return Ref{}, false
 	}
 	query := value.Query()

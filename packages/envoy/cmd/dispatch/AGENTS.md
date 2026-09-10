@@ -36,10 +36,10 @@ projection of Postgres comment, ask, and suggestion records. Go renders canonica
 markdown from the tree for reads and versions; anchors are Proof marks, so their
 stored rows carry a mark ID while the mark moves with its text. Boot migrates legacy
 `Y.Text` rooms and offset anchors once; run `dispatch check-documents` beforehand to
-inspect a database without changing it. Migration `0009_project_artifacts` rejects a
-malformed artifact reference or an artifact without an owning issue before altering
-the schema; either failure aborts the transaction and server boot without recording
-the migration. A successful migration backfills `project_key` and generated `ref_key`.
+inspect a database without changing it. Migration `0009_project_artifacts` prunes malformed
+derived artifact references with a notice before altering the schema; the parser rejects them on
+later source writes. It aborts server boot before recording the migration only when an artifact
+has no owning issue. A successful migration backfills `project_key` and generated `ref_key`.
 
 ## Identity
 
