@@ -513,18 +513,19 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates a controller-held-events-free v17 state through v18 and v19", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
+  it("refuses a v18 state with active trees or issues during Dispatch migration", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-active-"));
     const file = path.join(tempDir, "state.json");
-    const current = newLegionState(initialState.project, initialState.cap);
-    const { controllerPendingNotices: _notices, gates: _gates, ...v17State } = current;
-    await writeFile(file, JSON.stringify({ ...v17State, version: 17 }), "utf8");
 
-    const migrated = await loadState(file, initialState);
-
-    expect(migrated.version).toBe(19);
-    expect(migrated.controllerPendingNotices).toEqual([]);
-    expect(migrated.gates).toEqual({});
+    for (const activeState of [
+      { version: 18, trees: { "LEGION-42": {} }, issues: {} },
+      { version: 18, trees: {}, issues: { "LEGION-42": {} } },
+    ]) {
+      await writeFile(file, JSON.stringify(activeState), "utf8");
+      await expect(loadState(file, initialState)).rejects.toThrow(
+        "Cannot migrate a Legion state with active trees to the Dispatch lifecycle"
+      );
+    }
   });
 
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {

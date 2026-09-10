@@ -720,9 +720,16 @@ function migrateV17State(state: unknown): unknown {
   return { ...rest, version: 18, controllerPendingNotices };
 }
 
-/** v18 -> v19: adds the Dispatch design-gate ledger. */
+/** v18 -> v19: switches issue lifecycle state to Dispatch. Pre-Dispatch trees and issues cannot
+ * be represented safely, so they are rejected rather than discarded. */
 function migrateV18State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 18) return state;
+  if (
+    (recordValue(state.trees) && Object.keys(state.trees).length > 0) ||
+    (recordValue(state.issues) && Object.keys(state.issues).length > 0)
+  ) {
+    throw new Error("Cannot migrate a Legion state with active trees to the Dispatch lifecycle");
+  }
   return { ...state, version: 19, gates: {} };
 }
 
