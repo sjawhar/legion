@@ -16,7 +16,8 @@ integration to deliver Envoy traffic into a live session, including idle session
   `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
   `dispatch_artifact`, and `dispatch_read`. The native Dispatch tools are offered only when
   `dispatch.enabled` resolves a server URL and bearer token in envoy.json or when `DISPATCH_URL`
-  and `DISPATCH_TOKEN` provide them. Each call fills the target repo from the session's working
+  and `DISPATCH_TOKEN` provide them; with `dispatch.enabled: true` and no `dispatch.serverUrl`,
+  the URL is `http://localhost:8766`. Each call fills the target repo from the session's working
   directory, stamps it with the Claude session id, and subscribes each successful mutation's
   `details.topic` so its Dispatch events arrive back through Envoy.
 
