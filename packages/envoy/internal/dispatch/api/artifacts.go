@@ -40,7 +40,6 @@ type artifactUploadInput struct {
 	name        string
 	content     []byte
 	contentType string
-	primary     bool
 	summary     string
 	supplied    *model.Actor
 	inline      bool
@@ -48,11 +47,11 @@ type artifactUploadInput struct {
 }
 
 type jsonArtifactUpload struct {
-	Name    string       `json:"name"`
-	Content *string      `json:"content"`
-	Primary bool         `json:"primary"`
-	Summary string       `json:"summary"`
-	Actor   *model.Actor `json:"actor"`
+	Name    string          `json:"name"`
+	Content *string         `json:"content"`
+	Primary json.RawMessage `json:"primary"`
+	Summary string          `json:"summary"`
+	Actor   *model.Actor    `json:"actor"`
 }
 
 func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
@@ -99,10 +98,6 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := artifactKind(mediaType)
-	if input.primary && kind != "doc" {
-		writeError(w, "PRIMARY_NOT_DOC", http.StatusBadRequest, "only documents can be primary")
-		return
-	}
 	s.storeArtifact(w, r, input, actor, kind)
 }
 
@@ -123,6 +118,10 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 		writeError(w, "INVALID_JSON", http.StatusBadRequest, "request body must contain one JSON value")
 		return artifactUploadInput{}, false
 	}
+	if body.Primary != nil {
+		writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "primary is fixed at issue creation")
+		return artifactUploadInput{}, false
+	}
 	blank := body.Content == nil || strings.TrimSpace(*body.Content) == ""
 	var content []byte
 	if body.Content != nil {
@@ -132,7 +131,6 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 		name:        strings.TrimSpace(body.Name),
 		content:     content,
 		contentType: "text/markdown; charset=utf-8",
-		primary:     body.Primary,
 		summary:     strings.TrimSpace(body.Summary),
 		supplied:    body.Actor,
 		inline:      true,
@@ -154,14 +152,9 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		}
 		supplied = &actor
 	}
-	primary := false
-	if raw := r.FormValue("primary"); raw != "" {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "primary must be true or false")
-			return artifactUploadInput{}, false
-		}
-		primary = parsed
+	if _, exists := r.MultipartForm.Value["primary"]; exists {
+		writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "primary is fixed at issue creation")
+		return artifactUploadInput{}, false
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
 	file, header, err := r.FormFile("file")
@@ -193,7 +186,6 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		name:        name,
 		content:     content,
 		contentType: contentType,
-		primary:     primary,
 		summary:     strings.TrimSpace(r.FormValue("summary")),
 		supplied:    supplied,
 	}, true
@@ -237,12 +229,6 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		if input.primary {
-			if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = false where issue_key = $1 and is_primary`, issueKey); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-		}
 		actorJSON, err := encodeJSON(actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -250,9 +236,9 @@ func (s *server) storeArtifact(
 		}
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
-			values ($1, $2, $3, $4, $5, $6)
+			values ($1, $2, $3, $4, false, $5)
 			returning id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
-		`, issueKey, slug, input.name, kind, input.primary, actorJSON).Scan(
+		`, issueKey, slug, input.name, kind, actorJSON).Scan(
 			&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &actorJSON, &artifact.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, err)
@@ -269,17 +255,6 @@ func (s *server) storeArtifact(
 		if artifact.Kind != kind {
 			writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
 			return
-		}
-		if input.primary && !artifact.Primary {
-			if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = false where issue_key = $1 and is_primary`, issueKey); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = true where id = $1`, artifact.ID); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			artifact.Primary = true
 		}
 	}
 
@@ -632,74 +607,6 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(published...)
 	writeJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
-}
-
-func (s *server) setPrimaryArtifact(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Actor *model.Actor `json:"actor"`
-	}
-	if r.ContentLength != 0 {
-		if err := decodeJSON(r, &input); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-	}
-	actor, ok := s.requireActor(w, r, input.Actor)
-	if !ok {
-		return
-	}
-	if actor.Kind != "user" {
-		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "only users can select the primary document")
-		return
-	}
-	if err := validateArtifactRequestRef(r); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	tx, err := s.begin(r.Context())
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	artifact, err := s.loadArtifactForRequest(r.Context(), tx, r)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if artifact.Kind != "doc" {
-		writeError(w, "PRIMARY_NOT_DOC", http.StatusBadRequest, "only documents can be primary")
-		return
-	}
-	if err := s.requireOpenIssue(r.Context(), tx, artifact.IssueKey); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = false where issue_key = $1 and is_primary`, artifact.IssueKey); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = true where id = $1`, artifact.ID); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	issue, err := s.loadIssue(r.Context(), tx, artifact.IssueKey)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	issue.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, model.Event{IssueKey: issue.Key, Type: "issue.updated", Actor: actor, Payload: issue})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	s.publish(event)
-	writeJSON(w, http.StatusOK, issue)
 }
 
 func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {

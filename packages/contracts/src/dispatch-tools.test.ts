@@ -136,6 +136,13 @@ describe("dispatchToolSpecs", () => {
     );
   });
 
+  test("does not advertise a primary artifact option", () => {
+    const artifact = dispatchToolSpecs.find((spec) => spec.name === "dispatch_artifact");
+    if (!artifact) throw new Error("missing dispatch_artifact");
+    const argumentsSchema = artifact.arguments(schemaApi) as Record<string, unknown>;
+    expect(argumentsSchema).not.toHaveProperty("primary");
+  });
+
   test("rejects an ask resolution without a reason", () => {
     expect(
       schemaFor("dispatch_resolve_ask").safeParse({

@@ -552,7 +552,6 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_artifact": {
-      const primary = optionalBoolean(args, "primary");
       const summary = optionalString(args, "summary");
       const name = stringArg(args, "name");
       const content = optionalString(args, "content");
@@ -562,14 +561,12 @@ export async function executeDispatchTool(
           ? {
               name,
               file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
-              ...(primary === undefined ? {} : { primary }),
               ...(summary === undefined ? {} : { summary }),
               actor,
             }
           : {
               name,
               content,
-              ...(primary === undefined ? {} : { primary }),
               ...(summary === undefined ? {} : { summary }),
               actor,
             }

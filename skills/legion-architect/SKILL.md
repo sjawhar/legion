@@ -78,7 +78,7 @@ applies, run this exact sequence **before any Legion-role spawn**, including a
 sub-architect:
 
 ```text
-dispatch_artifact({ issue: "<root issue>", name: "spec.md", content: "<root specification>", primary: true, summary: "<one-line summary>" })
+dispatch_artifact({ issue: "<root issue>", name: "spec.md", content: "<root specification>", summary: "<one-line summary>" })
 askId = dispatch_ask({
   issue: "<root issue>",
   question: "<specification summary and the decision requested>",

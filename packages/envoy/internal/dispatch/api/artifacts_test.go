@@ -26,12 +26,12 @@ func createArtifactIssue(t *testing.T, handler http.Handler) model.Issue {
 	return decodeBody[model.Issue](t, response)
 }
 
-func TestUploadArtifactJSONCreatesPrimaryDocument(t *testing.T) {
+func TestUploadArtifactJSONCreatesDocumentVersionOne(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
-		"name": "architect-spec.md", "content": "# Spec\n", "primary": true, "summary": "Initial spec",
+		"name": "architect-spec.md", "content": "# Spec\n", "summary": "Initial spec",
 	}, "alice")
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create JSON artifact: status=%d body=%s", response.Code, response.Body.String())
@@ -40,8 +40,8 @@ func TestUploadArtifactJSONCreatesPrimaryDocument(t *testing.T) {
 		Artifact model.Artifact `json:"artifact"`
 		Version  model.Version  `json:"version"`
 	}](t, response)
-	if upload.Artifact.Kind != "doc" || !upload.Artifact.Primary || upload.Version.Number != 1 {
-		t.Fatalf("JSON artifact = %#v version=%#v, want primary document version 1", upload.Artifact, upload.Version)
+	if upload.Artifact.Kind != "doc" || upload.Artifact.Primary || upload.Version.Number != 1 {
+		t.Fatalf("JSON artifact = %#v version=%#v, want non-primary document version 1", upload.Artifact, upload.Version)
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+upload.Artifact.ID+"/text", nil, "alice")
 	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"# Spec\n"`) {
@@ -53,6 +53,64 @@ func TestUploadArtifactJSONCreatesPrimaryDocument(t *testing.T) {
 	}
 }
 
+func TestUploadArtifactRejectsPrimaryFlag(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	path := "/api/v1/issues/" + issue.Key + "/artifacts"
+
+	assertRejected := func(t *testing.T, name string, responseCode int, body string, artifactName string) {
+		t.Helper()
+		if responseCode != http.StatusBadRequest || !strings.Contains(body, `"code":"ARTIFACT_INPUT"`) || !strings.Contains(body, "fixed at issue creation") {
+			t.Fatalf("%s primary flag: status=%d body=%s", name, responseCode, body)
+		}
+		list := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
+		if list.Code != http.StatusOK {
+			t.Fatalf("list artifacts after %s primary flag: status=%d body=%s", name, list.Code, list.Body.String())
+		}
+		for _, artifact := range decodeBody[[]model.Artifact](t, list) {
+			if artifact.Name == artifactName {
+				t.Fatalf("%s primary flag created artifact %#v", name, artifact)
+			}
+		}
+	}
+
+	for _, test := range []struct {
+		name    string
+		primary any
+	}{
+		{name: "true", primary: true},
+		{name: "false", primary: false},
+		{name: "null", primary: nil},
+	} {
+		t.Run("JSON "+test.name, func(t *testing.T) {
+			artifactName := "json-primary-" + test.name + ".md"
+			response := dispatchRequest(t, handler, http.MethodPost, path, map[string]any{
+				"name": artifactName, "content": "# JSON primary\n", "primary": test.primary,
+			}, "alice")
+			assertRejected(t, "JSON "+test.name, response.Code, response.Body.String(), artifactName)
+		})
+	}
+
+	multipartResponse := multipartRequest(t, handler, path, map[string]string{
+		"name": "multipart-primary.md", "primary": "true",
+	}, "multipart-primary.md", "text/markdown", []byte("# Multipart primary\n"), "alice")
+	assertRejected(t, "multipart", multipartResponse.Code, multipartResponse.Body.String(), "multipart-primary.md")
+}
+
+func TestPrimaryRoutesAreGone(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+
+	for _, target := range []string{
+		"/api/v1/artifacts/" + issue.PrimaryArtifactID + "/primary",
+		"/api/v1/issues/" + issue.Key + "/artifacts/spec/primary",
+	} {
+		response := dispatchRequest(t, handler, http.MethodPost, target, map[string]any{}, "alice")
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("primary route %s: status=%d body=%s, want 404", target, response.Code, response.Body.String())
+		}
+	}
+}
 func TestUploadArtifactJSONCreatesNextVersion(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
@@ -139,7 +197,7 @@ func TestUploadArtifactMultipartTrimsNameBeforeMIMEInference(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-		"name": " architect-spec.md ", "primary": "true",
+		"name": " architect-spec.md ",
 	}, "architect-spec.md", "", []byte("# Architect spec\n"), "alice")
 	if response.Code != http.StatusCreated {
 		t.Fatalf("upload whitespace-named document: status=%d body=%s", response.Code, response.Body.String())
@@ -147,8 +205,8 @@ func TestUploadArtifactMultipartTrimsNameBeforeMIMEInference(t *testing.T) {
 	upload := decodeBody[struct {
 		Artifact model.Artifact `json:"artifact"`
 	}](t, response)
-	if upload.Artifact.Name != "architect-spec.md" || upload.Artifact.Kind != "doc" || !upload.Artifact.Primary {
-		t.Fatalf("whitespace-named document = %#v, want primary Markdown document", upload.Artifact)
+	if upload.Artifact.Name != "architect-spec.md" || upload.Artifact.Kind != "doc" || upload.Artifact.Primary {
+		t.Fatalf("whitespace-named document = %#v, want non-primary Markdown document", upload.Artifact)
 	}
 }
 
@@ -194,7 +252,6 @@ func TestArtifactRoutesResolveUUIDsAndIssueScopedSlugs(t *testing.T) {
 		{name: "text", method: http.MethodGet, suffix: "/text"},
 		{name: "version", method: http.MethodGet, suffix: "/versions/1"},
 		{name: "named version", method: http.MethodPost, suffix: "/versions", body: map[string]string{"summary": "Named version"}},
-		{name: "primary", method: http.MethodPost, suffix: "/primary"},
 		{name: "edit", method: http.MethodPost, suffix: "/edits", body: map[string]any{"ops": []any{}}},
 	} {
 		t.Run("invalid UUID "+route.name, func(t *testing.T) {
@@ -232,7 +289,6 @@ func TestArtifactRoutesResolveUUIDsAndIssueScopedSlugs(t *testing.T) {
 		body   any
 	}{
 		{name: "named version", method: http.MethodPost, suffix: "/versions", body: map[string]string{"summary": "Named version"}},
-		{name: "primary", method: http.MethodPost, suffix: "/primary"},
 		{name: "edit", method: http.MethodPost, suffix: "/edits", body: map[string]any{"ops": []any{}}},
 	} {
 		t.Run(route.name, func(t *testing.T) {
@@ -279,7 +335,6 @@ func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 		{name: "text", method: http.MethodGet, suffix: "/text"},
 		{name: "version", method: http.MethodGet, suffix: "/versions/1"},
 		{name: "named version", method: http.MethodPost, suffix: "/versions", body: map[string]string{"summary": "Named version"}},
-		{name: "primary", method: http.MethodPost, suffix: "/primary"},
 		{name: "edit", method: http.MethodPost, suffix: "/edits", body: map[string]any{"ops": []any{}}},
 	} {
 		t.Run(route.name, func(t *testing.T) {

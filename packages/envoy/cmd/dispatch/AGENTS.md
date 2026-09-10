@@ -88,13 +88,11 @@ the table says human only.
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/primary` | POST | human only | Make a document the issue primary artifact. `{id}` must be a UUID. |
 | `/api/v1/issues/{key}/artifacts/{slug}` | GET | user or bearer | Read an artifact, versions, and references. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | user or bearer | Read a live document's markdown. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named live-document version. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply document edit operations. `{slug}` is resolved within `{key}`. |
-| `/api/v1/issues/{key}/artifacts/{slug}/primary` | POST | human only | Make a document the issue primary artifact. `{slug}` is resolved within `{key}`.
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |

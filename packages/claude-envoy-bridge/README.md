@@ -33,8 +33,8 @@ integration to deliver Envoy traffic into a live session, including idle session
   `dispatch` skill (when to raise a question) alongside the tools.
 
 `dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
-An architect can post a primary specification directly with
-`{ issue, name: "spec.md", content: "# Design", primary: true }`.
+An architect can post a specification directly with
+`{ issue, name: "spec.md", content: "# Design" }`.
 
 ## Inbound rendering
 

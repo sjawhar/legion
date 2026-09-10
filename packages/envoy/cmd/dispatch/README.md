@@ -124,19 +124,17 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 | `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List artifacts or create a version from a multipart `file` or JSON `{name, content, primary?, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact and its incoming references. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/primary` | POST | cookie or trusted header | Make a document the issue primary artifact. `{id}` must be a UUID. |
 | `/api/v1/issues/{key}/artifacts/{slug}` | GET | cookie, trusted header, or bearer | Read an artifact and its incoming references. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{slug}` is resolved within `{key}`. |
-| `/api/v1/issues/{key}/artifacts/{slug}/primary` | POST | cookie or trusted header | Make a document the issue primary artifact. `{slug}` is resolved within `{key}`. |
 | `/...` | GET | none | Serve the dashboard static files. |
 
 A caller resolved by header identity without a stored GitHub token receives

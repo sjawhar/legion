@@ -32,8 +32,8 @@ the session working directory, stamps it with the OpenCode session id and title,
 `details.topic` as tool metadata so a successful mutation subscribes to that exact Dispatch topic.
 
 `dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
-An architect can post a primary specification directly with
-`{ issue, name: "spec.md", content: "# Design", primary: true }`.
+An architect can post a specification directly with
+`{ issue, name: "spec.md", content: "# Design" }`.
 
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 

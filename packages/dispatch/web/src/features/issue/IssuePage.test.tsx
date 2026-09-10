@@ -571,7 +571,7 @@ test("IssuePage does not mount an image as the hidden Spec document", async () =
   }
 });
 
-test("IssuePage labels a non-primary document and links back to the primary spec", async () => {
+test("IssuePage opens a non-spec document at its version route", async () => {
   const documentArtifact = {
     created_at: "2026-09-09T01:00:00Z",
     created_by: { id: "alice", kind: "user" as const },
@@ -608,10 +608,6 @@ test("IssuePage labels a non-primary document and links back to the primary spec
   try {
     await screen.findByRole("tab", { name: "Artifacts", selected: true });
     expect(screen.getByRole("heading", { name: "design.md" })).not.toBeNull();
-    expect(screen.getByText("Not primary")).not.toBeNull();
-    expect(screen.getByRole("link", { name: "Back to primary spec" }).getAttribute("href")).toBe(
-      "/issues/CORE-1/spec"
-    );
     expect(screen.queryByLabelText("Artifact version")).toBeNull();
     fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
     await waitFor(() =>

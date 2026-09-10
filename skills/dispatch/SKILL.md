@@ -98,7 +98,7 @@ answer. Use `reply_to_ask` on `dispatch_comment` to reply under your own ask; it
 exclusive with `reply_to`.
 
 ## The spec is where narrative goes
-Write and update primary documents according to [Writing a spec](#writing-a-spec).
+Write and update the issue specification according to [Writing a spec](#writing-a-spec).
 
 Read the current document before changing it:
 
@@ -106,7 +106,7 @@ Read the current document before changing it:
 dispatch_doc_read({ issue?, artifact?, version?, ref? })
 ```
 It returns live or versioned markdown with open marks and `details` `{ issue }`; omit `artifact`
-with `issue` to read the primary document. Then write narrative with:
+with `issue` to read the issue specification. Then write narrative with:
 
 ```ts
 dispatch_doc_edit({ issue, artifact, ops, summary? })
@@ -153,27 +153,26 @@ dispatch_suggest({ issue, artifact, quote, replace_with, body?, occurrence? })
 It returns `details` `{ issue, topic, comment }`. A human accepts or rejects a suggestion. On
 `TARGET_AMBIGUOUS`, add zero-based `occurrence`. On `TARGET_NOT_FOUND`, re-read the document
 before retrying. `INVALID_OP` names a malformed edit; `CAP_EXCEEDED` never truncates;
-`ISSUE_CLOSED` rejects a write. `ACTOR_KIND`, `ROUTE_INVALID`, and `PRIMARY_NOT_DOC` reject an
-invalid actor, route, or primary artifact.
+`ISSUE_CLOSED` rejects a write. `ACTOR_KIND` and `ROUTE_INVALID` reject an invalid actor or route.
 
 ## Artifacts
 
 Attach an image, diagram, or local file with:
 
 ```ts
-dispatch_artifact({ issue, name, path, primary?, summary? })
+dispatch_artifact({ issue, name, path, summary? })
 ```
 
 Or, when the text is already in the call, post a Markdown document directly:
 
 ```ts
-dispatch_artifact({ issue, name: "spec.md", content: "# Design\n...", primary: true })
+dispatch_artifact({ issue, name: "spec.md", content: "# Design\n..." })
 ```
 
 Exactly one of `path` and `content` is required. The inline form sends JSON with
 `Content-Type: application/json`. It returns `details` `{ issue, topic, artifact, version }`.
-Uploading the same `name` creates its next version. Use `content` for an architect's primary spec;
-set `primary: true` only for Markdown documents.
+Uploading the same `name` creates its next version. Use `content` when the text is already in
+the call.
 
 ## Messages
 

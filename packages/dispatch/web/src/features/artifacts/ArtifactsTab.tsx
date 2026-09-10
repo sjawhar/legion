@@ -1,9 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { mergeIssue } from "../../api/issue-cache";
 import type {
   Artifact,
   ArtifactVersionContent,
@@ -18,11 +17,7 @@ import {
   inputClasses,
   linkHoverText,
   linkText,
-  secondaryButtonBorder,
-  secondaryButtonHoverBorder,
-  secondaryButtonText,
   surfaceMutedBg,
-  textDisabled,
   textMutedOnSurface,
   textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
@@ -129,7 +124,6 @@ function isText(content: ArtifactVersionContent | undefined): content is Artifac
 }
 
 function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
-  const queryClient = useQueryClient();
   const { pathname } = useLocation();
   const route = parseIssuePath(pathname);
   const highlighted = route?.kind === "artifact" && route.slug === artifact.slug;
@@ -156,20 +150,6 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
     enabled: artifact.kind === "doc" && afterVersion !== undefined,
     queryKey: ["artifact", artifact.id, "version", afterVersion],
     queryFn: () => api.getArtifactVersion(artifact.id, afterVersion ?? 0),
-  });
-  const makePrimary = useMutation({
-    mutationFn: () => api.makeArtifactPrimary(artifact.id),
-    onSuccess: (issue) => {
-      mergeIssue(queryClient, issue);
-      // The badges read each artifact's `primary`; flip them from the response so the tab
-      // is right before the list refetch lands.
-      queryClient.setQueryData<Artifact[]>(["artifacts", issue.key], (current) =>
-        current?.map((entry) => ({ ...entry, primary: entry.id === issue.primary_artifact_id }))
-      );
-      void queryClient.invalidateQueries({ queryKey: ["artifact"] });
-      void queryClient.invalidateQueries({ queryKey: ["artifacts", issue.key] });
-      void queryClient.invalidateQueries({ queryKey: ["issue", issue.key] });
-    },
   });
   const latestVersion = versions[0];
   const referencedBy = detail.data?.referenced_by ?? [];
@@ -212,30 +192,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
           >
             Primary
           </span>
-        ) : artifact.kind === "doc" ? (
-          <div className="flex flex-col items-end gap-1">
-            <span className={`text-xs font-medium ${textMutedOnSurface}`}>Not primary</span>
-            <button
-              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-              disabled={makePrimary.isPending}
-              onClick={() => makePrimary.mutate()}
-              type="button"
-            >
-              Make primary
-            </button>
-          </div>
-        ) : (
-          <span title="Only documents can be primary">
-            <button
-              className={`min-h-11 cursor-not-allowed rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textDisabled}`}
-              disabled
-              title="Only documents can be primary"
-              type="button"
-            >
-              Make primary
-            </button>
-          </span>
-        )}
+        ) : null}
       </div>
 
       {artifact.kind === "image" && latestVersion !== undefined ? (
@@ -369,9 +326,6 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
           ))}
         </section>
       )}
-      {makePrimary.isError ? (
-        <p className={`text-sm ${dangerText}`}>Could not select this document.</p>
-      ) : null}
     </article>
   );
 }
