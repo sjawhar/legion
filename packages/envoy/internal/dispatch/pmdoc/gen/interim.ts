@@ -10,7 +10,7 @@ const here = import.meta.dir;
 const corpus = join(here, "..", "testdata", "corpus");
 const out = join(here, "..", "testdata", "fixtures.json");
 
-const schema = new Schema({
+export const schema = new Schema({
   nodes: {
     doc: { content: "block+" },
     paragraph: { group: "block", content: "inline*" },
@@ -156,25 +156,27 @@ function documentFor(name: string): ProseMirrorNode {
   }
 }
 
-const fixtures = readdirSync(corpus)
-  .filter((file) => file.endsWith(".md"))
-  .sort()
-  .map((file) => {
-    const name = basename(file, ".md");
-    const markdown = readFileSync(join(corpus, file), "utf8");
-    const doc = documentFor(name);
-    const ydoc = new Y.Doc();
-    ydoc.clientID = 1;
-    prosemirrorToYXmlFragment(doc, ydoc.getXmlFragment("prosemirror"));
-    return {
-      name,
-      markdown,
-      pm_json: doc.toJSON(),
-      yjs_update_v1_b64: Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString("base64"),
-      // The browser serializer is unavailable until the concurrently published package lands.
-      rendered_by_milkdown: markdown,
-    };
-  });
+if (import.meta.main) {
+  const fixtures = readdirSync(corpus)
+    .filter((file) => file.endsWith(".md"))
+    .sort()
+    .map((file) => {
+      const name = basename(file, ".md");
+      const markdown = readFileSync(join(corpus, file), "utf8");
+      const doc = documentFor(name);
+      const ydoc = new Y.Doc();
+      ydoc.clientID = 1;
+      prosemirrorToYXmlFragment(doc, ydoc.getXmlFragment("prosemirror"));
+      return {
+        name,
+        markdown,
+        pm_json: doc.toJSON(),
+        yjs_update_v1_b64: Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString("base64"),
+        // The browser serializer is unavailable until the concurrently published package lands.
+        rendered_by_milkdown: markdown,
+      };
+    });
 
-writeFileSync(out, `${JSON.stringify({ source: "interim-hand-schema", fixtures }, null, 2)}\n`);
-console.log(`wrote ${fixtures.length} interim fixtures`);
+  writeFileSync(out, `${JSON.stringify({ source: "interim-hand-schema", fixtures }, null, 2)}\n`);
+  console.log(`wrote ${fixtures.length} interim fixtures`);
+}
