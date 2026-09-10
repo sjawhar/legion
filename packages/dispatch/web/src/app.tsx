@@ -3,6 +3,7 @@ import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from "rea
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 
 import { api, isForbidden, isUnauthorized } from "./api/client";
+import { useConnectionState } from "./api/live";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
 import { Inbox } from "./features/inbox/Inbox";
@@ -187,6 +188,7 @@ function ShellSkeleton(): ReactNode {
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const connection = useConnectionState();
   const location = useLocation();
   const mainRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -228,6 +230,26 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         >
           Skip to content
         </a>
+        {connection === "reconnecting" ? (
+          <p
+            aria-live="polite"
+            className="fixed right-4 bottom-20 z-40 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 shadow-lg md:bottom-4"
+            data-testid="connection-pill"
+          >
+            Reconnecting…
+          </p>
+        ) : connection === "unavailable" ? (
+          <p
+            aria-live="polite"
+            className="fixed right-4 bottom-20 z-40 flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-800 shadow-lg md:bottom-4"
+            data-testid="connection-pill"
+          >
+            Live updates unavailable
+            <button className="underline" onClick={() => window.location.reload()} type="button">
+              Reload
+            </button>
+          </p>
+        ) : null}
         <header className="flex items-center justify-between border-b border-slate-200 bg-slate-950 px-3 text-slate-100 md:hidden">
           <Link className="text-lg font-semibold" to="/">
             Dispatch

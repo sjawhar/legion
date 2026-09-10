@@ -53,20 +53,21 @@ type AppContext struct {
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey     string
-	WebDistDir     string
-	Users          auth.UserStore
-	Identity       identity.Identity
-	AllowedLogins  map[string]struct{}
-	Store          *store.Store
-	AgentToken     string
-	RepoProjects   string
-	DefaultProject string
-	ServerURL      string
-	Docs           docs.API
-	Events         *events.Broker
-	App            *auth.AppConfig
-	AppSource      string
+	SigningKey       string
+	WebDistDir       string
+	Users            auth.UserStore
+	Identity         identity.Identity
+	AllowedLogins    map[string]struct{}
+	Store            *store.Store
+	AgentToken       string
+	RepoProjects     string
+	DefaultProject   string
+	ServerURL        string
+	Docs             docs.API
+	Events           *events.Broker
+	App              *auth.AppConfig
+	AppSource        string
+	TestHooksEnabled bool
 }
 
 // BuildAppContext bundles the shared HTTP-handler state.
@@ -81,14 +82,15 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
 	}
 	apiDeps, err := api.NewDeps(api.DepsInput{
-		Store:           opts.Store,
-		Identity:        opts.Identity,
-		AgentToken:      opts.AgentToken,
-		RepoProjectsRaw: opts.RepoProjects,
-		DefaultProject:  opts.DefaultProject,
-		ServerURL:       opts.ServerURL,
-		Docs:            opts.Docs,
-		Events:          opts.Events,
+		Store:            opts.Store,
+		Identity:         opts.Identity,
+		AgentToken:       opts.AgentToken,
+		RepoProjectsRaw:  opts.RepoProjects,
+		DefaultProject:   opts.DefaultProject,
+		ServerURL:        opts.ServerURL,
+		Docs:             opts.Docs,
+		Events:           opts.Events,
+		TestHooksEnabled: opts.TestHooksEnabled,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)

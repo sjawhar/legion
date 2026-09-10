@@ -72,45 +72,83 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	sinceRaw := r.Header.Get("Last-Event-ID")
-	if strings.TrimSpace(sinceRaw) == "" {
+	lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
+	sinceProvided := lastEventID != "" || r.URL.Query().Has("since")
+	sinceRaw := lastEventID
+	if sinceRaw == "" {
 		sinceRaw = r.URL.Query().Get("since")
 	}
-	since, err := parseNonNegativeInt(sinceRaw, "since")
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	var since int64
+	if sinceProvided {
+		var err error
+		since, err = parseNonNegativeInt(sinceRaw, "since")
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, "STREAM_UNSUPPORTED", http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	// A cold client (no since= and no Last-Event-ID) used to fetch its own head
+	// via a separate GET /api/v1/events/head request, then open this connection
+	// with since=<that head>. An event whose id was allocated before that first
+	// request read the head, but committed after the head response and before
+	// this connection's Subscribe below, was excluded from catch-up (id <= since)
+	// and missed by the subscription (registered too late) — lost forever. This
+	// handler now IS the client's only request for a cold start: subscribing
+	// before computing its own head closes that gap, since anything committing
+	// after Subscribe lands in the channel regardless of its id (see below).
 	subscription, cancel := s.deps.Events.Subscribe()
 	defer cancel()
+	if !sinceProvided {
+		if err := s.deps.Store.Pool.QueryRow(r.Context(), `select coalesce(max(id), 0) from events`).Scan(&since); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-	replay, err := s.readEventsAfterID(r.Context(), since)
-	if err != nil {
-		return
-	}
-	lastID := since
-	for _, event := range replay {
-		if err := writeSSEEvent(w, event); err != nil {
+	// Ids are assigned by nextval() when the insert statement runs, before commit,
+	// so a lower id can commit after a higher one is already visible to a catch-up
+	// query — a still-open transaction that grabbed an earlier id is exactly the
+	// case the subscription above (taken before any catch-up query runs) exists to
+	// cover. Page through the full backlog here without ever closing the stream: a
+	// capped page used to end the stream and force a client reconnect, but that
+	// left a gap between "read this page" and "reopen a new subscription" where a
+	// low id could commit and be missed by both the next page's `id > cursor` query
+	// (cursor has already moved past it) and the old subscription (already
+	// cancelled). Keeping one subscription live across every page closes that gap.
+	cursor := since
+	sentDuringCatchup := make(map[int64]bool)
+	for {
+		replay, err := s.readEventsAfterID(r.Context(), cursor)
+		if err != nil {
 			return
 		}
-		lastID = event.ID
+		for _, event := range replay {
+			if err := writeSSEEvent(w, event); err != nil {
+				return
+			}
+			sentDuringCatchup[event.ID] = true
+			cursor = event.ID
+		}
+		flusher.Flush()
+		if len(replay) < maxSSEReplay {
+			break
+		}
 	}
-	flusher.Flush()
-	if len(replay) == maxSSEReplay {
-		// The subscription only carries events appended after it was taken, so a capped
-		// replay would leave a gap the live tail never fills. Ending the stream makes the
-		// client reconnect with Last-Event-ID and page through the rest.
-		return
-	}
+	// The live loop below must never use an id comparison to decide whether to
+	// forward: it would silently drop a late-committing lower id (see above).
+	// Dedup only against the bounded set of ids catch-up actually sent, in case one
+	// of them is *also* still sitting in the subscription channel (committed, and
+	// thus queryable, in the narrow window between Subscribe and a catch-up query,
+	// but not yet drained from it).
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -122,13 +160,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			if event.ID <= lastID {
+			if sentDuringCatchup[event.ID] {
 				continue
 			}
 			if err := writeSSEEvent(w, event); err != nil {
 				return
 			}
-			lastID = event.ID
 			flusher.Flush()
 		case <-heartbeat.C:
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
@@ -137,6 +174,18 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// disconnectAllStreams closes every currently open SSE connection, forcing each
+// client through its reconnect-from-lastId path. Test-only: mounted by Register
+// only when Deps.TestHooksEnabled is set, so e2e suites can prove reconnect
+// behavior without seeding thousands of events to trip the replay cap.
+func (s *server) disconnectAllStreams(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	s.deps.Events.CloseAll()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 type eventListOptions struct {

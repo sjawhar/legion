@@ -34,25 +34,27 @@ const repoLabelPrefix = "repo:"
 
 // Deps are the API's application dependencies.
 type Deps struct {
-	Store          *store.Store
-	Identity       identity.Identity
-	AgentToken     string
-	DefaultProject string
-	ServerURL      string
-	Docs           docs.API
-	Events         *events.Broker
+	Store            *store.Store
+	Identity         identity.Identity
+	AgentToken       string
+	DefaultProject   string
+	ServerURL        string
+	Docs             docs.API
+	Events           *events.Broker
+	TestHooksEnabled bool
 }
 
 // DepsInput contains raw boot values used to construct API dependencies.
 type DepsInput struct {
-	Store           *store.Store
-	Identity        identity.Identity
-	AgentToken      string
-	RepoProjectsRaw string
-	DefaultProject  string
-	ServerURL       string
-	Docs            docs.API
-	Events          *events.Broker
+	Store            *store.Store
+	Identity         identity.Identity
+	AgentToken       string
+	RepoProjectsRaw  string
+	DefaultProject   string
+	ServerURL        string
+	Docs             docs.API
+	Events           *events.Broker
+	TestHooksEnabled bool
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -77,13 +79,14 @@ func NewDeps(input DepsInput) (Deps, error) {
 		})
 	}
 	return Deps{
-		Store:          input.Store,
-		Identity:       input.Identity,
-		AgentToken:     input.AgentToken,
-		DefaultProject: defaultProject,
-		ServerURL:      strings.TrimSuffix(input.ServerURL, "/"),
-		Docs:           input.Docs,
-		Events:         input.Events,
+		Store:            input.Store,
+		Identity:         input.Identity,
+		AgentToken:       input.AgentToken,
+		DefaultProject:   defaultProject,
+		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
+		Docs:             input.Docs,
+		Events:           input.Events,
+		TestHooksEnabled: input.TestHooksEnabled,
 	}, nil
 }
 
@@ -165,6 +168,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/me/state", s.getUserState)
 	mux.HandleFunc("PUT /api/v1/me/issues/{key}/state", s.putUserState)
 	mux.HandleFunc("GET /api/v1/events", s.streamEvents)
+	if deps.TestHooksEnabled {
+		mux.HandleFunc("POST /api/v1/events/_test/disconnect", s.disconnectAllStreams)
+	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {

@@ -22,7 +22,7 @@ function event(
   } as Event;
 }
 
-test("ask events refresh the issue, its asks, selected ask, and the inbox", () => {
+test("ask events refresh the issue, its asks, selected ask, user state, and the inbox", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -37,13 +37,14 @@ test("ask events refresh the issue, its asks, selected ask, and the inbox", () =
     ["issue", "CORE-1"],
     ["events", "CORE-1"],
     ["issues"],
+    ["user-state"],
+    ["inbox"],
     ["asks", "CORE-1"],
     ["ask", "ask-1"],
-    ["inbox"],
   ]);
 });
 
-test("issue changes refresh the inbox", () => {
+test("issue changes refresh user state and the inbox", () => {
   for (const type of ["issue.closed", "issue.updated"] as const) {
     const invalidated: unknown[][] = [];
     const queryClient = {
@@ -55,7 +56,13 @@ test("issue changes refresh the inbox", () => {
 
     applyEventInvalidations(queryClient, event(type));
 
-    expect(invalidated).toEqual([["issue", "CORE-1"], ["events", "CORE-1"], ["issues"], ["inbox"]]);
+    expect(invalidated).toEqual([
+      ["issue", "CORE-1"],
+      ["events", "CORE-1"],
+      ["issues"],
+      ["user-state"],
+      ["inbox"],
+    ]);
   }
 });
 
@@ -74,14 +81,15 @@ test("artifact versions refresh the document and its anchored margin items", () 
     ["issue", "CORE-1"],
     ["events", "CORE-1"],
     ["issues"],
+    ["user-state"],
+    ["inbox"],
     ["artifacts", "CORE-1"],
     ["artifact", "artifact-1"],
     ["comments", "CORE-1"],
-    ["inbox"],
   ]);
 });
 
-test("message events refresh the affected issue messages and artifact references", () => {
+test("message events refresh the affected issue messages, artifact references, and the inbox", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -96,12 +104,14 @@ test("message events refresh the affected issue messages and artifact references
     ["issue", "CORE-1"],
     ["events", "CORE-1"],
     ["issues"],
+    ["user-state"],
+    ["inbox"],
     ["messages", "CORE-1"],
     ["artifact"],
   ]);
 });
 
-test("comment events refresh artifact references", () => {
+test("comment events refresh artifact references and the inbox", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -113,6 +123,33 @@ test("comment events refresh artifact references", () => {
   applyEventInvalidations(queryClient, event("comment.created"));
 
   expect(invalidated).toContainEqual(["artifact"]);
+  expect(invalidated).toContainEqual(["inbox"]);
+  expect(invalidated).toContainEqual(["user-state"]);
+});
+
+test("every event type refreshes user state so unread badges stay live across tabs", () => {
+  for (const type of [
+    "issue.created",
+    "artifact.created",
+    "ask.opened",
+    "comment.resolved",
+    "suggestion.accepted",
+    "message.created",
+    "child.status",
+  ] as const) {
+    const invalidated: unknown[][] = [];
+    const queryClient = {
+      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+        invalidated.push([...queryKey]);
+        return Promise.resolve();
+      },
+    };
+
+    applyEventInvalidations(queryClient, event(type));
+
+    expect(invalidated).toContainEqual(["user-state"]);
+    expect(invalidated).toContainEqual(["inbox"]);
+  }
 });
 
 test("SSE event prepends a newer event to the loaded log page", () => {

@@ -209,3 +209,21 @@ export function putIssueState(
     options
   );
 }
+
+/**
+ * Forces every open SSE connection on the server closed, as if it had restarted.
+ * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
+ * proves the client's reconnect-from-lastId path without seeding thousands of
+ * events to trip the real replay cap.
+ */
+export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/events/_test/disconnect",
+    "POST",
+    {},
+    {
+      as: "agent",
+      ...options,
+    }
+  );
+}

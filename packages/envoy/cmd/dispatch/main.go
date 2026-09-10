@@ -34,13 +34,14 @@ const (
 )
 
 type bootConfig struct {
-	DatabaseURL    string
-	AgentToken     string
-	RepoProjects   string
-	DefaultProject string
-	IdentityHeader string
-	AllowedLogins  map[string]struct{}
-	NATSDisabled   bool
+	DatabaseURL      string
+	AgentToken       string
+	RepoProjects     string
+	DefaultProject   string
+	IdentityHeader   string
+	AllowedLogins    map[string]struct{}
+	NATSDisabled     bool
+	TestHooksEnabled bool
 }
 
 func main() {
@@ -162,6 +163,8 @@ func main() {
 		Events:         broker,
 		App:            appCfg,
 		AppSource:      appSource,
+
+		TestHooksEnabled: boot.TestHooksEnabled,
 	})
 
 	if err != nil {
@@ -282,12 +285,13 @@ func loadAppCredentials(dataDir string) (*auth.AppConfig, string, error) {
 
 func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	boot := bootConfig{
-		DatabaseURL:    strings.TrimSpace(getenv("DATABASE_URL")),
-		AgentToken:     strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
-		RepoProjects:   strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
-		DefaultProject: strings.TrimSpace(getenv("DISPATCH_DEFAULT_PROJECT")),
-		AllowedLogins:  parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
-		NATSDisabled:   getenv("DISPATCH_NATS_DISABLED") == "1",
+		DatabaseURL:      strings.TrimSpace(getenv("DATABASE_URL")),
+		AgentToken:       strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
+		RepoProjects:     strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
+		DefaultProject:   strings.TrimSpace(getenv("DISPATCH_DEFAULT_PROJECT")),
+		AllowedLogins:    parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
+		NATSDisabled:     getenv("DISPATCH_NATS_DISABLED") == "1",
+		TestHooksEnabled: getenv("DISPATCH_TEST_HOOKS") == "1",
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
