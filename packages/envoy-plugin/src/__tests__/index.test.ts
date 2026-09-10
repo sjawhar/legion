@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as os from "node:os";
+import { DISPATCH_ISSUE_TOPIC_PREFIX, dispatchIssueSubject } from "@legion/contracts";
 import { logger } from "../log";
 
 // Suppress console.error during tests
@@ -520,15 +521,15 @@ describe("tool.execute.after auto-subscribes native Dispatch mutations", () => {
   it("subscribes the calling session to a native Dispatch mutation topic", async () => {
     const subscribed = await runHook("dispatch_ask", {
       issue: "DSP-742",
-      topic: "notifications.dispatch.issue.DSP-742.>",
+      topic: dispatchIssueSubject("DSP-742", ">"),
       ask: "ask-742",
     });
     // `>` needs at least one more token, so the client registers the issue's
     // own subject beside the wildcard: lifecycle events and replies both arrive.
     expect(subscribed).toContainEqual([
       "ses_dispatch",
-      "notifications.dispatch.issue.DSP-742",
-      "notifications.dispatch.issue.DSP-742.>",
+      `${DISPATCH_ISSUE_TOPIC_PREFIX}DSP-742`,
+      dispatchIssueSubject("DSP-742", ">"),
     ]);
   });
 

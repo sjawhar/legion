@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { dispatchIssueSubject } from "@legion/contracts";
 import { dispatchSubscriptionTopic } from "../dispatch-subscribe";
 
 describe("dispatchSubscriptionTopic", () => {
@@ -6,10 +7,10 @@ describe("dispatchSubscriptionTopic", () => {
     expect(
       dispatchSubscriptionTopic({
         issue: "DSP-42",
-        topic: "notifications.dispatch.issue.DSP-42.>",
+        topic: dispatchIssueSubject("DSP-42", ">"),
         ask: "ask-1",
       })
-    ).toBe("notifications.dispatch.issue.DSP-42.>");
+    ).toBe(dispatchIssueSubject("DSP-42", ">"));
   });
 
   test("refuses an absent, non-string, or foreign topic", () => {

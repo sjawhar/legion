@@ -36,9 +36,9 @@ type Deps struct {
 	Docs      docs.API
 }
 
-// Run drains unpublished notifying events at startup, after committed local
-// events, and periodically so a dropped in-process notification cannot strand
-// an event. It returns when ctx is cancelled.
+// Run drains unpublished events at startup, after committed local events, and
+// periodically so a dropped in-process notification cannot strand an event. It
+// returns when ctx is cancelled.
 func Run(ctx context.Context, deps Deps) {
 	events, cancel := deps.Broker.Subscribe()
 	defer cancel()
@@ -83,7 +83,7 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		select e.id, e.issue_key, e.seq, e.type, e.actor, e.notify, e.created_at, e.payload, i.route
 		from events e
 		join issues i on i.key = e.issue_key
-		where e.notify and e.published_at is null
+		where e.published_at is null
 		order by e.id
 		limit $1
 	`, batchSize)
@@ -153,7 +153,9 @@ func publish(deps Deps, event model.Event, route *string) error {
 	if err := deps.Publisher.Publish(item); err != nil {
 		return err
 	}
-	publishRoute(deps.Publisher, item, route)
+	if event.Notify {
+		publishRoute(deps.Publisher, item, route)
+	}
 	return nil
 }
 

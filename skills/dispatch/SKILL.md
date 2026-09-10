@@ -141,8 +141,8 @@ A write result's `details.topic` subscribes the host to the issue. Events render
 dispatch <KEY> · <type> · by <actor>
 ```
 
-Human-authored events reach you, except an unnamed artifact version; child-status events also
-reach you. Session-authored events never wake sessions. After a restart, catch up with:
+The issue topic carries every Dispatch event; `notify` only controls agent wake and routed delivery.
+After a restart, catch up with:
 
 ```ts
 dispatch_read({ issue?, ref? })

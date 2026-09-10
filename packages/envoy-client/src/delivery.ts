@@ -5,6 +5,7 @@ import {
   agentSubject,
   ChildStatusEventPayloadSchema as ChildStatusPayloadSchema,
   CommentEventPayloadSchema as CommentPayloadSchema,
+  DISPATCH_ISSUE_TOPIC_PREFIX,
   type InboundDispatchEvent as DispatchEvent,
   DispatchEventSchema,
   EnvelopeSchema,
@@ -121,7 +122,9 @@ function dispatchPayload(event: DispatchEvent): unknown {
 // `DispatchEventSchema` — in which case the raw parsed value (object or string) is
 // kept (`raw`) so no data is dropped and nothing renders as a hand-built text
 // template.
-type DispatchFrame = { readonly event: DispatchEvent } | { readonly raw: unknown };
+type DispatchFrame =
+  | { readonly event: DispatchEvent; readonly notify: unknown }
+  | { readonly raw: unknown };
 
 function parseDispatchFrame(rawPayload: string): DispatchFrame {
   let value: unknown;
@@ -131,7 +134,9 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
     return { raw: rawPayload };
   }
   const parsed = DispatchEventSchema.safeParse(value);
-  return parsed.success ? { event: parsed.data } : { raw: value };
+  if (!parsed.success) return { raw: value };
+  const wireEvent = value as DispatchEvent & { readonly notify?: unknown };
+  return { event: parsed.data, notify: wireEvent.notify };
 }
 
 export function inboundTimestamp(milliseconds: number | undefined): string {
@@ -184,6 +189,12 @@ export function renderInbound(
     } else {
       const frame = parseDispatchFrame(envelope.payload);
       if ("event" in frame) {
+        if (
+          frame.notify === false &&
+          (subject ?? envelope.topic)?.startsWith(DISPATCH_ISSUE_TOPIC_PREFIX) === true
+        ) {
+          return { skip: true, content: "", envelope };
+        }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
           return { skip: true, content: "", envelope };
         }

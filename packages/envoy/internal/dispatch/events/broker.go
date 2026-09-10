@@ -59,8 +59,8 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 	return e, nil
 }
 
-// Notify reports whether an event should wake external listeners. Event logs
-// and SSE carry every event regardless of this value.
+// Notify reports whether an event should wake agents and receive routed delivery.
+// The issue topic, event log, and SSE carry every event regardless of this value.
 func (b *Broker) Notify(e model.Event) bool {
 	if e.Type == "child.status" {
 		return true

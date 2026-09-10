@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -161,11 +162,12 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 	}
 }
 
-func TestRunSkipsNonNotifyingEvents(t *testing.T) {
+func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()
-	seedIssue(t, database, "T-1", nil)
-	ignored := appendEvent(t, database, broker, model.Event{
+	route := "role:legion-controller-x"
+	seedIssue(t, database, "T-1", &route)
+	silent := appendEvent(t, database, broker, model.Event{
 		IssueKey: "T-1", Type: "message.created",
 		Actor:   model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"},
 		Payload: model.Message{ID: "d7657c0d-71b9-43d5-8783-a5d98f7812e0", IssueKey: "T-1", Body: "Agent-only update"},
@@ -178,11 +180,85 @@ func TestRunSkipsNonNotifyingEvents(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	waitFor(t, time.Second, "notifying event publication", func() bool {
-		return len(publisher.all()) == 1 && publishedAt(t, database, notifying.ID) != nil
+	waitFor(t, time.Second, "all event publication", func() bool {
+		return len(publisher.all()) == 3 && publishedAt(t, database, silent.ID) != nil && publishedAt(t, database, notifying.ID) != nil
 	})
-	if publishedAt(t, database, ignored.ID) != nil {
-		t.Fatal("non-notifying event was marked published")
+	items := publisher.all()
+	wantTopics := []string{
+		"notifications.dispatch.issue.T-1.message.created",
+		"notifications.dispatch.issue.T-1.message.created",
+		"notifications.role.legion-controller-x",
+	}
+	for index, want := range wantTopics {
+		if items[index].Topic != want {
+			t.Fatalf("publication %d topic = %q, want %q", index, items[index].Topic, want)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		item contracts.Envelope
+		want bool
+	}{
+		{name: "silent issue event", item: items[0], want: false},
+		{name: "notifying issue event", item: items[1], want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var payload model.Event
+			if err := json.Unmarshal([]byte(tc.item.Payload), &payload); err != nil {
+				t.Fatalf("decode event payload: %v", err)
+			}
+			if payload.Notify != tc.want {
+				t.Fatalf("payload notify = %t, want %t", payload.Notify, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnpublishedEventScanUsesEventsUnpublishedIndex(t *testing.T) {
+	database := openTestStore(t)
+	seedIssue(t, database, "T-1", nil)
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into events (issue_key, seq, type, actor, payload, notify, published_at)
+		select 'T-1', id, 'message.created', '{"kind":"session","id":"test"}', '{"body":"published"}', false, now()
+		from generate_series(1, 2000) as id
+	`); err != nil {
+		t.Fatalf("seed published events: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into events (issue_key, seq, type, actor, payload, notify)
+		values ('T-1', 2001, 'message.created', '{"kind":"session","id":"test"}', '{"body":"unpublished"}', false)
+	`); err != nil {
+		t.Fatalf("seed unpublished event: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), "analyze events"); err != nil {
+		t.Fatalf("analyze events: %v", err)
+	}
+	rows, err := database.Pool.Query(context.Background(), `
+		explain (costs off)
+		select e.id, e.issue_key, e.seq, e.type, e.actor, e.notify, e.created_at, e.payload, i.route
+		from events e
+		join issues i on i.key = e.issue_key
+		where e.published_at is null
+		order by e.id
+		limit $1
+	`, batchSize)
+	if err != nil {
+		t.Fatalf("explain unpublished event scan: %v", err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan plan line: %v", err)
+		}
+		plan = append(plan, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate plan: %v", err)
+	}
+	if !strings.Contains(strings.Join(plan, "\n"), "Index Scan using events_unpublished") {
+		t.Fatalf("unpublished event scan plan =\n%s\nwant Index Scan using events_unpublished", strings.Join(plan, "\n"))
 	}
 }
 

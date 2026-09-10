@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { dispatchIssueSubject } from "@legion/contracts";
 import { tool } from "@opencode-ai/plugin/tool";
 import { logger } from "../log";
 import initPlugin from "../server";
@@ -89,7 +90,7 @@ test("registers every native Dispatch tool with its shared schema and executes a
       output: "Opened ask ask-1: Should the branch merge?",
       metadata: {
         issue: "DSP-41",
-        topic: "notifications.dispatch.issue.DSP-41.>",
+        topic: dispatchIssueSubject("DSP-41", ">"),
         ask: "ask-1",
       },
     });
