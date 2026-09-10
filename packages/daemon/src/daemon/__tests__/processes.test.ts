@@ -175,6 +175,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     treeStopTimeoutSeconds: 60,
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
+    workerRpcTimeoutSeconds: 5,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir,
@@ -2561,6 +2562,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -2676,6 +2678,7 @@ describe("ProcessManager", () => {
       issue: child,
       role,
       sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
         tmuxSession: "legion-omp",
@@ -2721,6 +2724,7 @@ describe("ProcessManager", () => {
       issue: child,
       role,
       sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
         tmuxSession: "legion-omp",
@@ -2836,6 +2840,7 @@ describe("ProcessManager", () => {
       issue: child,
       role,
       sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       launchFailures: 2,
       locator: {
@@ -2917,6 +2922,93 @@ describe("ProcessManager", () => {
     expect(publications).toEqual([]);
     const finalClaim = managedState.roles[token];
     expect(finalClaim && "issue" in finalClaim ? finalClaim.launchFailures : undefined).toBe(0);
+  });
+  it("retires a started worker whose ready delivery cannot connect, then delivers its original assignment after the resumed retry confirms ready", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    const stateDir = await temporaryDir();
+    const priorSession = path.join(stateDir, "prior-implementer-session.json");
+    await writeFile(priorSession, "{}", "utf8");
+    let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
+    const readyClient = fakeWorkerRpcClient();
+    const {
+      manager: processes,
+      commands,
+      state: managedState,
+    } = manager(state, {
+      config: config(stateDir, {
+        workerBootTimeoutSeconds: 1,
+        // The first generation is dead, so it retires on its first deadline. The retry's socket
+        // accepts connections while its /worker/started -> /worker/ready handshake runs, so it
+        // must not be treated as a perpetually unregistered boot during this test.
+        workerBootRegistrationDeadlineIntervals: 1_000,
+      }),
+      now: () => currentTime,
+      sleep: async (ms) => {
+        currentTime += ms;
+        await onceEventLoop();
+      },
+      connectWorkerRpc: async () => {
+        const claim = managedState.roles[token];
+        if (!claim || !("issue" in claim) || claim.generation === 1) {
+          throw new Error("first-generation shim cannot connect");
+        }
+        return readyClient;
+      },
+      readProcessCmdline: async () => "bash\0",
+    });
+
+    await processes.spawnWorker(root, child, role, "implement #43");
+    const started = managedState.roles[token];
+    if (!started || !("issue" in started) || !started.locator) {
+      throw new Error("first-generation claim missing");
+    }
+    // Models /worker/started: the session capability must exist before /worker/ready can be
+    // attempted, but this deliberately does not mark the ready delivery as confirmed.
+    started.sessionId = "ses_implementer";
+    started.locator.ompSessionFile = priorSession;
+
+    await expect(processes.workerReady(child, role, "ses_implementer", 1)).rejects.toThrow(
+      "first-generation shim cannot connect"
+    );
+
+    await flushEventLoopUntil(() => {
+      const claim = managedState.roles[token];
+      return (
+        claim !== undefined &&
+        "issue" in claim &&
+        claim.generation === 2 &&
+        claim.launchFailures === 1 &&
+        claim.locator !== undefined
+      );
+    }, 50_000);
+
+    const relaunched = managedState.roles[token];
+    if (!relaunched || !("issue" in relaunched) || !relaunched.locator) {
+      throw new Error("relaunched claim missing");
+    }
+    expect(relaunched.pendingAssignment).toBe("implement #43");
+    expect(relaunched.launchFailures).toBe(1);
+    expect(commands.some((command) => command.join(" ").includes("--resume"))).toBeTrue();
+
+    // Models the relaunched worker's /worker/started transition: the session capability is
+    // minted, but launch-failure accounting is deliberately left untouched here -- only a
+    // durably confirmed /worker/ready (the following workerReady call) resets it.
+    relaunched.sessionId = "ses_implementer";
+    await processes.workerReady(child, role, "ses_implementer", relaunched.generation ?? 0);
+
+    expect(readyClient.prompts).toEqual(["implement #43"]);
+    expect(relaunched.pendingAssignment).toBeUndefined();
+    expect(relaunched.launchFailures).toBeUndefined();
   });
 
   it("retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm, escalating to worker-died at the launch-failure threshold", async () => {
@@ -3044,9 +3136,9 @@ describe("ProcessManager", () => {
     expect(stillBooting.launchFailures).toBe(0);
     expect(currentTime - startTime).toBeGreaterThanOrEqual(3_000);
 
-    // /worker/started confirms the boot: cancels the watch outright rather than waiting for it
-    // to notice on its own next wake.
+    // Ready confirmation cancels the watch outright rather than waiting for its next wake.
     stillBooting.sessionId = "ses_implementer";
+    stillBooting.readyConfirmedAt = currentTime;
     processes.cancelBootWatchdog(token, stillBooting.generation);
     const attemptsAtConfirmation = connectAttempts;
     await flushEventLoop(400);
@@ -3869,6 +3961,7 @@ describe("ProcessManager", () => {
       issue: child,
       role,
       sessionId: "ses_sub_architect",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
         tmuxSession: "legion-omp",
@@ -4545,6 +4638,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -4709,6 +4803,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 2,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -4782,6 +4877,49 @@ describe("ProcessManager", () => {
     expect(claim.pendingAssignment).toBe("verify #55");
   });
 
+  it("queues a same-role spawn against a started-but-unconfirmed claim as resumed-pending, never probing or prompting its socket", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      status: "in_progress",
+      children: [],
+    };
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      // readyConfirmedAt deliberately absent: /worker/started registered the session, but
+      // /worker/ready has not yet durably confirmed the boot. This claim must be queued exactly
+      // like the sessionId-less booting case, never probed or prompted as if already live.
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    let connectCalls = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => {
+        connectCalls += 1;
+        throw new Error("must not probe an unconfirmed boot's socket");
+      },
+    });
+
+    const result = await processes.spawnWorker(root, root, "tester", "verify #55");
+
+    expect(result).toEqual({ status: "resumed", roleToken: token });
+    expect(connectCalls).toBe(0);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.pendingAssignment).toBe("verify #55");
+    expect(claim.readyConfirmedAt).toBeUndefined();
+  });
+
   it("respawns with --resume when a worker's claimed socket is dead, splitting into its own persisted window", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
@@ -4806,6 +4944,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -4870,6 +5009,7 @@ describe("ProcessManager", () => {
       role: "planner",
       generation: 1,
       sessionId: "ses_planner",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -4882,6 +5022,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       agentId: "agt_tester",
       locator: {
         tmuxSession: "legion-omp",
@@ -5011,6 +5152,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5096,6 +5238,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5199,6 +5342,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5275,6 +5419,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
       sessionId: "ses_original",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
         tmuxSession: "legion-omp",
@@ -5452,6 +5597,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -5544,6 +5690,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -6686,7 +6833,7 @@ describe("ProcessManager", () => {
     expect(managedState.roles[token]).toBeUndefined();
   });
 
-  it("delivers a worker's pending assignment over its socket on worker/ready and clears it", async () => {
+  it("delivers a worker's pending assignment over its socket on worker/ready, clears it, and resets launchFailures", async () => {
     const state = newLegionState("omp", 1);
     const token = roleToken("omp", root, "tester");
     state.roles[token] = {
@@ -6695,6 +6842,9 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       pendingAssignment: "verify #41",
+      // A prior generation's unconfirmed boot(s) left this behind; a durable ready
+      // confirmation is the only thing that ever resets it (never mere registration).
+      launchFailures: 2,
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -6713,10 +6863,82 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.launchFailures).toBeUndefined();
     // Same fix as the resumed-live-socket branch of spawnWorker: a delivered pending assignment
     // must re-register as the issue's active phase, or the worker's eventual `handoff complete`
     // 409s against a phase this delivery path never restored.
     expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+  });
+
+  it("resets launchFailures once worker/ready durably confirms a claim with no pending assignment", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      launchFailures: 2,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => client,
+    });
+
+    await processes.workerReady(root, "tester", "ses_tester", 1);
+
+    expect(client.prompts).toEqual([]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.readyConfirmedAt).toBeNumber();
+    expect(claim.launchFailures).toBeUndefined();
+  });
+  it("serializes concurrent worker/ready calls so the pending assignment prompts once", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    const originalPrompt = client.prompt;
+    const promptStarted = Promise.withResolvers<void>();
+    const releasePrompt = Promise.withResolvers<void>();
+    client.prompt = async (task) => {
+      promptStarted.resolve();
+      await releasePrompt.promise;
+      await originalPrompt(task);
+    };
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => client,
+    });
+
+    const first = processes.workerReady(root, "tester", "ses_tester", 1);
+    await promptStarted.promise;
+    const second = processes.workerReady(root, "tester", "ses_tester", 1);
+    releasePrompt.resolve();
+    await Promise.all([first, second]);
+
+    expect(client.prompts).toEqual(["verify #41"]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.readyConfirmedAt).toBeNumber();
   });
 
   it("ignores worker/ready from a stale generation even when the session id matches, leaving pendingAssignment intact", async () => {
@@ -7293,14 +7515,21 @@ describe("ProcessManager", () => {
       },
     };
     const commands: string[][] = [];
-    const {
-      manager: processes,
-      state: managedState,
-      publications,
-    } = manager(state, {
+    const publications: Array<{ subject: string; json: string }> = [];
+    const relaunched = Promise.withResolvers<void>();
+    const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir, { workerCap: 1 }),
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
+      },
+      natsPublish: (subject, json) => {
+        publications.push({ subject, json });
+        if (
+          subject === roleTopic(roleToken("omp", root, "architect")) &&
+          json === JSON.stringify({ type: "worker-started", issue: root, role: "implementer" })
+        ) {
+          relaunched.resolve();
+        }
       },
       run: async (command) => {
         commands.push(command);
@@ -7332,9 +7561,7 @@ describe("ProcessManager", () => {
       processes.reconnectWorkers(),
       processes.spawnWorker(root, root, "implementer", "task2"),
     ]);
-    await flushEventLoopUntil(() =>
-      commands.some((command) => command[1] === "new-window" || command[1] === "split-window")
-    );
+    await relaunched.promise;
 
     const paneOpens = commands.filter(
       (command) => command[1] === "new-window" || command[1] === "split-window"
@@ -7352,7 +7579,7 @@ describe("ProcessManager", () => {
     expect(claim.resumeSessionFile ?? claim.locator?.ompSessionFile).toBe(resumeFile);
   });
 
-  it("a worker/started-style confirmation whose lock acquisition wins a race against a runtime retirement decision keeps the claim confirmed, making the retirement a no-op", async () => {
+  it("a worker-ready confirmation whose lock acquisition wins a race against a runtime retirement decision keeps the claim confirmed, making the retirement a no-op", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
@@ -7388,12 +7615,11 @@ describe("ProcessManager", () => {
     });
     processes.enableWorkerPromotion();
 
-    // Mirrors `handleWorkerStarted`'s exact commit shape: captures generation/pane id before
-    // any lock, then re-validates them inside `mutateLiveRoleClaim` before committing. Called
-    // with no preceding await, its `mutateClaim` registration lands on the per-token queue
-    // essentially immediately — ahead of `reconnectWorkers`' own retirement decision, which
-    // only reaches its `mutateClaim` call after its `workerClient` connect attempt rejects
-    // (several microtask ticks later) — so this wins the race to run first.
+    // Models `workerReady`'s atomic confirmation state change. Called with no preceding await,
+    // its `mutateClaim` registration lands on the per-token queue essentially immediately —
+    // ahead of `reconnectWorkers`' own retirement decision, which only reaches its `mutateClaim`
+    // call after its `workerClient` connect attempt rejects (several microtask ticks later) —
+    // so this wins the race to run first.
     const confirm = () =>
       processes.mutateLiveRoleClaim(root, root, token, async () => {
         const current = managedState.roles[token];
@@ -7406,12 +7632,14 @@ describe("ProcessManager", () => {
         ) {
           throw new Error("Stale worker generation");
         }
-        // Replaces the object (never mutates it in place), exactly like the real
-        // `handleWorkerStarted` does — so `reconnectWorkers`' own claim reference, captured by
-        // value before this confirmation ran, stays stale and this test genuinely exercises
-        // `retireUnconfirmedBoot`'s own fresh re-read rather than `reconnectWorkers`' outer
-        // sessionId check.
-        managedState.roles[token] = { ...current, sessionId: "ses_confirmed" };
+        // Replaces the object (never mutates it in place), exactly like the real ready path
+        // does — so `reconnectWorkers`' claim reference, captured by value before confirmation,
+        // stays stale and this test genuinely exercises `retireUnconfirmedBoot`'s fresh re-read.
+        managedState.roles[token] = {
+          ...current,
+          sessionId: "ses_confirmed",
+          readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+        };
         return "confirmed";
       });
 
@@ -7433,7 +7661,7 @@ describe("ProcessManager", () => {
     expect(commands.some((command) => command[1] === "kill-pane")).toBeFalse();
   });
 
-  it("a runtime retirement decision that wins its lock acquisition before a racing worker/started confirmation's slow GitHub-lease fetch resolves rejects the stale confirmation and leaves the claim retired for retry", async () => {
+  it("a runtime retirement decision that wins its lock acquisition before a racing worker registration's slow GitHub-lease fetch resolves rejects the stale registration and leaves the claim retired for retry", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
@@ -7550,6 +7778,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7605,6 +7834,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7665,6 +7895,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7701,6 +7932,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",
@@ -7731,6 +7963,42 @@ describe("ProcessManager", () => {
 
     expect(managedState.workerAdmission.queue).toEqual([]);
     expect(client.prompts).toEqual(["verify #41"]);
+  });
+
+  it("leaves a queued idle-resume entry alone when its claim has a session but no ready confirmation, deferring to the ready path/watchdog", async () => {
+    const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    const { processes, state, managedState } = await workerCapFixture(1, {
+      connectWorkerRpc: async () => client,
+    });
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      // readyConfirmedAt deliberately absent: a restart landed between /worker/ready's ack and
+      // its durable confirmation write, so this claim is neither stale (a real session and a
+      // live client) nor safely promotable (admission cannot yet trust its readiness).
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    await processes.reconnectWorkers();
+
+    await processes.reconcileWorkerAdmission();
+
+    expect(client.prompts).toEqual([]);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+    expect(claim.locator).toBeDefined();
+    expect(claim.pendingAssignment).toBe("verify #41");
   });
 
   it("stops the drain after one below-threshold failure each for two queued tokens instead of burning every MAX_LAUNCH_FAILURES attempt on both in one pass", async () => {
@@ -7816,8 +8084,8 @@ describe("ProcessManager", () => {
     // The pane already exists at this point (a real, running worker-shim process) — a
     // `saveState` failure here is a durable-state persistence issue, not a launch failure:
     // `launchFailures` is never touched at all (a launch success carries forward whatever it
-    // was before -- 0 for a claim with no prior failures, exactly as here -- only a confirmed
-    // `/worker/started` ever resets it), the token is never
+    // was before -- 0 for a claim with no prior failures, exactly as here -- only a durably
+    // confirmed `/worker/ready` ever resets it), the token is never
     // re-queued (it already has a live pane; re-queuing it would launch a second pane for the
     // same issue/role the next time it is promoted), and the locator plus `pendingAssignment`
     // stay exactly as `launchWorker` wrote them — the in-memory claim remains authoritative

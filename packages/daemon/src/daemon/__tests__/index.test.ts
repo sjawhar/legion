@@ -214,6 +214,7 @@ function config(stateDir: string): DaemonConfig {
     treeStopTimeoutSeconds: 60,
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
+    workerRpcTimeoutSeconds: 5,
     gates: { design: "root-issues", merge: "human" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     stateDir,

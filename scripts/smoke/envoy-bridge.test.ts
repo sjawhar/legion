@@ -19,7 +19,7 @@ const currentEnvelope = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("bridgeConfigFromEnvironment", () => {
-  test("limits its upstream subscription to exactly the configured repository", () => {
+  test("limits its upstream GitHub subscription to exactly the configured repository, and relays every Dispatch issue project", () => {
     const config = bridgeConfigFromEnvironment({
       SMOKE_REPO: "example-org/legion-smoke",
       SMOKE_RIG_NATS: "nats://127.0.0.1:14222",
@@ -27,7 +27,10 @@ describe("bridgeConfigFromEnvironment", () => {
 
     expect(config).toEqual({
       repository: "example-org/legion-smoke",
-      subject: "notifications.github.example-org.legion-smoke.>",
+      subjects: [
+        "notifications.github.example-org.legion-smoke.>",
+        "notifications.dispatch.issue.>",
+      ],
       upstreamUrl: DEFAULT_UPSTREAM_NATS_URL,
       downstreamUrl: "nats://127.0.0.1:14222",
     });

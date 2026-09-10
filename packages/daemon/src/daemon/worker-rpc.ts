@@ -65,8 +65,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** Connects to a running worker-shim's unix socket and negotiates nothing by itself — call `negotiate()` next. */
-export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcClient> {
+/** Connects to a running worker-shim's unix socket and negotiates nothing by itself — call
+ * `negotiate()` next. `connectTimeoutMs` (the daemon's configured `worker_rpc_timeout_seconds`,
+ * `DEFAULT_RPC_TIMEOUT_MS` when a caller omits it, e.g. a test fixture) becomes this client's
+ * default per-request timeout for `negotiate()` and any `getState()` call that does not pass its
+ * own override. */
+export async function connectWorkerRpc(
+  socketPath: string,
+  connectTimeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
+): Promise<WorkerRpcClient> {
   let buffer = "";
   const pending = new Map<string, PendingRequest>();
   const closedResolvers = Promise.withResolvers<void>();
@@ -142,7 +149,7 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
   const request = (
     type: string,
     extra: Record<string, unknown> = {},
-    timeoutMs = DEFAULT_RPC_TIMEOUT_MS
+    timeoutMs = connectTimeoutMs
   ): Promise<Record<string, unknown>> => {
     const id = randomUUID();
     const settled = Promise.withResolvers<Record<string, unknown>>();
@@ -186,7 +193,7 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
         throw error;
       }
     },
-    getState(timeoutMs = DEFAULT_RPC_TIMEOUT_MS) {
+    getState(timeoutMs = connectTimeoutMs) {
       return request("get_state", {}, timeoutMs).then((response) => {
         const data = isRecord(response.data) ? response.data : undefined;
         if (typeof data?.isStreaming === "boolean") {
@@ -238,7 +245,9 @@ export interface SocketProbeResult {
  * (unambiguously dead), and a `get_state` failure means "busy, not dead" everywhere except
  * `spawnWorker`'s own resume decision (which requires an answering shim before prompting it
  * directly rather than relaunching) — every caller keeps its own verdict and its own logging
- * around these facts. */
+ * around these facts. `timeoutMs` should be the caller's own configured
+ * `worker_rpc_timeout_seconds` (`DEFAULT_RPC_TIMEOUT_MS` when omitted, e.g. a test fixture) so a
+ * probe's `get_state` call respects the same timeout the connection itself was opened with. */
 export async function probeWorkerSocket(
   connect: (socketPath: string) => Promise<WorkerRpcClient>,
   socketPath: string,

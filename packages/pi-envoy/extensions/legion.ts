@@ -41,6 +41,63 @@ export function setLegionBootstrapExitForTests(hook: (code: number) => never): v
   exitProcess = hook;
 }
 
+// Bounds retries of the transient `/process/ready` and `/worker/ready` bootstrap requests.
+const READY_RETRY_ATTEMPTS = 3;
+const READY_RETRY_DELAY_MS = 1_000;
+
+function isNetworkOrTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "NetworkError" || error.name === "TimeoutError") return true;
+
+  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return (
+    code === "ConnectionRefused" ||
+    code === "ConnectionTimeout" ||
+    code === "EAI_AGAIN" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    code === "ENOTFOUND" ||
+    code === "ETIMEDOUT" ||
+    (error instanceof TypeError &&
+      (error.message === "Failed to fetch" || error.message === "fetch failed"))
+  );
+}
+
+/**
+ * Calls a role's `/process/ready` or `/worker/ready` daemon request. The daemon acknowledges
+ * this request before dialing back into this process's shim socket, so retry only errors that can
+ * resolve on their own: daemon 5xx responses and network or timeout failures, up to a bounded
+ * number of attempts. A definitive 4xx (401/403 or any other) propagates immediately, and an
+ * exhausted retry budget propagates too -- both reach the enclosing bootstrap catch, which exits
+ * the process so the daemon respawns a fresh attempt.
+ */
+const callReadyWithRetry = async (label: string, call: () => Promise<void>): Promise<void> => {
+  for (let attempt = 1; attempt <= READY_RETRY_ATTEMPTS; attempt++) {
+    try {
+      await call();
+      return;
+    } catch (error) {
+      const retryable =
+        error instanceof LegionDaemonApiError
+          ? error.status >= 500 && error.status < 600
+          : isNetworkOrTimeoutError(error);
+      if (!retryable) throw error;
+      if (attempt === READY_RETRY_ATTEMPTS) {
+        console.error(`[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`);
+        throw error;
+      }
+      console.error(
+        `[legion] ${label} failed (attempt ${attempt}/${READY_RETRY_ATTEMPTS}), retrying: ${messageFor(error)}`
+      );
+      const retryDelay = Promise.withResolvers<void>();
+      setTimeout(retryDelay.resolve, READY_RETRY_DELAY_MS);
+      await retryDelay.promise;
+    }
+  }
+};
+
 async function persistedTranscript(
   context: SessionContext
 ): Promise<{ readonly sessionFile: string; readonly agentId: string }> {
@@ -264,17 +321,28 @@ export default function legionExtension(pi: PiApi): void {
         };
         await claimEnvoyRole(sessionID, roleToken, context);
         await startControlSubscription(sessionID);
-        await roleDaemon().processReady({
-          tree,
-          sessionId: sessionID,
-          secret: started.secret,
-        });
+        await callReadyWithRetry("root process/ready", () =>
+          roleDaemon().processReady({
+            tree,
+            sessionId: sessionID,
+            secret: started.secret,
+          })
+        );
         registerArchitectTools();
         await activateLegionTool();
       } catch (error) {
-        console.error(
-          `[legion] root bootstrap failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
-        );
+        if (
+          error instanceof LegionDaemonApiError &&
+          (error.status === 401 || error.status === 403)
+        ) {
+          console.error(
+            `[legion] root bootstrap authorization failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+          );
+        } else {
+          console.error(
+            `[legion] root bootstrap failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+          );
+        }
         exitProcess(1);
       }
     })();
@@ -346,18 +414,29 @@ export default function legionExtension(pi: PiApi): void {
           registerArchitectTools();
           await activateLegionTool();
         }
-        await roleDaemon().workerReady({
-          tree,
-          issue,
-          role,
-          sessionId: sessionID,
-          secret: started.secret,
-          generation: generation(process.env),
-        });
-      } catch (error) {
-        console.error(
-          `[legion] worker bootstrap failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+        await callReadyWithRetry("worker/ready", () =>
+          roleDaemon().workerReady({
+            tree,
+            issue,
+            role,
+            sessionId: sessionID,
+            secret: started.secret,
+            generation: generation(process.env),
+          })
         );
+      } catch (error) {
+        if (
+          error instanceof LegionDaemonApiError &&
+          (error.status === 401 || error.status === 403)
+        ) {
+          console.error(
+            `[legion] worker bootstrap authorization failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+          );
+        } else {
+          console.error(
+            `[legion] worker bootstrap failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+          );
+        }
         exitProcess(1);
       }
     })();

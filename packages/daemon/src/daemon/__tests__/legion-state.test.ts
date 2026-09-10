@@ -103,9 +103,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v19 state with a valid project and admission capacity", () => {
+  it("initializes empty v20 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 19,
+      version: 20,
       project: "omp",
       issues: {},
       trees: {},
@@ -305,7 +305,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates v12 state to v13 (a version bump only, no field changes)", async () => {
+  it("migrates v12 state to v13 (a version bump only, no field changes) and on to v20's readyConfirmedAt backfill", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v12-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -314,9 +314,10 @@ describe("legion state", () => {
     // entirely in `roles`.
     current.trees = {};
     current.issues = {};
-    // A locator keeps the v13 -> v14 worker-identity migration (tested below) from touching
-    // this claim, so the only observable change through the full chain is the version bump
-    // this test names.
+    // A locator keeps the v13 -> v14 worker-identity migration from touching this claim; with
+    // `sessionId` also present, the same claim now also matches the v19 -> v20 backfill's own
+    // pre-upgrade "confirmed" criteria, so `readyConfirmedAt` is the one other observable
+    // change through the full chain this test names.
     const implementerToken = roleToken(initialState.project, issue, "implementer");
     current.roles = {
       ...current.roles,
@@ -333,7 +334,22 @@ describe("legion state", () => {
     const v12State = { ...current, version: 12 };
     await writeFile(file, JSON.stringify(v12State), "utf8");
 
-    expect(await loadState(file, initialState)).toEqual(current);
+    const migrationTimestamp = 1_726_000_000_000;
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(migrationTimestamp);
+    try {
+      expect(await loadState(file, initialState)).toEqual({
+        ...current,
+        roles: {
+          ...current.roles,
+          [implementerToken]: {
+            ...current.roles[implementerToken],
+            readyConfirmedAt: migrationTimestamp,
+          },
+        },
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("migrates v14 state to v15 (a version bump only, no field changes)", async () => {
@@ -365,7 +381,7 @@ describe("legion state", () => {
     });
   });
 
-  it("keeps a v12 worker's session identity intact when a resumable locator is already present", async () => {
+  it("keeps a v12 worker's session identity intact when a resumable locator is already present, backfilling readyConfirmedAt for it as an already-confirmed pre-v20 claim", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v12-locator-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -387,7 +403,19 @@ describe("legion state", () => {
     };
     await writeFile(file, JSON.stringify({ ...current, version: 12 }), "utf8");
 
-    expect(await loadState(file, initialState)).toEqual(current);
+    const migrationTimestamp = 1_726_000_000_000;
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(migrationTimestamp);
+    try {
+      expect(await loadState(file, initialState)).toEqual({
+        ...current,
+        roles: {
+          ...current.roles,
+          [token]: { ...current.roles[token], readyConfirmedAt: migrationTimestamp },
+        },
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("migrates v15 state by adding an empty running-worker queue", async () => {
@@ -443,7 +471,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates a controller-held-events-free v17 state through v18 and v19", async () => {
+  it("migrates a controller-held-events-free v17 state through v18, v19, and v20", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -457,7 +485,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(19);
+    expect(migrated.version).toBe(20);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -546,7 +574,7 @@ describe("legion state", () => {
     }
   });
 
-  it("converts a tree-less, issue-less v18 state to v19, preserving its controller notices", async () => {
+  it("converts a tree-less, issue-less v18 state to v19 (and onward to v20), preserving its controller notices", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-gates-"));
     const file = path.join(tempDir, "state.json");
     const notice = {
@@ -575,9 +603,74 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(19);
+    expect(migrated.version).toBe(20);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
+  });
+
+  it("migrates v19 state to v20 by backfilling readyConfirmedAt for confirmed worker claims, leaving unconfirmed, already-confirmed, and controller claims untouched", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v19-"));
+    const file = path.join(tempDir, "state.json");
+    const current = newLegionState(initialState.project, initialState.cap);
+    const confirmedToken = roleToken(initialState.project, issue, "implementer");
+    const unconfirmedToken = roleToken(initialState.project, issue, "tester");
+    const alreadyConfirmedToken = roleToken(initialState.project, issue, "reviewer");
+    const locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@42",
+      tmuxPaneId: "%1",
+      socketPath: "/state/workers/implementer.sock",
+    };
+    current.roles = {
+      [confirmedToken]: {
+        // sessionId + locator, no readyConfirmedAt: the pre-v20 meaning of "confirmed" this
+        // migration backfills.
+        issue,
+        role: "implementer",
+        sessionId: "ses_implementer",
+        locator,
+      },
+      [unconfirmedToken]: {
+        // No sessionId at all: /worker/started never registered this generation, so it was
+        // never confirmed under either the old or new meaning and must stay untouched.
+        issue,
+        role: "tester",
+        pendingAssignment: "verify #41",
+      },
+      [alreadyConfirmedToken]: {
+        // Already carries readyConfirmedAt (persisted by an already-patched daemon): never
+        // overwritten by this migration's own timestamp.
+        issue,
+        role: "reviewer",
+        sessionId: "ses_reviewer",
+        locator,
+        readyConfirmedAt: 1_700_000_000_000,
+      },
+      [controllerToken(initialState.project)]: {
+        role: "controller",
+        sessionId: "ses_controller",
+      },
+    };
+    await writeFile(file, JSON.stringify({ ...current, version: 19 }), "utf8");
+
+    const migrationTimestamp = 1_726_000_000_000;
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(migrationTimestamp);
+    try {
+      const migrated = await loadState(file, initialState);
+
+      expect(migrated.version).toBe(20);
+      expect(migrated.roles[confirmedToken]).toEqual({
+        ...current.roles[confirmedToken],
+        readyConfirmedAt: migrationTimestamp,
+      });
+      expect(migrated.roles[unconfirmedToken]).toEqual(current.roles[unconfirmedToken]);
+      expect(migrated.roles[alreadyConfirmedToken]).toEqual(current.roles[alreadyConfirmedToken]);
+      expect(migrated.roles[controllerToken(initialState.project)]).toEqual(
+        current.roles[controllerToken(initialState.project)]
+      );
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {

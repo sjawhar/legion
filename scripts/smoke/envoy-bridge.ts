@@ -1,5 +1,5 @@
 import { EnvelopeSchema } from "../../packages/contracts/src/envelope";
-import { connect, type NatsConnection } from "nats";
+import { connect, type NatsConnection, type Subscription } from "nats";
 
 export const DEFAULT_UPSTREAM_NATS_URL = "nats://envoy-nats.tailb86685.ts.net:4222";
 
@@ -31,7 +31,7 @@ const envelopeFields: Record<string, true> = {
 
 export type BridgeConfig = {
   repository: string;
-  subject: string;
+  subjects: string[];
   upstreamUrl: string;
   downstreamUrl: string;
 };
@@ -53,7 +53,10 @@ export function bridgeConfigFromEnvironment(
 
   return {
     repository,
-    subject: `notifications.github.${repository.replace("/", ".")}.>`,
+    subjects: [
+      `notifications.github.${repository.replace("/", ".")}.>`,
+      "notifications.dispatch.issue.>",
+    ],
     upstreamUrl: environment.SMOKE_UPSTREAM_NATS?.trim() || DEFAULT_UPSTREAM_NATS_URL,
     downstreamUrl,
   };
@@ -102,6 +105,36 @@ function validationFailure(validation: Exclude<EnvelopeValidation, { valid: true
 }
 
 
+async function forwardMessages(
+  subscription: Subscription,
+  subject: string,
+  downstream: NatsConnection
+): Promise<void> {
+  const subjectPrefix = subject.slice(0, -1);
+  let firstMessage = true;
+  for await (const message of subscription) {
+    if (!message.subject.startsWith(subjectPrefix)) {
+      throw new Error(`refusing out-of-scope upstream subject ${message.subject}`);
+    }
+    if (firstMessage) {
+      firstMessage = false;
+      const validation = envelopeValidation(new TextDecoder().decode(message.data));
+      if (!validation.valid) {
+        const reason = validationFailure(validation);
+        console.error(`BRIDGE UNHEALTHY first-envelope subject=${message.subject} ${reason}`);
+        throw new Error(`first bridged envelope is incompatible: ${reason}`);
+      }
+      console.log(
+        `BRIDGE VALIDATION shape=${validation.shape} subject=${message.subject} bytes=${message.data.byteLength}`
+      );
+    }
+
+    downstream.publishMessage(message);
+    await downstream.flush();
+    console.log(`BRIDGED subject=${message.subject} bytes=${message.data.byteLength}`);
+  }
+}
+
 export async function runBridge(config: BridgeConfig): Promise<void> {
   const upstream = await connect({
     servers: config.upstreamUrl,
@@ -119,8 +152,11 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,
     });
-    const subscription = upstream.subscribe(config.subject);
-    const stop = () => subscription.unsubscribe();
+    const activeDownstream = downstream;
+    const subscriptions = config.subjects.map((subject) => upstream.subscribe(subject));
+    const stop = () => {
+      for (const subscription of subscriptions) subscription.unsubscribe();
+    };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
 
@@ -128,31 +164,14 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
       await upstream.flush();
       await downstream.flush();
       console.log(
-        `BRIDGE READY subject=${config.subject} upstream=${config.upstreamUrl} downstream=${config.downstreamUrl}`
+        `BRIDGE READY subjects=${config.subjects.join(",")} upstream=${config.upstreamUrl} downstream=${config.downstreamUrl}`
       );
 
-      let firstMessage = true;
-      for await (const message of subscription) {
-        if (!message.subject.startsWith(config.subject.slice(0, -1))) {
-          throw new Error(`refusing out-of-scope upstream subject ${message.subject}`);
-        }
-        if (firstMessage) {
-          firstMessage = false;
-          const validation = envelopeValidation(new TextDecoder().decode(message.data));
-          if (!validation.valid) {
-            const reason = validationFailure(validation);
-            console.error(`BRIDGE UNHEALTHY first-envelope subject=${message.subject} ${reason}`);
-            throw new Error(`first bridged envelope is incompatible: ${reason}`);
-          }
-          console.log(
-            `BRIDGE VALIDATION shape=${validation.shape} subject=${message.subject} bytes=${message.data.byteLength}`
-          );
-        }
-
-        downstream.publishMessage(message);
-        await downstream.flush();
-        console.log(`BRIDGED subject=${message.subject} bytes=${message.data.byteLength}`);
-      }
+      await Promise.all(
+        subscriptions.map((subscription, index) =>
+          forwardMessages(subscription, config.subjects[index], activeDownstream)
+        )
+      );
     } finally {
       process.off("SIGINT", stop);
       process.off("SIGTERM", stop);
