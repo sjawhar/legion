@@ -1,9 +1,6 @@
 package pmdoc
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestParseMatchesMilkdownForFixtures(t *testing.T) {
 	for _, fx := range loadFixtures(t) {
@@ -39,35 +36,11 @@ func TestRenderParseRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("re-parse canonical markdown: %v\n%s", err, md)
 			}
-			if !stripAnchorMarks(doc).Equal(back) {
+			if !StripAnchorMarks(doc).Equal(back) {
 				g, _ := back.JSON()
-				w, _ := stripAnchorMarks(doc).JSON()
+				w, _ := StripAnchorMarks(doc).JSON()
 				t.Fatalf("round trip differs\n got: %s\nwant: %s\nmd:\n%s", g, w, md)
 			}
 		})
 	}
-}
-
-func stripAnchorMarks(node *Node) *Node {
-	if node == nil {
-		return nil
-	}
-	out := &Node{Type: node.Type, Attrs: node.Attrs, Text: node.Text}
-	for _, mark := range node.Marks {
-		if !strings.HasPrefix(mark.Type, "proof") && mark.Type != "dispatchAsk" {
-			out.Marks = append(out.Marks, mark)
-		}
-	}
-	for _, child := range node.Children {
-		clean := stripAnchorMarks(child)
-		if len(out.Children) > 0 {
-			previous := out.Children[len(out.Children)-1]
-			if previous.Type == "text" && clean.Type == "text" && marksEqual(previous.Marks, clean.Marks) {
-				previous.Text += clean.Text
-				continue
-			}
-		}
-		out.Children = append(out.Children, clean)
-	}
-	return out
 }
