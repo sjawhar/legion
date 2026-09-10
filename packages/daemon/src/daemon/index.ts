@@ -246,8 +246,15 @@ async function verifyLegionPluginLoaded(
         return manifest.version;
       })
       .catch(() => undefined);
+    // Named so a failure of the *launch prefix itself* (e.g. `secrets` denying a key, a
+    // nonzero exit with its own stderr) is distinguishable from the plugin genuinely being
+    // disabled/unregistered (exit 0, marker simply absent) — both previously reported the
+    // identical "not loaded" message, hiding the real cause.
+    const probeDetail = [`exit ${result.exitCode}`, result.stderr.trim()]
+      .filter((part) => part.length > 0)
+      .join(": ");
     throw new Error(
-      `[legion] pi-legion-envoy${version ? ` ${version}` : ""} is installed but not loaded by omp (disabled or unregistered); run omp plugin list`
+      `[legion] pi-legion-envoy${version ? ` ${version}` : ""} is installed but not loaded by omp (disabled or unregistered; probe ${probeDetail}); run omp plugin list`
     );
   } finally {
     await rm(probeDir, { recursive: true, force: true });

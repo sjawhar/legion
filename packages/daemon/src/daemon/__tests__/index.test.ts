@@ -1038,7 +1038,7 @@ describe("startDaemon", () => {
           },
         })
       ).rejects.toThrow(
-        "pi-legion-envoy 0.8.5 is installed but not loaded by omp (disabled or unregistered); run omp plugin list"
+        "pi-legion-envoy 0.8.5 is installed but not loaded by omp (disabled or unregistered; probe exit 0: LEGION_PLUGIN_LOADED=no); run omp plugin list"
       );
 
       expect(probeCommand?.slice(0, 4)).toEqual([
@@ -1053,6 +1053,63 @@ describe("startDaemon", () => {
       );
       expect(loadedState).toBeFalse();
       expect(natsCreated).toBeFalse();
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("names the real cause when the configured launch prefix itself fails the plugin-load probe, instead of blaming a disabled/unregistered plugin", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig: DaemonConfig = {
+      ...config(stateDir),
+      ompLaunchPrefix: ["secrets", "ANTHROPIC_API_KEY", "--"],
+    };
+    let shProbeCalls = 0;
+
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            runner: async (command) => {
+              if (command[0] !== "sh") throw new Error(`Unexpected command: ${command.join(" ")}`);
+              shProbeCalls += 1;
+              if (shProbeCalls === 1) {
+                // First sh-shaped probe: verifyOmpAgentsCapability.
+                return {
+                  stdout: "LEGION_OMP_AGENTS=available",
+                  stderr: "",
+                  exitCode: 0,
+                };
+              }
+              // Second sh-shaped probe: verifyLegionPluginLoaded. The launch prefix itself
+              // fails here (e.g. `secrets` denying a key) — never reaches omp, so the marker
+              // never appears and the exit is nonzero.
+              return {
+                stdout: "",
+                stderr: "secrets: ANTHROPIC_API_KEY: access denied\n",
+                exitCode: 1,
+              };
+            },
+            dispatchClient: fakeDispatchClient(),
+            resolveDaemonEnvironment: async () => daemonEnvironment,
+            readPluginManifest: async () => validLegionPluginManifest,
+            tokenManager: {
+              getToken: async () => ({
+                token: "test-token",
+                expiresAt: "2099-01-01T00:00:00.000Z",
+                gitIdentity: {
+                  name: "legion-implementer[bot]",
+                  email: "1+legion-implementer[bot]@users.noreply.github.com",
+                },
+              }),
+            },
+            loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+            createNatsTransport: async () => {
+              throw new Error("NATS must not start after a failed plugin load check");
+            },
+          },
+        })
+      ).rejects.toThrow("probe exit 1: secrets: ANTHROPIC_API_KEY: access denied");
     } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
