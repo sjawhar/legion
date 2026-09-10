@@ -22,14 +22,16 @@ This package exposes:
 - `dispatch_doc_read`
 - `dispatch_artifact`
 - `dispatch_read`
+- `dispatch_search`
 
-The native `dispatch_*` tools create and read Dispatch issues, asks, comments, documents, and
-artifacts. They are present when `dispatch.enabled` resolves a server URL and bearer token from
-envoy.json (`~/.config/opencode/envoy.json`, merged with `<repo>/.opencode/envoy.json`) or the
-`DISPATCH_URL` and `DISPATCH_TOKEN` environment variables; `dispatch.enabled: true` without
-`dispatch.serverUrl` targets `http://localhost:8766`. Each call fills the target issue from
-the session working directory, stamps it with the OpenCode session id and title, and stores
-`details.topic` as tool metadata so a successful mutation subscribes to that exact Dispatch topic.
+The eleven native `dispatch_*` tools create and read Dispatch issues, asks, comments,
+documents, and artifacts, or search all of them. They are present when `dispatch.enabled`
+resolves a server URL and bearer token from envoy.json (`~/.config/opencode/envoy.json`, merged
+with `<repo>/.opencode/envoy.json`) or the `DISPATCH_URL` and `DISPATCH_TOKEN` environment
+variables; `dispatch.enabled: true` without `dispatch.serverUrl` targets `http://localhost:8766`.
+Each issue-scoped call fills the target issue from the session working directory, stamps it with
+the OpenCode session id and title, and stores a successful mutation's `details.topic` as tool
+metadata so the host subscribes to that exact Dispatch topic.
 
 `dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
 An architect can post a specification directly with

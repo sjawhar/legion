@@ -7,15 +7,18 @@ import type {
   Comment,
   CommentRead,
   CreateAskInput,
+  DuplicateCandidate,
   EditOp,
   Event,
   IssueDetails,
+  SearchResult,
 } from "@legion/contracts";
 import {
   ASK_URGENCIES,
   dispatchIssueSubject,
   dispatchToolSchema,
   dispatchToolSpecs,
+  snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
@@ -85,6 +88,8 @@ const nativeIssueKeyPattern = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
 const externalIssueRefPattern = /^([^/\s]+)\/([^/\s#]+)#([1-9][0-9]*)$/;
 const bareIssueNumberPattern = /^[1-9][0-9]*$/;
 
+const issueFreeTools = new Set(["dispatch_issue", "dispatch_resolve_ask", "dispatch_search"]);
+
 function canonicalExternalIssueRef(value: string): string {
   const match = value.trim().match(externalIssueRefPattern);
   return match ? `${canonicalRepo(match[1] ?? "", match[2] ?? "")}#${match[3]}` : value;
@@ -108,6 +113,40 @@ function optionalBoolean(args: Record<string, unknown>, name: string): boolean |
 function optionalNumber(args: Record<string, unknown>, name: string): number | undefined {
   const value = args[name];
   return typeof value === "number" ? value : undefined;
+}
+
+interface DuplicateCandidateShape {
+  readonly key?: unknown;
+  readonly title?: unknown;
+  readonly status?: unknown;
+  readonly snippet?: unknown;
+  readonly shared_terms?: unknown;
+  readonly href?: unknown;
+}
+
+function isDuplicateCandidate(value: unknown): value is DuplicateCandidate {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as DuplicateCandidateShape;
+  return (
+    typeof candidate.key === "string" &&
+    typeof candidate.title === "string" &&
+    typeof candidate.status === "string" &&
+    typeof candidate.snippet === "string" &&
+    typeof candidate.shared_terms === "number" &&
+    typeof candidate.href === "string"
+  );
+}
+
+function duplicateCandidates(error: DispatchServiceError): DuplicateCandidate[] {
+  if (error.candidates === undefined || !error.candidates.every(isDuplicateCandidate)) throw error;
+  return error.candidates;
+}
+
+function searchResultLine(result: SearchResult, baseUrl: string): string {
+  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
+  const label = `${result.issue.key} [${result.issue.status}] ${result.issue.title} - ${result.kind}${artifactName}`;
+  const href = new URL(result.href, baseUrl).toString();
+  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
 
 function askUrgency(args: ToolArguments): AskUrgency | undefined {
@@ -151,7 +190,7 @@ async function resolveIssueArguments(
   env: ExecutorEnvironment,
   exec: ExecFn
 ): Promise<{ args: ToolArguments; ref: ParsedDispatchRef | null }> {
-  if (tool === "dispatch_issue" || tool === "dispatch_resolve_ask") return { args, ref: null };
+  if (issueFreeTools.has(tool)) return { args, ref: null };
   const refArgument = args.ref;
   const ref =
     typeof refArgument === "string"
@@ -361,7 +400,9 @@ async function openArtifactMarks(
 export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
 ): Promise<DispatchToolResult> {
-  if (!input.config.enabled || !input.config.url || !input.config.token) {
+  const configUrl = input.config.url;
+  const configToken = input.config.token;
+  if (!input.config.enabled || !configUrl || !configToken) {
     throw new Error("Dispatch is disabled; resolve both DISPATCH_URL and DISPATCH_TOKEN");
   }
   const env = input.env ?? process.env;
@@ -372,11 +413,10 @@ export async function executeDispatchTool(
   // argument only needs the contract's shape named when it is forwarded.
   const args = toolSchema(input.tool).parse(issueArguments.args) as ToolArguments;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
-  const client = new DispatchClient(input.config.url, input.config.token, input.fetchImpl);
-  const issueKey =
-    input.tool === "dispatch_issue" || input.tool === "dispatch_resolve_ask"
-      ? null
-      : await ensureIssue(client, stringArg(args, "issue"), actor);
+  const client = new DispatchClient(configUrl, configToken, input.fetchImpl);
+  const issueKey = issueFreeTools.has(input.tool)
+    ? null
+    : await ensureIssue(client, stringArg(args, "issue"), actor);
   const issue = () => {
     if (issueKey === null) throw new Error("issue is required");
     return issueKey;
@@ -384,20 +424,63 @@ export async function executeDispatchTool(
 
   switch (input.tool) {
     case "dispatch_issue": {
+      const project = stringArg(args, "project");
+      const title = stringArg(args, "title");
       const parent = optionalString(args, "parent");
       const external = optionalString(args, "external");
+      const force = optionalBoolean(args, "force");
       const spec = optionalString(args, "spec");
-      const created = await client.issue({
-        project: stringArg(args, "project"),
-        title: stringArg(args, "title"),
-        ...(parent === undefined ? {} : { parent }),
-        ...(external === undefined ? {} : { external }),
-        ...(spec === undefined ? {} : { spec }),
-        actor,
+      try {
+        const created = await client.issue({
+          project,
+          title,
+          ...(parent === undefined ? {} : { parent }),
+          ...(external === undefined ? {} : { external }),
+          ...(force === undefined ? {} : { force }),
+          ...(spec === undefined ? {} : { spec }),
+          actor,
+        });
+        return {
+          text: `Created ${created.key}: ${created.title}`,
+          details: { issue: created.key, topic: dispatchIssueSubject(created.key, ">") },
+        };
+      } catch (error) {
+        if (!(error instanceof DispatchServiceError) || error.code !== "POSSIBLE_DUPLICATE") {
+          throw error;
+        }
+        const candidates = duplicateCandidates(error);
+        return {
+          text: [
+            `Not created: "${title}" looks like a duplicate.`,
+            ...candidates.map((candidate) => {
+              const href = new URL(candidate.href, configUrl).toString();
+              return `${candidate.key} [${candidate.status}] ${candidate.title} → ${href}`;
+            }),
+            "Reference the existing issue, or call dispatch_issue again with force: true after reading it.",
+          ].join("\n"),
+          details: { duplicates: candidates },
+        };
+      }
+    }
+    case "dispatch_search": {
+      const query = stringArg(args, "query");
+      const project = optionalString(args, "project");
+      const limit = optionalNumber(args, "limit");
+      const search = await client.search(query, {
+        ...(project === undefined ? {} : { project }),
+        ...(limit === undefined ? {} : { limit }),
       });
+      const results = search.results;
+      const count = results.length;
       return {
-        text: `Created ${created.key}: ${created.title}`,
-        details: { issue: created.key, topic: dispatchIssueSubject(created.key, ">") },
+        text:
+          count === 0
+            ? `No results for "${query}".`
+            : [
+                `${count} ${count === 1 ? "result" : "results"} for "${query}" (${search.took_ms} ms)`,
+                ...results.map((result) => searchResultLine(result, configUrl)),
+              ].join("\n"),
+        details: { query, results },
       };
     }
     case "dispatch_resolve_ask": {

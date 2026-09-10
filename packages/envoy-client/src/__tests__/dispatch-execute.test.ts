@@ -184,6 +184,143 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/issue/);
   });
 
+  test("dispatch_search needs no issue and renders results with absolute links", async () => {
+    const results = [
+      {
+        kind: "document",
+        issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
+        artifact: { slug: "spec", name: "spec.md" },
+        id: "artifact-2",
+        snippet: "…the <mark>astrolabe</mark> measures…",
+        rank: 1,
+        href: "/issues/LEGION-2/spec?q=astrolabe",
+      },
+      {
+        kind: "comment",
+        issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
+        id: "comment-2",
+        snippet: "Comment about <mark>astrolabe</mark>",
+        rank: 0.5,
+        href: "/issues/LEGION-2/spec#comment-2",
+      },
+    ];
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname !== "/api/v1/search")
+        throw new Error(`unexpected request: ${target.pathname}`);
+      return response({ results, took_ms: 12 });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_search",
+      args: { query: "astrolabe" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      [
+        '2 results for "astrolabe" (12 ms)',
+        "LEGION-2 [triage] Astrolabe - document spec.md: …the **astrolabe** measures… -> http://dispatch.test/issues/LEGION-2/spec?q=astrolabe",
+        "LEGION-2 [triage] Astrolabe - comment: Comment about **astrolabe** -> http://dispatch.test/issues/LEGION-2/spec#comment-2",
+      ].join("\n")
+    );
+    expect(result.details).toEqual({ query: "astrolabe", results });
+    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(requests).toEqual(["/api/v1/search?q=astrolabe"]);
+  });
+
+  test("dispatch_search rejects a one-character query before any request", async () => {
+    let requests = 0;
+    const fetchImpl = (() => {
+      requests += 1;
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_search",
+        args: { query: "a" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(/2 characters/);
+    expect(requests).toBe(0);
+  });
+
+  test("dispatch_issue returns duplicate candidates instead of throwing", async () => {
+    const candidates = [
+      {
+        key: "LEGION-12",
+        title: "Global search across issues and documents",
+        status: "triage",
+        snippet: "<mark>Global</mark> <mark>search</mark> …",
+        shared_terms: 4,
+        href: "/issues/LEGION-12",
+      },
+    ];
+    const fetchImpl = async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+      new Response(
+        JSON.stringify({
+          error: "possible duplicate of LEGION-12: Global search across issues and documents",
+          code: "POSSIBLE_DUPLICATE",
+          candidates,
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
+      );
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "LEGION", title: "Global search across issues and documents" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        'Not created: "Global search across issues and documents" looks like a duplicate.',
+        "LEGION-12 [triage] Global search across issues and documents → http://dispatch.test/issues/LEGION-12",
+        "Reference the existing issue, or call dispatch_issue again with force: true after reading it.",
+      ].join("\n"),
+      details: { duplicates: candidates },
+    });
+  });
+
+  test("dispatch_issue forwards force", async () => {
+    const requests: Array<{ readonly body: unknown }> = [];
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ body: JSON.parse(String(init?.body)) });
+      return response({ key: "LEGION-13", title: "New global search work" });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "LEGION", title: "New global search work", force: true },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("Created LEGION-13: New global search work");
+    expect(requests).toEqual([{ body: expect.objectContaining({ force: true }) }]);
+  });
   test("rejects tool arguments outside the shared schema before issuing a request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");

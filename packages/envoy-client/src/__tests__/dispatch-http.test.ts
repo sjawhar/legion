@@ -47,6 +47,37 @@ describe("DispatchClient", () => {
     );
   });
 
+  test("search encodes q, project, and limit and returns the response body", async () => {
+    const body = {
+      results: [
+        {
+          kind: "document" as const,
+          issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
+          artifact: { slug: "spec", name: "spec.md" },
+          id: "artifact-2",
+          snippet: "<mark>astrolabe</mark>",
+          rank: 1,
+          href: "/issues/LEGION-2/spec?q=astrolabe",
+        },
+      ],
+      took_ms: 12,
+    };
+    const { fetchImpl, requests } = fakeFetch([jsonResponse(body)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(
+      client.search("astrolabe sextant", { project: "LEGION", limit: 5 })
+    ).resolves.toEqual(body);
+
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]?.url).pathname + new URL(requests[0]?.url).search).toBe(
+      "/api/v1/search?q=astrolabe+sextant&project=LEGION&limit=5"
+    );
+    expect(requests[0]?.init).toMatchObject({
+      method: "GET",
+      headers: { Authorization: "Bearer secret", Accept: "application/json" },
+    });
+  });
   test("maps dispatch operations to authenticated JSON and multipart API requests", async () => {
     const { fetchImpl, requests } = fakeFetch([
       ...Array.from({ length: 15 }, () => jsonResponse({ ok: true })),
