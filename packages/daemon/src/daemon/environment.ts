@@ -81,6 +81,21 @@ function parseMiseEnvironment(stdout: string): FullMiseEnvironment {
   return environment as FullMiseEnvironment;
 }
 
+/** The only place `DISPATCH_TOKEN`/`DISPATCH_URL`/`DISPATCH_MCP_URL` belong is the explicit,
+ * config-driven `-e` pairs `processes.ts` adds to a spawned pane's own tmux environment. Every
+ * other child process the daemon spawns — mise/tool resolution, GitHub App role/`gh` CLI
+ * children (`github-app-env.ts`), and any other daemon subprocess — must never see them, even
+ * when the daemon's own process (or mise's) happens to carry one for unrelated reasons. Shared
+ * by `fullMiseEnvironment` below and by `github-app-env.ts`'s base-env copy so every consumer of
+ * either strips the same three keys the same way. */
+const DISPATCH_PANE_ONLY_ENV_KEYS = ["DISPATCH_TOKEN", "DISPATCH_URL", "DISPATCH_MCP_URL"] as const;
+
+export function stripDispatchEnv<T extends NodeJS.ProcessEnv>(env: T): T {
+  const stripped = { ...env };
+  for (const key of DISPATCH_PANE_ONLY_ENV_KEYS) delete stripped[key];
+  return stripped;
+}
+
 async function fullMiseEnvironment(
   mise: string,
   env: NodeJS.ProcessEnv,
@@ -88,26 +103,17 @@ async function fullMiseEnvironment(
 ): Promise<FullMiseEnvironment> {
   const result = await run([mise, "env", "--json"]);
   if (result.exitCode !== 0) {
-    const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+    // stdout is `mise`'s env dump on partial success — never interpolated here, only stderr.
+    const detail = result.stderr.trim();
     throw new Error(
-      `[legion] Could not load the full mise environment${detail ? `: ${detail}` : ""}`
+      `[legion] Could not load the full mise environment (exit ${result.exitCode})${detail ? `: ${detail}` : ""}`
     );
   }
   const merged: NodeJS.ProcessEnv = {
     ...env,
     ...parseMiseEnvironment(result.stdout),
   };
-  // paneEnv becomes the base environment for every daemon-spawned subprocess, including the
-  // `tmux new-session`/`new-window` invocations that start each pane's tmux session — tmux
-  // captures that invocation's environment as the session's own base environment, which every
-  // later pane in the same session inherits regardless of the `-e` pairs a specific `new-window`
-  // call adds. If the daemon's own process (or mise's) happened to carry a dispatch env var, it
-  // would leak into every pane unconditionally. Stripping the three dispatch keys here makes the
-  // explicit, config-driven `-e` list processes.ts builds the only way a pane ever sees them.
-  delete merged.DISPATCH_TOKEN;
-  delete merged.DISPATCH_URL;
-  delete merged.DISPATCH_MCP_URL;
-  return merged as FullMiseEnvironment;
+  return stripDispatchEnv(merged) as FullMiseEnvironment;
 }
 
 function miseToolFromInvocation(invocation: string): string | undefined {
