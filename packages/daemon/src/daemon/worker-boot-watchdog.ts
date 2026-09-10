@@ -17,6 +17,13 @@ export interface WatchedClaim {
   sessionId?: string;
 }
 
+/** `cancelableSleep`'s own result: the wait itself, and an explicit cleanup a caller racing it
+ * against something else must invoke for the loser — see `cancelableSleep`'s own doc comment. */
+interface CancelableSleepHandle {
+  promise: Promise<void>;
+  cancel: () => void;
+}
+
 export interface WorkerBootWatchdogDeps {
   workerBootTimeoutSeconds(): number;
   now(): number;
@@ -98,23 +105,49 @@ export class WorkerBootWatchdog {
   }
 
   /**
-   * As a plain sleep, but resolves the moment `cancellation` settles — clearing the underlying
-   * real timer outright rather than merely losing a `Promise.race` while it lingers. Every
-   * wait `arm` makes uses this: without it, a cancelled watch's abandoned
-   * `workerBootTimeoutSeconds`-long real timer would keep a process (or a test run) alive long
-   * after the cancellation it lost to, for as long as that timer had left to run.
+   * As a plain sleep, but resolves the moment `signal` aborts, clearing the underlying real
+   * timer outright rather than merely losing a race while it lingers. Symmetrically, detaches
+   * its own abort listener the moment its own timer (or injected `deps.sleep`) fires normally:
+   * `signal` is the watch's one long-lived abort source, and the connect-retry loop below calls
+   * this once per failed attempt for as long as a worker is merely slow to open its socket —
+   * without this detach, every one of those calls would leave a listener attached to `signal`
+   * for the rest of the watch's life, accumulating without bound over a long-lived daemon
+   * watching a persistently borderline-slow worker. Returns an explicit `cancel()` too: a
+   * caller racing this against something else (the interval-remainder wait against a `closed`
+   * promise, see `watchOneInterval`) must clean up the loser's own timer itself — `signal`
+   * alone only observes the watch's overall cancellation, never "the other side of this one
+   * race already won". `cancel()` and a natural settlement are both idempotent and safe to
+   * invoke in either order or more than once.
    */
-  private cancelableSleep(ms: number, cancellation: Promise<unknown>): Promise<void> {
-    if (this.deps.sleep) {
-      return Promise.race([this.deps.sleep(ms), cancellation.then(() => undefined)]);
-    }
+  private cancelableSleep(ms: number, signal: AbortSignal): CancelableSleepHandle {
     const { promise, resolve } = Promise.withResolvers<void>();
-    const timer = setTimeout(resolve, ms);
-    void cancellation.then(() => {
+    if (signal.aborted) {
+      resolve();
+      return { promise, cancel: () => {} };
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = (): void => {
       clearTimeout(timer);
       resolve();
-    });
-    return promise;
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    const cancel = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    if (this.deps.sleep) {
+      this.deps.sleep(ms).then(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      });
+    } else {
+      timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+    }
+    return { promise, cancel };
   }
 
   /**
@@ -156,11 +189,11 @@ export class WorkerBootWatchdog {
   ): void {
     if (this.disposed) return;
     this.armed.get(token)?.cancel();
-    const cancellation = Promise.withResolvers<"cancelled">();
+    const controller = new AbortController();
     let cancelled = false;
     const cancel = (): void => {
       cancelled = true;
-      cancellation.resolve("cancelled");
+      controller.abort();
     };
     this.armed.set(token, { generation, cancel });
 
@@ -189,7 +222,7 @@ export class WorkerBootWatchdog {
         try {
           client = await this.deps.workerClient(token, locator.socketPath);
         } catch {
-          await this.cancelableSleep(BOOT_WATCHDOG_POLL_INTERVAL_MS, cancellation.promise);
+          await this.cancelableSleep(BOOT_WATCHDOG_POLL_INTERVAL_MS, controller.signal).promise;
         }
       }
       if (!cancelled && client) {
@@ -198,7 +231,11 @@ export class WorkerBootWatchdog {
         // never escape this race uncaught: treat it exactly like an ordinary close rather than
         // let it abort the whole watch mid-flight.
         const closed = client.closed.catch(() => undefined);
-        await Promise.race([closed, this.cancelableSleep(remaining, cancellation.promise)]);
+        const sleep = this.cancelableSleep(remaining, controller.signal);
+        await Promise.race([closed, sleep.promise]);
+        // Explicit cleanup regardless of which side won: a `closed`-winning race must never
+        // leave the interval's own timer live in the background until it separately fires.
+        sleep.cancel();
       }
     };
 
