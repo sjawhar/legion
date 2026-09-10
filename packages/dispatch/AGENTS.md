@@ -47,13 +47,11 @@ output CSS, catching the scanner-blind-spot case those checks exist to prevent;
 background composite in its own file and asserts that pairing is registered, since a component
 can compose a text role onto a background role its own registration never checked;
 `styles-css-pin.test.ts` asserts the hand-written hex/`rgb()` literals in `styles.css` (the
-pre-hydration `:root` fallback) equal the exact OKLCH-computed value of the palette swatch their
-trailing `/* swatch-name */` comment names. Adding a new color pairing means adding a registered
-composite to `classes.ts`, not inventing a shade inline.
-
-The current document tab is an interim read-only rendered view over the server's
-Proof-compatible Yjs tree. It deliberately has no inline typing or collaborative
-cursor path; those return with Lane B PR 4's Proof editor integration.
+pre-hydration `:root` fallback and Proof editor variables, both outside the `dark:` className
+mechanism) equal the exact OKLCH-computed value of the palette swatch their trailing
+`/* swatch-name */` comment names. Adding a new color pairing means adding a registered
+composite to `classes.ts`, not inventing a shade inline. The Proof editor inherits its theme
+through palette-pinned CSS variables scoped under `.dispatch-doc .proof-editor`.
 
 ## Commands
 
@@ -77,6 +75,10 @@ the production listener on port 8766. It defaults `DATABASE_URL` to
 `postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable` and
 uses trusted `X-Dispatch-User` identity for `alice` and `bob`; do not replace it
 with a fixture server.
+
+E2E builds set `VITE_DISPATCH_E2E=1`. In that build only, `ProofDocument` exposes its live
+`editor` and `view` as `window.__dispatchDocument` for Playwright state probes; production builds
+never create that property.
 
 `e2e/seed.ts` truncates the test database before each scenario. For a deployed
 server, set `PLAYWRIGHT_DATABASE_URL` for the same database and

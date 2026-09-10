@@ -519,13 +519,8 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
   const artifactRouteSlug = artifactRoute?.slug;
   const query = new URLSearchParams(search);
   const commentId = query.get("comment") ?? undefined;
+  const askId = query.get("ask") ?? undefined;
   const highlightTerm = firstHighlightTerm(query.get("q") ?? "");
-  const from = Number(query.get("from"));
-  const to = Number(query.get("to"));
-  const highlight =
-    Number.isInteger(from) && Number.isInteger(to) && from >= 0 && to > from
-      ? { from, to }
-      : undefined;
   const issue = useQuery({
     queryKey: ["issue", route.key],
     queryFn: () => api.getIssue(route.key),
@@ -652,8 +647,8 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
         {activatedTabs.spec && !(artifactRoute !== undefined && !isPrimaryArtifactRoute) ? (
           <ArtifactDocument
             artifact={primaryArtifact}
+            askId={askId}
             commentId={commentId}
-            highlight={highlight}
             highlightTerm={highlightTerm}
             isClosed={isClosed}
             issueKey={issueKey}
@@ -699,8 +694,8 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
         {selectedArtifact?.kind === "doc" ? (
           <ArtifactDocument
             artifact={selectedArtifact}
+            askId={askId}
             commentId={commentId}
-            highlight={highlight}
             highlightTerm={highlightTerm}
             isClosed={isClosed}
             issueKey={issueKey}

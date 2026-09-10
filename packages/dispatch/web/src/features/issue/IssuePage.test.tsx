@@ -3,8 +3,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
+import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api, type ListEventsOptions } from "../../api/client";
 import type { Ask, IssueDetails } from "../../api/types";
+import { DocumentRuntime } from "../doc/runtime";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
@@ -80,21 +82,27 @@ function CurrentRoute() {
   return <output data-testid="current-route">{`${location.pathname}${location.search}`}</output>;
 }
 
-function renderIssuePage(path = "/issues/CORE-1", navigateTo?: string) {
+function renderIssuePage(path = "/issues/CORE-1", navigateTo?: string, documentText?: string) {
+  const runtime = fakeDocumentRuntime({ text: documentText });
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
-  return render(
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  const view = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
-        <CurrentRoute />
-        {navigateTo === undefined ? null : <Link to={navigateTo}>Navigate to test route</Link>}
-        <Routes>
-          <Route path="/issues/:key/*" element={<IssuePage />} />
-        </Routes>
+        <DocumentRuntime.Provider value={runtime.runtime}>
+          <CurrentRoute />
+          {navigateTo === undefined ? null : <Link to={navigateTo}>Navigate to test route</Link>}
+          <Routes>
+            <Route path="/issues/:key/*" element={<IssuePage />} />
+          </Routes>
+        </DocumentRuntime.Provider>
       </QueryClientProvider>
     </MemoryRouter>
   );
+  window.setTimeout(runtime.sync);
+  return { ...view, runtime };
 }
 
 test("IssuePage reads newest events when looking for active sessions", async () => {
@@ -258,7 +266,7 @@ test("IssuePage keeps the Spec mounted across tabs", async () => {
     markdown: "The mounted specification",
     version: 1,
   });
-  const view = renderIssuePage("/issues/CORE-1/spec");
+  const view = renderIssuePage("/issues/CORE-1/spec", undefined, "The mounted specification");
 
   try {
     await screen.findByRole("tab", { name: "Spec", selected: true });
@@ -436,10 +444,11 @@ test("IssuePage highlights a historical quote from its comment deep link", async
 
   try {
     await waitFor(() =>
-      expect(view.container.querySelector("mark.dispatch-anchor-history")?.textContent).toBe(
-        "SQLit"
-      )
+      expect(
+        view.runtime.editors.some((editor) => editor.markdown?.includes('data-id="comment-1"'))
+      ).toBe(true)
     );
+    expect(view.runtime.editors.some((editor) => editor.focused.includes("comment-1"))).toBe(true);
     expect(
       within(within(view.container).getByRole("tabpanel", { name: "Spec" })).getAllByRole("article")
     ).toHaveLength(1);

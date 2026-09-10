@@ -14,6 +14,8 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
+    // @sjawhar/proof-editor (Milkdown + mermaid) is one ~2.8 MB lazy chunk loaded only on the document tab.
+    chunkSizeWarningLimit: 3000,
     emptyOutDir: true,
   },
   server: {

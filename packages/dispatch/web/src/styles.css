@@ -67,3 +67,38 @@ a {
     min-height: 44px;
   }
 }
+
+.dispatch-doc .proof-editor {
+  --bg-color: transparent;
+  --text-color: currentColor;
+  --font-family: inherit;
+  --code-bg: #f1f5f9; /* slate-100 */
+  --pre-bg: #0f172b; /* slate-900 */
+  --pre-color: #f1f5f9; /* slate-100 */
+  --blockquote-border: #cad5e2; /* slate-300 */
+  --blockquote-color: #45556c; /* slate-600 */
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc .proof-editor {
+    --code-bg: #1d293d; /* slate-800 */
+    --pre-bg: #020618; /* slate-950 */
+    --pre-color: #f1f5f9; /* slate-100 */
+    --blockquote-border: #45556c; /* slate-600 */
+    --blockquote-color: #cad5e2; /* slate-300 */
+  }
+}
+
+.dispatch-doc .milkdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.dispatch-doc .milkdown .editor {
+  min-height: 24rem;
+}
+
+.dispatch-doc[data-read-only="true"] .dispatch-action-bar {
+  display: none;
+}
