@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 const maxArtifactBlobSize = 25 << 20
@@ -329,7 +330,7 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := s.replaceRefs(r.Context(), tx, "artifact", artifact.ID, markdown); err != nil {
+		if err := refs.Replace(r.Context(), tx, "artifact", artifact.ID, markdown, s.deps.ServerURL); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -389,7 +390,7 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	referencedBy, err := s.loadReferencedBy(r.Context(), artifact)
+	referencedBy, err := refs.ReferencedBy(r.Context(), s.deps.Store.Pool, artifact.RefKey)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

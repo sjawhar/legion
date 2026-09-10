@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 const maxCommentBody16 = 2000
@@ -342,7 +343,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			}
 		}
 	}
-	if err := s.replaceRefs(r.Context(), tx, "comment", comment.ID, comment.Body); err != nil {
+	if err := refs.Replace(r.Context(), tx, "comment", comment.ID, comment.Body, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

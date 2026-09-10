@@ -59,3 +59,18 @@ func TestExtractTrimsParenthesizedDispatchReference(t *testing.T) {
 		t.Fatalf("Extract() = %#v; want %#v", got, want)
 	}
 }
+
+func TestExtractParsesProjectDocumentReferences(t *testing.T) {
+	body := `dispatch://CORE/artifact/design-notes dispatch://CORE/artifact/design-notes@v2 dispatch://CORE/artifact/design-notes/ask/a1 dispatch://CORE/artifact/design-notes/comment/c1 dispatch://CORE dispatch://CORE/spec https://dispatch.example/projects/CORE/documents/design-notes?version=3 https://dispatch.example/projects/CORE/documents/design-notes?ask=a2`
+	want := []Ref{
+		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
+		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
+		{Kind: "ask", Project: "CORE", ID: "a1"},
+		{Kind: "comment", Project: "CORE", ID: "c1"},
+		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
+		{Kind: "ask", Project: "CORE", ID: "a2"},
+	}
+	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v; want %#v", got, want)
+	}
+}

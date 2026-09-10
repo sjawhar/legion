@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // listIssuesQuery aggregates each issue's open-ask count with a single
@@ -308,7 +309,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.replaceRefs(r.Context(), tx, "artifact", artifactID, markdown); err != nil {
+	if err := refs.Replace(r.Context(), tx, "artifact", artifactID, markdown, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

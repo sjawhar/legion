@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 const (
@@ -151,7 +152,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	ask.Urgency = urgency
 	ask.Anchor = anchor
 	ask.State = "open"
-	if err := s.replaceRefs(r.Context(), tx, "ask", ask.ID, ask.Question); err != nil {
+	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

@@ -13,7 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 type versionPending struct {
@@ -485,7 +485,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return model.Version{}, fmt.Errorf("decode document version authors: %w", err)
 	}
-	if err := s.indexDocumentReferences(ctx, tx, artifactID, markdown); err != nil {
+	if err := refs.Replace(ctx, tx, "artifact", artifactID, markdown, s.serverURL); err != nil {
 		return model.Version{}, err
 	}
 	if err := s.refreshAnchors(ctx, tx, artifactID, tree); err != nil {
@@ -495,29 +495,6 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 		s.rememberPendingVersion(artifactID, version, *write.capture)
 	}
 	return version, nil
-}
-
-func (s *Service) indexDocumentReferences(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error {
-	if _, err := tx.Exec(ctx, `delete from refs where from_kind = 'artifact' and from_id = $1`, artifactID); err != nil {
-		return fmt.Errorf("clear document references: %w", err)
-	}
-	for _, ref := range text.Extract(markdown, s.serverURL) {
-		if ref.Kind == "url" {
-			continue
-		}
-		toID := ref.ID
-		if ref.Kind == "artifact" {
-			toID = ref.IssueKey + "/" + ref.ID
-		}
-		if _, err := tx.Exec(ctx, `
-			insert into refs (from_kind, from_id, to_kind, to_id)
-			values ('artifact', $1, $2, $3)
-			on conflict do nothing
-		`, artifactID, ref.Kind, toID); err != nil {
-			return fmt.Errorf("write document reference: %w", err)
-		}
-	}
-	return nil
 }
 
 func actorKey(actor model.Actor) string {

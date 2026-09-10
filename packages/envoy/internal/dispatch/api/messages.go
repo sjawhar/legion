@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 const maxMessageBody16 = 2000
@@ -63,7 +64,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.replaceRefs(r.Context(), tx, "message", message.ID, message.Body); err != nil {
+	if err := refs.Replace(r.Context(), tx, "message", message.ID, message.Body, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
