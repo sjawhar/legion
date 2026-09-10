@@ -11,6 +11,9 @@ OAuth, and the GitHub REST/GraphQL proxy.
 store contains users, native issues, artifacts, document updates, and the event
 outbox.
 
+Migration 0010 adds stored generated `search` columns; Postgres maintains them on writes and no
+application code writes or refreshes them.
+
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Stored dashboard mappings are
 authoritative, and external issues fall back to `DISPATCH_DEFAULT_PROJECT` when
@@ -70,7 +73,8 @@ the table says human only.
 | `/api/v1/projects` | GET, POST | POST human only | List or create projects. |
 | `/api/v1/settings/repo-projects` | GET | human only | List repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | human only | Create or replace, or remove, a repository mapping. |
-| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. |
+| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
+| `/api/v1/search?q=&project=&limit=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results contain `<mark>` snippets and SPA `href`s. `limit` is 1–50 (default 20); an under-two-character or stop-word-only query returns `400 INVALID_QUERY`, and an invalid limit returns `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. |
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
 | `/api/v1/issues/{key}/events` | GET | user or bearer | Read events by forward cursor, descending page, or exact IDs. |
