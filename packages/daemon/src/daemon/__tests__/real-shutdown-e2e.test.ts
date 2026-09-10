@@ -166,6 +166,7 @@ function config(
     resyncIntervalMs: 600_000,
     workerStopTimeoutSeconds: 1,
     treeStopTimeoutSeconds: 1,
+    workerBootTimeoutSeconds: 120,
     gates: { design: "off", merge: "off" },
     githubApps: {},
     stateDir,
@@ -213,6 +214,7 @@ function processManagerDeps(
       },
     },
     now: () => Date.now(),
+    revokeSessionCapability: () => {},
   };
 }
 
@@ -243,7 +245,6 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       generation: 1,
       status: "active",
       launchFailures: 0,
-      heldEvents: [],
     };
     const token = roleToken("realshutdown", root, "tester");
     state.roles[token] = {
@@ -374,7 +375,6 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         generation: 1,
         status: "active",
         launchFailures: 0,
-        heldEvents: [],
       };
       const token = roleToken("realshutdown", root, "tester");
       state.roles[token] = {
@@ -438,7 +438,6 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         generation: 1,
         status: "active",
         launchFailures: 0,
-        heldEvents: [],
       };
 
       let daemon: LegionApi | undefined;

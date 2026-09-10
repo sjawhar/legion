@@ -129,6 +129,19 @@ export class CapabilityService {
     this.capabilities.set(sessionId, capability);
   }
 
+  /** Invalidates a session's capability the moment its process is observed dead, so a stale
+   * credential file cannot keep minting grants until a respawn overwrites it, and revokes every
+   * grant already minted for that session — without this, a grant minted before revocation
+   * would otherwise keep redeeming GitHub tokens for up to its own `expiresAt`, since
+   * `resolveGrant` only ever checks expiry, never the capability that minted it. A no-op if the
+   * session never had a capability (already revoked, or never minted). */
+  deleteCapability(sessionId: string): void {
+    this.capabilities.delete(sessionId);
+    for (const [grantId, grant] of this.grants) {
+      if (grant.sessionId === sessionId) this.grants.delete(grantId);
+    }
+  }
+
   setGrant(grantId: string, grant: Grant): void {
     this.grants.set(grantId, grant);
   }
@@ -147,46 +160,5 @@ export class CapabilityService {
 
   getWorkerBootToken(token: string): WorkerBootToken | undefined {
     return this.workerBootTokens.get(token);
-  }
-}
-
-/**
- * Tracks whether the controller's startup redelivery has already run for the
- * current daemon process, so a controller reconnecting on the same boot never
- * replays it twice. Reset whenever a fresh controller capability is minted.
- */
-export class ControllerGate {
-  private ready = false;
-  private readyAttempt: Promise<void> | undefined;
-  private generation = 0;
-
-  async ensureReady(onReady: () => Promise<void>): Promise<void> {
-    if (this.ready) return;
-    if (this.readyAttempt) {
-      await this.readyAttempt;
-      return;
-    }
-
-    const generation = this.generation;
-    const attempt = (async () => {
-      await onReady();
-      if (this.generation === generation) {
-        this.ready = true;
-      }
-    })();
-    this.readyAttempt = attempt;
-    try {
-      await attempt;
-    } finally {
-      if (this.readyAttempt === attempt) {
-        this.readyAttempt = undefined;
-      }
-    }
-  }
-
-  reset(): void {
-    this.generation += 1;
-    this.ready = false;
-    this.readyAttempt = undefined;
   }
 }

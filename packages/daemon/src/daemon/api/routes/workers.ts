@@ -8,7 +8,7 @@ import {
 } from "@legion/contracts";
 import type { WorkerRoleClaim } from "../../legion-state";
 import { equalSecretHash, secretHash, spawnCapabilityKey } from "../auth";
-import { type RouteContext, roleForSession, rootForIssue, treeContains } from "../context";
+import { type RouteContext, rootForIssue, treeContains } from "../context";
 import { appRoleForLegionRole } from "../github";
 import {
   EnvoyPublishError,
@@ -18,25 +18,6 @@ import {
   requiredString,
   validateContractResponse,
 } from "../http";
-
-/** Rejects the request unless the supplied spawn token was minted for exactly this tree/issue/role. */
-function requireSpawnCapability(
-  ctx: RouteContext,
-  body: Record<string, unknown>,
-  expected: { tree: string; issue: string; role: string },
-  message: string
-): void {
-  const spawnToken = requiredString(body, "spawnToken");
-  const spawn = ctx.deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)];
-  if (
-    !spawn ||
-    spawn.tree !== expected.tree ||
-    spawn.issue !== expected.issue ||
-    spawn.role !== expected.role
-  ) {
-    throw new HttpError(403, message);
-  }
-}
 
 export async function handleSpawnToken(
   ctx: RouteContext,
@@ -55,47 +36,6 @@ export async function handleSpawnToken(
   return Response.json(
     validateContractResponse(LegionDaemonApi.SpawnToken.response, {
       spawnToken,
-    })
-  );
-}
-
-export async function handlePhase(
-  ctx: RouteContext,
-  body: Record<string, unknown>
-): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
-  const phase = requiredString(body, "phase");
-  const sessionId = requiredString(body, "sessionId");
-  const role = roleForSession(ctx.deps.state, issue, sessionId, phase);
-  requireSpawnCapability(
-    ctx,
-    body,
-    { tree, issue, role },
-    "Worker session is not bound to a matching daemon-issued spawn token"
-  );
-  const secret = randomUUID();
-  ctx.auth.setCapability(sessionId, {
-    tree,
-    issue,
-    role,
-    secretHash: secretHash(secret),
-  });
-  ctx.deps.state.phases[issue] = { phase: role, sessionId };
-  const token = roleToken(ctx.deps.state.project, issue, role);
-  const existing = ctx.deps.state.roles[token];
-  ctx.deps.state.roles[token] = {
-    ...(existing && "issue" in existing ? existing : {}),
-    issue,
-    role,
-    sessionId,
-  };
-  const lease = await ctx.github.tokenForIssue(issue, appRoleForLegionRole(role));
-  await ctx.save();
-  return Response.json(
-    validateContractResponse(LegionDaemonApi.Phase.response, {
-      secret,
-      gitName: lease.gitIdentity.name,
-      gitEmail: lease.gitIdentity.email,
     })
   );
 }
@@ -167,25 +107,6 @@ export async function handleWorkerSession(
   );
 }
 
-export async function handleRoleBacking(
-  ctx: RouteContext,
-  body: Record<string, unknown>
-): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
-  const role = legionRole(requiredString(body, "role"));
-  const agentId = requiredString(body, "agentId");
-  const sessionId = requiredString(body, "sessionId");
-  requireSpawnCapability(
-    ctx,
-    body,
-    { tree, issue, role },
-    "Unknown or mismatched Legion spawn token"
-  );
-  await ctx.deps.processManager.registerRoleBacking(tree, issue, role, agentId, sessionId);
-  await ctx.save();
-  return Response.json(validateContractResponse(LegionDaemonApi.RoleBacking.response, {}));
-}
-
 export async function handleWorkerStarted(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -194,28 +115,44 @@ export async function handleWorkerStarted(
   const role = legionRole(requiredString(body, "role"));
   const bootToken = requiredString(body, "bootToken");
   const sessionId = requiredString(body, "sessionId");
-  const boot = ctx.auth.getWorkerBootToken(bootToken);
-  if (
-    !boot ||
-    boot.tree !== tree ||
-    boot.issue !== issue ||
-    boot.role !== role ||
-    (boot.sessionId !== undefined && boot.sessionId !== sessionId)
-  ) {
-    throw new HttpError(403, "Invalid worker boot token");
-  }
   const token = roleToken(ctx.deps.state.project, issue, role);
-  const fastFailClaim = ctx.deps.state.roles[token];
-  if (
-    !fastFailClaim ||
-    !("issue" in fastFailClaim) ||
-    fastFailClaim.generation !== boot.generation ||
-    !fastFailClaim.locator
-  ) {
+  const claim = ctx.deps.state.roles[token];
+  if (!claim || !("issue" in claim) || !claim.locator) {
     throw new HttpError(409, "Stale worker generation");
   }
-  if (boot.expectedSessionId !== undefined && boot.expectedSessionId !== sessionId) {
-    throw new HttpError(409, "Worker respawn must resume the same agent session");
+  // Captured now, re-checked against the current claim after the slow lease await below: the
+  // boot watchdog (or a reconnect probe) races this exact confirmation and may retire this
+  // generation's pane while the GitHub request is in flight.
+  const capturedGeneration = claim.generation;
+  const capturedPaneId = claim.locator.tmuxPaneId;
+  const boot = ctx.auth.getWorkerBootToken(bootToken);
+  if (boot) {
+    if (
+      boot.tree !== tree ||
+      boot.issue !== issue ||
+      boot.role !== role ||
+      (boot.sessionId !== undefined && boot.sessionId !== sessionId)
+    ) {
+      throw new HttpError(403, "Invalid worker boot token");
+    }
+    if (claim.generation !== boot.generation) {
+      throw new HttpError(409, "Stale worker generation");
+    }
+    if (boot.expectedSessionId !== undefined && boot.expectedSessionId !== sessionId) {
+      throw new HttpError(409, "Worker respawn must resume the same agent session");
+    }
+  } else {
+    // The in-memory boot-token map is gone (the daemon restarted between this launch and
+    // /worker/started): fall back to the hash `launchWorker` persisted onto the claim at mint —
+    // it proves the same token minted for this exact claim generation without needing the
+    // in-memory map to have survived, and the same-agent check reads the durable counterpart of
+    // the in-memory path's `expectedSessionId`.
+    if (!claim.bootTokenHash || !equalSecretHash(claim.bootTokenHash, bootToken)) {
+      throw new HttpError(403, "Invalid worker boot token");
+    }
+    if (claim.expectedSessionId !== undefined && claim.expectedSessionId !== sessionId) {
+      throw new HttpError(409, "Worker respawn must resume the same agent session");
+    }
   }
   const agentId = requiredString(body, "agentId");
   const ompSessionFile = requiredString(body, "ompSessionFile");
@@ -225,7 +162,9 @@ export async function handleWorkerStarted(
   // its stop timeout (`stopProcessSerialized` -> `workerAdmission.mutateClaim`). Holding it across
   // this network round trip would let a stuck `tokenForIssue` block a graceful shutdown from ever
   // timing out for this worker. A transient failure here leaves the boot token and claim
-  // untouched, so a retry with the same {bootToken, sessionId} starts clean.
+  // untouched, so a retry with the same {bootToken, sessionId} starts clean. The lock is
+  // (re-)acquired below, after this await, to re-validate against whatever changed while it was
+  // outstanding and commit atomically with that re-validation.
   const lease = await ctx.github.tokenForIssue(issue, appRoleForLegionRole(role));
   const secret = randomUUID();
 
@@ -235,35 +174,39 @@ export async function handleWorkerStarted(
   // handler resurrect a claim it already deleted, or persist a locator for a tree it already
   // reported closed. The lock now spans only synchronous state plus one disk-persist await, never
   // the GitHub network round trip above.
-  await ctx.deps.processManager.mutateLiveRoleClaim(tree, issue, token, async () => {
-    // Re-validated here, now holding the per-token lock, not only at entry above: the tree's
-    // closing state and this exact claim's identity can both have moved while the lease request
-    // above was in flight (mutateLiveRoleClaim's own entry check ran before that request even
-    // started), or while a concurrent respawn (itself serialized on this same token) waited its
-    // own turn on this lock.
-    const currentClaim = ctx.deps.state.roles[token];
+  return ctx.deps.processManager.mutateLiveRoleClaim(tree, issue, token, async () => {
+    // Re-read: the boot watchdog or a reconnect probe may have retired this exact boot (or a
+    // newer launch may have replaced it) while the GitHub lease was in flight above — never
+    // write over whatever now occupies this token.
+    const current = ctx.deps.state.roles[token];
     if (
-      !currentClaim ||
-      !("issue" in currentClaim) ||
-      currentClaim.generation !== boot.generation ||
-      !currentClaim.locator
+      !current ||
+      !("issue" in current) ||
+      !current.locator ||
+      current.generation !== capturedGeneration ||
+      current.locator.tmuxPaneId !== capturedPaneId
     ) {
       throw new HttpError(409, "Stale worker generation");
     }
-
     // Build the new claim as a local draft rather than mutating the live one in place, so a
     // save failure can be rolled back by simply restoring the old reference — leaving the
-    // in-memory claim exactly as durable as what was ever written to disk, and a retry with
-    // the same {bootToken, sessionId} starting where the first attempt did.
-    const priorClaim = currentClaim;
+    // in-memory claim exactly as durable as what was ever written to disk, and a retry with the
+    // same {bootToken, sessionId} starting where the first attempt did.
+    const priorClaim = current;
     const priorPhase = ctx.deps.state.phases[issue];
-    ctx.deps.state.roles[token] = {
-      ...currentClaim,
+    const nextClaim: WorkerRoleClaim = {
+      ...current,
       sessionId,
       agentId,
       bootTokenHash: secretHash(bootToken).toString("hex"),
-      locator: { ...currentClaim.locator, ompSessionFile },
+      locator: { ...current.locator, ompSessionFile },
     };
+    // A confirmed boot is the actual recovery signal — never a mere relaunch, which the boot
+    // watchdog's own accounting (`processes.ts`'s `launchWorker`) deliberately carries forward
+    // so a worker that keeps opening a pane but never gets this far still escalates to
+    // worker-died.
+    delete nextClaim.launchFailures;
+    ctx.deps.state.roles[token] = nextClaim;
     ctx.deps.state.phases[issue] = { phase: role, sessionId };
     try {
       await ctx.save();
@@ -273,21 +216,28 @@ export async function handleWorkerStarted(
       else ctx.deps.state.phases[issue] = priorPhase;
       throw error;
     }
-  });
 
-  // Only after the durable state is persisted do we consume the boot token and mint the session
-  // capability: both are ephemeral (never part of `ctx.save()`'s payload), so the save-failure
-  // rollback above needed no counterpart for them — they were never touched in that case.
-  boot.sessionId = sessionId;
-  ctx.auth.setCapability(sessionId, { tree, issue, role, secretHash: secretHash(secret) });
-  return Response.json(
-    validateContractResponse(LegionDaemonApi.WorkerStarted.response, {
-      roleToken: token,
-      secret,
-      gitName: lease.gitIdentity.name,
-      gitEmail: lease.gitIdentity.email,
-    })
-  );
+    // Only after the durable state is persisted do we consume the boot token and mint the
+    // session capability: both are ephemeral (never part of `ctx.save()`'s payload), so the
+    // save-failure rollback above needed no counterpart for them — they were never touched in
+    // that case. `boot` is absent on the persisted-hash fallback path (the in-memory map never
+    // had this token to begin with after a restart), so there is nothing to consume there.
+    if (boot) boot.sessionId = sessionId;
+    // The boot is confirmed: cancel this generation's armed boot watchdog inside this same
+    // locked transition, not after it settles — a retirement decision queued behind this lock
+    // must see the watch already gone the moment its own turn comes, never a window where the
+    // save landed but the watch could still fire concurrently.
+    ctx.deps.processManager.cancelBootWatchdog(token, capturedGeneration);
+    ctx.auth.setCapability(sessionId, { tree, issue, role, secretHash: secretHash(secret) });
+    return Response.json(
+      validateContractResponse(LegionDaemonApi.WorkerStarted.response, {
+        roleToken: token,
+        secret,
+        gitName: lease.gitIdentity.name,
+        gitEmail: lease.gitIdentity.email,
+      })
+    );
+  });
 }
 
 interface WorkerSession {

@@ -11,6 +11,7 @@ import {
 } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
+import { secretHash } from "../api/auth";
 import { EnvoyPublishError } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
@@ -20,12 +21,6 @@ const root = formatIssueKey("acme", "widgets", 1);
 const child = formatIssueKey("acme", "widgets", 2);
 const otherRoot = formatIssueKey("acme", "other", 9);
 const foreign = formatIssueKey("acme", "other", 10);
-
-interface PhaseResponse {
-  secret: string;
-  gitName: string;
-  gitEmail: string;
-}
 
 interface GrantResponse {
   grantId: string;
@@ -47,13 +42,6 @@ describe("Legion HTTP API", () => {
   let releaseSlots: IssueKey[];
   let closedTrees: IssueKey[];
   let admissions: IssueKey[];
-  let backingRegistrations: Array<{
-    tree: IssueKey;
-    issue: IssueKey;
-    role: string;
-    agentId: string;
-    sessionId: string;
-  }>;
   let spawnedWorkers: Array<{ tree: IssueKey; issue: IssueKey; role: string; task: string }>;
   let workerReadyCalls: Array<{
     issue: IssueKey;
@@ -71,7 +59,6 @@ describe("Legion HTTP API", () => {
     releaseSlots = [];
     closedTrees = [];
     admissions = [];
-    backingRegistrations = [];
     spawnedWorkers = [];
     workerReadyCalls = [];
     now = 1_700_000_000_000;
@@ -90,7 +77,6 @@ describe("Legion HTTP API", () => {
       locator: { tmuxSession: "legion-omp", tmuxWindowId: "@1" },
       status: "queued",
       launchFailures: 0,
-      heldEvents: [],
     };
     state.issues[otherRoot] = {
       key: otherRoot,
@@ -114,7 +100,6 @@ describe("Legion HTTP API", () => {
       generation: 1,
       status: "active",
       launchFailures: 0,
-      heldEvents: [],
     };
   });
 
@@ -209,20 +194,9 @@ describe("Legion HTTP API", () => {
         releaseSlot: (issue) => {
           releaseSlots.push(issue);
         },
-        registerRoleBacking: (tree, issue, role, agentId, sessionId) => {
-          backingRegistrations.push({ tree, issue, role, agentId, sessionId });
-          const backingToken = roleToken(state.project, issue, role);
-          const existingBacking = state.roles[backingToken];
-          state.roles[backingToken] = {
-            ...(existingBacking && "issue" in existingBacking ? existingBacking : {}),
-            issue,
-            role,
-            agentId,
-            sessionId,
-          };
-        },
         markTreeReady: () => {},
         markControllerReady: () => {},
+        cancelBootWatchdog: () => {},
         spawnWorker:
           options?.spawnWorkerImpl ??
           (async (tree, issue, role, task) => {
@@ -794,12 +768,6 @@ describe("Legion HTTP API", () => {
     ]);
     expect(commands[2]?.join(" ")).toContain("addSubIssue");
 
-    state.trees[root]?.heldEvents.push({
-      role: "legion-omp-acme__widgets-2-implementer",
-      payloadJson: '{"type":"work"}',
-      heldAt: "2026-08-23T00:00:00.000Z",
-      eventId: "evt-1",
-    });
     const released = await json("/legion/v1/waves/release", {
       tree: root,
       children: [child],
@@ -807,20 +775,14 @@ describe("Legion HTTP API", () => {
     });
     expect(released.body).toEqual({ released: [child] });
     expect(state.issues[child]?.released).toBe(true);
-    expect(publications).toEqual([
-      {
-        topic: "notifications.role.legion-omp-acme__widgets-2-implementer",
-        payload: '{"type":"work"}',
-      },
-    ]);
-    expect(state.trees[root]?.heldEvents).toEqual([]);
+    expect(publications).toEqual([]);
     const releasedAgain = await json("/legion/v1/waves/release", {
       tree: root,
       children: [child],
       ...architect,
     });
     expect(releasedAgain.body).toEqual({ released: [child] });
-    expect(publications).toHaveLength(1);
+    expect(publications).toEqual([]);
 
     const rootIssue = state.issues[root];
     if (!rootIssue) throw new Error("Root issue is missing from test state");
@@ -1029,34 +991,6 @@ describe("Legion HTTP API", () => {
       }),
     });
 
-    const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
-      tree: root,
-      issue: child,
-      role: "implementer",
-      ...architect,
-    });
-    expect(
-      (
-        await json("/legion/v1/role-backing", {
-          tree: root,
-          issue: child,
-          role: "implementer",
-          agentId: "agent-17",
-          sessionId: "ses_implementer",
-          spawnToken: spawn.body.spawnToken,
-        })
-      ).response.status
-    ).toBe(200);
-    expect(backingRegistrations).toEqual([
-      {
-        tree: root,
-        issue: child,
-        role: "implementer",
-        agentId: "agent-17",
-        sessionId: "ses_implementer",
-      },
-    ]);
-
     const provisioningCredential = await json<{ token: string }>(
       "/legion/v1/provisioning-credential",
       {
@@ -1220,35 +1154,31 @@ describe("Legion HTTP API", () => {
     expect(rootStarted.response.status).toBe(200);
     expect(otherStarted.response.status).toBe(200);
 
-    const workerSpawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+    const testerToken = roleToken(state.project, root, "tester");
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const workerBootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!workerBootToken) throw new Error("worker boot token was not minted");
+    const workerPhase = await json<{ secret: string }>("/legion/v1/worker/started", {
       tree: root,
       issue: root,
       role: "tester",
-      sessionId: "ses_root_architect",
-      secret: rootStarted.body.secret,
-    });
-    expect(workerSpawn.response.status).toBe(200);
-    expect(
-      (
-        await json("/legion/v1/role-backing", {
-          tree: root,
-          issue: root,
-          role: "tester",
-          agentId: "agent-tester",
-          sessionId: "ses_tester",
-          spawnToken: workerSpawn.body.spawnToken,
-        })
-      ).response.status
-    ).toBe(200);
-    const workerPhase = await json<PhaseResponse>("/legion/v1/phase", {
-      tree: root,
-      issue: root,
-      phase: "tester",
+      bootToken: workerBootToken,
       sessionId: "ses_tester",
-      spawnToken: workerSpawn.body.spawnToken,
+      agentId: "agent-tester",
+      ompSessionFile: "/tmp/tester.json",
     });
     expect(workerPhase.response.status).toBe(200);
-    expect(state.roles[roleToken(state.project, root, "tester")]).toEqual({
+    expect(state.roles[testerToken]).toMatchObject({
       issue: root,
       role: "tester",
       sessionId: "ses_tester",
@@ -1336,174 +1266,6 @@ describe("Legion HTTP API", () => {
     }
   });
 
-  it("preserves a worker spawn capability across daemon restart so its backed session can register phase", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-spawn-capability-"));
-    const file = path.join(tempDir, "state.json");
-    try {
-      await start({ saveState: async () => saveState(file, state) });
-      const bootToken = await api?.mintBootToken(root, 3);
-      if (!bootToken) throw new Error("boot nonce was not minted");
-      const started = await json<{ secret: string }>("/legion/v1/process/started", {
-        tree: root,
-        generation: 3,
-        rootSessionId: "ses_architect",
-        bootToken,
-        agentId: "root-agent",
-        ompSessionFile: "/tmp/root.json",
-      });
-      expect(started.response.status).toBe(200);
-      const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
-        tree: root,
-        issue: root,
-        role: "reviewer",
-        sessionId: "ses_architect",
-        secret: started.body.secret,
-      });
-      expect(
-        (
-          await json("/legion/v1/role-backing", {
-            tree: root,
-            issue: root,
-            role: "reviewer",
-            agentId: "agent-reviewer",
-            sessionId: "ses_recreated",
-            spawnToken: spawn.body.spawnToken,
-          })
-        ).response.status
-      ).toBe(200);
-      api?.stop();
-
-      const reloaded = await loadState(file, { project: "omp", cap: 2 });
-      await start({ state: reloaded, mintController: false });
-      const phase = await json("/legion/v1/phase", {
-        tree: root,
-        issue: root,
-        phase: "reviewer",
-        sessionId: "ses_recreated",
-        spawnToken: spawn.body.spawnToken,
-      });
-
-      expect(phase.response.status).toBe(200);
-    } finally {
-      await rm(tempDir, { recursive: true, force: true });
-    }
-  });
-  it("stores the resolved claim role in state.phases, not an arbitrary declared phase string", async () => {
-    await start();
-    const bootToken = await api?.mintBootToken(root, 3);
-    if (!bootToken) throw new Error("boot nonce was not minted");
-    const started = await json<{ secret: string }>("/legion/v1/process/started", {
-      tree: root,
-      generation: 3,
-      rootSessionId: "ses_architect",
-      bootToken,
-      agentId: "root-agent",
-      ompSessionFile: "/tmp/root.json",
-    });
-    expect(started.response.status).toBe(200);
-    const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
-      tree: root,
-      issue: root,
-      role: "tester",
-      sessionId: "ses_architect",
-      secret: started.body.secret,
-    });
-    expect(spawn.response.status).toBe(200);
-    expect(
-      (
-        await json("/legion/v1/role-backing", {
-          tree: root,
-          issue: root,
-          role: "tester",
-          agentId: "agent-tester",
-          sessionId: "ses_tester",
-          spawnToken: spawn.body.spawnToken,
-        })
-      ).response.status
-    ).toBe(200);
-
-    // roleForSession only rejects a declared phase that names a *different*
-    // recognized role; an unrecognized string passes through unchecked, so
-    // handlePhase must persist the resolved claim role, not this value.
-    const phase = await json("/legion/v1/phase", {
-      tree: root,
-      issue: root,
-      phase: "not-a-real-role",
-      sessionId: "ses_tester",
-      spawnToken: spawn.body.spawnToken,
-    });
-
-    expect(phase.response.status).toBe(200);
-    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
-  });
-
-  it("merges /phase onto an existing claim, preserving locator/generation/pendingAssignment", async () => {
-    await start();
-    const bootToken = await api?.mintBootToken(root, 3);
-    if (!bootToken) throw new Error("boot nonce was not minted");
-    const started = await json<{ secret: string }>("/legion/v1/process/started", {
-      tree: root,
-      generation: 3,
-      rootSessionId: "ses_architect",
-      bootToken,
-      agentId: "root-agent",
-      ompSessionFile: "/tmp/root.json",
-    });
-    expect(started.response.status).toBe(200);
-    const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
-      tree: root,
-      issue: root,
-      role: "tester",
-      sessionId: "ses_architect",
-      secret: started.body.secret,
-    });
-    expect(spawn.response.status).toBe(200);
-
-    const testerToken = roleToken(state.project, root, "tester");
-    // Pre-seed the claim with fields /phase must not drop by rebuilding it wholesale.
-    state.roles[testerToken] = {
-      issue: root,
-      role: "tester",
-      sessionId: "ses_tester",
-      agentId: "agent-tester",
-      generation: 5,
-      pendingAssignment: "verify #41",
-      launchFailures: 1,
-      bootTokenHash: "deadbeef",
-      locator: {
-        tmuxSession: "legion-omp",
-        tmuxWindowId: "@9",
-        tmuxPaneId: "%9",
-        socketPath: "/state/workers/tester.sock",
-      },
-    };
-
-    const phase = await json("/legion/v1/phase", {
-      tree: root,
-      issue: root,
-      phase: "tester",
-      sessionId: "ses_tester",
-      spawnToken: spawn.body.spawnToken,
-    });
-
-    expect(phase.response.status).toBe(200);
-    expect(state.roles[testerToken]).toEqual({
-      issue: root,
-      role: "tester",
-      agentId: "agent-tester",
-      sessionId: "ses_tester",
-      generation: 5,
-      pendingAssignment: "verify #41",
-      launchFailures: 1,
-      bootTokenHash: "deadbeef",
-      locator: {
-        tmuxSession: "legion-omp",
-        tmuxWindowId: "@9",
-        tmuxPaneId: "%9",
-        socketPath: "/state/workers/tester.sock",
-      },
-    });
-  });
   it("surfaces a deferred admission retry as queued through the controller API", async () => {
     await start({ admissionResult: "queued" });
 
@@ -1594,55 +1356,34 @@ describe("Legion HTTP API", () => {
     }
   });
 
-  it("rejects a phase whose spawn token was minted for another role", async () => {
+  it("rejects a worker/started boot token minted for a different role", async () => {
     await start();
-    const bootToken = await api?.mintBootToken(root, 3);
-    if (!bootToken) throw new Error("boot nonce was not minted");
-    const started = await json<{ secret: string }>("/legion/v1/process/started", {
-      tree: root,
-      generation: 3,
-      rootSessionId: "ses_architect",
-      bootToken,
-      agentId: "root-agent",
-      ompSessionFile: "/tmp/root.json",
-    });
-    expect(started.response.status).toBe(200);
-    const testerSpawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+    const testerToken = roleToken(state.project, root, "tester");
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const reviewerBootToken = await api?.mintWorkerBootToken(root, root, "reviewer", 1);
+    if (!reviewerBootToken) throw new Error("worker boot token was not minted");
+
+    const mismatched = await json("/legion/v1/worker/started", {
       tree: root,
       issue: root,
       role: "tester",
-      sessionId: "ses_architect",
-      secret: started.body.secret,
-    });
-    const reviewerSpawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
-      tree: root,
-      issue: root,
-      role: "reviewer",
-      sessionId: "ses_architect",
-      secret: started.body.secret,
-    });
-    expect(
-      (
-        await json("/legion/v1/role-backing", {
-          tree: root,
-          issue: root,
-          role: "reviewer",
-          agentId: "agent-reviewer",
-          sessionId: "ses_reviewer",
-          spawnToken: reviewerSpawn.body.spawnToken,
-        })
-      ).response.status
-    ).toBe(200);
-
-    const replay = await json("/legion/v1/phase", {
-      tree: root,
-      issue: root,
-      phase: "reviewer",
-      sessionId: "ses_reviewer",
-      spawnToken: testerSpawn.body.spawnToken,
+      bootToken: reviewerBootToken,
+      sessionId: "ses_tester",
+      agentId: "agent-tester",
+      ompSessionFile: "/tmp/tester.json",
     });
 
-    expect(replay.response.status).toBe(403);
+    expect(mismatched.response.status).toBe(403);
   });
 
   it("reissues a daemon-registered worker session capability and keeps grants short-lived", async () => {
@@ -1658,6 +1399,20 @@ describe("Legion HTTP API", () => {
       ompSessionFile: "/tmp/root.json",
     });
     expect(started.response.status).toBe(200);
+    const testerToken = roleToken(state.project, root, "tester");
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const workerBootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!workerBootToken) throw new Error("worker boot token was not minted");
     const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
       tree: root,
       issue: root,
@@ -1665,44 +1420,23 @@ describe("Legion HTTP API", () => {
       sessionId: "ses_architect",
       secret: started.body.secret,
     });
-    const unregisteredSession = await json("/legion/v1/phase", {
+    const phase = await curlJson<{
+      roleToken: string;
+      secret: string;
+      gitName: string;
+      gitEmail: string;
+    }>("/legion/v1/worker/started", {
       tree: root,
       issue: root,
-      phase: "tester",
-      sessionId: "ses_unregistered",
-      spawnToken: spawn.body.spawnToken,
-    });
-    expect(unregisteredSession.response.status).toBe(403);
-    expect(
-      (
-        await json("/legion/v1/role-backing", {
-          tree: root,
-          issue: root,
-          role: "tester",
-          agentId: "agent-tester",
-          sessionId: "ses_tester",
-          spawnToken: spawn.body.spawnToken,
-        })
-      ).response.status
-    ).toBe(200);
-    const roleBypass = await json("/legion/v1/phase", {
-      tree: root,
-      issue: root,
-      phase: "reviewer",
+      role: "tester",
+      bootToken: workerBootToken,
       sessionId: "ses_tester",
-      spawnToken: spawn.body.spawnToken,
-    });
-    expect(roleBypass.response.status).toBe(403);
-
-    const phase = await curlJson<PhaseResponse>("/legion/v1/phase", {
-      tree: root,
-      issue: root,
-      phase: "tester",
-      sessionId: "ses_tester",
-      spawnToken: spawn.body.spawnToken,
+      agentId: "agent-tester",
+      ompSessionFile: "/tmp/tester.json",
     });
     expect(phase.status).toBe(200);
     expect(phase.body).toEqual({
+      roleToken: testerToken,
       secret: expect.any(String),
       gitName: "legion-implement[bot]",
       gitEmail: "42+legion-implement[bot]@users.noreply.github.com",
@@ -1770,6 +1504,99 @@ describe("Legion HTTP API", () => {
       grantId: grant.body.grantId,
     });
     expect(expired.response.status).toBe(403);
+  });
+  it("revokes an already-minted grant the moment its minting session's capability is revoked, even before it would otherwise expire", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const grant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+    expect(grant.status).toBe(200);
+
+    // Simulates what `ProcessManager.closeTree`/`retireWorkerLocator`/`removeTreeWindow`
+    // actually call the instant a session's process is observed dead or torn down (see
+    // `revokeRoleClaim`) - `deleteCapability` must not merely stop future grant mints, it must
+    // also invalidate every grant this session already minted, since `resolveGrant` only ever
+    // checks expiry, never the capability that minted it.
+    api?.revokeSessionCapability("ses_architect");
+
+    const token = await json("/legion/v1/gh-token", {
+      grantId: grant.body.grantId,
+    });
+    expect(token.response.status).toBe(403);
+  });
+  it("resolves worker/started against a persisted boot-token hash after a restart, rejecting a session that does not match the resumed agent", async () => {
+    await start();
+    const testerToken = roleToken(state.project, root, "tester");
+    const workerBootToken = await api?.mintWorkerBootToken(root, root, "tester", 3, "ses_original");
+    if (!workerBootToken) throw new Error("worker boot token was not minted");
+    // Simulates what a real `launchWorker` call already persists onto the claim at mint time
+    // (see `launchWorker`'s doc comment): the boot token's hash and the session this respawn is
+    // expected to resume, durable independent of the in-memory boot-token map.
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 3,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@1",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+      bootTokenHash: secretHash(workerBootToken).toString("hex"),
+      expectedSessionId: "ses_original",
+    };
+
+    // Restart: a fresh daemon/API instance means a fresh in-memory boot-token map, so
+    // `/worker/started` must fall back to the persisted hash on the claim.
+    api?.stop();
+    await start({ state });
+
+    const mismatched = await json("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken: workerBootToken,
+      sessionId: "ses_different",
+      agentId: "agent-tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(mismatched.response.status).toBe(409);
+    expect((mismatched.body as { error?: string }).error).toBe(
+      "Worker respawn must resume the same agent session"
+    );
+    // Rejected before any mutation: the claim is untouched, so a follow-up attempt with the
+    // correct session still works against the same persisted hash.
+    const untouchedClaim = state.roles[testerToken];
+    expect(
+      untouchedClaim && "issue" in untouchedClaim ? untouchedClaim.sessionId : "present"
+    ).toBeUndefined();
+
+    const resumed = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken: workerBootToken,
+      sessionId: "ses_original",
+      agentId: "agent-tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(resumed.response.status).toBe(200);
+    expect(state.roles[testerToken]).toMatchObject({ sessionId: "ses_original" });
   });
   it("restores a root architect capability from durable transcript backing after a daemon restart", async () => {
     await start();

@@ -26,7 +26,6 @@ function stateWithRoot(): LegionState {
     locator: { tmuxSession: "legion-omp", tmuxWindowId: "@1" },
     status: "queued",
     launchFailures: 0,
-    heldEvents: [],
   };
   return state;
 }
@@ -80,12 +79,12 @@ function startApi(
     processManager: {
       admit: () => "spawned",
       releaseSlot: () => {},
-      registerRoleBacking: () => {},
       markProcessDead: options.markProcessDead ?? (() => {}),
       reportRootExit: () => {},
       closeTree: () => {},
       markTreeReady: () => {},
       markControllerReady: () => {},
+      cancelBootWatchdog: () => {},
       spawnWorker: async () => ({ status: "spawned" as const, roleToken: "stub-role-token" }),
       workerReady: () => {},
       rejectIfTreeGone: () => {},

@@ -59,7 +59,6 @@ function rootState(status: "active" | "lingering" | "closed" = "active"): Legion
     root,
     generation: 1,
     status,
-    heldEvents: [],
     launchFailures: 0,
   };
   claim(state, root, "architect");
@@ -159,7 +158,6 @@ describe("reduceGithubEvent", () => {
       root,
       generation: 1,
       status: "active",
-      heldEvents: [],
       launchFailures: 0,
     };
     const architect = claim(state, root, "architect");
@@ -304,7 +302,6 @@ describe("reduceGithubEvent", () => {
       root,
       generation: 1,
       status: "active",
-      heldEvents: [],
       launchFailures: 0,
     };
     // A newer event drops one of the children the first ingress recorded.
@@ -841,7 +838,6 @@ describe("reduceGithubEvent", () => {
         },
       },
     ]);
-    expect(state.trees[root].heldEvents).toEqual([]);
   });
 
   it("wakes the controller exactly once for a closed tree's approved review at a green head", () => {
@@ -938,7 +934,6 @@ describe("reduceGithubEvent", () => {
         },
       },
     ]);
-    expect(state.trees[root].heldEvents).toEqual([]);
   });
 
   it("filters legion-footer and self-authored comments before routing", () => {

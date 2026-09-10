@@ -138,6 +138,7 @@ export function config(): DaemonConfig {
     resyncIntervalMs: 600_000,
     workerStopTimeoutSeconds: 10,
     treeStopTimeoutSeconds: 60,
+    workerBootTimeoutSeconds: 120,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir: "/state",
@@ -167,7 +168,6 @@ export function stateForIssue(released = true): {
     generation: 1,
     status: "active",
     launchFailures: 0,
-    heldEvents: [],
   };
   state.roles[architect] = { issue, role: "architect" };
   state.roles[implementer] = { issue, role: "implementer" };

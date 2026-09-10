@@ -7,7 +7,7 @@ import {
 } from "@legion/contracts";
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
-import { CapabilityService, ControllerGate, secretHash, spawnCapabilityKey } from "./api/auth";
+import { CapabilityService, secretHash, spawnCapabilityKey } from "./api/auth";
 import { appendFooter, type RouteContext, requireTree, requireTreeIssue } from "./api/context";
 
 import { GitHubService, type GitHubTokenSource } from "./api/github";
@@ -42,9 +42,7 @@ import {
 import { handleMergeGate } from "./api/routes/merge-gate";
 import { handleProcessExit, handleProcessReady, handleProcessStarted } from "./api/routes/process";
 import {
-  handlePhase,
   handlePhaseComplete,
-  handleRoleBacking,
   handleSpawnToken,
   handleSpawnWorker,
   handleWorkerReady,
@@ -69,13 +67,6 @@ export interface LegionApiConfig {
 export interface LegionApiProcessManager {
   admit(issue: IssueKey): "spawned" | "queued";
   releaseSlot(issue: IssueKey): void;
-  registerRoleBacking(
-    tree: IssueKey,
-    issue: IssueKey,
-    role: LegionRole,
-    agentId: string,
-    sessionId: string
-  ): void | Promise<void>;
   spawnWorker(
     tree: IssueKey,
     issue: IssueKey,
@@ -100,6 +91,7 @@ export interface LegionApiProcessManager {
   closeTree(tree: IssueKey, options?: { stopRoot?: boolean }): void | Promise<void>;
   markTreeReady(tree: IssueKey): void | Promise<void>;
   markControllerReady(): void | Promise<void>;
+  cancelBootWatchdog(token: string, generation?: number): void;
   beginLinger(tree: IssueKey): void;
 }
 
@@ -126,6 +118,7 @@ export interface LegionApi {
     generation: number,
     expectedSessionId?: string
   ): Promise<string>;
+  revokeSessionCapability(sessionId: string): void;
   stop(): void;
 }
 
@@ -173,7 +166,6 @@ const ROUTES: Record<string, RouteEntry> = {
     request: LegionDaemonApi.SpawnToken.request,
     handler: handleSpawnToken,
   },
-  "/legion/v1/phase": { request: LegionDaemonApi.Phase.request, handler: handlePhase },
   "/legion/v1/worker/started": {
     request: LegionDaemonApi.WorkerStarted.request,
     handler: handleWorkerStarted,
@@ -193,10 +185,6 @@ const ROUTES: Record<string, RouteEntry> = {
   "/legion/v1/worker-session": {
     request: LegionDaemonApi.WorkerSession.request,
     handler: handleWorkerSession,
-  },
-  "/legion/v1/role-backing": {
-    request: LegionDaemonApi.RoleBacking.request,
-    handler: handleRoleBacking,
   },
   "/legion/v1/provisioning-credential": {
     request: LegionDaemonApi.ProvisioningCredential.request,
@@ -231,7 +219,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     await deps.saveState?.();
   };
   const auth = new CapabilityService(now);
-  const controllerGate = new ControllerGate();
   const github = new GitHubService(deps.tokenManager, runner);
 
   const ctx: RouteContext = {
@@ -242,7 +229,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     runner,
     grantTtlMs: GRANT_TTL_MS,
     auth,
-    controllerGate,
     github,
     requireTree: (body) => requireTree(deps.state, body),
     requireTreeIssue: (body) => requireTreeIssue(deps.state, body),
@@ -317,10 +303,10 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     mintControllerCapability: async () => {
       const secret = randomUUID();
       deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");
-      controllerGate.reset();
       await save();
       return secret;
     },
+    revokeSessionCapability: (sessionId) => auth.deleteCapability(sessionId),
     stop: () => server.stop(true),
   };
 }

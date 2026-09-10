@@ -213,7 +213,7 @@ corresponding lifecycle procedure.
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
 | `catchup-overseer` | Verify its gates, child counts, and PR verdicts against current artifacts, then resume the applicable numbered lifecycle step. It is a current-state snapshot, not a raw-event replay. For each entry in its `phaseCompletions` (`{issue, role, summary, at}`, phases that completed while you were not live), handle it exactly as a `phase-complete` wake. |
-| `revive-worker` | The extension has revived the backed worker. Do not create a duplicate; message the restored worker via `envoy_publish` to its role token if action is needed and rely on its committed handoff over recollection. |
+| `worker-died` | Payload `{type:"worker-died", issue, role}`. The daemon probed and retried this role's worker through `MAX_LAUNCH_FAILURES` attempts and could not confirm a boot — never a raw-event replay or a silent revive. Reassess the work and `spawn_worker` again for the role (it resumes the same agent via `--resume` if a session file survived) or reassign it if the failure looks environmental, not agent-specific. |
 | `reopened` | Reopen the root lifecycle: inspect the reason and current artifacts, reassess scope and children, and resume at the first applicable numbered step. |
 
 ## Escalation judgment

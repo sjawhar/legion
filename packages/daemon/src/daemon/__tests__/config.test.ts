@@ -253,6 +253,7 @@ describe("daemon config", () => {
         "worker_stop_timeout_seconds: 20",
         "tree_stop_timeout_seconds: 45",
         "resync_interval_seconds: 120",
+        "worker_boot_timeout_seconds: 90",
         "omp_invocation: mise x github:acme/oh-my-pi@18.0.3 -- omp",
         "state_dir: ./state",
         "gates:",
@@ -280,10 +281,64 @@ describe("daemon config", () => {
       workerStopTimeoutSeconds: 20,
       treeStopTimeoutSeconds: 45,
       resyncIntervalMs: 120_000,
+      workerBootTimeoutSeconds: 90,
       stateDir: "/tmp/legion-config/state",
       gates: { design: "off", merge: "off" },
       ompInvocation: "mise x github:acme/oh-my-pi@18.0.3 -- omp",
     });
+  });
+
+  it("resolves workerBootTimeoutSeconds: YAML beats env, env beats the 120 default", () => {
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "envoy_url: http://listener:9020",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "board_project_ids:",
+        "  - PVT_one",
+        "repos:",
+        "  - acme/widgets",
+        "app_logins:",
+        "  - legion-implement[bot]",
+        "worker_boot_timeout_seconds: 90",
+        "gates:",
+        "  design: off",
+        "  merge: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+
+    const fromYaml = resolveDaemonConfig({ configFile: file });
+    expect(fromYaml.config.workerBootTimeoutSeconds).toBe(90);
+
+    // Config-file value wins over env, matching every other lifecycle setting's precedence
+    // (`resolveValue`: cli > config > env > default).
+    const fileBeatsEnv = resolveDaemonConfig({
+      configFile: file,
+      env: { LEGION_WORKER_BOOT_TIMEOUT_SECONDS: "45" },
+    });
+    expect(fileBeatsEnv.config.workerBootTimeoutSeconds).toBe(90);
+
+    const { config: fromEnvOnly } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_BOARD_PROJECT_IDS: "PVT_alpha",
+        LEGION_WORKER_BOOT_TIMEOUT_SECONDS: "45",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(fromEnvOnly.workerBootTimeoutSeconds).toBe(45);
+
+    const { config: withoutEither } = resolveDaemonConfig({
+      env: { ...requiredEnv, LEGION_BOARD_PROJECT_IDS: "PVT_alpha" },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(withoutEither.workerBootTimeoutSeconds).toBe(120);
   });
 
   it("rejects the retired dispatch_mcp_url key from the YAML loader shape with a helpful message", () => {

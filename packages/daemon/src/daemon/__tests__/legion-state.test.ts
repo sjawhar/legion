@@ -29,14 +29,6 @@ function stateWithTree() {
     },
     status: "launch-failed",
     launchFailures: 3,
-    heldEvents: [
-      {
-        role: "implementer",
-        payloadJson: "{}",
-        heldAt: "2026-08-24T00:00:00Z",
-        eventId: "event-1",
-      },
-    ],
   };
   state.roles[roleToken(initialState.project, issue, "implementer")] = {
     issue,
@@ -108,9 +100,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v16 state with a valid project and admission capacity", () => {
+  it("initializes empty v17 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 16,
+      version: 17,
       project: "omp",
       issues: {},
       trees: {},
@@ -122,7 +114,6 @@ describe("legion state", () => {
       admission: { cap: 4, active: [], queue: [] },
       workerAdmission: { queue: [] },
       phases: {},
-      controllerHeldEvents: [],
     });
   });
 
@@ -300,17 +291,11 @@ describe("legion state", () => {
 
     expect(migrated).toEqual(current);
   });
-  it("migrates v7 state by removing adopted dispatch threads and their held replies", async () => {
+  it("migrates v7 state by removing adopted dispatch threads", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v7-"));
     const file = path.join(tempDir, "state.json");
     const dispatchThread = formatIssueKey("sjawhar", "legion", 99);
     const retainedChild = formatIssueKey("sjawhar", "legion", 100);
-    const retainedHeldEvent = {
-      role: "implementer",
-      payloadJson: '{"type":"work"}',
-      heldAt: "2026-08-24T00:00:01Z",
-      eventId: "event-work",
-    };
     const legacy = stateWithTree();
     legacy.issues[issue].children = [dispatchThread, retainedChild];
     legacy.issues[dispatchThread] = {
@@ -331,15 +316,6 @@ describe("legion state", () => {
       released: false,
       labels: [],
     };
-    legacy.trees[issue].heldEvents = [
-      retainedHeldEvent,
-      {
-        role: "architect",
-        payloadJson: '{"type":"dispatch-reply","body":"answer"}',
-        heldAt: "2026-08-24T00:00:02Z",
-        eventId: "event-dispatch-reply",
-      },
-    ];
     const v7State = {
       ...legacy,
       // A v7 file carries the same legacy CI flags a v8 file does.
@@ -360,7 +336,6 @@ describe("legion state", () => {
     const expected = stateWithTree();
     expected.issues[issue].children = [retainedChild];
     expected.issues[retainedChild] = legacy.issues[retainedChild];
-    expected.trees[issue].heldEvents = [retainedHeldEvent];
     const implementerToken = roleToken(initialState.project, issue, "implementer");
     expected.roles[implementerToken] = { issue, role: "implementer" };
 
@@ -516,6 +491,56 @@ describe("legion state", () => {
     await writeFile(file, JSON.stringify({ ...withoutWorkerAdmission, version: 15 }), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v16 state to v17 by dropping the held-event plumbing (heldEvents, controllerHeldEvents, recoveryEvents), preserving workerAdmission and phases", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    current.workerAdmission = { queue: [roleToken(initialState.project, issue, "implementer")] };
+    current.phases[issue] = {
+      phase: "implementer",
+      sessionId: "ses_123",
+      completed: { summary: "implemented the thing", at: "2026-09-01T00:00:00.000Z" },
+    };
+    const v16Input = {
+      ...current,
+      version: 16,
+      controllerHeldEvents: [
+        { role: "controller", eventId: "evt-controller", subject: "s.controller", payload: "{}" },
+      ],
+      trees: {
+        ...current.trees,
+        [issue]: {
+          ...current.trees[issue],
+          heldEvents: [
+            { role: "architect", eventId: "evt-architect", subject: "s.architect", payload: "{}" },
+          ],
+          recoveryEvents: [
+            {
+              issue,
+              role: "implementer",
+              original: { topic: "s.implementer", payload: "{}", eventId: "evt-implementer" },
+            },
+          ],
+        },
+      },
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
+    expect(loaded).toEqual(current);
+    // The held-event plumbing being dropped is orthogonal to a queued admission retry and a
+    // completed-but-unrouted phase, both of which pre-date v16->v17 and must survive it intact.
+    expect(loaded.workerAdmission).toEqual({
+      queue: [roleToken(initialState.project, issue, "implementer")],
+    });
+    expect(loaded.phases[issue]).toEqual({
+      phase: "implementer",
+      sessionId: "ses_123",
+      completed: { summary: "implemented the thing", at: "2026-09-01T00:00:00.000Z" },
+    });
   });
 
   it("rejects removed v6 fields on current-version state", async () => {

@@ -14,15 +14,18 @@ import {
 } from "@legion/contracts";
 import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
 import type { CommandRunnerOptions } from "../state/fetch";
+import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { createCancellableSleep } from "./cancellable-sleep";
 import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
+import type { ExceptionInfo } from "./events";
 import type { LegionState, TreeState, WorkerLocator, WorkerRoleClaim } from "./legion-state";
 import { StopFailed, TreeClosingError } from "./process-errors";
 import * as tmux from "./tmux";
 import { MAX_LAUNCH_FAILURES, WorkerAdmission } from "./worker-admission";
-import type { WorkerRpcClient } from "./worker-rpc";
+import { WorkerBootWatchdog } from "./worker-boot-watchdog";
+import { probeWorkerSocket, type WorkerRpcClient } from "./worker-rpc";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -51,22 +54,8 @@ class SpawnPersistenceFailure extends Error {
 type Redelivery = { topic: string; payload: string; eventId: string };
 
 export type ControlDirective =
-  | {
-      type: "revive-worker";
-      issue: IssueKey;
-      role: LegionRole;
-      agentId: string;
-      parentSessionFile: string;
-      redeliver: Redelivery;
-    }
-  | { type: "reclaim-architect"; issue: IssueKey; redeliver: Redelivery };
-
-export interface ExceptionInfo {
-  roleToken: string;
-  reason: "no_holder" | "delivery_failed";
-  original: Redelivery;
-  nack?: { type: "revive-worker"; issue: IssueKey; role: LegionRole };
-}
+  | { type: "reclaim-architect"; issue: IssueKey; redeliver: Redelivery }
+  | { type: "shutdown" };
 
 export interface ProcessManagerDeps {
   state: LegionState;
@@ -98,6 +87,11 @@ export interface ProcessManagerDeps {
    * retirement, or every process under a closing tree — before it is killed outright.
    * Overridable for tests; defaults to a real timer. */
   sleep?(ms: number): Promise<void>;
+  /** Overridable for tests; defaults to a real macrotask boundary (`setTimeout(fn, 0)`). The
+   * boot watchdog calls this once per re-arm — see `WorkerBootWatchdog.arm`'s doc comment for
+   * why a real timer, not merely another microtask, matters here even under an injected fake
+   * clock/`sleep`. */
+  yield?(): Promise<void>;
   /** Overridable for tests only, to observe the ordering of `WorkerAdmission`'s own
    * reservation-release and queue-drain-trigger relative to the `launchWorker`/
    * `promptExistingWorker` call preceding them — see `WorkerAdmissionDeps.onAdmissionEvent`'s
@@ -105,10 +99,10 @@ export interface ProcessManagerDeps {
    * supplies this. */
   onAdmissionEvent?(token: string, event: "reservation-released" | "queue-drain-triggered"): void;
   workerCatchup: WorkerCatchupDeps;
+  /** Invalidates a session's daemon-minted capability the moment its process is observed dead, so a stale credential file cannot keep minting grants until a respawn overwrites it. */
+  revokeSessionCapability(sessionId: string): void;
   now(): number;
 }
-
-type RoleBacking = WorkerRoleClaim;
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 const TMUX_RECONCILIATION_GRACE_MS = 120_000;
@@ -237,6 +231,10 @@ export class ProcessManager {
    * raced past the fence just before the tree started closing is never invisible to a snapshot
    * taken while it is still mid-flight. */
   private readonly inFlightLaunches = new Map<IssueKey, Set<Promise<unknown>>>();
+  /** Owns the per-role-token boot watchdog: watches a freshly-launched worker's boot against
+   * `workerBootTimeoutSeconds`, probing liveness before ever retiring an unconfirmed boot. See
+   * `worker-boot-watchdog.ts` for the full design. */
+  private readonly bootWatchdog: WorkerBootWatchdog;
 
   /**
    * The stop hierarchy every graceful-shutdown path funnels through, from lowest level up:
@@ -269,6 +267,23 @@ export class ProcessManager {
       onAdmissionEvent: deps.onAdmissionEvent,
       rootForIssue: (issue) => this.rootForIssue(issue),
     });
+    this.bootWatchdog = new WorkerBootWatchdog({
+      workerBootTimeoutSeconds: () => this.deps.config.workerBootTimeoutSeconds,
+      now: () => this.deps.now(),
+      run: this.deps.run,
+      isOmpPane: (pid) => this.isOmpPane(pid),
+      workerClient: (token, socketPath) => this.workerClient(token, socketPath),
+      sleep: this.deps.sleep,
+      yield: this.deps.yield,
+      getClaim: (token) => {
+        const claim = this.deps.state.roles[token];
+        return claim && "issue" in claim
+          ? { generation: claim.generation, sessionId: claim.sessionId }
+          : undefined;
+      },
+      retireUnconfirmedBoot: (token, locator, generation, retry) =>
+        this.retireUnconfirmedBoot(token, locator, generation, retry),
+    });
   }
 
   /** The only way worker-queue promotion is ever allowed to actually launch or prompt
@@ -276,6 +291,21 @@ export class ProcessManager {
    * `reconcileWorkerAdmission()` -- see `WorkerAdmission`'s own doc comment for why. */
   enableWorkerPromotion(): void {
     this.workerAdmission.enableWorkerPromotion();
+  }
+
+  /** Cancels the armed boot watchdog for `token`, if any — a no-op if none is armed, or if
+   * `generation` is given and does not match the armed watchdog's (a stale caller from an
+   * earlier attempt must never cancel a newer one's watch). */
+  cancelBootWatchdog(token: string, generation?: number): void {
+    this.bootWatchdog.cancel(token, generation);
+  }
+
+  /** Cancels every armed boot watchdog. Daemon shutdown calls this once before drain and again
+   * after — an in-flight handler during drain (a launch's own success path, `reconnectWorkers`)
+   * can still arm a watchdog after the first call, and this is the only guaranteed-safe way to
+   * catch that: no background timer may outlive the ProcessManager. Idempotent. */
+  dispose(): void {
+    this.bootWatchdog.cancelAll();
   }
 
   private serialize<T>(
@@ -380,29 +410,6 @@ export class ProcessManager {
     await this.beginPromotionSweep();
   }
 
-  async registerRoleBacking(
-    treeKey: IssueKey,
-    issue: IssueKey,
-    role: LegionRole,
-    agentId: string,
-    sessionId: string
-  ): Promise<void> {
-    if (this.rootForIssue(issue) !== treeKey) {
-      throw new Error(`Issue ${issue} does not belong to Legion tree ${treeKey}`);
-    }
-    const token = roleToken(this.deps.state.project, issue, role);
-    const existing = this.deps.state.roles[token];
-    this.deps.state.roles[token] = {
-      ...(existing && "issue" in existing ? existing : {}),
-      issue,
-      role,
-      agentId,
-      sessionId,
-    };
-    this.redeliverHeldRoleEvents(treeKey, issue, role);
-    await this.deps.saveState();
-  }
-
   async spawnWorker(
     treeKey: IssueKey,
     issue: IssueKey,
@@ -448,29 +455,34 @@ export class ProcessManager {
         if (claim?.locator) {
           if (!claim.sessionId) {
             // Booting: launchWorker opened the pane but /worker/started has not yet registered
-            // this generation's session. Never launch a second pane while a boot is in flight --
+            // this generation's session. Never launch a second pane while a boot is in flight —
             // queue the task and let /worker/ready deliver it once the worker registers.
             claim.pendingAssignment = task;
             await this.deps.saveState();
             return { status: "resumed", roleToken: token };
           }
           const socketPath = claim.locator.socketPath;
-          const client = await this.workerClient(token, socketPath).catch(() => undefined);
-          const alive = client
-            ? await client
-                .getState(5_000)
-                .then(() => true)
-                .catch(() => false)
-            : false;
+          const probe = await probeWorkerSocket(
+            (path) => this.workerClient(token, path),
+            socketPath
+          );
           if (this.closingTrees.has(treeKey)) {
             throw new TreeClosingError(treeKey);
           }
-          if (client && alive) {
-            // A worker whose `runState` is already non-idle ("running"/"unknown") already occupies
-            // its running-worker slot -- prompting it is not a new admission, so it goes straight
-            // through. An *idle* client is not currently counted by `runningWorkerCount()`, so
-            // prompting it unconditionally would flip an uncounted-idle worker to running past
-            // `config.workerCap`: `WorkerAdmission.resumeOrQueueExisting` gates that one case
+          if (probe.client) {
+            // Connected — whether or not `get_state` itself answered. A client whose
+            // `get_state` call never resolved simply keeps its unset/`"unknown"` `runState`,
+            // which `resumeOrQueueExisting`'s own idle check already treats as
+            // not-currently-promptable (queued exactly like a known-busy client) rather than a
+            // reason to retire a socket that plainly still connects — matching the "connect
+            // failure means dead, a connected socket whose `get_state` fails means only busy"
+            // contract every other liveness check in this file follows. Only an *idle* client
+            // is prompted directly, and only below `config.workerCap` (an idle client is not
+            // currently counted by `runningWorkerCount()`, so prompting it unconditionally
+            // would flip an uncounted-idle worker to running past the cap); a non-idle client
+            // (mid-turn, or still unknown) is queued exactly like the at-cap case instead of
+            // having a prompt injected into it, and delivered once its own idle transition
+            // re-drains the queue. `WorkerAdmission.resumeOrQueueExisting` gates both cases
             // through the same `admissionLock` decision every other admission goes through, and
             // itself owns the actual `promptExistingWorker` call and releasing that reservation
             // once it settles (mirroring `launchOrQueue`'s admitted branch, which likewise owns
@@ -483,7 +495,7 @@ export class ProcessManager {
               claim,
               claim.sessionId,
               task,
-              client
+              probe.client
             );
             if (decision.kind === "queued") {
               return { status: "queued", roleToken: token };
@@ -667,11 +679,18 @@ export class ProcessManager {
     this.workerAdmission.promoteWorkerQueue();
   }
 
-  /** Reconnects to every live worker'''s shim socket after a daemon restart, probing liveness.
-   * A connect failure means the worker is confirmed dead. A connect that succeeds but whose
-   * follow-up `get_state` fails (times out, say) means only that the shim is busy answering
-   * this one request in time -- never a reason to kill a live worker -- so the claim is left
-   * exactly as is, with its conservative "unknown"-counts-as-running `runState`. */
+  /** Reconnects to every live worker's shim socket after a daemon restart, probing liveness. A
+   * connect failure against an already-confirmed claim means the worker is confirmed dead; the
+   * same failure against an unconfirmed boot (never reached `/worker/started`) is routed through
+   * `retireUnconfirmedBoot` instead, so it retries or gives up exactly like the boot watchdog
+   * would rather than merely clearing the locator and stranding the claim with nothing left to
+   * ever retry it. A connect that succeeds but whose follow-up `get_state` fails (times out,
+   * say) means only that the shim is busy answering this one request in time — never a reason
+   * to kill a live worker — so the claim is left exactly as is, with its conservative
+   * "unknown"-counts-as-running `runState`. An unconfirmed boot that survives this reconnect
+   * gets its watchdog re-armed: the in-memory `WorkerBootWatchdog` registry does not survive a
+   * restart, so without this a boot still awaiting `/worker/started` would never be probed
+   * again. */
   async reconnectWorkers(): Promise<void> {
     const claims = Object.entries(this.deps.state.roles).filter(
       (entry): entry is [string, WorkerRoleClaim & { locator: WorkerLocator }] =>
@@ -680,29 +699,58 @@ export class ProcessManager {
     await Promise.all(
       claims.map(async ([token, claim]) => {
         // Captured once, immutably, before any await: a concurrent respawn replacing this
-        // claim'''s locator mid-probe (e.g. a dead-socket `spawnWorker` decision finishing while
+        // claim's locator mid-probe (e.g. a dead-socket `spawnWorker` decision finishing while
         // this exact connect is still in flight) must never be mistaken for the locator this
-        // call is actually probing -- `markWorkerDeadLocked`'''s own pane-id identity check only
-        // protects against retiring the WRONG locator if this one is passed correctly.
+        // call is actually probing — `retireUnconfirmedBoot`'s/`markWorkerDeadLocked`'s own
+        // pane-id identity check only protects against retiring the WRONG locator if this one
+        // is passed correctly.
         const probedLocator = claim.locator;
-        let client: WorkerRpcClient;
-        try {
-          client = await this.workerClient(token, probedLocator.socketPath);
-        } catch (error) {
-          console.error(`[legion] failed to reconnect worker ${token}:`, error);
-          await this.markWorkerDead(token, probedLocator);
+        const parsed = parseRoleToken(this.deps.state.project, token);
+        let treeKey: IssueKey | undefined;
+        let role: LegionRole | undefined;
+        if (parsed && !("controller" in parsed)) {
+          role = parsed.role;
+          treeKey = this.rootForIssue(parsed.issue);
+        }
+        const probe = await probeWorkerSocket(
+          (socketPath) => this.workerClient(token, socketPath),
+          probedLocator.socketPath
+        );
+        if (!probe.client) {
+          console.error(`[legion] failed to reconnect worker ${token}:`, probe.connectError);
+          if (claim.sessionId) {
+            await this.markWorkerDead(token, probedLocator);
+          } else {
+            await this.retireUnconfirmedBoot(
+              token,
+              probedLocator,
+              claim.generation,
+              this.deriveRetryContext(token, claim.issue)
+            );
+          }
           return;
         }
-        try {
-          // Seeds `runState` from the response's `isStreaming` field: a worker that was already
-          // idle before this restart is not left stuck at the conservative "unknown" default
-          // (counted as running) forever, since nothing else will ever observe an
-          // `agent_start`/`agent_end` frame to correct it if it never runs another turn.
-          await client.getState(5_000);
-        } catch (error) {
+        // `probeWorkerSocket`'s `get_state` call seeds `runState` from the response's
+        // `isStreaming` field on this same client: a worker that was already idle before this
+        // restart is not left stuck at the conservative "unknown" default (counted as running)
+        // forever, since nothing else will ever observe an `agent_start`/`agent_end` frame to
+        // correct it if it never runs another turn. A `get_state` failure only means the shim
+        // is busy answering this one request — never a reason to treat a connected worker as
+        // dead.
+        if (!probe.stateAnswered) {
           console.error(
             `[legion] worker ${token} reconnected but get_state failed (treating as busy, not dead):`,
-            error
+            probe.stateError
+          );
+        }
+        if (!claim.sessionId && treeKey && role) {
+          this.bootWatchdog.arm(
+            treeKey,
+            claim.issue,
+            role,
+            token,
+            claim.locator,
+            claim.generation ?? 1
           );
         }
       })
@@ -733,10 +781,98 @@ export class ProcessManager {
     await this.deps.saveState();
   }
 
-  /** The architect's own `/process/exit` self-report on an issue that is NOT closed: a
-   * spontaneous exit or crash, not a teardown. Marks the tree `"dead"` so it becomes eligible
-   * for resurrection (`resurrectDeadTree`) rather than staying `"active"` with nothing running.
+  /**
+   * Handles a boot confirmed dead — never reached `/worker/started`, and its pane/socket are
+   * both gone: retires whatever is left of the pane, clears the locator (stashing its
+   * `ompSessionFile` into `resumeSessionFile`, mirroring `markWorkerDeadLocked`, so a later
+   * `spawnWorker` call — or the retry below — resumes the same agent instead of finding a stale
+   * locator and concluding a boot is still in flight forever). The clear always happens, even
+   * when `treeKey` cannot be resolved (an issue whose tree no longer exists) — a permanently
+   * dangling stale locator is never acceptable — but the retry-or-give-up accounting
+   * (`launchFailures`, enqueue, or `worker-died` at the threshold) only runs when there is a
+   * tree left to retry against or notify. Below the threshold, the retry is *enqueued*
+   * (`WorkerAdmission.enqueueForRetryPending`, folded into this same locked save so the
+   * locator-clear and the queue-push are one durable transition), never launched directly here:
+   * a direct `launchWorker`
+   * call would bypass the running-worker cap, the reservation, and the per-role launch lock —
+   * over-admission, or a second pane racing a concurrent same-role spawn — and would also
+   * dereference `api` before it exists when this runs from `reconnectWorkers` at boot (before
+   * `enableWorkerPromotion()`). The whole decision runs under `mutateClaim(token)`, serialized
+   * against every other admission/retirement decision for this token (`spawnWorker`,
+   * `handleWorkerStarted` via `mutateLiveRoleClaim`) — and re-validates the claim it was handed
+   * against the current one before touching anything, since the caller may have captured it,
+   * or decided this boot was dead, some time before this actually runs: a claim that has since
+   * been confirmed (`sessionId` now set), superseded by a newer launch (a different generation
+   * or pane), or deleted entirely (`closeTree`) means this retirement is stale and must never
+   * touch what replaced it. Also never fights a `closeTree` already tearing this claim's tree
+   * down: `closeTreeLocked`'s own fixed-point loop already owns stopping (and deleting) every
+   * worker under a closing/closed tree through its own `stopProcessSerialized` call — retiring
+   * this same token again here would either find nothing left to stop or, worse, stop a
+   * respawned generation `closeTree` never asked for, so a tree that `isTreeGone` reports gone
+   * makes this a no-op instead. Shared by the boot watchdog's own dead verdict,
+   * `reconnectWorkers`' restart-time probe, and a pre-confirmation socket close
+   * (`onWorkerClientClosed`).
    */
+  private async retireUnconfirmedBoot(
+    token: string,
+    locator: WorkerLocator,
+    generation: number | undefined,
+    retry?: { treeKey: IssueKey; issue: IssueKey; role: LegionRole }
+  ): Promise<void> {
+    await this.workerAdmission.mutateClaim(token, async () => {
+      const claim = this.deps.state.roles[token];
+      if (
+        !claim ||
+        !("issue" in claim) ||
+        claim.sessionId !== undefined ||
+        claim.generation !== generation ||
+        claim.locator?.tmuxPaneId !== locator.tmuxPaneId
+      ) {
+        return;
+      }
+      const treeKey = retry?.treeKey ?? this.rootForIssue(claim.issue);
+      // A closeTree already tearing down (or having already torn down) this claim's tree owns
+      // stopping (and deleting) this exact worker through its own fixed-point loop — retiring
+      // it again here would either find nothing left to stop or, worse, stop a respawned
+      // generation closeTree never asked for. Skipped for that reason only: an issue whose
+      // tree cannot be resolved at all still gets its dangling locator cleared below (never
+      // left permanently stale) — it just never reaches the retry-or-give-up accounting past
+      // it, exactly like the `!retry` early return already handles.
+      if (
+        treeKey &&
+        (this.deps.state.trees[treeKey]?.status === "closed" || this.closingTrees.has(treeKey))
+      ) {
+        return;
+      }
+      await this.retireWorkerLocator(token, locator);
+      const resumeSessionFile = claim.locator?.ompSessionFile ?? claim.resumeSessionFile;
+      delete claim.locator;
+      if (resumeSessionFile) claim.resumeSessionFile = resumeSessionFile;
+      if (!retry) {
+        await this.deps.saveState();
+        return;
+      }
+      const { treeKey: retryTreeKey, issue, role } = retry;
+      const failures = (claim.launchFailures ?? 0) + 1;
+      claim.launchFailures = failures;
+      // `===`, not `>=`: fires exactly once, at the tick `failures` first reaches the threshold —
+      // see `launchWorker`'s own publish for why.
+      if (failures === MAX_LAUNCH_FAILURES) {
+        this.publishWorkerDied(retryTreeKey, issue, role);
+        await this.deps.saveState();
+        return;
+      }
+      // Pushed onto the queue *before* this save (not after, and not via `enqueueForRetry`'s
+      // own separate persist) so the locator-clear above and this queue-push land in the same
+      // durable transition: two separate saves would let a crash, or a persist failure,
+      // between them strand this claim — locator-less, unqueued, and invisible to
+      // `reconnectWorkers`' locator-only filter, with nothing left to ever retry it.
+      await this.workerAdmission.enqueueForRetryPending(token);
+      await this.deps.saveState();
+      this.workerAdmission.promoteWorkerQueue();
+    });
+  }
+
   async markProcessDead(treeKey: IssueKey, generation?: number): Promise<void> {
     const tree = this.requireTree(treeKey);
     if (tree.generation !== (generation ?? tree.generation)) return;
@@ -825,18 +961,22 @@ export class ProcessManager {
 
     if (tree.locator) {
       if (!stopRoot) {
-        // Nothing to gracefully stop -- see this method's doc comment -- but the caller already
+        // Nothing to gracefully stop — see this method's doc comment — but the caller already
         // confirmed its own exit, so the locator it names is always gone.
         delete tree.locator;
       } else {
         // Captured once, immutably, before any await: a concurrent `reportRootExit` racing this
         // same tree must never be able to yank the locator out from under this leg between the
         // probe and the stop call that follows it. (`recordRootExit` guards the reverse
-        // direction too -- it skips clearing the locator whenever `closingTrees` already names
+        // direction too — it skips clearing the locator whenever `closingTrees` already names
         // this tree, precisely so this captured copy stays valid for as long as this leg needs
         // it.)
         const architectToken = roleToken(this.deps.state.project, treeKey, "architect");
         const rootLocator = tree.locator;
+        const architectClaim = this.deps.state.roles[architectToken];
+        this.revokeRoleClaim(
+          architectClaim && "issue" in architectClaim ? architectClaim : undefined
+        );
         const alive = (await this.probe(treeKey)) === "alive";
         try {
           await this.stopProcessSerialized(architectToken, rootLocator, this.treeStopTimeoutMs, {
@@ -862,7 +1002,7 @@ export class ProcessManager {
       );
       if (batch.length === 0) break;
       for (const [token] of batch) attemptedTokens.add(token);
-      // Captured synchronously here, alongside `batch` itself and before any `await` below --
+      // Captured synchronously here, alongside `batch` itself and before any `await` below —
       // `batch`'s claim objects are the live `state.roles` entries, not copies, so a concurrent
       // mutation of that exact same object (e.g. a respawn deleting/replacing its `locator` in
       // place) between this point and the delete step below would otherwise change what
@@ -879,8 +1019,8 @@ export class ProcessManager {
         const result = settled[index];
         if (result?.status === "fulfilled") {
           // Re-acquires the token's own critical section for the delete itself, re-checking the
-          // claim's identity (pane id) against the locator that was actually stopped -- mirrors
-          // `markWorkerDeadLocked`'s stale-identity guard. `stopProcessSerialized` above already
+          // claim's identity (pane id) against the locator that was actually stopped — mirrors
+          // `retireUnconfirmedBoot`'s stale-identity guard. `stopProcessSerialized` above already
           // ran under this same lock, but only for the stop call; without re-acquiring it here,
           // a live writer (e.g. `/worker/started`) that raced in in-between (took the lock after
           // the stop released it but before this delete runs) and wrote a fresh locator for a
@@ -893,6 +1033,12 @@ export class ProcessManager {
               "issue" in current &&
               current.locator?.tmuxPaneId === stoppedPaneIds.get(token)
             ) {
+              // Cancels this claim's boot watchdog (a no-op if none is armed) and revokes its
+              // session capability before deleting it — the single chokepoint every path that
+              // retires or deletes a role's claim must go through, or a stale process could
+              // keep minting grants after this tree has stopped trusting it.
+              this.cancelBootWatchdog(token);
+              this.revokeRoleClaim(current);
               delete this.deps.state.roles[token];
             }
           });
@@ -902,7 +1048,7 @@ export class ProcessManager {
             `[legion] worker ${token} failed to stop while closing ${treeKey}:`,
             result?.status === "rejected" ? result.reason : undefined
           );
-          // Leave this claim and its locator exactly as they are -- a possibly-still-live pane
+          // Leave this claim and its locator exactly as they are — a possibly-still-live pane
           // must never lose its only durable handle.
         }
       }
@@ -931,6 +1077,8 @@ export class ProcessManager {
     for (const [token, claim] of Object.entries(this.deps.state.roles)) {
       if ("issue" in claim && this.rootForIssue(claim.issue) === treeKey) {
         await this.workerAdmission.mutateClaim(token, async () => {
+          this.cancelBootWatchdog(token);
+          this.revokeRoleClaim(claim);
           delete this.deps.state.roles[token];
         });
       }
@@ -1136,11 +1284,13 @@ export class ProcessManager {
       }
       return true;
     }
-    this.publishController({
-      type: "revive-failed",
-      issue: directive.issue,
-      role: directive.type === "revive-worker" ? directive.role : "architect",
-    });
+    if (directive.type !== "shutdown") {
+      this.publishController({
+        type: "revive-failed",
+        issue: directive.issue,
+        role: "architect",
+      });
+    }
     return false;
   }
 
@@ -1154,38 +1304,18 @@ export class ProcessManager {
     this.resurrecting.set(treeKey, resurrection);
     return resurrection;
   }
+  /** Connects the root architect's shim socket on `/process/started`, exactly as `workerReady`
+   * does for a phase worker, so the shim's pre-connect backlog drains. The daemon holds no
+   * events to replay here: a resurrected root's missed wake is recovered by the overseer
+   * catch-up snapshot (`onTreeReady`, called alongside this by the same route), not by this
+   * method. */
   async markTreeReady(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
-    if (tree.locator?.socketPath) {
-      // The root architect is a worker of its own issue: connect exactly as workerReady does so
-      // its shim's pre-connect backlog drains and it can be prompted/resumed later.
-      await this.workerClient(
-        roleToken(this.deps.state.project, treeKey, "architect"),
-        tree.locator.socketPath
-      );
-    }
-    const recoveries = tree.recoveryEvents;
-    if (!recoveries?.length) return;
-    for (const recovery of [...recoveries]) {
-      let recovered = false;
-      if (recovery.issue === treeKey && recovery.role === "architect") {
-        this.deps.natsPublish(recovery.original.topic, recovery.original.payload);
-        recovered = true;
-      } else {
-        const backing = this.roleBacking(recovery.issue, recovery.role);
-        if (backing?.agentId) {
-          recovered = await this.reviveWorker(
-            treeKey,
-            recovery.issue,
-            recovery.role,
-            backing.agentId,
-            recovery.original
-          );
-        }
-      }
-      if (recovered) recoveries.splice(recoveries.indexOf(recovery), 1);
-    }
-    await this.deps.saveState();
+    if (!tree.locator?.socketPath) return;
+    await this.workerClient(
+      roleToken(this.deps.state.project, treeKey, "architect"),
+      tree.locator.socketPath
+    );
   }
 
   /**
@@ -1223,15 +1353,6 @@ export class ProcessManager {
   }
 
   async handleException(exception: ExceptionInfo): Promise<void> {
-    if (exception.nack) {
-      this.publishController({
-        type: "revive-failed",
-        issue: exception.nack.issue,
-        role: exception.nack.role,
-      });
-      return;
-    }
-
     const parsed = parseRoleToken(this.deps.state.project, exception.roleToken);
     if (!parsed) return;
     if ("controller" in parsed) {
@@ -1250,82 +1371,48 @@ export class ProcessManager {
           redeliver: exception.original,
         });
       } else {
-        await this.persistRecovery(root, parsed.issue, parsed.role, exception.original);
         await this.resurrect(root);
       }
       return;
     }
 
-    const backing = this.roleBacking(parsed.issue, parsed.role);
-    if (!backing?.agentId) {
-      this.hold(root, parsed.role, exception.original);
-      await this.deps.saveState();
-      return;
-    }
-
-    if ((await this.probe(root)) === "dead") {
-      await this.persistRecovery(root, parsed.issue, parsed.role, exception.original);
-      await this.resurrect(root);
-      return;
-    }
-
-    await this.reviveWorker(root, parsed.issue, parsed.role, backing.agentId, exception.original);
+    await this.resumeWorker(root, parsed.issue, parsed.role);
   }
 
-  private async reviveWorker(
-    root: IssueKey,
-    issue: IssueKey,
-    role: LegionRole,
-    agentId: string,
-    original: Redelivery
-  ): Promise<boolean> {
-    const sessionFile = this.requireTree(root).locator?.ompSessionFile;
-    if (!sessionFile) throw new Error(`Live Legion tree ${root} has no OMP session file`);
-    const revived = await this.controlDirective(
-      root,
-      {
-        type: "revive-worker",
-        issue,
-        role,
-        agentId,
-        parentSessionFile: sessionFile,
-        redeliver: original,
-      },
-      false
-    );
-    if (!revived) return false;
+  /**
+   * Recovers a role's missed wake by probing its own worker locator (never the root's) and, if
+   * dead, resuming the same agent through the existing `spawnWorker` resume path (`--resume`,
+   * never fresh) with a state-derived catch-up as its prompt instead of the raw missed event —
+   * shared by a role-lane delivery exception, the durable lane's `onUndeliverable` 404, and a
+   * dead-launch retry. A role with no claim or locator at all was never spawned: there is
+   * nothing to resume, so this is a no-op (its eventual first spawn's own catch-up recovers
+   * anything missed meanwhile). Publishes `worker-died` to the tree architect only once the
+   * resume attempt itself fails at the launch-failure threshold.
+   */
+  async resumeWorker(root: IssueKey, issue: IssueKey, role: LegionRole): Promise<void> {
+    const token = roleToken(this.deps.state.project, issue, role);
+    const claim = this.deps.state.roles[token];
+    if (!claim || !("issue" in claim) || !claim.locator) {
+      console.error(
+        `[legion] resumeWorker no-op for ${token}: no claim or locator to resume (never spawned, or already cleared) - its eventual first spawn's own catch-up recovers anything missed meanwhile`
+      );
+      return;
+    }
     const catchup = await workerCatchup(this.deps.state, issue, role, this.deps.workerCatchup);
-    this.deps.natsPublish(
-      roleTopic(roleToken(this.deps.state.project, issue, role)),
-      JSON.stringify(catchup)
-    );
-    this.deps.natsPublish(original.topic, original.payload);
-    return true;
-  }
-
-  private async persistRecovery(
-    root: IssueKey,
-    issue: IssueKey,
-    role: LegionRole,
-    original: Redelivery
-  ): Promise<void> {
-    const tree = this.requireTree(root);
-    let recoveries = tree.recoveryEvents;
-    if (!recoveries) {
-      recoveries = [];
-      tree.recoveryEvents = recoveries;
+    try {
+      await this.spawnWorker(root, issue, role, JSON.stringify(catchup));
+    } catch (error) {
+      console.error(`[legion] failed to resume worker ${issue}/${role}:`, error);
+      const failedClaim = this.deps.state.roles[token];
+      const failures =
+        failedClaim && "issue" in failedClaim ? (failedClaim.launchFailures ?? 0) : 0;
+      // `===`, not `>=`: mirrors `launchWorker`'s own threshold publish - fires exactly once, at
+      // the tick `failures` first reaches the threshold, never again on a later attempt against
+      // the same already-past-threshold claim.
+      if (failures === MAX_LAUNCH_FAILURES) {
+        this.publishWorkerDied(root, issue, role);
+      }
     }
-    if (
-      !recoveries.some(
-        (recovery) =>
-          recovery.issue === issue &&
-          recovery.role === role &&
-          recovery.original.eventId === original.eventId
-      )
-    ) {
-      recoveries.push({ issue, role, original });
-    }
-    await this.deps.saveState();
   }
 
   private startRoot(issue: IssueKey): Promise<void> {
@@ -1405,7 +1492,6 @@ export class ProcessManager {
       generation: 0,
       status: "queued",
       launchFailures: 0,
-      heldEvents: [],
     };
     this.deps.state.trees[issue] = tree;
     return tree;
@@ -1651,6 +1737,19 @@ export class ProcessManager {
     return connecting;
   }
 
+  /** Derives `{treeKey, issue, role}` for `retireUnconfirmedBoot`'s retry accounting from a
+   * role token alone — `undefined` for a controller token, or a role whose tree cannot be
+   * resolved (an issue whose tree no longer exists). */
+  private deriveRetryContext(
+    token: string,
+    issue: IssueKey
+  ): { treeKey: IssueKey; issue: IssueKey; role: LegionRole } | undefined {
+    const parsed = parseRoleToken(this.deps.state.project, token);
+    if (!parsed || "controller" in parsed) return undefined;
+    const treeKey = this.rootForIssue(parsed.issue);
+    return treeKey ? { treeKey, issue, role: parsed.role } : undefined;
+  }
+
   /**
    * Fires when a cached worker connection's socket closes at runtime (not a boot-time
    * `reconnectWorkers` probe). A replaced/retired client's late close (this cached entry has
@@ -1659,16 +1758,19 @@ export class ProcessManager {
    * Otherwise evicts the now-stale cache entry, then tries at most one reconnect per claim
    * generation — the shim may still be listening with a fresh socket, or momentarily
    * restarting — before concluding the worker is truly dead; a second close for the same
-   * generation (the reconnect's own connection also died) goes straight to `markWorkerDead`
+   * generation (the reconnect's own connection also died) goes straight to the dead-worker path
    * instead of chaining into another reconnect attempt, so a flapping socket can never loop
    * forever. A reconnect that *fails to connect* means the worker is confirmed dead; one that
    * connects but whose follow-up `get_state` fails only means the shim is busy — never a reason
-   * to kill a live worker, so the claim is left as is. A root architect or controller
-   * connection has no matching `WorkerRoleClaim` (they are tracked via
-   * `state.trees`/`state.controllerLocator`), so this is a no-op for them past the cache
-   * eviction — `markWorkerDead` clears the claim's *persistent* locator (not just the ephemeral
-   * client cache entry), which is what lets `runningWorkerCount()` stop counting a dead worker
-   * as running once its socket is confirmed closed.
+   * to kill a live worker, so the claim is left as is. An unconfirmed claim (never reached
+   * `/worker/started`, `sessionId` still unset) routes its dead verdict through
+   * `retireUnconfirmedBoot` — the same retire/count/enqueue-or-give-up accounting the boot
+   * watchdog and `reconnectWorkers` use — rather than `markWorkerDead`'s confirmed-worker path,
+   * which only clears the locator with no accounting or requeue: without this branch, a socket
+   * that dies before confirmation left its claim locator-less and unqueued, with nothing left
+   * to ever revisit it. A root architect or controller connection has no matching
+   * `WorkerRoleClaim` (they are tracked via `state.trees`/`state.controllerLocator`), so this is
+   * a no-op for them past the cache eviction.
    */
   private async onWorkerClientClosed(token: string, client: WorkerRpcClient): Promise<void> {
     if (this.workerClients.get(token) !== client) return;
@@ -1676,26 +1778,39 @@ export class ProcessManager {
     const claim = this.deps.state.roles[token];
     if (!claim || !("issue" in claim) || claim.locator === undefined) return;
     const locator = claim.locator;
+    const generation = claim.generation;
+    const confirmed = claim.sessionId !== undefined;
+    const retireDead = async (): Promise<void> => {
+      if (confirmed) {
+        await this.markWorkerDead(token, locator);
+      } else {
+        await this.retireUnconfirmedBoot(
+          token,
+          locator,
+          generation,
+          this.deriveRetryContext(token, claim.issue)
+        );
+      }
+    };
     const attemptKey = `${token}:${claim.generation ?? 0}`;
     if (this.reconnectAttempted.has(attemptKey)) {
-      await this.markWorkerDead(token, locator);
+      await retireDead();
       return;
     }
     this.reconnectAttempted.add(attemptKey);
-    let reconnected: WorkerRpcClient;
-    try {
-      reconnected = await this.workerClient(token, locator.socketPath);
-    } catch {
+    const probe = await probeWorkerSocket(
+      (socketPath) => this.workerClient(token, socketPath),
+      locator.socketPath
+    );
+    if (!probe.client) {
       // Reconnect failed to connect at all; the worker is confirmed dead.
-      await this.markWorkerDead(token, locator);
+      await retireDead();
       return;
     }
-    try {
-      await reconnected.getState(5_000);
-    } catch (error) {
+    if (!probe.stateAnswered) {
       console.error(
         `[legion] worker ${token} reconnected but get_state failed (treating as busy, not dead):`,
-        error
+        probe.stateError
       );
     }
   }
@@ -1850,13 +1965,16 @@ export class ProcessManager {
         // window sees an unconfirmed claim rather than racing a stale one (both for a fresh
         // spawn and a resume, where OMP reports the same session id it had before).
         ...(claim?.agentId ? { agentId: claim.agentId } : {}),
+        // Carried over, never reset by a mere relaunch: a boot the watchdog never confirms
+        // must accumulate across repeated retries so the threshold below is ever reachable,
+        // even when every retry successfully opens a pane but none ever completes
+        // `/worker/started`. `/worker/started`'s own success path clears it — that is the
+        // actual recovery signal, not merely reopening a pane.
+        launchFailures: claim?.launchFailures ?? 0,
         generation,
-        // A successful launch always starts this claim's failure count fresh: a prior claim's
-        // accumulated `launchFailures` (e.g. from being rotated through the queue below
-        // MAX_LAUNCH_FAILURES -- see `promoteQueuedWorker`) must never carry over past a launch
-        // that actually succeeds, mirroring `tree.launchFailures = 0` on a successful root spawn.
-        launchFailures: 0,
         pendingAssignment: task,
+        bootTokenHash: secretHash(bootToken).toString("hex"),
+        ...(claim?.sessionId ? { expectedSessionId: claim.sessionId } : {}),
         locator: freshLocator,
         // resumeSessionFile deliberately dropped: a fresh locator now carries its own
         // ompSessionFile, so the standalone fallback field is stale.
@@ -1915,6 +2033,7 @@ export class ProcessManager {
           );
         }
       }
+      this.bootWatchdog.arm(treeKey, issue, role, token, locator, generation);
     } catch (error) {
       if (error instanceof TreeClosingError) throw error;
       if (error instanceof StopFailed) throw error;
@@ -1980,8 +2099,9 @@ export class ProcessManager {
   /** Connects the controller's shim socket on `/controller/ready`, exactly as `markTreeReady`
    * does for the root architect, so the shim's pre-connect backlog drains. Best-effort: a shim
    * connect failure (listener race, stale socket, RPC timeout) must never block
-   * `/controller/ready` from accepting the role and replaying held events — the connection is
-   * retried on the next `spawnWorker`/`workerReady`/reconnect attempt that touches this socket.
+   * `/controller/ready` from accepting the role — the daemon holds no events to replay here
+   * either; the connection is retried on the next `spawnWorker`/`workerReady`/reconnect attempt
+   * that touches this socket.
    */
   async markControllerReady(): Promise<void> {
     const socketPath = this.deps.state.controllerLocator?.socketPath;
@@ -1998,6 +2118,16 @@ export class ProcessManager {
     await writeFile(path.join(directory, ".omp", "config.yml"), "", "utf8");
   }
 
+  /** Revokes a claim's session capability (a no-op if it never had one — never spawned, or
+   * already revoked) the instant its process is retired or torn down, so a stale process can
+   * never keep minting grants once the daemon has stopped trusting it. The single chokepoint
+   * every path that retires or deletes a role's claim goes through: `removeTreeWindow` (the
+   * root architect), `retireWorkerLocator` (a worker, via `markWorkerDeadLocked` and every
+   * other retirement), and `closeTree` (root and every worker, on tree shutdown). */
+  private revokeRoleClaim(claim: WorkerRoleClaim | undefined): void {
+    if (claim?.sessionId) this.deps.revokeSessionCapability(claim.sessionId);
+  }
+
   /** Called only once `probe` has already confirmed the recorded pane is dead, so `stopProcess`
    * normally has nothing live to gracefully close and degrades straight to the kill; routed
    * through it anyway for the rare race where the pane outlived that probe. Best-effort: a
@@ -2005,6 +2135,9 @@ export class ProcessManager {
    * probe already confirmed this pane dead, so a failed kill of an already-dead pane is a stray
    * cleanup problem, never a reason to refuse resurrecting the tree onto a fresh one. */
   private async removeTreeWindow(tree: TreeState): Promise<void> {
+    const architectToken = roleToken(this.deps.state.project, tree.root, "architect");
+    const architectClaim = this.deps.state.roles[architectToken];
+    this.revokeRoleClaim(architectClaim && "issue" in architectClaim ? architectClaim : undefined);
     const locator = tree.locator;
     delete tree.locator;
     if (!locator) return;
@@ -2145,6 +2278,9 @@ export class ProcessManager {
    * `StopFailed`; callers never treat a locator as safe to clear or a replacement as safe to
    * launch when it does. */
   private async retireWorkerLocator(token: string, locator: WorkerLocator): Promise<void> {
+    this.cancelBootWatchdog(token);
+    const claim = this.deps.state.roles[token];
+    this.revokeRoleClaim(claim && "issue" in claim ? claim : undefined);
     await this.stopProcess(token, locator, this.workerStopTimeoutMs);
   }
 
@@ -2202,34 +2338,11 @@ export class ProcessManager {
     }
   }
 
-  private roleBacking(issue: IssueKey, role: LegionRole): RoleBacking | undefined {
-    for (const claim of Object.values(this.deps.state.roles) as RoleBacking[]) {
-      if (claim.issue === issue && claim.role === role) return claim;
-    }
-    return undefined;
-  }
-
-  private hold(root: IssueKey, role: LegionRole, event: Redelivery): void {
-    this.requireTree(root).heldEvents.push({
-      role,
-      payloadJson: event.payload,
-      heldAt: new Date(this.deps.now()).toISOString(),
-      eventId: event.eventId,
-    });
-  }
-  private redeliverHeldRoleEvents(treeKey: IssueKey, issue: IssueKey, role: LegionRole): void {
-    if (this.deps.state.issues[issue]?.released !== true) return;
-    const token = roleToken(this.deps.state.project, issue, role);
-    const heldEvents = this.requireTree(treeKey).heldEvents;
-    for (let index = 0; index < heldEvents.length; ) {
-      const held = heldEvents[index];
-      if (held?.role !== role) {
-        index += 1;
-        continue;
-      }
-      this.deps.natsPublish(roleTopic(token), held.payloadJson);
-      heldEvents.splice(index, 1);
-    }
+  private publishWorkerDied(root: IssueKey, issue: IssueKey, role: LegionRole): void {
+    this.deps.natsPublish(
+      roleTopic(roleToken(this.deps.state.project, root, "architect")),
+      JSON.stringify({ type: "worker-died", issue, role })
+    );
   }
 
   private publishController(
