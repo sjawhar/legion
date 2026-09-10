@@ -13,7 +13,11 @@ import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const session = {
-  actor: { kind: "session" as const, id: "e2e-session", origin: { tmux: "dispatch:1.2" } },
+  actor: {
+    kind: "session" as const,
+    id: "e2e-session",
+    origin: { session_title: "e2e-session-title", tmux: "dispatch:1.2" },
+  },
   as: "agent" as const,
 };
 
@@ -64,6 +68,10 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   const inboxCards = alicePage.locator("[data-testid^=ask-]");
   await expect(inboxCards).toHaveCount(3);
   await expect(inboxCards.nth(0)).toContainText("Newest ask");
+  await expect(alicePage.getByTestId(`ask-${newestAsk.id}`).locator("time")).toHaveAttribute(
+    "dateTime",
+    newestAsk.created_at
+  );
   await alicePage.screenshot({ path: testInfo.outputPath("inbox-three-asks.png"), fullPage: true });
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Close navigation" }).click();
@@ -91,9 +99,10 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
     });
 
   await alicePage.goto(`/issues/${firstIssue.key}`);
-  await expect(alicePage.getByRole("region", { name: "Active sessions" })).toContainText(
-    "e2e-session"
-  );
+  const activeSessions = alicePage.getByRole("region", { name: "Active sessions" });
+  await expect(activeSessions).toContainText("e2e-session-title");
+  await expect(activeSessions.getByText("e2e-session", { exact: true })).toHaveCount(0);
+  await expect(activeSessions.locator("[title='e2e-session']")).toHaveCount(1);
   const issueTitle = alicePage.getByLabel("Issue title");
   await issueTitle.fill("First decision revised");
   await issueTitle.press("Enter");

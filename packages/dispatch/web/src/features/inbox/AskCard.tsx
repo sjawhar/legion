@@ -3,16 +3,14 @@ import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask } from "../../api/types";
+import { actorLabel } from "../refs/actor";
+import { Timestamp } from "../refs/Timestamp";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
 
 export interface AskCardProps {
   ask: Ask;
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
-}
-
-function authorLabel(ask: Ask): string {
-  return ask.author.kind === "session" ? `Asked by ${ask.author.id}` : `Asked by ${ask.author.id}`;
 }
 
 export function AskCard({ ask, answerAsk: answer = answerAsk }: AskCardProps): ReactNode {
@@ -72,7 +70,9 @@ export function AskCard({ ask, answerAsk: answer = answerAsk }: AskCardProps): R
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-medium text-slate-950">{ask.question}</p>
-          <p className="mt-1 text-sm text-slate-500">{authorLabel(ask)}</p>
+          <p className="mt-1 text-sm text-slate-500">
+            {actorLabel(ask.author)} · <Timestamp at={ask.created_at} />
+          </p>
         </div>
         <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
           {ask.urgency}

@@ -165,7 +165,7 @@ test("DocEditor uses an empty synchronized document in preview and version diffs
       ytext.delete(0, ytext.length);
     });
 
-    fireEvent.click(documentEditor.getByRole("button", { name: "Preview" }));
+    expect(documentEditor.getByRole("button", { name: "Edit" })).not.toBeNull();
     await waitFor(() => expect(documentEditor.queryByText("Use SQLite")).toBeNull());
 
     fireEvent.change(documentEditor.getByLabelText("Version"), { target: { value: "1" } });
@@ -228,7 +228,7 @@ test("DocEditor resets version mode and diff state for a different artifact", as
     );
 
     expect((editor.getByLabelText("Version") as HTMLSelectElement).value).toBe("");
-    expect(editor.getByRole("button", { name: "Preview" })).not.toBeNull();
+    expect(editor.getByRole("button", { name: "Edit" })).not.toBeNull();
     expect(editor.queryByTestId("version-view")).toBeNull();
     expect(editor.queryByTestId("version-diff")).toBeNull();
     rendered.unmount();

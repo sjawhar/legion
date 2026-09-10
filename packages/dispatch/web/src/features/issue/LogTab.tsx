@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Event, UserIssueState, UserState } from "../../api/types";
+import { actorLabel } from "../refs/actor";
 import { buildLogItems, eventItemId, isPinnedEvent } from "./log-model";
 import {
   applyDismissedStateOperation,
@@ -388,7 +389,7 @@ function LogEvent({
             {eventDescription(event)}
           </p>
           <p className="mt-1 text-xs text-slate-500">
-            {event.actor.id} · {new Date(event.created_at).toLocaleString()}
+            {actorLabel(event.actor)} · {new Date(event.created_at).toLocaleString()}
           </p>
         </div>
         <div className="flex gap-2">

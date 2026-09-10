@@ -33,5 +33,10 @@
       "trailingCommas": "es5",
       "arrowParentheses": "always"
     }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
   }
 }

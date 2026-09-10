@@ -14,6 +14,7 @@ import type {
 } from "../../api/types";
 import { DocEditor } from "../doc/DocEditor";
 import { DocView } from "../doc/DocView";
+import { actorLabel } from "../refs/actor";
 import { buildIssuePath, parseIssuePath } from "../refs/routes";
 import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
@@ -321,7 +322,7 @@ function IssueHeader({
                   className="flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700"
                   key={session.id}
                 >
-                  <span>{session.id}</span>
+                  <span title={session.id}>{actorLabel(session)}</span>
                   {tmuxTarget === undefined ? null : (
                     <button
                       className="font-medium text-sky-700 hover:text-sky-900"

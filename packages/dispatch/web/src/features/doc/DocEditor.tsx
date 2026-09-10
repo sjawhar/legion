@@ -92,7 +92,7 @@ function DocEditorContent({ artifact, isClosed, user }: DocEditorProps): ReactNo
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [content, setContent] = useState("");
   const [synced, setSynced] = useState(false);
-  const [mode, setMode] = useState<EditorMode>("edit");
+  const [mode, setMode] = useState<EditorMode>("preview");
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [showDiff, setShowDiff] = useState(false);
 

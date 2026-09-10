@@ -9,6 +9,7 @@ import {
   getAsk,
   listComments,
 } from "./api";
+import { enterEditMode } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -80,6 +81,7 @@ test("margin creates, follows, and preserves anchored review items", async ({
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     await page.getByRole("tab", { name: "Spec" }).click();
+    await enterEditMode(page);
     const editor = page.getByRole("textbox", { name: "Document editor" });
     await expect(editor).toContainText(initialMarkdown);
     await expect(page.locator('[aria-label="Selection actions"]')).toHaveCount(0);
@@ -207,10 +209,12 @@ test("margin creates, follows, and preserves anchored review items", async ({
         .toBeGreaterThan(0);
     }
     await page.goto(`/issues/${issue.key}/spec`);
+    await enterEditMode(page);
     await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
       "Note: The quick red "
     );
     await page.goto(`/issues/${issue.key}/artifact/spec`);
+    await enterEditMode(page);
     await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
       "Note: The quick red "
     );
@@ -236,7 +240,6 @@ test("margin anchors a whole-paragraph selection made in the rendered preview", 
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     await page.getByRole("tab", { name: "Spec" }).click();
-    await page.getByRole("button", { exact: true, name: "Preview" }).click();
     const paragraph = page.getByRole("article").locator("p").first();
     await expect(paragraph).toContainText(initialMarkdown);
 
