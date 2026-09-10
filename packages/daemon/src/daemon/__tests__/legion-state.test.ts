@@ -640,6 +640,41 @@ describe("legion state", () => {
     expect(loaded.controllerPendingNotices).toEqual([alreadyPresent, converted]);
   });
 
+  it("dedupes a converted v16 controllerHeldEvents entry against an already-present controllerPendingNotices entry sharing the same eventId, keeping exactly one", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-dedupe-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const alreadyPresent = {
+      payloadJson: '{"text":"already queued"}',
+      eventId: "evt-shared",
+    };
+    current.controllerPendingNotices = [alreadyPresent];
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v16Input = {
+      ...currentWithoutNotices,
+      version: 16,
+      // Same eventId as the already-present notice, but with a different payload -- an
+      // interrupted earlier migration attempt already converted and recorded this exact event;
+      // the raw v16 controllerHeldEvents entry it converted from is still present too, but must
+      // not be converted a second time into a duplicate notice for the same underlying event.
+      controllerPendingNotices: [alreadyPresent],
+      controllerHeldEvents: [
+        {
+          role: "controller",
+          payloadJson: '{"text":"a stale re-read of the same held event"}',
+          heldAt: "2026-09-01T00:00:00.000Z",
+          eventId: "evt-shared",
+        },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
+    expect(loaded).toEqual(current);
+    expect(loaded.controllerPendingNotices).toEqual([alreadyPresent]);
+  });
+
   it("rejects removed v6 fields on current-version state", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-current-"));
     const file = path.join(tempDir, "state.json");

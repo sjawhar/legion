@@ -640,13 +640,23 @@ function migrateV16State(state: unknown): unknown {
  * construction, and durability never depended on when it was originally held, only that it still
  * is. Merged with (never overwriting) any `controllerPendingNotices` already present on the raw
  * state -- a state that reached this step more than once (e.g. an interrupted earlier migration
- * attempt) must never lose whichever notices that first pass already converted. A malformed
- * entry (missing a `payloadJson`/`eventId` string pair) is logged and discarded rather than
- * silently dropped or carried forward broken. A state with no `controllerHeldEvents` at all
- * (every state before v16 ever added one) gets an empty array, same as before. */
+ * attempt) must never lose whichever notices that first pass already converted -- and deduped by
+ * `eventId`: a converted entry whose id already appears among the already-present notices is the
+ * same underlying event that first pass already converted, so it is skipped rather than queued a
+ * second time. A malformed entry (missing a `payloadJson`/`eventId` string pair) is logged and
+ * discarded rather than silently dropped or carried forward broken. A state with no
+ * `controllerHeldEvents` at all (every state before v16 ever added one) gets an empty array,
+ * same as before. */
 function migrateV17State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 17) return state;
   const { controllerHeldEvents, controllerPendingNotices: existingNotices, ...rest } = state;
+  const existingEventIds = new Set(
+    Array.isArray(existingNotices)
+      ? existingNotices
+          .map((notice) => (recordValue(notice) ? notice.eventId : undefined))
+          .filter((eventId): eventId is string => typeof eventId === "string")
+      : []
+  );
   const convertedNotices: Array<{ payloadJson: string; eventId: string }> = [];
   if (Array.isArray(controllerHeldEvents)) {
     for (const held of controllerHeldEvents) {
@@ -655,6 +665,7 @@ function migrateV17State(state: unknown): unknown {
         typeof held.payloadJson === "string" &&
         typeof held.eventId === "string"
       ) {
+        if (existingEventIds.has(held.eventId)) continue;
         convertedNotices.push({ payloadJson: held.payloadJson, eventId: held.eventId });
       } else {
         console.error(
