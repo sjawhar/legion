@@ -75,7 +75,7 @@ export function IssueTabs({
   return (
     <div
       aria-label="Issue detail"
-      className={`mb-4 flex gap-2 border-b ${borderDefault}`}
+      className={`mb-3 flex gap-1 border-b ${borderDefault}`}
       role="tablist"
     >
       {tabs.map((t) => (

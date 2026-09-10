@@ -30,6 +30,10 @@ test("issue tabs are URL-driven and keyboard-navigable, the sidebar marks the cu
   // D34 — the page title follows the route, including the issue's own title.
   await expect(page).toHaveTitle(`${issue.key} · ${issue.title} · Dispatch`);
 
+  // The document is the issue landing view; historical activity stays available on Log.
+  await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
+  await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}$`));
+
   // D9 — the sidebar marks the issue you are on.
   if (testInfo.project.name === "iphone") {
     await page.getByRole("button", { name: "Open navigation" }).click();

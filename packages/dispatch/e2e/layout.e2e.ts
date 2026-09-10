@@ -33,7 +33,7 @@ test("tablet keeps the log readable and exposes the review sheet", async ({
     await page.goto(`/issues/${issue.key}/log`);
 
     await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Open review panel" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
     const logBounds = await page.getByRole("tabpanel", { name: "Log" }).boundingBox();
     expect(logBounds?.width ?? 0).toBeGreaterThanOrEqual(400);
     const tabletScreenshot = testInfo.outputPath("tablet-800.png");
@@ -45,10 +45,10 @@ test("tablet keeps the log readable and exposes the review sheet", async ({
 
     await page.setViewportSize({ height: 768, width: 1024 });
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    await expect(page.getByRole("button", { name: "Close review panel" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Close review panel/ })).toBeVisible();
     await expect(page.getByTestId(`margin-comment-${comment.id}`)).toBeVisible();
-    await page.getByRole("button", { name: "Close review panel" }).click();
-    await expect(page.getByRole("button", { name: "Open review panel" })).toBeVisible();
+    await page.getByRole("button", { name: /Close review panel/ }).click();
+    await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
 
     await page.setViewportSize({ height: 1024, width: 1280 });
     await expect(page.getByRole("navigation", { name: "Issues" })).toBeVisible();

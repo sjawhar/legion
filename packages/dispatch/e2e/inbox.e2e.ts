@@ -25,7 +25,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("inbox answers asks inline and keeps issue state per user", async ({ browser }, testInfo) => {
+test("inbox shows current asks and answers issue asks in the margin", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const firstIssue = await createIssue({ project: "CORE", title: "First decision" });
   const secondIssue = await createIssue({ project: "CORE", title: "Second decision" });
@@ -90,12 +92,18 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
     await alicePage.getByRole("button", { name: "Close navigation" }).click();
   }
 
-  await newestAsk;
-  await alicePage.getByTestId(`ask-${newestAsk.id}`).getByRole("radio", { name: "Ship" }).check();
-  await alicePage
-    .getByTestId(`ask-${newestAsk.id}`)
-    .getByRole("button", { name: "Submit answer" })
-    .click();
+  await alicePage.goto(`/issues/${firstIssue.key}`);
+  if (testInfo.project.name === "iphone") {
+    await alicePage.getByRole("button", { name: "Open review panel (2 open asks)" }).click();
+  }
+  const needsYou = alicePage.getByRole("region", { name: "Needs you" });
+  const newestAskCard = needsYou.getByTestId(`ask-${newestAsk.id}`);
+  const shipOption = newestAskCard.getByRole("radio", { name: "Ship" });
+  await shipOption.click();
+  await expect(shipOption).toBeChecked();
+  await newestAskCard.getByRole("button", { name: "Submit answer" }).click();
+  await expect(newestAskCard).toHaveCount(0);
+  await alicePage.goto("/");
   await expect(inboxCards).toHaveCount(2);
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Open navigation" }).click();
@@ -230,7 +238,7 @@ test("posting an issue-level comment with no selection reaches the Log and Margi
   const page = await alice.newPage();
 
   try {
-    await page.goto(`/issues/${issue.key}`);
+    await page.goto(`/issues/${issue.key}/log`);
     const composer = page.getByRole("form", { name: "Comment composer" });
     await expect(composer).toBeVisible();
     await composer.getByLabel("Comment").fill("No selection needed to comment.");
@@ -248,7 +256,7 @@ test("posting an issue-level comment with no selection reaches the Log and Margi
     });
 
     if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open review panel" }).click();
+      await page.getByRole("button", { name: /Open review panel/ }).click();
     }
     await expect(
       page.getByLabel("Margin review items").getByText("No selection needed to comment.")

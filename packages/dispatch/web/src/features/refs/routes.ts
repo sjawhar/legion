@@ -35,7 +35,7 @@ export function issueTabForRoute(
   if (route.kind === "artifact") {
     return isPrimaryDocumentArtifactRoute(route, artifact) ? "spec" : "artifacts";
   }
-  return route.kind === "spec" ? "spec" : "log";
+  return route.kind === "issue" || route.kind === "spec" ? "spec" : "log";
 }
 
 const issueKeyPattern = "[A-Z][A-Z0-9-]*";

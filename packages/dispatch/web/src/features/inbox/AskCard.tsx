@@ -94,9 +94,8 @@ export function AskCard({
   getAskThread: getThread,
 }: AskCardProps): ReactNode {
   const queryClient = useQueryClient();
-  // The same open anchored ask can render simultaneously in more than one place (the issue
-  // board and the margin both show it) - useId keeps this instance's answer field id/label
-  // pairing unique across those mounts, instead of colliding on a shared ask.id-derived id.
+  // Each AskCard instance owns its answer field label so cards with the same
+  // ask id never collide when a responsive transition briefly renders both.
   const answerFieldId = `${useId()}-answer`;
   const [selected, setSelected] = useState<string[]>([]);
   const [answerText, setAnswerText] = useState("");
@@ -122,6 +121,7 @@ export function AskCard({
     onSuccess: (updatedAsk) => {
       setJustAnswered(updatedAsk);
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+      void queryClient.invalidateQueries({ queryKey: ["asks", ask.issue_key] });
       void queryClient.invalidateQueries({ queryKey: ["issue", ask.issue_key] });
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },

@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 
-import type { Anchor, Artifact, Comment, Event } from "../../api/types";
+import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import type { MarginComposer } from "./CommentsTab";
 import type { ComposerAnchor, ComposerKind } from "./Composer";
 import { MarginSheet } from "./MarginSheet";
@@ -44,7 +44,7 @@ export interface MarginSheetModel {
   actions: {
     closeComposer: () => void;
     onAction: (id: string, action: MarginItemAction) => void;
-    onReply: (comment: Comment) => void;
+    onReply: (comment: Comment, threadAnchor: Anchor | null) => void;
     onRetryAction: () => void;
     onRetryAnsweredAsk: (() => void) | undefined;
     onRetryComments: () => void;
@@ -65,6 +65,7 @@ export interface MarginSheetModel {
     issueKey: string | undefined;
     issuePending: boolean;
     openAskCount: number;
+    needsYou: Ask[];
     pendingActionId: string | undefined;
     pinned: Event[];
     pinnedIds: string[];
@@ -149,7 +150,9 @@ function useMarginSheet(): MarginSheetModel {
     issueKey,
     issuePending,
     items,
+    marginItems,
     mutateItem,
+    needsYou,
     pendingActionId,
     openAskCount,
     pinned,
@@ -180,7 +183,11 @@ function useMarginSheet(): MarginSheetModel {
     }
   }, [selection, setSelection, visibleArtifact?.id]);
   useEffect(() => {
-    if (composer !== undefined && (isClosed || composer.anchor.artifact !== visibleArtifact?.id)) {
+    if (
+      composer !== undefined &&
+      (isClosed ||
+        (composer.anchor !== undefined && composer.anchor.artifact !== visibleArtifact?.id))
+    ) {
       setComposer(undefined);
     }
   }, [composer, isClosed, visibleArtifact?.id]);
@@ -191,7 +198,7 @@ function useMarginSheet(): MarginSheetModel {
   }, [issueKey, routeItemId]);
 
   useMarginListeners({
-    items,
+    items: marginItems,
     list: commentListRef,
     routeItemId,
     selectItem,
@@ -203,7 +210,7 @@ function useMarginSheet(): MarginSheetModel {
   });
 
   const openComposer = useCallback(
-    (kind: ComposerKind, anchor: ComposerAnchor, replyTo?: string) => {
+    (kind: ComposerKind, anchor: ComposerAnchor | undefined, replyTo?: string) => {
       setComposer({ anchor, kind, replyTo });
       setSelection(undefined);
     },
@@ -216,19 +223,19 @@ function useMarginSheet(): MarginSheetModel {
     [mutateItem]
   );
   const onReply = useCallback(
-    (comment: Comment) => {
-      if (comment.anchor !== null) {
-        openComposer(
-          "comment",
-          {
-            artifact: comment.anchor.artifact_id,
-            from: comment.anchor.from,
-            quote: comment.anchor.quote,
-            to: comment.anchor.to,
-          },
-          comment.id
-        );
-      }
+    (comment: Comment, threadAnchor: Anchor | null) => {
+      openComposer(
+        "comment",
+        threadAnchor === null
+          ? undefined
+          : {
+              artifact: threadAnchor.artifact_id,
+              from: threadAnchor.from,
+              quote: threadAnchor.quote,
+              to: threadAnchor.to,
+            },
+        comment.id
+      );
     },
     [openComposer]
   );
@@ -261,6 +268,7 @@ function useMarginSheet(): MarginSheetModel {
       issueKey,
       issuePending,
       openAskCount,
+      needsYou,
       pendingActionId,
       pinned,
       pinnedIds,

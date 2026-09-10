@@ -48,7 +48,7 @@ test("artifacts tab has its own issue route", () => {
   expect(buildIssuePath({ key: "CORE-1", kind: "artifacts" })).toBe("/issues/CORE-1/artifacts");
 });
 
-test("artifact routes select Artifacts unless they name the primary document", () => {
+test("issue routes select Spec and artifact routes select Artifacts unless primary", () => {
   expect(
     issueTabForRoute(
       { key: "CORE-1", kind: "artifact", slug: "diagram" },
@@ -61,7 +61,7 @@ test("artifact routes select Artifacts unless they name the primary document", (
       { kind: "doc", primary: true }
     )
   ).toBe("spec");
-  expect(issueTabForRoute({ key: "CORE-1", kind: "issue" }, undefined)).toBe("log");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "issue" }, undefined)).toBe("spec");
   expect(issueTabForRoute({ id: "ask-1", key: "CORE-1", kind: "ask" }, undefined)).toBe("log");
   expect(issueTabForRoute({ key: "CORE-1", kind: "spec" }, undefined)).toBe("spec");
   expect(issueTabForRoute({ key: "CORE-1", kind: "log" }, undefined)).toBe("log");

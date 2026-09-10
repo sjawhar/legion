@@ -6,6 +6,7 @@ import {
   createIssue,
   createProject,
   getIssueEvents,
+  listComments,
   resolveAsk,
 } from "./api";
 import { resetDatabase } from "./seed";
@@ -27,7 +28,7 @@ async function setSheet(page: Page, project: string, open: boolean): Promise<voi
     return;
   }
   const toggle = page.getByRole("button", {
-    name: open ? "Open review panel" : "Close review panel",
+    name: open ? /Open review panel/ : /Close review panel/,
   });
   if ((await toggle.count()) > 0) {
     await toggle.click();
@@ -113,6 +114,60 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await alice.close();
 });
 
+test("an anchored comment replies to an agent-authored reply", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Keep this root visible.",
+    title: "Nested comment replies",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", from: 0, to: 4 },
+    body: "Root comment.",
+  });
+  const agentReply = await createComment(
+    issue.key,
+    { body: "Agent reply.", reply_to: root.id },
+    bobSession
+  );
+  const alice = await asUser(browser, "alice");
+  const submittedReplies: Record<string, unknown>[] = [];
+
+  try {
+    const page = await alice.newPage();
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        request.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
+      ) {
+        submittedReplies.push(request.postDataJSON() as Record<string, unknown>);
+      }
+    });
+    await page.goto(`/issues/${issue.key}`);
+    await setSheet(page, testInfo.project.name, true);
+    const replyCard = page.getByTestId(`margin-comment-${agentReply.id}`);
+    await expect(replyCard.getByRole("button", { name: "Reply" })).toBeVisible();
+    await replyCard.getByRole("button", { name: "Reply" }).click();
+    const composer = page.getByRole("form", { name: "Comment composer" });
+    await expect(composer).toContainText("Keep");
+    await composer.getByLabel("Comment").fill("Human nested reply.");
+    await composer.getByRole("button", { name: "Comment" }).click();
+    await expect.poll(() => submittedReplies).toHaveLength(1);
+    expect(submittedReplies[0]).toMatchObject({
+      body: "Human nested reply.",
+      reply_to: agentReply.id,
+    });
+    expect(submittedReplies[0]).not.toHaveProperty("anchor");
+    await expect
+      .poll(() => listComments(issue.key))
+      .toContainEqual(
+        expect.objectContaining({ body: "Human nested reply.", reply_to: agentReply.id })
+      );
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a session retraction leaves its reason in the thread and removes the human's live inbox item", async ({
   browser,
 }, testInfo) => {
@@ -175,7 +230,7 @@ test("a session retraction leaves its reason in the thread and removes the human
     path: testInfo.outputPath("ask-retraction-thread.png"),
   });
   if (testInfo.project.name === "iphone") {
-    await issuePage.getByRole("button", { name: "Close review panel" }).click();
+    await issuePage.getByRole("button", { name: /Close review panel/ }).click();
     await issuePage.getByRole("button", { name: "Open navigation" }).click();
   }
   await expect(issuePage.getByRole("heading", { exact: true, name: "Needs you" })).toHaveCount(0);

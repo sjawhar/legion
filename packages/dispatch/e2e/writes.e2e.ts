@@ -69,10 +69,17 @@ test("a failed pin shows a retryable error, never lies to the sidebar, and recov
 
   // Two synthetic clicks in the same task exercise the retry guard before React can render
   // the button disabled.
+  const retryResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "PUT" &&
+      response.url().includes(`/api/v1/me/issues/${issue.key}/state`) &&
+      response.ok()
+  );
   await retry.evaluate((button: HTMLButtonElement) => {
     button.click();
     button.click();
   });
+  await retryResponse;
   await expect.poll(() => retryRequests).toBe(1);
   await expect(header.getByRole("alert")).toHaveCount(0);
   await expect(header.getByRole("button", { name: "Unpin issue" })).toBeVisible();
@@ -149,7 +156,7 @@ test("Resolve shows a pending state before settling", async ({ browser }, testIn
   await page.goto(`/issues/${issue.key}`);
   await page.getByRole("tab", { name: "Spec" }).click();
   if (testInfo.project.name === "iphone") {
-    await page.getByRole("button", { name: "Open review panel" }).click();
+    await page.getByRole("button", { name: /Open review panel/ }).click();
   }
   const card = page.getByTestId(`margin-comment-${comment.id}`);
   await card.getByRole("button", { name: "Resolve" }).click();
