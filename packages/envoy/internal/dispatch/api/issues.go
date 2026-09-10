@@ -14,6 +14,22 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
+// listIssuesQuery aggregates each issue's open-ask count with a single
+// query. The state filter lives in the join condition, not a WHERE/FILTER
+// clause on the joined rows, so it matches the partial asks_open(issue_key)
+// where state = 'open' index instead of forcing a sequential scan of asks.
+const listIssuesQuery = `
+	select i.key, i.title, i.status, i.parent_key, i.updated_at, i.last_seq,
+	       count(a.id) filter (where i.closed_at is null)
+	from issues i
+	left join asks a on a.issue_key = i.key and a.state = 'open'
+	where ($1 = '' or i.project_key = $1)
+	  and ($2 = '' or i.status = $2)
+	  and ($3 = '' or i.parent_key = $3)
+	group by i.key
+	order by i.updated_at desc, i.key desc
+`
+
 func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -21,17 +37,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	parent := strings.TrimSpace(r.URL.Query().Get("parent"))
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select i.key, i.title, i.status, i.parent_key, i.updated_at,
-		       count(a.id) filter (where a.state = 'open' and i.closed_at is null)
-		from issues i
-		left join asks a on a.issue_key = i.key
-		where ($1 = '' or i.project_key = $1)
-		  and ($2 = '' or i.status = $2)
-		  and ($3 = '' or i.parent_key = $3)
-		group by i.key
-		order by i.updated_at desc, i.key desc
-	`, project, status, parent)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), listIssuesQuery, project, status, parent)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -40,7 +46,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	issues := []model.IssueSummary{}
 	for rows.Next() {
 		var issue model.IssueSummary
-		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Parent, &issue.UpdatedAt, &issue.OpenAsks); err != nil {
+		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

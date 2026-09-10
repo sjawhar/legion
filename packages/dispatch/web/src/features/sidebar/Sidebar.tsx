@@ -1,5 +1,5 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
-import { type ReactNode, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
+import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -99,30 +99,6 @@ export function arrangeIssues(
     .filter((group) => group.items.length > 0);
 }
 
-export interface FrozenSidebar {
-  groups: SidebarGroup[];
-  issueKey: string;
-}
-
-export function selectSidebarView(
-  currentIssue: string | undefined,
-  frozen: FrozenSidebar | undefined,
-  arranged: SidebarGroup[],
-  detailsPending: boolean
-): { displayed: SidebarGroup[] | undefined; frozen: FrozenSidebar | undefined } {
-  if (currentIssue === undefined) {
-    return { displayed: detailsPending ? undefined : arranged, frozen: undefined };
-  }
-  if (detailsPending && frozen?.issueKey !== currentIssue) {
-    return { displayed: undefined, frozen };
-  }
-  if (frozen?.issueKey === currentIssue) {
-    return { displayed: frozen.groups, frozen };
-  }
-  const next = { groups: arranged, issueKey: currentIssue };
-  return { displayed: arranged, frozen: next };
-}
-
 function activeIssueKey(pathname: string): string | undefined {
   return parseIssuePath(pathname)?.key;
 }
@@ -186,18 +162,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }): ReactNode 
   const location = useLocation();
   const issues = useQuery({ queryKey: ["issues"], queryFn: () => api.listIssues() });
   const state = useQuery({ queryKey: ["user-state"], queryFn: () => api.getMyState() });
-  const issueDetails = useQueries({
-    queries: (issues.data ?? []).map((issue) => ({
-      queryKey: ["issue", issue.key],
-      queryFn: () => api.getIssue(issue.key),
-    })),
-  });
   const currentIssue = activeIssueKey(location.pathname);
-  const frozen = useRef<FrozenSidebar | undefined>(undefined);
   const lastSeqByIssue = Object.fromEntries(
-    issueDetails.flatMap((detail) =>
-      detail.data === undefined ? [] : [[detail.data.key, detail.data.last_seq] as const]
-    )
+    (issues.data ?? []).map((issue) => [issue.key, issue.last_seq] as const)
   );
   if (issues.isError || state.isError) {
     return <p className="mt-8 text-sm text-rose-300">Could not load issues.</p>;
@@ -206,20 +173,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }): ReactNode 
     return <p className="mt-8 text-sm text-slate-400">Loading issues…</p>;
   }
 
-  const arranged = arrangeIssues(issues.data ?? [], state.data ?? {}, lastSeqByIssue);
-  const view = selectSidebarView(
-    currentIssue,
-    frozen.current,
-    arranged,
-    issueDetails.some((detail) => detail.isPending)
-  );
-  frozen.current = view.frozen;
-
-  if (view.displayed === undefined) {
-    return <p className="mt-8 text-sm text-slate-400">Loading issues…</p>;
-  }
-
-  const displayed = view.displayed;
+  const displayed = arrangeIssues(issues.data ?? [], state.data ?? {}, lastSeqByIssue);
 
   const issueByKey = new Map((issues.data ?? []).map((issue) => [issue.key, issue]));
   return (

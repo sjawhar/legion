@@ -71,7 +71,7 @@ export interface Issue {
 }
 
 export interface IssueSummary
-  extends Pick<Issue, "key" | "title" | "status" | "parent" | "updated_at"> {
+  extends Pick<Issue, "key" | "title" | "status" | "parent" | "updated_at" | "last_seq"> {
   readonly open_asks: number;
 }
 

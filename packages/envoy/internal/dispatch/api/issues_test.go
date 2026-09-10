@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -142,4 +143,89 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 		t.Fatalf("reopen issue: status=%d body=%s", reopened.Code, reopened.Body.String())
 	}
 	assertOpenAskCount(1)
+}
+
+func TestListIssuesIncludesLastSequence(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[model.Issue](t, created)
+
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list issues: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	summaries := decodeBody[[]map[string]any](t, listed)
+	if len(summaries) != 1 {
+		t.Fatalf("listed issues = %#v, want one summary", summaries)
+	}
+	if got, ok := summaries[0]["last_seq"].(float64); !ok || int(got) != issue.LastSeq {
+		t.Fatalf("list last_seq = %#v, want %d", summaries[0]["last_seq"], issue.LastSeq)
+	}
+}
+
+// The issue list query's open-ask count must be covered by the partial
+// asks_open(issue_key) where state = 'open' index rather than a sequential
+// scan of the asks table: a listing call is on Dispatch's hottest path and
+// must not scale with total ask volume across the instance.
+func TestListIssuesQueryUsesAsksOpenIndex(t *testing.T) {
+	_, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin explain transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
+		t.Fatalf("disable sequential scans: %v", err)
+	}
+
+	var planJSON []byte
+	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "").Scan(&planJSON); err != nil {
+		t.Fatalf("explain list query: %v", err)
+	}
+
+	var plans []struct {
+		Plan json.RawMessage `json:"Plan"`
+	}
+	if err := json.Unmarshal(planJSON, &plans); err != nil {
+		t.Fatalf("decode explain output: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("explain plans = %#v, want one plan", plans)
+	}
+	if planNodeSeqScansRelation(t, plans[0].Plan, "asks") {
+		t.Fatalf("list query plan sequentially scans asks; want an index scan via asks_open:\n%s", planJSON)
+	}
+}
+
+func planNodeSeqScansRelation(t *testing.T, planJSON json.RawMessage, relation string) bool {
+	t.Helper()
+	var node struct {
+		NodeType     string            `json:"Node Type"`
+		RelationName string            `json:"Relation Name"`
+		Plans        []json.RawMessage `json:"Plans"`
+	}
+	if err := json.Unmarshal(planJSON, &node); err != nil {
+		t.Fatalf("decode plan node: %v", err)
+	}
+	if node.NodeType == "Seq Scan" && node.RelationName == relation {
+		return true
+	}
+	for _, child := range node.Plans {
+		if planNodeSeqScansRelation(t, child, relation) {
+			return true
+		}
+	}
+	return false
 }
