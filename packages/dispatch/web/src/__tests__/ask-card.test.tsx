@@ -61,6 +61,28 @@ function renderCard(node: ReactNode) {
   return { queryClient, view };
 }
 
+// The same open anchored ask renders in more than one place at once (the issue board and
+// the margin both show it) - each mounted AskCard's own answer field must stay independently
+// labeled, not collide on an ask.id-derived id shared by every instance.
+test("two AskCard instances for the same ask keep independently labeled answer fields", () => {
+  const input = ask();
+  const { view } = renderCard(
+    <>
+      <AskCard ask={input} getAskThread={emptyThread(input)} />
+      <AskCard ask={input} getAskThread={emptyThread(input)} />
+    </>
+  );
+
+  try {
+    const fields = view.getAllByLabelText("Your answer");
+    expect(fields).toHaveLength(2);
+    expect(fields[0]).not.toBe(fields[1]);
+    expect(fields[0].id).not.toBe(fields[1].id);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard submits the selected single option", async () => {
   const submitted: Array<{ id: string; input: { selected: string[]; text?: string } }> = [];
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
