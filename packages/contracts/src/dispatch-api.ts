@@ -146,6 +146,7 @@ export interface Comment {
   readonly body: string;
   readonly anchor: Anchor | null;
   readonly reply_to: string | null;
+  readonly ask_id: string | null;
   readonly resolved: boolean;
   readonly suggestion: Suggestion | null;
   readonly created_at: string;
@@ -158,6 +159,8 @@ export interface Suggestion {
 
 export interface CommentEventPayload extends Comment {
   readonly artifact_name: string;
+  /** The question text of the ask this comment replies to (Comment.ask_id); empty otherwise. */
+  readonly ask_question?: string;
 }
 
 export interface Message {
@@ -305,6 +308,7 @@ export interface CreateCommentInput {
   readonly body: string;
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
+  readonly ask_id?: string;
   readonly suggestion?: { readonly replace_with: string };
   readonly actor?: Actor;
 }
@@ -347,6 +351,11 @@ export interface ArtifactDetails extends Artifact {
 
 export interface CommentRead {
   readonly comment: Comment;
+  readonly replies: Comment[];
+}
+
+export interface AskRead {
+  readonly ask: Ask;
   readonly replies: Comment[];
 }
 
@@ -436,6 +445,8 @@ export const CommentEventPayloadSchema = z.object({
   artifact_name: z.string().optional(),
   body: z.string().optional(),
   reply_to: z.string().nullish(),
+  ask_id: z.string().nullish(),
+  ask_question: z.string().optional(),
   anchor: z.object({ quote: z.string().optional() }).nullish(),
   suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
 });

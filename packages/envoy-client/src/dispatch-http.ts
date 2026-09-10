@@ -5,6 +5,7 @@ import type {
   ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
+  AskRead,
   Comment,
   CommentRead,
   CreateArtifactInput,
@@ -161,7 +162,7 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
   }
 
-  async getAsk(id: string): Promise<Ask> {
+  async getAsk(id: string): Promise<AskRead> {
     return this.#json("GET", ["api", "v1", "asks", id]);
   }
 

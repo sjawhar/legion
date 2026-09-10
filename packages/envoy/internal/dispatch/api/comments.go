@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -22,7 +23,7 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 	}
 	artifactID := strings.TrimSpace(r.URL.Query().Get("artifact"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
+		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
 		from comments
 		where issue_key = $1 and ($2 = '' or anchor->>'artifact_id' = $2)
 		order by created_at, id
@@ -57,33 +58,8 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		with recursive replies as (
-			select id, issue_key, author, body, anchor, reply_to, resolved, suggestion, created_at
-			from comments where reply_to = $1
-			union all
-			select c.id, c.issue_key, c.author, c.body, c.anchor, c.reply_to, c.resolved, c.suggestion, c.created_at
-			from comments c join replies r on c.reply_to = r.id
-		)
-		select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
-		from replies
-		order by created_at, id
-	`, comment.ID)
+	replies, err := s.loadReplyChain(r.Context(), s.deps.Store.Pool, "reply_to", comment.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	defer rows.Close()
-	replies := []model.Comment{}
-	for rows.Next() {
-		reply, err := scanComment(rows)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		replies = append(replies, reply)
-	}
-	if err := rows.Err(); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -93,11 +69,46 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 	}{Comment: comment, Replies: replies})
 }
 
+// loadReplyChain returns every comment transitively replying to the row(s)
+// matching "<seedColumn> = seedValue", ordered oldest first. seedColumn
+// selects the thread root: "reply_to" for a comment's own replies, "ask_id"
+// for an ask's directly-replying comments (plus, either way, every comment
+// that replies to one of those via reply_to). seedColumn is caller-controlled
+// and never derived from request input.
+func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seedValue string) ([]model.Comment, error) {
+	rows, err := q.Query(ctx, fmt.Sprintf(`
+		with recursive replies as (
+			select id, issue_key, author, body, anchor, reply_to, ask_id, resolved, suggestion, created_at
+			from comments where %s = $1
+			union all
+			select c.id, c.issue_key, c.author, c.body, c.anchor, c.reply_to, c.ask_id, c.resolved, c.suggestion, c.created_at
+			from comments c join replies r on c.reply_to = r.id
+		)
+		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
+		from replies
+		order by created_at, id
+	`, seedColumn), seedValue)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	replies := []model.Comment{}
+	for rows.Next() {
+		reply, err := scanComment(rows)
+		if err != nil {
+			return nil, err
+		}
+		replies = append(replies, reply)
+	}
+	return replies, rows.Err()
+}
+
 func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Body       string             `json:"body"`
 		Anchor     *model.AnchorInput `json:"anchor"`
 		ReplyTo    *string            `json:"reply_to"`
+		AskID      *string            `json:"ask_id"`
 		Suggestion *struct {
 			ReplaceWith string `json:"replace_with"`
 		} `json:"suggestion"`
@@ -131,6 +142,10 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if input.ReplyTo != nil && input.AskID != nil {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to and ask_id cannot both be set")
+		return
+	}
 	if input.ReplyTo != nil {
 		if strings.TrimSpace(*input.ReplyTo) == "" {
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this issue")
@@ -143,6 +158,21 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		}
 		if !sameIssue {
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this issue")
+			return
+		}
+	}
+	var askQuestion string
+	if input.AskID != nil {
+		if strings.TrimSpace(*input.AskID) == "" {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this issue")
+			return
+		}
+		if err := tx.QueryRow(r.Context(), `select question from asks where id = $1 and issue_key = $2`, *input.AskID, issueKey).Scan(&askQuestion); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this issue")
+				return
+			}
+			s.writeHandlerError(w, err)
 			return
 		}
 	}
@@ -176,10 +206,10 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	}
 	var comment model.Comment
 	if err := tx.QueryRow(r.Context(), `
-		insert into comments (issue_key, author, body, anchor, reply_to, suggestion)
-		values ($1, $2, $3, $4, $5, $6)
+		insert into comments (issue_key, author, body, anchor, reply_to, ask_id, suggestion)
+		values ($1, $2, $3, $4, $5, $6, $7)
 		returning id::text, created_at
-	`, issueKey, author, input.Body, anchorJSON, input.ReplyTo, suggestionJSON).Scan(&comment.ID, &comment.CreatedAt); err != nil {
+	`, issueKey, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, suggestionJSON).Scan(&comment.ID, &comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -188,6 +218,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	comment.Body = input.Body
 	comment.Anchor = anchor
 	comment.ReplyTo = input.ReplyTo
+	comment.AskID = input.AskID
 	comment.Suggestion = suggestion
 	if err := s.replaceRefs(r.Context(), tx, "comment", comment.ID, comment.Body); err != nil {
 		s.writeHandlerError(w, err)
@@ -211,7 +242,7 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		IssueKey: issueKey,
 		Type:     "comment.created",
 		Actor:    actor,
-		Payload:  commentEventPayload(comment, artifactName),
+		Payload:  commentEventPayload(comment, artifactName, askQuestion),
 	})
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -388,7 +419,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		IssueKey: comment.IssueKey,
 		Type:     eventType,
 		Actor:    actor,
-		Payload:  commentEventPayload(comment, artifactName),
+		Payload:  commentEventPayload(comment, artifactName, ""),
 	})
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -409,14 +440,14 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 
 func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.Comment, error) {
 	return scanComment(q.QueryRow(ctx, `
-		select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
+		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
 		from comments where id = $1
 	`, id))
 }
 
 func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
 	return scanComment(tx.QueryRow(ctx, `
-		select id::text, issue_key, author, body, anchor, reply_to::text, resolved, suggestion, created_at
+		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
 		from comments where id = $1 for update
 	`, id))
 }
@@ -425,7 +456,7 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 	var comment model.Comment
 	var author, anchor, suggestion []byte
 	if err := row.Scan(
-		&comment.ID, &comment.IssueKey, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.Resolved, &suggestion, &comment.CreatedAt,
+		&comment.ID, &comment.IssueKey, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.AskID, &comment.Resolved, &suggestion, &comment.CreatedAt,
 	); err != nil {
 		return model.Comment{}, err
 	}
@@ -449,8 +480,8 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 	return comment, nil
 }
 
-func commentEventPayload(comment model.Comment, artifactName string) model.CommentEventPayload {
-	return model.CommentEventPayload{Comment: comment, ArtifactName: artifactName}
+func commentEventPayload(comment model.Comment, artifactName, askQuestion string) model.CommentEventPayload {
+	return model.CommentEventPayload{Comment: comment, ArtifactName: artifactName, AskQuestion: askQuestion}
 }
 
 func (s *server) commentArtifactName(ctx context.Context, tx pgx.Tx, comment model.Comment) (string, error) {

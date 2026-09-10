@@ -594,29 +594,45 @@ describe("executeDispatchTool", () => {
     expect(JSON.parse(requests[1]?.init.body as string)).not.toHaveProperty("body");
   });
 
-  test("reads the targeted ask from a Dispatch ask reference", async () => {
+  test("reads the targeted ask, its reply thread, from a Dispatch ask reference", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target.pathname + target.search);
       if (target.pathname === "/api/v1/asks/ask-42") {
         return response({
-          id: "ask-42",
-          issue_key: "DSP-42",
-          author: { kind: "session", id: "author-1" },
-          question: "Which API should we ship?",
-          options: [{ label: "JSON", description: "Use the HTTP API." }, { label: "MCP" }],
-          multiple: false,
-          urgency: "high",
-          anchor: null,
-          state: "answered",
-          answer: {
-            user: "sami",
-            selected: ["JSON"],
-            text: "Ship JSON.",
-            at: "2026-09-09T00:00:00Z",
+          ask: {
+            id: "ask-42",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "author-1" },
+            question: "Which API should we ship?",
+            options: [{ label: "JSON", description: "Use the HTTP API." }, { label: "MCP" }],
+            multiple: false,
+            urgency: "high",
+            anchor: null,
+            state: "answered",
+            answer: {
+              user: "sami",
+              selected: ["JSON"],
+              text: "Ship JSON.",
+              at: "2026-09-09T00:00:00Z",
+            },
+            created_at: "2026-09-09T00:00:00Z",
           },
-          created_at: "2026-09-09T00:00:00Z",
+          replies: [
+            {
+              id: "comment-1",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "JSON, please.",
+              anchor: null,
+              reply_to: null,
+              ask_id: "ask-42",
+              resolved: false,
+              suggestion: null,
+              created_at: "2026-09-08T23:59:00Z",
+            },
+          ],
         });
       }
       throw new Error(`unexpected request: ${target.pathname}`);
@@ -644,6 +660,9 @@ describe("executeDispatchTool", () => {
         "- By: sami",
         "- Selected: JSON",
         "- Text: Ship JSON.",
+        "Replies:",
+        "comment-1 · user sami",
+        "Body: JSON, please.",
       ].join("\n"),
       details: {
         issue: "DSP-42",
@@ -652,6 +671,69 @@ describe("executeDispatchTool", () => {
     });
     expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
     expect(requests).toEqual(["/api/v1/asks/ask-42"]);
+  });
+
+  test("posts a comment reply to an ask using reply_to_ask", async () => {
+    const requests: Array<{ pathname: string; body: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push({ pathname: target.pathname, body: JSON.parse(String(init?.body)) });
+      return response({
+        id: "comment-1",
+        issue_key: "DSP-42",
+        author: { kind: "session", id: "session-1" },
+        body: "I'd go with JSON.",
+        anchor: null,
+        reply_to: null,
+        ask_id: "ask-42",
+        resolved: false,
+        suggestion: null,
+        created_at: "2026-09-09T00:00:00Z",
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-42", body: "I'd go with JSON.", reply_to_ask: "ask-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("Posted comment comment-1");
+    expect(requests).toEqual([
+      {
+        pathname: "/api/v1/issues/DSP-42/comments",
+        body: expect.objectContaining({ ask_id: "ask-42", body: "I'd go with JSON." }),
+      },
+    ]);
+  });
+
+  test("rejects a comment reply that names both reply_to and reply_to_ask", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: {
+          issue: "DSP-42",
+          body: "Which one?",
+          reply_to: "comment-1",
+          reply_to_ask: "ask-42",
+        },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(/reply_to and reply_to_ask/);
   });
 
   test("reads the targeted comment and quoted reply chain from a Dispatch comment reference", async () => {

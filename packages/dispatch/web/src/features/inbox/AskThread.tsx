@@ -1,0 +1,155 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type FormEvent, type ReactNode, useId, useState } from "react";
+
+import { api } from "../../api/client";
+import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
+import { QueryError } from "../../components/QueryError";
+import { actorLabel } from "../refs/actor";
+import { Timestamp } from "../refs/Timestamp";
+
+const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
+const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
+  api.createComment(issueKey, input);
+
+function replyAuthorLabel(comment: Comment): string {
+  return actorLabel(comment.author);
+}
+
+interface UseAskThreadResult {
+  replies: Comment[];
+  body: string;
+  setBody: (value: string) => void;
+  submitReply: (event: FormEvent<HTMLFormElement>) => void;
+  isPending: boolean;
+  isError: boolean;
+  retry: () => void;
+}
+
+/** Query + reply mutation for an ask's thread, kept separate from AskThread's markup so it can
+ * be reasoned about (and, if ever needed, reused) independently of the JSX. */
+function useAskThread(
+  ask: Ask,
+  createReply: (issueKey: string, input: CreateCommentInput) => Promise<Comment>,
+  getAskThread: (id: string) => Promise<AskRead>
+): UseAskThreadResult {
+  const queryClient = useQueryClient();
+  const [body, setBody] = useState("");
+  // A distinct queryKey from ["ask", id] (the bare-Ask query useAnsweredAsks
+  // uses to keep an answered ask visible): the two consumers expect
+  // incompatible shapes (Ask vs. {ask, replies}), and react-query caches by
+  // key alone, so sharing a key would silently corrupt whichever read second.
+  const thread = useQuery({
+    queryKey: ["ask-thread", ask.id],
+    queryFn: () => getAskThread(ask.id),
+  });
+  const submit = useMutation({
+    mutationFn: (text: string) => createReply(ask.issue_key, { ask_id: ask.id, body: text }),
+    onSuccess: () => {
+      setBody("");
+      void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
+    },
+  });
+
+  const submitReply = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const text = body.trim();
+    if (text === "" || submit.isPending) {
+      return;
+    }
+    submit.mutate(text);
+  };
+
+  return {
+    replies: thread.data?.replies ?? [],
+    body,
+    setBody,
+    submitReply,
+    isPending: submit.isPending,
+    isError: submit.isError,
+    retry: () => {
+      if (submit.variables !== undefined) {
+        submit.mutate(submit.variables);
+      }
+    },
+  };
+}
+
+export interface AskThreadProps {
+  ask: Ask;
+  createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  getAskThread?: (id: string) => Promise<AskRead>;
+}
+
+/**
+ * The reply thread under a question: every comment that replies directly to
+ * the ask (Comment.ask_id) plus their own reply chains, oldest first, and a
+ * composer to add another. Renders for both an open and an answered ask —
+ * answering closes the decision, not the conversation (Composer.tsx assumes a
+ * document anchor and the Margin's selection/picker chrome, so it does not fit
+ * this anchor-less, always-open reply box without contortion; a minimal
+ * inline form is the direct fit).
+ */
+export function AskThread({
+  ask,
+  createReply: reply = createReply,
+  getAskThread: getThread = getAskThread,
+}: AskThreadProps): ReactNode {
+  // The same ask can render simultaneously in more than one place (the issue
+  // board and the margin both show open anchored asks) - useId keeps this
+  // instance's reply field id/label pairing unique across those mounts,
+  // instead of colliding on a shared `ask.id`-derived id.
+  const replyFieldId = `${useId()}-reply`;
+  const { replies, body, setBody, submitReply, isPending, isError, retry } = useAskThread(
+    ask,
+    reply,
+    getThread
+  );
+
+  return (
+    <section
+      aria-label="Replies"
+      className="mt-4 space-y-3 border-t border-slate-200 pt-4 dark:border-slate-800"
+      data-testid={`thread-${ask.id}`}
+    >
+      {replies.length === 0 ? null : (
+        <ul className="space-y-2">
+          {replies.map((comment) => (
+            <li className="rounded-lg bg-slate-50 p-2 text-sm dark:bg-slate-800" key={comment.id}>
+              <p className="whitespace-pre-wrap text-slate-800 dark:text-slate-200">
+                {comment.body}
+              </p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                {replyAuthorLabel(comment)} · <Timestamp at={comment.created_at} />
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form className="flex flex-col gap-2" onSubmit={submitReply}>
+        <label
+          className="block text-sm font-medium text-slate-700 dark:text-slate-300"
+          htmlFor={replyFieldId}
+        >
+          Reply
+          <textarea
+            className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950"
+            disabled={isPending}
+            id={replyFieldId}
+            onChange={(event) => setBody(event.target.value)}
+            value={body}
+          />
+        </label>
+        <button
+          className="self-start rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 enabled:hover:border-sky-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+          disabled={body.trim() === "" || isPending}
+          type="submit"
+        >
+          {isPending ? "Replying…" : "Reply"}
+        </button>
+        {isError ? (
+          <QueryError message="Could not post your reply." onRetry={retry} retrying={isPending} />
+        ) : null}
+      </form>
+    </section>
+  );
+}

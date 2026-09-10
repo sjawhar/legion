@@ -154,7 +154,11 @@ type AskAnswer struct {
 	At       time.Time `json:"at"`
 }
 
-// Comment is an issue comment, optionally with an edit suggestion.
+// Comment is an issue comment, optionally with an edit suggestion. A comment
+// replies to at most one of another comment (ReplyTo) or an ask (AskID): a
+// top-level reply in an ask's thread sets AskID; a reply nested under that
+// comment sets ReplyTo instead, so an ask's full thread is "AskID = the ask"
+// plus the ReplyTo chains rooted at those comments.
 type Comment struct {
 	ID         string      `json:"id"`
 	IssueKey   string      `json:"issue_key"`
@@ -162,6 +166,7 @@ type Comment struct {
 	Body       string      `json:"body"`
 	Anchor     *Anchor     `json:"anchor"`
 	ReplyTo    *string     `json:"reply_to"`
+	AskID      *string     `json:"ask_id"`
 	Resolved   bool        `json:"resolved"`
 	Suggestion *Suggestion `json:"suggestion"`
 	CreatedAt  time.Time   `json:"created_at"`
@@ -179,6 +184,11 @@ type Suggestion struct {
 type CommentEventPayload struct {
 	Comment
 	ArtifactName string `json:"artifact_name"`
+	// AskQuestion is the question text of the ask this comment replies to
+	// (Comment.AskID), carried alongside the id-shaped in_reply_to so a
+	// notification renderer can show "re: <question>" instead of a bare UUID.
+	// Empty when the comment does not reply to an ask.
+	AskQuestion string `json:"ask_question,omitempty"`
 }
 
 // Message is a short issue update.

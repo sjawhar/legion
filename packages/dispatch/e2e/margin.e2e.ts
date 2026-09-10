@@ -195,7 +195,7 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await expect(askCard).toContainText("brown");
     await askCard.getByLabel("Your answer").fill("Because it is precise.");
     await askCard.getByRole("button", { name: "Submit answer" }).click();
-    await expect.poll(() => getAsk(ask.id)).toMatchObject({ state: "answered" });
+    await expect.poll(() => getAsk(ask.id)).toMatchObject({ ask: { state: "answered" } });
     await page.goto("/");
     await expect(page.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
 
@@ -339,9 +339,11 @@ test("margin ask composer sends option choices that the inbox records as a selec
     await expect
       .poll(() => getAsk(askId))
       .toMatchObject({
-        multiple: true,
-        options: [{ description: "Proceed this week", label: "Ship" }, { label: "Hold" }],
-        urgency: "high",
+        ask: {
+          multiple: true,
+          options: [{ description: "Proceed this week", label: "Ship" }, { label: "Hold" }],
+          urgency: "high",
+        },
       });
 
     await page.goto("/");
@@ -351,8 +353,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
     await expect
       .poll(() => getAsk(askId))
       .toMatchObject({
-        answer: { selected: ["Ship"], user: "alice" },
-        state: "answered",
+        ask: { answer: { selected: ["Ship"], user: "alice" }, state: "answered" },
       });
   } finally {
     await alice.close();

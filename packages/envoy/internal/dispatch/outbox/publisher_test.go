@@ -129,6 +129,88 @@ func TestRunSummarizesCommentBody(t *testing.T) {
 	}
 }
 
+func TestRunCorrelatesAskReplyCommentToItsAsk(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	askID := "5a660655-04ad-4ce0-8a9b-93dd03c412b7"
+	commentID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: "T-1",
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID:       commentID,
+				IssueKey: "T-1",
+				Body:     "I'd go with option A.",
+				AskID:    &askID,
+			},
+			ArtifactName: "spec.md",
+		},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "ask reply publication", func() bool {
+		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) != nil
+	})
+	item := publisher.all()[0]
+	if !event.Notify {
+		t.Fatalf("human ask reply must notify")
+	}
+	if item.InReplyTo != askID {
+		t.Fatalf("in_reply_to = %q, want %q", item.InReplyTo, askID)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("published envelope does not validate: %v", err)
+	}
+}
+
+func TestRunRoutesAskReplyToAuthorEvenWhenIssueRoutedElsewhere(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	route := "role:legion-controller-x"
+	seedIssue(t, database, "T-1", &route)
+	askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
+	commentID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: "T-1",
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID:       commentID,
+				IssueKey: "T-1",
+				Body:     "Ship it.",
+				AskID:    &askID,
+			},
+			ArtifactName: "spec.md",
+		},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "ask author route publication", func() bool {
+		return len(publisher.all()) == 3 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if items[0].Topic != "notifications.dispatch.issue.T-1.comment.created" {
+		t.Fatalf("issue topic = %q", items[0].Topic)
+	}
+	if items[1].Topic != "notifications.role.legion-controller-x" {
+		t.Fatalf("issue route topic = %q, want the issue's own route", items[1].Topic)
+	}
+	if items[2].Topic != "notifications.agent.session-asker" {
+		t.Fatalf("routed copy in-reply-to = %q, want %q", items[2].Topic, "notifications.agent.session-asker")
+	}
+	if items[2].InReplyTo != askID {
+		t.Fatalf("ask author route in_reply_to = %q, want %q", items[2].InReplyTo, askID)
+	}
+}
+
 func TestRunAddsBoundRoutePublication(t *testing.T) {
 	for _, tc := range []struct {
 		name, route, wantTopic string
@@ -359,6 +441,21 @@ func seedIssue(t *testing.T, database *store.Store, key string, route *string) {
 	`, key, route); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
+}
+
+func seedAsk(t *testing.T, database *store.Store, issueKey string, author model.Actor, question string) string {
+	t.Helper()
+	authorJSON, err := json.Marshal(author)
+	if err != nil {
+		t.Fatalf("encode ask author: %v", err)
+	}
+	var id string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into asks (issue_key, author, question) values ($1, $2, $3) returning id
+	`, issueKey, authorJSON, question).Scan(&id); err != nil {
+		t.Fatalf("create ask: %v", err)
+	}
+	return id
 }
 
 func publishedAt(t *testing.T, database *store.Store, eventID int64) *time.Time {

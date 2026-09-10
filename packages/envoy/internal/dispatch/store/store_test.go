@@ -112,6 +112,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"issue_external_links_url",
 		"artifacts_one_primary",
 		"asks_open",
+		"comments_ask_id",
 		"refs_to",
 		"events_unpublished",
 	}
@@ -152,6 +153,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_pkey",
 		"comments_issue_key_fkey",
 		"comments_reply_to_fkey",
+		"comments_ask_id_fkey",
 		"messages_pkey",
 		"messages_issue_key_fkey",
 		"refs_pkey",
@@ -171,8 +173,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 5 {
-		t.Errorf("recorded migrations: got %d, want 5", migrations)
+	if migrations != 6 {
+		t.Errorf("recorded migrations: got %d, want 6", migrations)
 	}
 }
 

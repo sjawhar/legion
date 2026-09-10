@@ -3,6 +3,7 @@ import type {
   Artifact,
   ArtifactVersionText,
   Ask,
+  AskRead,
   Comment,
   CreateAskInput,
   CreateCommentInput,
@@ -141,8 +142,8 @@ export function listComments(
   );
 }
 
-export function getAsk(id: string, options: ApiOptions = {}): Promise<Ask> {
-  return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
+export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
+  return request<AskRead>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
 
 export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artifact> {

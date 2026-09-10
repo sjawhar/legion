@@ -124,7 +124,7 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 			retryLater = true
 			continue
 		}
-		if err := publish(deps, event, route); err != nil {
+		if err := publish(ctx, deps, event, route); err != nil {
 			slog.Error("dispatch outbox: publish issue event", "event_id", event.ID, "error", err)
 			retryLater = true
 			continue
@@ -142,7 +142,7 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	return count, retryLater, nil
 }
 
-func publish(deps Deps, event model.Event, route *string) error {
+func publish(ctx context.Context, deps Deps, event model.Event, route *string) error {
 	item, err := envelope(event)
 	if err != nil {
 		return err
@@ -155,8 +155,41 @@ func publish(deps Deps, event model.Event, route *string) error {
 	}
 	if event.Notify {
 		publishRoute(deps.Publisher, item, route)
+		publishAskAuthorRoute(ctx, deps, item, event)
 	}
 	return nil
+}
+
+// publishAskAuthorRoute delivers a human reply on an ask directly to the asking
+// session's own topic, regardless of the issue's route. The issue's route (if
+// any) may point at an entirely different reviewer, so without this the agent
+// that asked the question never learns a human replied.
+func publishAskAuthorRoute(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) {
+	if event.Type != "comment.created" {
+		return
+	}
+	askID := payloadString(event.Payload, "ask_id")
+	if askID == "" {
+		return
+	}
+	var authorJSON []byte
+	if err := deps.Store.Pool.QueryRow(ctx, `select author from asks where id = $1`, askID).Scan(&authorJSON); err != nil {
+		slog.Error("dispatch outbox: load ask author", "ask_id", askID, "error", err)
+		return
+	}
+	var author model.Actor
+	if err := json.Unmarshal(authorJSON, &author); err != nil {
+		slog.Error("dispatch outbox: decode ask author", "ask_id", askID, "error", err)
+		return
+	}
+	if author.Kind != "session" {
+		return
+	}
+	routed := item
+	routed.Topic = contracts.AgentTopicPrefix + author.ID
+	if err := deps.Publisher.Publish(routed); err != nil {
+		slog.Error("dispatch outbox: publish ask author route", "ask_id", askID, "error", err)
+	}
 }
 
 func publishRoute(publisher Publisher, item contracts.Envelope, route *string) {
@@ -204,6 +237,14 @@ func envelope(event model.Event) (contracts.Envelope, error) {
 	}
 	if event.Type == "ask.answered" {
 		item.InReplyTo = payloadString(event.Payload, "id")
+	}
+	if event.Type == "comment.created" {
+		// A comment replying directly to an ask (Comment.AskID) is a reply to the
+		// asking session's question: correlate it the same way ask.answered
+		// correlates to the ask, so the agent's TOON renders "re: <ask id>".
+		if askID := payloadString(event.Payload, "ask_id"); askID != "" {
+			item.InReplyTo = askID
+		}
 	}
 	if strings.HasPrefix(event.Type, "ask.") {
 		item.Urgency = payloadString(event.Payload, "urgency")

@@ -1,8 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { Ask } from "../api/types";
+import type { Ask, AskRead, Comment } from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
 
 function ask(overrides: Partial<Ask> = {}): Ask {
@@ -30,6 +30,29 @@ function answered(input: Ask, selected: string[], text: string | null = null): A
   };
 }
 
+function reply(overrides: Partial<Comment> = {}): Comment {
+  return {
+    anchor: null,
+    ask_id: "ask-1",
+    author: { kind: "user", id: "alice" },
+    body: "A reply",
+    created_at: "2026-09-09T00:01:00Z",
+    id: "comment-1",
+    issue_key: "CORE-1",
+    reply_to: null,
+    resolved: false,
+    suggestion: null,
+    ...overrides,
+  };
+}
+
+// Every test provides an explicit (usually empty) thread so mounting AskCard
+// never falls through to the default getAskThread, which would issue a real
+// fetch in this test environment.
+function emptyThread(input: Ask): () => Promise<AskRead> {
+  return async () => ({ ask: input, replies: [] });
+}
+
 function renderCard(node: ReactNode) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -40,13 +63,15 @@ function renderCard(node: ReactNode) {
 
 test("AskCard submits the selected single option", async () => {
   const submitted: Array<{ id: string; input: { selected: string[]; text?: string } }> = [];
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(
     <AskCard
-      ask={ask({ options: [{ label: "Ship" }, { label: "Hold" }] })}
-      answerAsk={async (id, input) => {
-        submitted.push({ id, input });
-        return ask({ id, state: "answered" });
+      ask={input}
+      answerAsk={async (id, submission) => {
+        submitted.push({ id, input: submission });
+        return answered(input, submission.selected);
       }}
+      getAskThread={emptyThread(input)}
     />
   );
 
@@ -69,13 +94,15 @@ test("AskCard submits the selected single option", async () => {
 
 test("AskCard submits every checked multiple option", async () => {
   const submitted: Array<{ selected: string[] }> = [];
+  const input = ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] });
   const { view } = renderCard(
     <AskCard
-      ask={ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] })}
-      answerAsk={async (_id, input) => {
-        submitted.push(input);
-        return ask({ state: "answered" });
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected);
       }}
+      getAskThread={emptyThread(input)}
     />
   );
 
@@ -92,15 +119,18 @@ test("AskCard submits every checked multiple option", async () => {
 
 test("AskCard submits free-text without inventing a selected option", async () => {
   const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const input = ask();
   const { view } = renderCard(
     <AskCard
-      ask={ask()}
-      answerAsk={async (_id, input) => {
-        submitted.push(input);
-        return ask({ state: "answered" });
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
       }}
+      getAskThread={emptyThread(input)}
     />
   );
+
   try {
     fireEvent.change(view.getByLabelText("Your answer"), {
       target: { value: "Take the third path" },
@@ -119,7 +149,9 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
     rejectAnswer = reject;
   });
   const input = ask({ options: [{ label: "Ship" }] });
-  const { queryClient, view } = renderCard(<AskCard ask={input} answerAsk={() => pendingAnswer} />);
+  const { queryClient, view } = renderCard(
+    <AskCard ask={input} answerAsk={() => pendingAnswer} getAskThread={emptyThread(input)} />
+  );
   queryClient.setQueryData<Ask[]>(["inbox"], [input]);
 
   try {
@@ -138,7 +170,11 @@ test("AskCard renders who answered, what was selected, and when, in place of the
   const now = spyOn(Date, "now").mockReturnValue(new Date("2026-09-09T00:06:00Z").getTime());
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(
-    <AskCard ask={input} answerAsk={async () => answered(input, ["Ship"])} />
+    <AskCard
+      ask={input}
+      answerAsk={async () => answered(input, ["Ship"])}
+      getAskThread={emptyThread(input)}
+    />
   );
 
   try {
@@ -172,6 +208,7 @@ test("AskCard retries a failed answer without losing its form", async () => {
         }
         return answered(input, ["Ship"]);
       }}
+      getAskThread={emptyThread(input)}
     />
   );
 
@@ -198,6 +235,7 @@ test("AskCard ignores a same-task duplicate answer submit", async () => {
         attempts += 1;
         return answered(input, ["Ship"]);
       }}
+      getAskThread={emptyThread(input)}
     />
   );
 
@@ -209,6 +247,114 @@ test("AskCard ignores a same-task duplicate answer submit", async () => {
 
     await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
     expect(attempts).toBe(1);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard renders the reply thread under the question before it is answered", async () => {
+  const input = ask();
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      getAskThread={async () => ({
+        ask: input,
+        replies: [reply({ id: "comment-1", body: "Any update?" })],
+      })}
+    />
+  );
+
+  try {
+    await waitFor(() => expect(view.getByText("Any update?")).toBeTruthy());
+    expect(
+      within(view.getByTestId("thread-ask-1")).getByText("alice", { exact: false })
+    ).toBeTruthy();
+    // The composer stays available alongside existing replies.
+    expect(view.getByRole("button", { name: "Reply" })).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard keeps the thread and reply composer visible after the ask is answered", async () => {
+  const input = ask({ options: [{ label: "Ship" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async () => answered(input, ["Ship"])}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+
+    await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
+    // Answering is a distinct event, not the end of the conversation: the
+    // thread section (and its composer) stays mounted below the answer.
+    expect(view.getByRole("button", { name: "Reply" })).toBeTruthy();
+    expect(view.getByLabelText("Reply")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard posts a reply to the ask and clears the composer on success", async () => {
+  const input = ask();
+  const posted: Array<{ issueKey: string; body: string; askId?: string }> = [];
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      createReply={async (issueKey, body) => {
+        posted.push({ issueKey, body: body.body, askId: body.ask_id });
+        return reply({ body: body.body });
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.change(view.getByLabelText("Reply"), {
+      target: { value: "Any update on this?" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Reply" }));
+
+    await waitFor(() =>
+      expect(posted).toEqual([{ issueKey: "CORE-1", body: "Any update on this?", askId: "ask-1" }])
+    );
+    await waitFor(() => expect(view.getByLabelText("Reply")).toHaveProperty("value", ""));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard surfaces a retryable error when posting a reply fails", async () => {
+  let attempts = 0;
+  const input = ask();
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      createReply={async (_issueKey, body) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("offline");
+        }
+        return reply({ body: body.body });
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.change(view.getByLabelText("Reply"), { target: { value: "Retry me" } });
+    fireEvent.click(view.getByRole("button", { name: "Reply" }));
+
+    const alert = await view.findByRole("alert");
+    expect(alert.textContent).toContain("Could not post your reply.");
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(attempts).toBe(2));
   } finally {
     view.unmount();
   }

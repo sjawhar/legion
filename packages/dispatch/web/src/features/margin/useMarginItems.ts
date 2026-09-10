@@ -7,14 +7,38 @@ import type { Ask, Comment } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { pinnedEventIds } from "../issue/log-model";
 import { parseIssuePath } from "../refs/routes";
+import { useAnsweredAsks } from "./useAnsweredAsks";
 
 export type MarginTab = "artifacts" | "comments" | "pinned";
-
-import { useAnsweredAsks } from "./useAnsweredAsks";
 export type MarginItemAction = "accept" | "reject" | "resolve";
 export type MarginItem =
   | { ask: Ask; depth: number; kind: "ask" }
   | { comment: Comment; depth: number; kind: "comment" };
+
+// A comment that replies directly to an ask (`ask_id` set), or transitively replies to one
+// of those replies, belongs to that ask's own thread — AskCard already renders it via
+// AskThread. Without this exclusion it would also surface here as a standalone root
+// comment, rendering the same reply twice.
+function withoutAskThreadReplies(comments: Comment[]): Comment[] {
+  const askThreadIds = new Set(
+    comments.filter((comment) => comment.ask_id !== null).map((comment) => comment.id)
+  );
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const comment of comments) {
+      if (
+        !askThreadIds.has(comment.id) &&
+        comment.reply_to !== null &&
+        askThreadIds.has(comment.reply_to)
+      ) {
+        askThreadIds.add(comment.id);
+        grew = true;
+      }
+    }
+  }
+  return comments.filter((comment) => !askThreadIds.has(comment.id));
+}
 
 function commentThreads(comments: Comment[]): Array<Array<{ comment: Comment; depth: number }>> {
   const byParent = new Map<string, Comment[]>();
@@ -91,8 +115,10 @@ export function useMarginItems(tab: MarginTab) {
   const anchoredAsks = answeredAsks.asks;
   const items = useMemo<MarginItem[]>(() => {
     const anchoredItems = anchoredAsks.map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
-    const visibleComments = (comments.data ?? []).filter(
-      (comment) => comment.anchor === null || comment.anchor.artifact_id === visibleArtifact?.id
+    const visibleComments = withoutAskThreadReplies(
+      (comments.data ?? []).filter(
+        (comment) => comment.anchor === null || comment.anchor.artifact_id === visibleArtifact?.id
+      )
     );
     const threads = commentThreads(visibleComments).map((thread) =>
       thread.map(({ comment, depth }) => ({ comment, depth, kind: "comment" as const }))

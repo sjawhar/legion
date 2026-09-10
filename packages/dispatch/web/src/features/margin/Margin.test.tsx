@@ -70,6 +70,7 @@ const comment: Comment = {
   body: "why?",
   created_at: "2026-09-09T00:00:00Z",
   id: "comment-1",
+  ask_id: null,
   issue_key: "CORE-1",
   reply_to: null,
   resolved: false,
@@ -382,13 +383,10 @@ test("Margin surfaces and retries a failed fetch for an answered anchored ask", 
   queryClient.setQueryData(["inbox"], [anchoredAsk]);
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], [comment]);
-  const getAsk = spyOn(api, "getAsk")
-    .mockRejectedValueOnce(new Error("offline"))
-    .mockResolvedValue({
-      ...anchoredAsk,
-      answer: { at: "2026-09-09T00:05:00Z", selected: ["Ship"], text: null, user: "alice" },
-      state: "answered",
-    });
+  // AskCard's own reply-thread query (`["ask-thread", id]`) also calls `api.getAsk` as soon as
+  // the card mounts, so the initial resolved value must cover that fetch before the
+  // reject/retry sequence below exercises `useAnsweredAsks`'s missing-ask fallback query.
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask: anchoredAsk, replies: [] });
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
@@ -401,6 +399,15 @@ test("Margin surfaces and retries a failed fetch for an answered anchored ask", 
 
   try {
     await screen.findByTestId("ask-ask-1");
+    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(1));
+    getAsk.mockRejectedValueOnce(new Error("offline")).mockResolvedValue({
+      ask: {
+        ...anchoredAsk,
+        answer: { at: "2026-09-09T00:05:00Z", selected: ["Ship"], text: null, user: "alice" },
+        state: "answered",
+      },
+      replies: [],
+    });
     act(() => {
       queryClient.setQueryData(["inbox"], []);
     });
@@ -409,8 +416,53 @@ test("Margin surfaces and retries a failed fetch for an answered anchored ask", 
     expect(alert.textContent).toContain("Could not load an answered ask.");
     expect(screen.getByTestId("margin-comment-comment-1")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(3));
     expect((await screen.findByTestId("ask-ask-1")).textContent).toContain("alice answered");
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+  }
+});
+
+test("a reply to an ask renders exactly once in the margin, not also as a standalone comment", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  const askReply: Comment = {
+    anchor: null,
+    ask_id: anchoredAsk.id,
+    author: { id: "alice", kind: "user" },
+    body: "Any blockers first?",
+    created_at: "2026-09-09T00:01:00Z",
+    id: "ask-reply-1",
+    issue_key: "CORE-1",
+    reply_to: null,
+    resolved: false,
+    suggestion: null,
+  };
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], [anchoredAsk]);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [askReply]);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask: anchoredAsk, replies: [askReply] });
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByTestId("ask-ask-1");
+    await screen.findByTestId(`thread-${anchoredAsk.id}`);
+    expect(screen.getAllByText("Any blockers first?")).toHaveLength(1);
+    expect(screen.queryByTestId(`margin-comment-${askReply.id}`)).toBeNull();
   } finally {
     view.unmount();
     getAsk.mockRestore();

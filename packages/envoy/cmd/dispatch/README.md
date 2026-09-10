@@ -109,7 +109,7 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 | `/api/v1/settings/repo-projects` | GET | cookie or trusted header | List external repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. |
-| `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask. |
+| `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
 | `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, reply, or suggestion. |

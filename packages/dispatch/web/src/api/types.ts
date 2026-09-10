@@ -14,6 +14,7 @@ export type {
   Ask,
   AskAnswer,
   AskOption,
+  AskRead,
   AskUrgency,
   AuthenticatedUser,
   ChildStatusEventPayload,
