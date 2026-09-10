@@ -113,10 +113,6 @@ export const LegionDaemonApi = {
     request: architectCapability.extend({ issue: nonEmptyString, comment: z.string().optional() }),
     response: z.object({}),
   },
-  SpawnToken: {
-    request: architectCapability.extend({ issue: nonEmptyString, role: legionRole }),
-    response: z.object({ spawnToken: nonEmptyString }),
-  },
   ProvisioningCredential: {
     request: architectCapability.extend({ issue: nonEmptyString }),
     response: z.object({ token: nonEmptyString }),
@@ -228,8 +224,6 @@ export type LabelsInput = InputOf<typeof LegionDaemonApi.Labels.request>;
 export type LabelsResponse = OutputOf<typeof LegionDaemonApi.Labels.response>;
 export type EscalateInput = InputOf<typeof LegionDaemonApi.Escalate.request>;
 export type IssueCloseInput = InputOf<typeof LegionDaemonApi.IssueClose.request>;
-export type SpawnTokenInput = InputOf<typeof LegionDaemonApi.SpawnToken.request>;
-export type SpawnTokenResponse = OutputOf<typeof LegionDaemonApi.SpawnToken.response>;
 export type WorkerStartedInput = InputOf<typeof LegionDaemonApi.WorkerStarted.request>;
 export type WorkerStartedResponse = OutputOf<typeof LegionDaemonApi.WorkerStarted.response>;
 export type WorkerReadyInput = InputOf<typeof LegionDaemonApi.WorkerReady.request>;

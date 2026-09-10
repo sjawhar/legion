@@ -43,7 +43,6 @@ import { handleMergeGate } from "./api/routes/merge-gate";
 import { handleProcessExit, handleProcessReady, handleProcessStarted } from "./api/routes/process";
 import {
   handlePhaseComplete,
-  handleSpawnToken,
   handleSpawnWorker,
   handleWorkerReady,
   handleWorkerSession,
@@ -162,10 +161,6 @@ const ROUTES: Record<string, RouteEntry> = {
     handler: handleIssueClose,
   },
   "/legion/v1/escalate": { request: LegionDaemonApi.Escalate.request, handler: handleEscalate },
-  "/legion/v1/spawn-token": {
-    request: LegionDaemonApi.SpawnToken.request,
-    handler: handleSpawnToken,
-  },
   "/legion/v1/worker/started": {
     request: LegionDaemonApi.WorkerStarted.request,
     handler: handleWorkerStarted,

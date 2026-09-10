@@ -619,13 +619,15 @@ describe("daemon end-to-end", () => {
         daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), daemonOptions);
         await daemon.ready();
 
-        const staleArchitect = await fetch(`${daemonUrl}/legion/v1/spawn-token`, {
+        // `/legion/v1/spawn-token` is dead (no client calls it); `/legion/v1/escalate` is any
+        // other live architect-capability write, used purely as the auth probe this was.
+        const staleArchitect = await fetch(`${daemonUrl}/legion/v1/escalate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             tree: root,
-            issue: child,
-            role: "reviewer",
+            kind: "capacity",
+            context: { blocked: true },
             ...architect,
           }),
         });
@@ -647,13 +649,13 @@ describe("daemon end-to-end", () => {
           secret: expect.any(String),
         });
         architect.secret = recoveredRoot.secret;
-        const reauthorizedArchitect = await post(`${daemonUrl}/legion/v1/spawn-token`, {
+        const reauthorizedArchitect = await post(`${daemonUrl}/legion/v1/escalate`, {
           tree: root,
-          issue: child,
-          role: "reviewer",
+          kind: "capacity",
+          context: { blocked: true },
           ...architect,
         });
-        expect(await reauthorizedArchitect.json()).toEqual({ spawnToken: expect.any(String) });
+        expect(await reauthorizedArchitect.json()).toEqual({});
 
         const staleWorker = await fetch(`${daemonUrl}/legion/v1/grants`, {
           method: "POST",

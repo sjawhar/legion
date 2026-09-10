@@ -19,27 +19,6 @@ import {
   validateContractResponse,
 } from "../http";
 
-export async function handleSpawnToken(
-  ctx: RouteContext,
-  body: Record<string, unknown>
-): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
-  const role = legionRole(requiredString(body, "role"));
-  ctx.auth.requireArchitectCapability(body, tree);
-  const spawnToken = randomUUID();
-  ctx.deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)] = {
-    tree,
-    issue,
-    role,
-  };
-  await ctx.save();
-  return Response.json(
-    validateContractResponse(LegionDaemonApi.SpawnToken.response, {
-      spawnToken,
-    })
-  );
-}
-
 export async function handleWorkerSession(
   ctx: RouteContext,
   body: Record<string, unknown>

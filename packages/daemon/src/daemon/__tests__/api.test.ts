@@ -11,7 +11,7 @@ import {
 } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
-import { secretHash } from "../api/auth";
+import { secretHash, spawnCapabilityKey } from "../api/auth";
 import { EnvoyPublishError } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
@@ -1219,10 +1219,6 @@ describe("Legion HTTP API", () => {
         path: "/legion/v1/escalate",
         body: { tree: root, kind: "capacity", context: { blocked: true } },
       },
-      {
-        path: "/legion/v1/spawn-token",
-        body: { tree: root, issue: child, role: "implementer" },
-      },
     ];
 
     for (const write of lifecycleWrites) {
@@ -1413,13 +1409,16 @@ describe("Legion HTTP API", () => {
     };
     const workerBootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
     if (!workerBootToken) throw new Error("worker boot token was not minted");
-    const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+    // Mirrors what `mintBootToken`/`mintWorkerBootToken` write in production (the daemon mints
+    // this internally; no public route mints one on a client's behalf) -- a worker-role
+    // recovery token recorded directly against `spawnCapabilities`, recoverable by
+    // `/legion/v1/worker-session` below.
+    const spawnToken = "test-tester-recovery-token";
+    state.spawnCapabilities[spawnCapabilityKey(spawnToken)] = {
       tree: root,
       issue: root,
       role: "tester",
-      sessionId: "ses_architect",
-      secret: started.body.secret,
-    });
+    };
     const phase = await curlJson<{
       roleToken: string;
       secret: string;
@@ -1444,7 +1443,7 @@ describe("Legion HTTP API", () => {
 
     const recovered = await curlJson<WorkerSessionResponse>("/legion/v1/worker-session", {
       sessionId: "ses_tester",
-      recoveryToken: spawn.body.spawnToken,
+      recoveryToken: spawnToken,
     });
     expect(recovered.status).toBe(200);
     expect(recovered.body).toEqual({
