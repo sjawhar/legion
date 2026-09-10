@@ -2330,6 +2330,61 @@ describe("ProcessManager", () => {
     expect(commands).toEqual([]);
   });
 
+  it("relaunches with --resume when a claim's locator was already cleared by markWorkerDeadLocked but its resumeSessionFile survives — the exact shape a confirmed-dead worker leaves behind for the next no-holder recovery", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "child-implementer.jsonl");
+    await writeFile(sessionFile, "{}", "utf8");
+    // Exactly `markWorkerDeadLocked`'s own output shape (processes.ts:662-671): locator
+    // deleted, resumeSessionFile carried forward from the dead locator's own ompSessionFile.
+    // No prior fix (before this round) resumed this claim at all — `resumeWorker`'s own guard
+    // required a locator, so a no-holder exception delivered after the worker was already
+    // confirmed dead silently no-op'd forever, stranding the role.
+    state.roles[token] = {
+      issue: child,
+      role,
+      generation: 2,
+      resumeSessionFile: sessionFile,
+    };
+    const original = exception(token).original;
+    const {
+      manager: processes,
+      publications,
+      commands,
+    } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("dead shim socket");
+      },
+    });
+
+    await processes.handleException(exception(token, original));
+
+    expect(publications).toEqual([]);
+    expect(commands.some((command) => command.join(" ").includes("--resume"))).toBe(true);
+    expect(state.roles[token]).toMatchObject({
+      generation: 3,
+      pendingAssignment: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+    });
+    const relaunched = state.roles[token];
+    if (!relaunched || !("issue" in relaunched) || !relaunched.locator) {
+      throw new Error("expected a fresh locator after relaunch");
+    }
+    expect(relaunched.locator.ompSessionFile).toBe(sessionFile);
+  });
+
   it("publishes worker-died to the tree architect once resume attempts exhaust the launch-failure threshold", async () => {
     const state = newLegionState("omp", 1);
     tree(state);

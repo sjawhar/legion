@@ -1384,17 +1384,23 @@ export class ProcessManager {
    * dead, resuming the same agent through the existing `spawnWorker` resume path (`--resume`,
    * never fresh) with a state-derived catch-up as its prompt instead of the raw missed event —
    * shared by a role-lane delivery exception, the durable lane's `onUndeliverable` 404, and a
-   * dead-launch retry. A role with no claim or locator at all was never spawned: there is
-   * nothing to resume, so this is a no-op (its eventual first spawn's own catch-up recovers
-   * anything missed meanwhile). Publishes `worker-died` to the tree architect only once the
-   * resume attempt itself fails at the launch-failure threshold.
+   * dead-launch retry. A role with no claim, or a claim with neither a locator nor a resumable
+   * identity (`resumeSessionFile`, or its locator's own `ompSessionFile`), was never spawned or
+   * has nothing left to resume: there is nothing to recover, so this is a no-op (its eventual
+   * first spawn's own catch-up recovers anything missed meanwhile). Critically, a claim whose
+   * *locator* was already cleared but whose `resumeSessionFile` survives — exactly the shape
+   * `markWorkerDeadLocked` leaves behind for a confirmed-dead worker — is NOT that case: this is
+   * the one scenario this method exists to recover, and `spawnWorker`'s own resume-session
+   * lookup (`claim.locator?.ompSessionFile ?? claim.resumeSessionFile`) already handles it once
+   * reached. Publishes `worker-died` to the tree architect only once the resume attempt itself
+   * fails at the launch-failure threshold.
    */
   async resumeWorker(root: IssueKey, issue: IssueKey, role: LegionRole): Promise<void> {
     const token = roleToken(this.deps.state.project, issue, role);
     const claim = this.deps.state.roles[token];
-    if (!claim || !("issue" in claim) || !claim.locator) {
+    if (!claim || !("issue" in claim) || (!claim.locator && !claim.resumeSessionFile)) {
       console.error(
-        `[legion] resumeWorker no-op for ${token}: no claim or locator to resume (never spawned, or already cleared) - its eventual first spawn's own catch-up recovers anything missed meanwhile`
+        `[legion] resumeWorker no-op for ${token}: no claim or resumable identity (never spawned, or already fully retired) - its eventual first spawn's own catch-up recovers anything missed meanwhile`
       );
       return;
     }
