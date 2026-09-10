@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
+import { stripDispatchEnv } from "./environment";
 
 export type GitHubAppRole = "implement" | "review";
 
@@ -27,6 +28,14 @@ export interface DaemonConfig {
    * config.
    */
   dispatchUrl?: string;
+  /**
+   * Bearer token for the dispatch service, read from the `DISPATCH_TOKEN` environment
+   * variable only (never a YAML key). Required when `dispatchUrl` is set — spawned panes
+   * would otherwise have a dispatch service to target but no credential to authenticate
+   * with, so the native dispatch tool would fail to register. Undefined whenever
+   * `dispatchUrl` is unset, even if the environment variable is present.
+   */
+  dispatchToken?: string;
   natsUrls: string[];
   ompInvocation: string;
   boardProjectIds: string[];
@@ -280,7 +289,10 @@ function readStringRecord(value: unknown, field: string): Record<string, string>
 }
 
 function executePrivateKeyCommand(command: string, field: string): string {
-  const result = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+  const result = spawnSync("sh", ["-c", command], {
+    encoding: "utf8",
+    env: stripDispatchEnv(process.env),
+  });
   if (result.error || result.status !== 0) {
     const status = result.status === null ? "unknown" : String(result.status);
     const stderr = result.stderr?.trim();
@@ -516,20 +528,18 @@ export function resolveDaemonConfig(
           "DISPATCH_URL"
         );
   if (env.DISPATCH_MCP_URL !== undefined) {
-    // The daemon exports DISPATCH_MCP_URL into every pane it spawns (a `/mcp`-suffixed alias
-    // derived from its own dispatchUrl, for clients that still read that alias directly) — so
-    // `legion start`/`restart`/`check-config` run from inside one of those panes (the
-    // controller pane has a shell) always inherits it. Only reject a genuinely stale/wrong
-    // value: unset DISPATCH_URL (nothing to derive the alias from) or one that disagrees with
-    // what DISPATCH_URL implies; the daemon's own consistent echo is accepted.
-    const expectedMcpUrl =
-      resolvedDispatchUrl === undefined ? undefined : `${resolvedDispatchUrl}/mcp`;
-    if (expectedMcpUrl === undefined || env.DISPATCH_MCP_URL !== expectedMcpUrl) {
-      throw new Error(
-        "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
-      );
-    }
+    throw new Error("DISPATCH_MCP_URL was replaced by DISPATCH_URL");
   }
+  const dispatchTokenEnv =
+    env.DISPATCH_TOKEN !== undefined && env.DISPATCH_TOKEN.trim().length > 0
+      ? env.DISPATCH_TOKEN
+      : undefined;
+  if (resolvedDispatchUrl !== undefined && dispatchTokenEnv === undefined) {
+    throw new Error(
+      "dispatch_url is set but DISPATCH_TOKEN is not; the dispatch tools would not register"
+    );
+  }
+  const dispatchToken = resolvedDispatchUrl === undefined ? undefined : dispatchTokenEnv;
   if (env.LEGION_WORKER_BUDGET !== undefined) {
     throw new Error("worker_budget was replaced by worker_cap");
   }
@@ -674,6 +684,7 @@ export function resolveDaemonConfig(
       port: port.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
       dispatchUrl: resolvedDispatchUrl,
+      dispatchToken,
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       boardProjectIds: boardProjectIds.value,

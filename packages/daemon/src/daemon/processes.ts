@@ -1534,10 +1534,8 @@ export class ProcessManager {
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
       PATH: this.deps.panePath,
-      // DISPATCH_MCP_URL is a transitional alias for clients that still read it instead of
-      // DISPATCH_URL directly.
       DISPATCH_URL: this.deps.config.dispatchUrl,
-      DISPATCH_MCP_URL: this.deps.config.dispatchUrl && `${this.deps.config.dispatchUrl}/mcp`,
+      DISPATCH_TOKEN: this.deps.config.dispatchToken,
     });
     const addressingPrompt = addressingFragment(
       this.deps.state.project,
@@ -1815,10 +1813,8 @@ export class ProcessManager {
         GIT_CONFIG_COUNT: "0",
         GIT_TERMINAL_PROMPT: "0",
         PATH: this.deps.panePath,
-        // DISPATCH_MCP_URL is a transitional alias for clients that still read it instead of
-        // DISPATCH_URL directly.
         DISPATCH_URL: this.deps.config.dispatchUrl,
-        DISPATCH_MCP_URL: this.deps.config.dispatchUrl && `${this.deps.config.dispatchUrl}/mcp`,
+        DISPATCH_TOKEN: this.deps.config.dispatchToken,
       });
       const addressingPrompt = addressingFragment(this.deps.state.project, treeKey, issue, role);
       const locator = await this.launchShimmedProcess(
@@ -1962,10 +1958,8 @@ export class ProcessManager {
       ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
       ENVOY_URL: this.deps.config.envoyUrl,
       PATH: this.deps.panePath,
-      // DISPATCH_MCP_URL is a transitional alias for clients that still read it instead of
-      // DISPATCH_URL directly.
       DISPATCH_URL: this.deps.config.dispatchUrl,
-      DISPATCH_MCP_URL: this.deps.config.dispatchUrl && `${this.deps.config.dispatchUrl}/mcp`,
+      DISPATCH_TOKEN: this.deps.config.dispatchToken,
     });
     const window = await tmux.openWindow(
       this.deps.run,

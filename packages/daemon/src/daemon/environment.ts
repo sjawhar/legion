@@ -81,22 +81,45 @@ function parseMiseEnvironment(stdout: string): FullMiseEnvironment {
   return environment as FullMiseEnvironment;
 }
 
+/** `DISPATCH_URL`/`DISPATCH_TOKEN` are configured pane-only exports: the only place they belong
+ * is the explicit, config-driven `-e` pairs `processes.ts` adds to a spawned pane's own tmux
+ * environment. `DISPATCH_MCP_URL` is a retired alias with no legitimate destination at all — the
+ * daemon never emits it and strips it from every child process it spawns (an `-e` pair can only
+ * add or override a key for a new pane, never remove one the pane would otherwise inherit from
+ * the tmux server's own environment, so this key must never reach that environment in the first
+ * place). Every other child process the daemon spawns (mise/tool resolution here,
+ * `executePrivateKeyCommand`'s `sh -c` in `config.ts`, GitHub App role/`gh` CLI children in
+ * `github-app-env.ts`, and any other daemon subprocess) must never see any of the three, even
+ * when the daemon's own process (or mise's) happens to carry one for unrelated reasons. Shared
+ * by `fullMiseEnvironment`/`resolveOmpInvocation` below, by `config.ts`'s
+ * `executePrivateKeyCommand`, and by `github-app-env.ts`'s base-env copy, so every consumer
+ * strips the same three keys the same way. */
+const DISPATCH_ENV_KEYS = ["DISPATCH_TOKEN", "DISPATCH_URL", "DISPATCH_MCP_URL"] as const;
+
+export function stripDispatchEnv<T extends NodeJS.ProcessEnv>(env: T): T {
+  const stripped = { ...env };
+  for (const key of DISPATCH_ENV_KEYS) delete stripped[key];
+  return stripped;
+}
+
 async function fullMiseEnvironment(
   mise: string,
   env: NodeJS.ProcessEnv,
   run: CommandRunner
 ): Promise<FullMiseEnvironment> {
-  const result = await run([mise, "env", "--json"]);
+  const result = await run([mise, "env", "--json"], { env: stripDispatchEnv(env) });
   if (result.exitCode !== 0) {
-    const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+    // stdout is `mise`'s env dump on partial success — never interpolated here, only stderr.
+    const detail = result.stderr.trim();
     throw new Error(
-      `[legion] Could not load the full mise environment${detail ? `: ${detail}` : ""}`
+      `[legion] Could not load the full mise environment (exit ${result.exitCode})${detail ? `: ${detail}` : ""}`
     );
   }
-  return {
+  const merged: NodeJS.ProcessEnv = {
     ...env,
     ...parseMiseEnvironment(result.stdout),
-  } as FullMiseEnvironment;
+  };
+  return stripDispatchEnv(merged) as FullMiseEnvironment;
 }
 
 function miseToolFromInvocation(invocation: string): string | undefined {
@@ -124,7 +147,7 @@ async function resolveOmpInvocation(
     );
   }
 
-  const result = await run([mise, "where", tool]);
+  const result = await run([mise, "where", tool], { env: stripDispatchEnv(env) });
   const installDir = result.stdout.trim();
   const resolved =
     result.exitCode === 0 ? resolveExecutable(path.join(installDir, "bin", "omp")) : undefined;

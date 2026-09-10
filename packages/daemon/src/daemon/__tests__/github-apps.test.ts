@@ -553,4 +553,28 @@ describe("buildRoleEnv", () => {
     expect(result.PATH).toBe("/usr/bin");
     expect(result.LEGION_ID).toBe("team-1");
   });
+
+  it("scrubs the pane-only DISPATCH_TOKEN/DISPATCH_URL/DISPATCH_MCP_URL from the base environment", () => {
+    const baseEnv: Record<string, string> = {
+      PATH: "/usr/bin",
+      LEGION_ID: "team-1",
+      DISPATCH_TOKEN: "some-dispatch-token",
+      DISPATCH_URL: "http://localhost:8766",
+      DISPATCH_MCP_URL: "http://localhost:8766/mcp",
+    };
+
+    const identity = {
+      name: "legion-implement[bot]",
+      email: "12345+legion-implement[bot]@users.noreply.github.com",
+    };
+    const result = buildRoleEnv("ghs_token", identity, baseEnv);
+
+    expect(result.DISPATCH_TOKEN).toBeUndefined();
+    expect(result.DISPATCH_URL).toBeUndefined();
+    expect(result.DISPATCH_MCP_URL).toBeUndefined();
+
+    // Non-dispatch keys preserved
+    expect(result.PATH).toBe("/usr/bin");
+    expect(result.LEGION_ID).toBe("team-1");
+  });
 });
