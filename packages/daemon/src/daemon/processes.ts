@@ -1067,13 +1067,13 @@ export class ProcessManager {
     delete tree.lingerUntil;
     await this.releaseSlot(treeKey);
     // Every stopped claim above (one with a locator) is already deleted; this also clears any
-    // remaining claim under the tree that never had a locator to stop in the first place (e.g.
-    // a `registerRoleBacking`-only entry), which the fixed-point loop above never even sees. Each
-    // delete runs inside that same token's own critical section (mirroring the fixed-point
-    // loop's delete-after-stop): a writer that acquired this exact token's lock just before
-    // `tree.status` flipped to "closed" above, and has not yet reached its own post-lock
-    // `rejectIfTreeGone` check, is let to finish (and reject itself against the now-closed tree)
-    // before this delete runs, rather than racing it.
+    // remaining claim under the tree that never had a locator to stop in the first place (a
+    // claim still queued, never launched, when the tree closed), which the fixed-point loop
+    // above never even sees. Each delete runs inside that same token's own critical section
+    // (mirroring the fixed-point loop's delete-after-stop): a writer that acquired this exact
+    // token's lock just before `tree.status` flipped to "closed" above, and has not yet reached
+    // its own post-lock `rejectIfTreeGone` check, is let to finish (and reject itself against
+    // the now-closed tree) before this delete runs, rather than racing it.
     for (const [token, claim] of Object.entries(this.deps.state.roles)) {
       if ("issue" in claim && this.rootForIssue(claim.issue) === treeKey) {
         await this.workerAdmission.mutateClaim(token, async () => {
@@ -1087,10 +1087,10 @@ export class ProcessManager {
     // A tree that was closed while it still had queued (never-launched) tokens must never leave
     // them behind for a later, unrelated drain to promote against a tree that no longer exists.
     await this.workerAdmission.pruneQueueForTree(treeKey);
-    // A spawn capability minted before shutdown (`/legion/v1/spawn-token`) still authorizes the
-    // legacy `/legion/v1/role-backing` route (until #828 deletes it) to recreate a claim for this
-    // exact tree/issue/role -- deleting every capability recorded against this tree closes that
-    // replay window regardless of which legacy route it would have been redeemed through.
+    // A spawn capability minted before shutdown has no live claim left to authorize once this
+    // tree's claims are deleted above, but it would otherwise still sit in state indefinitely,
+    // revealing a valid (tree, issue, role) triple to whoever holds the token -- deleting every
+    // capability recorded against this tree closes that window for good.
     for (const [key, capability] of Object.entries(this.deps.state.spawnCapabilities)) {
       if (capability.tree === treeKey) {
         delete this.deps.state.spawnCapabilities[key];

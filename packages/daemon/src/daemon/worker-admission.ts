@@ -623,16 +623,15 @@ export class WorkerAdmission {
       // so bumping that counter or rotating the token to the tail would be wrong for both. They
       // still need different queue treatment, though.
       if (error instanceof TreeClosingError) {
-        // This token's tree is confirmed gone. Unlike round 7's fix (leave it for
-        // `closeTreeLocked`'s own `pruneQueueForTree` to remove during that tree's teardown),
-        // reaching this case now means the tree was ALREADY closed with nothing left to prune it
-        // — `spawnWorker`'s own entry check rejects a fresh enqueue against an already-closed
-        // tree before this point (see `isTreeGone`), so this is now only reachable via the
-        // narrower "closed mid-decision" race, but a dead entry here would otherwise wedge every
-        // worker queued behind it forever, since no `closeTreeLocked` call is left running to
-        // prune it. Drops the token and clears whatever locator-less claim `launchWorker`'s
-        // entry-check check left untouched (its own post-open branch, if that is the leg that
-        // fired instead, has already deleted its fresh claim itself before throwing).
+        // This token's tree is confirmed gone. `spawnWorker`'s own entry check already rejects a
+        // fresh enqueue against an already-closed tree before this point (see `isTreeGone`), so
+        // reaching this case now only happens via the narrower "closed mid-decision" race, with
+        // no `closeTreeLocked` call left running to prune this entry via its own
+        // `pruneQueueForTree` -- a dead entry here would otherwise wedge every worker queued
+        // behind it forever. Drops the token and clears whatever locator-less claim
+        // `launchWorker`'s entry-check check left untouched (its own post-open branch, if that
+        // is the leg that fired instead, has already deleted its fresh claim itself before
+        // throwing).
         await this.withAdmissionLock(async () => {
           const queue = this.deps.state.workerAdmission.queue;
           const index = queue.indexOf(token);
