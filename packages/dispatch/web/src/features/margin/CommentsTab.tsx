@@ -56,6 +56,7 @@ interface CommentsTabProps {
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
   onCloseComposer: () => void;
+  onComposerSaved: () => void;
   onReply: (comment: Comment) => void;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
@@ -89,6 +90,7 @@ function CommentCard({
   const anchor = comment.anchor;
   return (
     <article
+      aria-current={selected ? "true" : undefined}
       className={`rounded-xl border p-3 text-sm shadow-sm ${
         selected ? `${selectedCardBorder} ${selectedCardBg}` : card
       }`}
@@ -205,10 +207,22 @@ function CommentCard({
   );
 }
 
-function AskCardItem({ ask, selected }: { ask: Ask; selected: boolean }): ReactNode {
+function AskCardItem({
+  artifactSlug,
+  ask,
+  selected,
+}: {
+  artifactSlug: string;
+  ask: Ask;
+  selected: boolean;
+}): ReactNode {
   return (
-    <div className={selected ? `rounded-xl ${highlightRing}` : undefined} data-margin-item={ask.id}>
-      <AskCard ask={ask} />
+    <div
+      aria-current={selected ? "true" : undefined}
+      className={selected ? `rounded-xl ${highlightRing}` : undefined}
+      data-margin-item={ask.id}
+    >
+      <AskCard ask={ask} artifactSlug={artifactSlug} />
       <Unfurl body={ask.question} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         {new Date(ask.created_at).toLocaleString()}
@@ -232,6 +246,7 @@ export function CommentsTab({
   needsYou,
   onAction,
   onCloseComposer,
+  onComposerSaved,
   onReply,
   onRetryAction,
   onRetryAnsweredAsk,
@@ -248,6 +263,7 @@ export function CommentsTab({
           kind={composer.kind}
           issueKey={issueKey}
           onClose={onCloseComposer}
+          onSaved={onComposerSaved}
           replyTo={composer.replyTo}
         />
       )}
@@ -257,6 +273,7 @@ export function CommentsTab({
             <h2 className={`text-sm font-semibold ${textPrimaryOnSurface}`}>Needs you</h2>
             {needsYou.map((ask) => (
               <AskCardItem
+                artifactSlug={artifactSlug}
                 ask={ask}
                 key={ask.id}
                 selected={selectedItemId === ask.id || hoveredItemId === ask.id}
@@ -284,7 +301,7 @@ export function CommentsTab({
               return (
                 <div key={id}>
                   {item.kind === "ask" ? (
-                    <AskCardItem ask={item.ask} selected={active} />
+                    <AskCardItem artifactSlug={artifactSlug} ask={item.ask} selected={active} />
                   ) : (
                     <CommentCard
                       actionError={actionErrorId === item.comment.id}

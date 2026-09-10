@@ -1,19 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Ask, Comment, Event } from "../../api/types";
+import type { Artifact, Ask, Comment, Event } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { pinnedEventIds } from "../issue/log-model";
-import { parseIssuePath } from "../refs/routes";
 import { useAnsweredAsks } from "./useAnsweredAsks";
 
 export type MarginTab = "comments" | "pinned";
 export type MarginItemAction = "accept" | "reject" | "resolve";
 export type MarginItem =
   | { ask: Ask; depth: number; kind: "ask" }
-  | { comment: Comment; depth: number; kind: "comment" };
+  | { comment: Comment; depth: number; kind: "comment"; threadRootId: string };
 
 const pinnedEventBatchSize = 50;
 
@@ -74,7 +72,9 @@ export function threadRootId(comments: readonly Comment[], comment: Comment): st
   return root.id;
 }
 
-function commentThreads(comments: Comment[]): Array<Array<{ comment: Comment; depth: number }>> {
+function commentThreads(
+  comments: Comment[]
+): Array<Array<Extract<MarginItem, { kind: "comment" }>>> {
   const byParent = new Map<string, Comment[]>();
   const roots: Comment[] = [];
   const known = new Set(comments.map((comment) => comment.id));
@@ -101,7 +101,12 @@ function commentThreads(comments: Comment[]): Array<Array<{ comment: Comment; de
         }
       };
       append(root, 0);
-      return thread;
+      return thread.map(({ comment, depth }) => ({
+        comment,
+        depth,
+        kind: "comment" as const,
+        threadRootId: root.id,
+      }));
     });
 }
 
@@ -109,22 +114,17 @@ export function marginItemId(item: MarginItem): string {
   return item.kind === "ask" ? item.ask.id : item.comment.id;
 }
 
-export function useMarginItems(tab: MarginTab, documentText: string) {
-  const { pathname } = useLocation();
+export function marginItemMarkId(item: MarginItem): string | undefined {
+  return item.kind === "ask" ? item.ask.anchor?.mark_id : item.comment.anchor?.mark_id;
+}
+
+export function useMarginItems(
+  issueKey: string | undefined,
+  tab: MarginTab,
+  visibleArtifact: Artifact | undefined,
+  markPositions: ReadonlyMap<string, number>
+) {
   const queryClient = useQueryClient();
-  const route = parseIssuePath(pathname);
-  const issueKey = route?.key;
-  const routeArtifactSlug = route?.kind === "artifact" ? route.slug : undefined;
-  const routeItemId = route?.kind === "ask" || route?.kind === "comment" ? route.id : undefined;
-  const issue = useQuery({
-    enabled: issueKey !== undefined,
-    queryKey: ["issue", issueKey],
-    queryFn: () => api.getIssue(issueKey ?? ""),
-  });
-  const visibleArtifact =
-    routeArtifactSlug === undefined
-      ? issue.data?.artifacts.find((artifact) => artifact.id === issue.data?.primary_artifact_id)
-      : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug);
   const asks = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
   const inboxOpenAsks = useMemo(
     () => (asks.data ?? []).filter((ask) => ask.issue_key === issueKey && ask.state === "open"),
@@ -168,10 +168,10 @@ export function useMarginItems(tab: MarginTab, documentText: string) {
         (comment) => comment.anchor === null || comment.anchor.artifact_id === visibleArtifact?.id
       )
     );
-    const threads = commentThreads(visibleComments).map((thread) =>
-      thread.map(({ comment, depth }) => ({ comment, depth, kind: "comment" as const }))
-    );
-    const roots: MarginItem[][] = [...anchoredItems.map((ask) => [ask]), ...threads];
+    const roots: MarginItem[][] = [
+      ...anchoredItems.map((ask) => [ask]),
+      ...commentThreads(visibleComments),
+    ];
     return roots
       .sort((left, right) => {
         const leftRoot = left[0];
@@ -179,42 +179,35 @@ export function useMarginItems(tab: MarginTab, documentText: string) {
         if (leftRoot === undefined || rightRoot === undefined) {
           return 0;
         }
+        const leftMarkId = marginItemMarkId(leftRoot);
+        const rightMarkId = marginItemMarkId(rightRoot);
+        const leftPosition = leftMarkId === undefined ? undefined : markPositions.get(leftMarkId);
+        const rightPosition =
+          rightMarkId === undefined ? undefined : markPositions.get(rightMarkId);
+        if (leftPosition !== undefined && rightPosition !== undefined) {
+          if (leftPosition !== rightPosition) {
+            return leftPosition - rightPosition;
+          }
+        } else if (leftPosition !== undefined || rightPosition !== undefined) {
+          return leftPosition === undefined ? 1 : -1;
+        }
         const leftAnchor = leftRoot.kind === "ask" ? leftRoot.ask.anchor : leftRoot.comment.anchor;
         const rightAnchor =
           rightRoot.kind === "ask" ? rightRoot.ask.anchor : rightRoot.comment.anchor;
-        // Every anchored ask is always anchored (unanchored asks never enter this list, see
-        // useAnsweredAsks), so this puts anchored asks and anchored comments in document
-        // reading order; an anchored item whose text has changed sorts after found anchors.
-        // General, unanchored comments remain last, most recent first.
+        const leftCreatedAt =
+          leftRoot.kind === "ask" ? leftRoot.ask.created_at : leftRoot.comment.created_at;
+        const rightCreatedAt =
+          rightRoot.kind === "ask" ? rightRoot.ask.created_at : rightRoot.comment.created_at;
         if (leftAnchor !== null && rightAnchor !== null) {
-          const leftPosition = documentText.indexOf(leftAnchor.quote);
-          const rightPosition = documentText.indexOf(rightAnchor.quote);
-          if (leftPosition !== rightPosition) {
-            if (leftPosition === -1) {
-              return 1;
-            }
-            if (rightPosition === -1) {
-              return -1;
-            }
-            return leftPosition - rightPosition;
-          }
-          const leftCreatedAt =
-            leftRoot.kind === "ask" ? leftRoot.ask.created_at : leftRoot.comment.created_at;
-          const rightCreatedAt =
-            rightRoot.kind === "ask" ? rightRoot.ask.created_at : rightRoot.comment.created_at;
           return leftCreatedAt.localeCompare(rightCreatedAt);
         }
         if (leftAnchor !== null || rightAnchor !== null) {
           return leftAnchor !== null ? -1 : 1;
         }
-        const leftCreatedAt =
-          leftRoot.kind === "ask" ? leftRoot.ask.created_at : leftRoot.comment.created_at;
-        const rightCreatedAt =
-          rightRoot.kind === "ask" ? rightRoot.ask.created_at : rightRoot.comment.created_at;
         return rightCreatedAt.localeCompare(leftCreatedAt);
       })
       .flat();
-  }, [anchoredAsks, comments.data, documentText, visibleArtifact]);
+  }, [anchoredAsks, comments.data, markPositions, visibleArtifact]);
   const marginItems = useMemo<MarginItem[]>(
     () => [...needsYou.map((ask) => ({ ask, depth: 0, kind: "ask" as const })), ...items],
     [items, needsYou]
@@ -276,10 +269,6 @@ export function useMarginItems(tab: MarginTab, documentText: string) {
     commentsError: comments.isError,
     commentsPending: comments.isPending,
     commentRecords: comments.data ?? [],
-    isClosed: issue.data !== undefined && issue.data.closed_at !== null,
-    issueError: issue.isError,
-    issueKey,
-    issuePending: issue.isPending,
     items,
     marginItems,
     needsYou,
@@ -291,9 +280,6 @@ export function useMarginItems(tab: MarginTab, documentText: string) {
     pinnedIds,
     retryAnsweredAsk,
     retryComments: () => void comments.refetch(),
-    retryIssue: () => void issue.refetch(),
     retryItem: () => actionGuard.retryLast(action),
-    routeItemId,
-    visibleArtifact,
   };
 }

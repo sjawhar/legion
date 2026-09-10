@@ -39,16 +39,16 @@ const artifact: Artifact = {
   versions: [],
 };
 
-function comment(id: string, quote: string | null, createdAt: string): Comment {
+function comment(id: string, markId: string | null, createdAt: string, orphaned = false): Comment {
   return {
     anchor:
-      quote === null
+      markId === null
         ? null
         : {
             artifact_id: artifact.id,
-            mark_id: `mark-${id}`,
-            orphaned: false,
-            quote,
+            mark_id: markId,
+            orphaned,
+            quote: "selected",
             version: 1,
           },
     ask_id: null,
@@ -85,7 +85,15 @@ test("pinned lookup chunks 51 ids and combines results by sequence", async () =>
 });
 
 function OrderedItems() {
-  const { items } = useMarginItems("comments", "The quick brown fox");
+  const { items } = useMarginItems(
+    "CORE-1",
+    "comments",
+    artifact,
+    new Map([
+      ["m-b", 4],
+      ["m-a", 12],
+    ])
+  );
   return createElement(
     "output",
     { "aria-label": "Margin item order" },
@@ -93,7 +101,7 @@ function OrderedItems() {
   );
 }
 
-test("useMarginItems orders found quote anchors before missing and unanchored items", () => {
+test("useMarginItems orders items by their mark position, then unplaced anchors, then unanchored", () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
@@ -105,10 +113,10 @@ test("useMarginItems orders found quote anchors before missing and unanchored it
   queryClient.setQueryData(
     ["comments", "CORE-1"],
     [
-      comment("fox", "fox", "2026-09-09T00:00:00Z"),
-      comment("quick", "quick", "2026-09-09T00:01:00Z"),
-      comment("missing", "absent", "2026-09-09T00:02:00Z"),
-      comment("plain", null, "2026-09-09T00:03:00Z"),
+      comment("A", "m-a", "2026-09-09T00:00:00Z"),
+      comment("B", "m-b", "2026-09-09T00:01:00Z"),
+      comment("C", "m-c", "2026-09-09T00:02:00Z", true),
+      comment("D", null, "2026-09-09T00:03:00Z"),
     ]
   );
   queryClient.setQueryData(["inbox"], []);
@@ -123,7 +131,7 @@ test("useMarginItems orders found quote anchors before missing and unanchored it
   );
 
   try {
-    expect(screen.getByLabelText("Margin item order").textContent).toBe("quick,fox,missing,plain");
+    expect(screen.getByLabelText("Margin item order").textContent).toBe("B,A,C,D");
   } finally {
     view.unmount();
   }

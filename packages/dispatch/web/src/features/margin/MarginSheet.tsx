@@ -16,7 +16,6 @@ import { useDialog, useMediaQuery } from "../shell/useDialog";
 import { CommentsTab } from "./CommentsTab";
 import type { MarginSheetModel } from "./Margin";
 import { PinnedTab } from "./PinnedTab";
-import { SelectionMenu } from "./SelectionMenu";
 import type { MarginTab } from "./useMarginItems";
 
 interface MarginSheetProps {
@@ -50,7 +49,6 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
     sheet,
     tab,
   } = model;
-  const selectionValue = selection.value;
   const isCompactViewport = useMediaQuery("(max-width: 1279px)");
   const sheetDragOrigin = useRef<number | undefined>(undefined);
   const sheetDragMoved = useRef(false);
@@ -126,16 +124,6 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
             </button>
           </>
         ) : null}
-        {selectionValue === undefined || visibleArtifact === undefined || isClosed ? null : (
-          <SelectionMenu
-            onAction={(kind) => {
-              // The composer lives in the sheet body, so acting on a selection opens it.
-              sheet.toggle(true);
-              actions.onSelectionAction(kind, selectionValue);
-            }}
-            selection={selectionValue}
-          />
-        )}
         <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
           <div className={`flex border-b ${borderDefault}`} role="tablist">
             {(["comments", "pinned"] as MarginTab[]).map((name) => (
@@ -190,6 +178,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
               needsYou={needsYou}
               onAction={actions.onAction}
               onCloseComposer={actions.closeComposer}
+              onComposerSaved={actions.onComposerSaved}
               onReply={actions.onReply}
               onRetryAction={actions.onRetryAction}
               onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
