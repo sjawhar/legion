@@ -68,9 +68,6 @@ export interface Issue {
   readonly closed_at: string | null;
   readonly primary_artifact_id: string;
   readonly last_seq: number;
-  readonly artifacts?: Artifact[];
-  readonly open_asks?: Ask[];
-  readonly children?: IssueChild[];
 }
 
 export interface IssueSummary

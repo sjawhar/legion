@@ -30,7 +30,7 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
     queryKey: ["issue", key],
     queryFn: () => api.getIssue(key ?? ""),
   });
-  const artifact = issue.data?.artifacts?.find(
+  const artifact = issue.data?.artifacts.find(
     (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
   );
   const text = useQuery<ArtifactText | ArtifactVersionContent>({

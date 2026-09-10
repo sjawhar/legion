@@ -62,8 +62,8 @@ export function useMarginItems(tab: MarginTab) {
   });
   const visibleArtifact =
     routeArtifactSlug === undefined
-      ? issue.data?.artifacts?.find((artifact) => artifact.id === issue.data?.primary_artifact_id)
-      : issue.data?.artifacts?.find((artifact) => artifact.slug === routeArtifactSlug);
+      ? issue.data?.artifacts.find((artifact) => artifact.id === issue.data?.primary_artifact_id)
+      : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug);
   const asks = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
   const openAskCount = (asks.data ?? []).filter(
     (ask) => ask.issue_key === issueKey && ask.state === "open"

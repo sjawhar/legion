@@ -3,6 +3,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -10,6 +11,7 @@ import {
 import { Link, useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
+import { mergeIssue } from "../../api/issue-cache";
 import type {
   AuthenticatedUser,
   Comment,
@@ -181,14 +183,21 @@ function IssueHeader({
   const [editingTitle, setEditingTitle] = useState(false);
   const [route, setRoute] = useState(issue.route ?? "");
   const [routeDirty, setRouteDirty] = useState(false);
+  // Mirrors of the drafts for mutation callbacks. Every draft write goes through
+  // writeTitle/writeRoute so the ref is updated synchronously with the state, never via
+  // an effect: a passive effect flushes after paint, and a PATCH response landing in that
+  // gap would compare the callback against a stale value and clear the dirty flag for a
+  // draft the user had already changed (the CI route-clear race).
   const titleRef = useRef(title);
   const routeRef = useRef(route);
-  useEffect(() => {
-    titleRef.current = title;
-  }, [title]);
-  useEffect(() => {
-    routeRef.current = route;
-  }, [route]);
+  const writeTitle = useCallback((next: string) => {
+    titleRef.current = next;
+    setTitle(next);
+  }, []);
+  const writeRoute = useCallback((next: string) => {
+    routeRef.current = next;
+    setRoute(next);
+  }, []);
   const events = useQuery({
     queryKey: ["events", issue.key, "active-sessions"],
     queryFn: () => api.getIssueEvents(issue.key, { limit: 200, order: "desc" }),
@@ -201,7 +210,7 @@ function IssueHeader({
       await queryClient.cancelQueries({ queryKey: ["issue", issue.key] });
     },
     onSuccess: (next) => {
-      queryClient.setQueryData(["issue", issue.key], next);
+      mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
@@ -220,14 +229,14 @@ function IssueHeader({
 
   useEffect(() => {
     if (!titleDirty && !updateIssue.isPending) {
-      setTitle(issue.title);
+      writeTitle(issue.title);
     }
-  }, [issue.title, titleDirty, updateIssue.isPending]);
+  }, [issue.title, titleDirty, updateIssue.isPending, writeTitle]);
   useEffect(() => {
     if (!routeDirty && !updateIssue.isPending) {
-      setRoute(issue.route ?? "");
+      writeRoute(issue.route ?? "");
     }
-  }, [issue.route, routeDirty, updateIssue.isPending]);
+  }, [issue.route, routeDirty, updateIssue.isPending, writeRoute]);
 
   const saveTitle = () => {
     const next = title.trim();
@@ -244,7 +253,7 @@ function IssueHeader({
         }
       );
     } else {
-      setTitle(issue.title);
+      writeTitle(issue.title);
       setTitleDirty(false);
     }
   };
@@ -274,10 +283,10 @@ function IssueHeader({
   // showing an unsaved value indefinitely — fall back to the last confirmed issue state.
   useEffect(() => {
     if (updateIssue.isError) {
-      setTitle(issue.title);
+      writeTitle(issue.title);
       setTitleDirty(false);
     }
-  }, [updateIssue.isError, issue.title]);
+  }, [updateIssue.isError, issue.title, writeTitle]);
 
   return (
     <header className="mb-6 border-b border-slate-200 pb-6">
@@ -303,12 +312,12 @@ function IssueHeader({
             setTitleDirty(false);
           }}
           onChange={(event) => {
-            setTitle(event.target.value);
+            writeTitle(event.target.value);
             setTitleDirty(true);
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
-              setTitle(issue.title);
+              writeTitle(issue.title);
               setEditingTitle(false);
               setTitleDirty(false);
               return;
@@ -389,7 +398,7 @@ function IssueHeader({
           id="issue-route"
           onChange={(event) => {
             setRouteDirty(true);
-            setRoute(event.target.value);
+            writeRoute(event.target.value);
           }}
           placeholder="role:legion-controller-core"
           disabled={isClosed}
@@ -601,7 +610,7 @@ function IssueDetail({
     return <p className="text-rose-700">Could not load this issue.</p>;
   }
 
-  const primaryArtifact = issue.data.artifacts?.find(
+  const primaryArtifact = issue.data.artifacts.find(
     ({ id }) => id === issue.data.primary_artifact_id
   );
   if (primaryArtifact === undefined) {
@@ -610,7 +619,7 @@ function IssueDetail({
   const selectedArtifact =
     artifactRouteSlug === undefined
       ? primaryArtifact
-      : issue.data.artifacts?.find(({ slug }) => slug === artifactRouteSlug);
+      : issue.data.artifacts.find(({ slug }) => slug === artifactRouteSlug);
   if (selectedArtifact === undefined) {
     return <p className="text-rose-700">Could not load this document artifact.</p>;
   }
