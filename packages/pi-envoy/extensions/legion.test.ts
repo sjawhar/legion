@@ -1329,7 +1329,7 @@ describe("Legion OMP extension", () => {
     );
     expect(exits).toEqual([1]);
   });
-  test("retries worker/ready three times on a 503 then propagates without exiting (T18 hardening)", async () => {
+  test("retries worker/ready three times on a 503 then propagates without exiting", async () => {
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
       exits.push(code);

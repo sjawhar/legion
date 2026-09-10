@@ -570,7 +570,7 @@ main() {
     wait_for_webhook_forwarder
     record_forwarder_hook webhook-forward "repos/${SMOKE_REPO}/hooks"
   elif [[ "$webhook_mode" == "envoy" ]]; then
-    printf 'GREEN webhook ingress: production Envoy NATS bridge will forward only %s\n' "$SMOKE_REPO"
+    printf 'GREEN webhook ingress: production Envoy NATS bridge will relay %s GitHub events and Dispatch issue events for every project\n' "$SMOKE_REPO"
   else
     printf 'SKIPPED-BLOCKED webhook ingress: %s\n' "$(webhook_ingress_block_reason)"
   fi

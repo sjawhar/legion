@@ -818,7 +818,7 @@ describe("Legion HTTP API", () => {
     expect(treeReady).toEqual([root]);
   });
 
-  it("responds to process/ready before the architect's own shim connects, delivering the connect afterward (T18 regression)", async () => {
+  it("responds to process/ready before the architect's own shim connects, delivering the connect afterward", async () => {
     const shimGate = Promise.withResolvers<void>();
     let connected: Promise<void> | undefined;
     await start({
@@ -843,7 +843,7 @@ describe("Legion HTTP API", () => {
 
     // The response returns even though the fake shim connect below is still gated shut -- the
     // architect's own bootstrap (the caller of this exact request) must never be blocked on its
-    // own shim answering, or every root spawn deadlocks under load exactly as T18 found.
+    // own shim answering, or every root spawn would deadlock under load.
     const ready = await json("/legion/v1/process/ready", {
       tree: root,
       sessionId: "ses_root",
@@ -947,7 +947,7 @@ describe("Legion HTTP API", () => {
     expect(stateJson).not.toContain("controllerCapabilityHash");
   });
 
-  it("responds to controller/ready before its own shim connects, delivering the connect afterward (T18 regression)", async () => {
+  it("responds to controller/ready before its own shim connects, delivering the connect afterward", async () => {
     const shimGate = Promise.withResolvers<void>();
     let connected: Promise<void> | undefined;
     await start({
@@ -2145,7 +2145,7 @@ describe("Legion HTTP API", () => {
     ]);
   });
 
-  it("responds to worker/ready before the calling worker's own shim connects, delivering the prompt afterward (T18 regression)", async () => {
+  it("responds to worker/ready before the calling worker's own shim connects, delivering the prompt afterward", async () => {
     const shimGate = Promise.withResolvers<void>();
     let connected: Promise<void> | undefined;
     await start({
@@ -2184,7 +2184,7 @@ describe("Legion HTTP API", () => {
 
     // Same shape as /process/ready: the calling worker's own bootstrap is blocked on this
     // exact HTTP response, so the daemon must never await connecting to (and prompting) that
-    // same worker's own shim socket before responding -- the identical T18 deadlock, one level
+    // same worker's own shim socket before responding -- the same deadlock, one level
     // down from the root architect.
     const ready = await json("/legion/v1/worker/ready", {
       tree: root,
