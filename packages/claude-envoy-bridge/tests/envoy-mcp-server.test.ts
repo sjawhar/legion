@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test"
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 import { dispatchToolSpecs, zodSchemaApi } from "@legion/contracts"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import type { Server } from "bun"
@@ -12,6 +12,17 @@ import { FakeNatsServer } from "./fake-nats-server"
 function loadServer(instance: string): Promise<typeof EnvoyMcpServer> {
   return import(`../src/envoy-mcp-server?${instance}`)
 }
+
+const originalTmuxPane = process.env["TMUX_PANE"]
+
+beforeEach(() => {
+  delete process.env["TMUX_PANE"]
+})
+
+afterEach(() => {
+  if (originalTmuxPane === undefined) delete process.env["TMUX_PANE"]
+  else process.env["TMUX_PANE"] = originalTmuxPane
+})
 
 const ObjectJsonSchema = z.object({
   required: z.array(z.string()).optional(),

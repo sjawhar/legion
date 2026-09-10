@@ -215,8 +215,8 @@ func TestCheckDocumentsReportsLegacyParseFailures(t *testing.T) {
 	}
 	var artifactID string
 	if err := database.Pool.QueryRow(ctx, `
-		insert into artifacts (issue_key, slug, name, kind, created_by)
-		values ('TEST-1', 'legacy', 'legacy.md', 'doc', '{"kind":"user","id":"alice"}')
+		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+		values ('TEST-1', 'TEST', 'legacy', 'legacy.md', 'doc', '{"kind":"user","id":"alice"}')
 		returning id::text
 	`).Scan(&artifactID); err != nil {
 		t.Fatal(err)

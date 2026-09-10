@@ -580,7 +580,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.replaceRefs(r.Context(), tx, "comment", comment.ID, comment.Body); err != nil {
+	if err := refs.Replace(r.Context(), tx, "comment", comment.ID, comment.Body, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

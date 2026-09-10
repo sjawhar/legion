@@ -36,7 +36,11 @@ projection of Postgres comment, ask, and suggestion records. Go renders canonica
 markdown from the tree for reads and versions; anchors are Proof marks, so their
 stored rows carry a mark ID while the mark moves with its text. Boot migrates legacy
 `Y.Text` rooms and offset anchors once; run `dispatch check-documents` beforehand to
-inspect a database without changing it.
+inspect a database without changing it. Migration `0009_project_artifacts` rejects a
+malformed artifact reference or an artifact without an owning issue before altering
+the schema; either failure aborts the transaction and server boot without recording
+the migration. A successful migration backfills `project_key` and generated `ref_key`.
+
 ## Identity
 
 `internal/dispatch/identity` is the human identity boundary. Handlers resolve
@@ -70,7 +74,8 @@ the table says human only.
 | `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
 | `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
 | `/healthz` | GET | public | Report database and NATS readiness. |
-| `/api/v1/projects` | GET, POST | POST human only | List or create projects. |
+| `/api/v1/projects` | GET, POST | POST human only | List projects (including `open_asks`) or create one. |
+| `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. |
 | `/api/v1/settings/repo-projects` | GET | human only | List repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | human only | Create or replace, or remove, a repository mapping. |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
@@ -78,6 +83,7 @@ the table says human only.
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. |
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
 | `/api/v1/issues/{key}/events` | GET | user or bearer | Read events by forward cursor, descending page, or exact IDs. |
+| `/api/v1/issues/{key}/references` | GET | user or bearer | Read the eight-hop artifact reference closure; matching `If-None-Match` returns `304`. |
 | `/api/v1/inbox` | GET | user or bearer | List open asks, newest first. |
 | `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. |
 | `/api/v1/issues/{key}/asks?state=` | GET | user or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
@@ -90,22 +96,41 @@ the table says human only.
 | `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. |
 | `/api/v1/comments/{id}/reject` | POST | human only | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | user or bearer | Post a short issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. |
-| `/api/v1/artifacts/{id}` | GET | user or bearer | Read an artifact, versions, and references. `{id}` must be a UUID. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List issue artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. |
+| `/api/v1/artifacts/{id}` | GET | user or bearer | Read an artifact, versions, and incoming references. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/text` | GET | user or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. |
-| `/api/v1/issues/{key}/artifacts/{slug}` | GET | user or bearer | Read an artifact, versions, and references. `{slug}` is resolved within `{key}`. |
-| `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | user or bearer | Read a live document's markdown. `{slug}` is resolved within `{key}`. |
-| `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{slug}` is resolved within `{key}`. |
-| `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named live-document version. `{slug}` is resolved within `{key}`. |
-| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply document edit operations. `{slug}` is resolved within `{key}`. |
+| `/api/v1/artifacts/{id}/asks?state=` | GET, POST | user or bearer | List or create asks on an unlinked document. |
+| `/api/v1/artifacts/{id}/comments` | GET, POST | user or bearer | List or create comments and suggestions on an unlinked document. |
+| `/api/v1/artifacts/{id}/events` | GET | user or bearer | Read an unlinked document's events. |
+| `/api/v1/artifacts/{id}/references` | GET | user or bearer | Read outgoing and incoming reference edges. |
+| `/api/v1/issues/{key}/artifacts/{slug}` | GET | user or bearer | Read an issue artifact and its incoming references. `{slug}` is resolved within `{key}`. |
+| `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | user or bearer | Read an issue artifact's live markdown. |
+| `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an issue artifact version or download its blob. |
+| `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named issue-document version. |
+| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply issue-document edit operations. |
+| `/api/v1/projects/{key}/artifacts/{slug}` | GET | user or bearer | Read an unlinked project artifact and its incoming references. `{slug}` is resolved within `{key}`. |
+| `/api/v1/projects/{key}/artifacts/{slug}/text` | GET | user or bearer | Read an unlinked project document's live markdown. |
+| `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an unlinked project document version or download its blob. |
+| `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named project-document version. |
+| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. |
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. |
+
+## Dispatch topics
+
+Document events publish retained envelopes on
+`notifications.dispatch.document.<PROJECT>.<slug>.<type>`. `natstail` reads
+`natsUrls` from `envoy.json` and prints a matching envelope:
+
+```sh
+go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1
+```
 
 ## Checks
 

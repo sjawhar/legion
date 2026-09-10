@@ -1,4 +1,7 @@
-// Package refs stores Dispatch links and reads artifact reference relationships.
+// Package refs indexes Dispatch links and reads artifact relationships.
+// Artifact targets use ref_key (`<issue-or-project>/<slug>`) so issue and
+// project documents share one address. Closure returns at most eight hops and
+// marks the result truncated when it finds a ninth.
 package refs
 
 import (
