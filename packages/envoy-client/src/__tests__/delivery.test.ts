@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Envelope } from "@legion/contracts";
+import { dispatchIssueSubject, type Envelope } from "@legion/contracts";
 import { decode } from "@toon-format/toon";
 import { renderInbound, replyWith, senderLabel } from "../delivery";
 
@@ -20,13 +20,13 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
   };
 }
 
-function dispatchEvent(type: string, payload: object, eventActor = actor): string {
+function dispatchEvent(type: string, payload: object, eventActor = actor, notify = true): string {
   return JSON.stringify(
     envelope({
       event_id: "dispatch-1",
       source: "dispatch",
       source_event_id: "1",
-      topic: "notifications.dispatch.issue.DSP-1.>",
+      topic: dispatchIssueSubject("DSP-1", ">"),
       payload_summary: "Dispatch update",
       payload: JSON.stringify({
         id: 1,
@@ -34,7 +34,7 @@ function dispatchEvent(type: string, payload: object, eventActor = actor): strin
         seq: 7,
         type,
         actor: eventActor,
-        notify: true,
+        notify,
         created_at: "2026-09-09T00:00:00Z",
         payload,
       }),
@@ -280,6 +280,45 @@ describe("renderInbound dispatch events", () => {
     ) as { envoy: { dispatch: { payload: { body: string } } } };
 
     expect(decoded.envoy.dispatch.payload.body).toBe(body);
+  });
+
+  test("renders a non-notifying Dispatch event on an agent subject", () => {
+    const rendered = renderInbound(
+      dispatchEvent("message.created", { body: "Agent subject remains visible" }, actor, false),
+      reader,
+      `notifications.agent.${reader}`
+    );
+
+    expect(rendered.skip).toBe(false);
+    expect(decode(rendered.content)).toMatchObject({
+      envoy: {
+        dispatch: { type: "message.created", payload: { body: "Agent subject remains visible" } },
+      },
+    });
+  });
+
+  test("renders a non-notifying Dispatch event on a role subject", () => {
+    const rendered = renderInbound(
+      dispatchEvent("message.created", { body: "Role subject remains visible" }, actor, false),
+      reader,
+      "notifications.role.legion-controller"
+    );
+
+    expect(rendered.skip).toBe(false);
+    expect(decode(rendered.content)).toMatchObject({
+      envoy: {
+        dispatch: { type: "message.created", payload: { body: "Role subject remains visible" } },
+      },
+    });
+  });
+
+  test("drops an event that does not request an agent wake", () => {
+    expect(
+      renderInbound(
+        dispatchEvent("message.created", { body: "Persist without steering" }, actor, false),
+        reader
+      )
+    ).toMatchObject({ skip: true, content: "" });
   });
 
   test("drops an event authored by the reader session", () => {

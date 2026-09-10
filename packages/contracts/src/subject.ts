@@ -1,6 +1,21 @@
 export const AGENT_TOPIC_PREFIX = "notifications.agent." as const;
 export const ROLE_TOPIC_PREFIX = "notifications.role." as const;
 
+export const DISPATCH_ISSUE_TOPIC_PREFIX = "notifications.dispatch.issue." as const;
+
+export type DispatchIssueSubject<
+  IssueKey extends string = string,
+  Type extends string = string,
+> = `${typeof DISPATCH_ISSUE_TOPIC_PREFIX}${IssueKey}.${Type}`;
+
+export function dispatchIssueSubject<IssueKey extends string, Type extends string>(
+  issueKey: IssueKey,
+  type: Type
+): DispatchIssueSubject<IssueKey, Type>;
+export function dispatchIssueSubject(issueKey: string, type: string) {
+  return `${DISPATCH_ISSUE_TOPIC_PREFIX}${issueKey}.${type}`;
+}
+
 export type AgentSubject<Session extends string = string> =
   `${typeof AGENT_TOPIC_PREFIX}${Session}`;
 
@@ -193,6 +208,7 @@ export function whatsappSubject(phone: string, jid: string, kind: string) {
 
 export type Subject =
   | AgentSubject
+  | DispatchIssueSubject
   | GithubSubject
   | GithubResourceSubject
   | GithubPushSubject

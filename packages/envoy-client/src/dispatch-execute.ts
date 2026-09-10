@@ -13,6 +13,7 @@ import type {
 } from "@legion/contracts";
 import {
   ASK_URGENCIES,
+  dispatchIssueSubject,
   dispatchToolSchema,
   dispatchToolSpecs,
   zodSchemaApi,
@@ -82,10 +83,6 @@ interface ResolvedArtifact {
 const nativeIssueKeyPattern = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
 const externalIssueRefPattern = /^([^/\s]+)\/([^/\s#]+)#([1-9][0-9]*)$/;
 const bareIssueNumberPattern = /^[1-9][0-9]*$/;
-
-function dispatchTopic(issue: string): string {
-  return `notifications.dispatch.issue.${issue}.>`;
-}
 
 function stringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
@@ -377,7 +374,7 @@ export async function executeDispatchTool(
       });
       return {
         text: `Created ${created.key}: ${created.title}`,
-        details: { issue: created.key, topic: dispatchTopic(created.key) },
+        details: { issue: created.key, topic: dispatchIssueSubject(created.key, ">") },
       };
     }
     case "dispatch_ask": {
@@ -401,7 +398,11 @@ export async function executeDispatchTool(
       });
       return {
         text: `Opened ask ${ask.id}: ${ask.question}`,
-        details: { issue: ask.issue_key, topic: dispatchTopic(ask.issue_key), ask: ask.id },
+        details: {
+          issue: ask.issue_key,
+          topic: dispatchIssueSubject(ask.issue_key, ">"),
+          ask: ask.id,
+        },
       };
     }
     case "dispatch_comment": {
@@ -424,7 +425,7 @@ export async function executeDispatchTool(
         text: `Posted comment ${comment.id}`,
         details: {
           issue: comment.issue_key,
-          topic: dispatchTopic(comment.issue_key),
+          topic: dispatchIssueSubject(comment.issue_key, ">"),
           comment: comment.id,
         },
       };
@@ -444,7 +445,7 @@ export async function executeDispatchTool(
         text: `Posted suggestion ${comment.id}`,
         details: {
           issue: comment.issue_key,
-          topic: dispatchTopic(comment.issue_key),
+          topic: dispatchIssueSubject(comment.issue_key, ">"),
           comment: comment.id,
         },
       };
@@ -455,7 +456,7 @@ export async function executeDispatchTool(
         text: `Posted message ${message.id}`,
         details: {
           issue: message.issue_key,
-          topic: dispatchTopic(message.issue_key),
+          topic: dispatchIssueSubject(message.issue_key, ">"),
           message: message.id,
         },
       };
@@ -476,7 +477,7 @@ export async function executeDispatchTool(
             : `Applied ${edited.applied} ops (version ${edited.version.number})`,
         details: {
           issue: resolved.issue.key,
-          topic: dispatchTopic(resolved.issue.key),
+          topic: dispatchIssueSubject(resolved.issue.key, ">"),
           applied: edited.applied,
           ...(edited.version === null ? {} : { version: edited.version.number }),
         },
@@ -497,7 +498,10 @@ export async function executeDispatchTool(
           marks.length === 0
             ? document.markdown
             : `${document.markdown}\n\nOpen anchored asks/comments: ${marks.join(", ")}`,
-        details: { issue: resolved.issue.key, topic: dispatchTopic(resolved.issue.key) },
+        details: {
+          issue: resolved.issue.key,
+          topic: dispatchIssueSubject(resolved.issue.key, ">"),
+        },
       };
     }
     case "dispatch_artifact": {
@@ -527,7 +531,7 @@ export async function executeDispatchTool(
         text: `Uploaded ${result.artifact.name} as version ${result.version.number}`,
         details: {
           issue: result.artifact.issue_key,
-          topic: dispatchTopic(result.artifact.issue_key),
+          topic: dispatchIssueSubject(result.artifact.issue_key, ">"),
           artifact: result.artifact.id,
           version: result.version.number,
         },
@@ -538,7 +542,7 @@ export async function executeDispatchTool(
         const ask = await client.getAsk(issueArguments.ref.id);
         return {
           text: askSummary(ask),
-          details: { issue: ask.issue_key, topic: dispatchTopic(ask.issue_key) },
+          details: { issue: ask.issue_key, topic: dispatchIssueSubject(ask.issue_key, ">") },
         };
       }
       if (issueArguments.ref?.kind === "comment") {
@@ -547,7 +551,7 @@ export async function executeDispatchTool(
           text: commentSummary(comment),
           details: {
             issue: comment.comment.issue_key,
-            topic: dispatchTopic(comment.comment.issue_key),
+            topic: dispatchIssueSubject(comment.comment.issue_key, ">"),
           },
         };
       }
@@ -555,18 +559,18 @@ export async function executeDispatchTool(
       if (issueArguments.ref?.kind === "log") {
         return {
           text: logSummary(read.issue, read.events),
-          details: { issue: read.issue.key, topic: dispatchTopic(read.issue.key) },
+          details: { issue: read.issue.key, topic: dispatchIssueSubject(read.issue.key, ">") },
         };
       }
       if (issueArguments.ref?.kind === "children") {
         return {
           text: childrenSummary(read.issue),
-          details: { issue: read.issue.key, topic: dispatchTopic(read.issue.key) },
+          details: { issue: read.issue.key, topic: dispatchIssueSubject(read.issue.key, ">") },
         };
       }
       return {
         text: issueSummary(read.issue, read.events),
-        details: { issue: read.issue.key, topic: dispatchTopic(read.issue.key) },
+        details: { issue: read.issue.key, topic: dispatchIssueSubject(read.issue.key, ">") },
       };
     }
     default:

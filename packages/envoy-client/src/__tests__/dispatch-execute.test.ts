@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { dispatchIssueSubject } from "@legion/contracts";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool } from "../dispatch-execute";
 import { dispatchSubscriptionTopic } from "../dispatch-subscribe";
@@ -73,7 +74,7 @@ describe("executeDispatchTool", () => {
     });
     expect(result.details).toEqual({
       issue: "DSP-41",
-      topic: "notifications.dispatch.issue.DSP-41.>",
+      topic: dispatchIssueSubject("DSP-41", ">"),
       ask: "ask-1",
     });
   });
@@ -281,10 +282,10 @@ describe("executeDispatchTool", () => {
       text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
       details: {
         issue: "DSP-42",
-        topic: "notifications.dispatch.issue.DSP-42.>",
+        topic: dispatchIssueSubject("DSP-42", ">"),
       },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
+    expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
@@ -358,7 +359,7 @@ describe("executeDispatchTool", () => {
       text: "Applied 2 ops (no new version)",
       details: {
         issue: "DSP-42",
-        topic: "notifications.dispatch.issue.DSP-42.>",
+        topic: dispatchIssueSubject("DSP-42", ">"),
         applied: 2,
       },
     });
@@ -646,10 +647,10 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: {
         issue: "DSP-42",
-        topic: "notifications.dispatch.issue.DSP-42.>",
+        topic: dispatchIssueSubject("DSP-42", ">"),
       },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
+    expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
     expect(requests).toEqual(["/api/v1/asks/ask-42"]);
   });
 
@@ -727,10 +728,10 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: {
         issue: "DSP-42",
-        topic: "notifications.dispatch.issue.DSP-42.>",
+        topic: dispatchIssueSubject("DSP-42", ">"),
       },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
+    expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
     expect(requests).toEqual(["/api/v1/comments/comment-42"]);
   });
   test("returns a subscription topic when reading an issue summary", async () => {
@@ -763,9 +764,9 @@ describe("executeDispatchTool", () => {
 
     expect(result.details).toEqual({
       issue: "DSP-42",
-      topic: "notifications.dispatch.issue.DSP-42.>",
+      topic: dispatchIssueSubject("DSP-42", ">"),
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
+    expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
   });
 
   test("reads recent events from a Dispatch log reference", async () => {
@@ -812,7 +813,7 @@ describe("executeDispatchTool", () => {
         "Events:",
         "- #3 comment.created · user sami · 2026-09-09T00:02:00Z",
       ].join("\n"),
-      details: { issue: "DSP-42", topic: "notifications.dispatch.issue.DSP-42.>" },
+      details: { issue: "DSP-42", topic: dispatchIssueSubject("DSP-42", ">") },
     });
   });
 
@@ -847,7 +848,7 @@ describe("executeDispatchTool", () => {
 
     expect(result).toEqual({
       text: ["Key: DSP-42", "Children:", "- DSP-43: A child issue (todo)"].join("\n"),
-      details: { issue: "DSP-42", topic: "notifications.dispatch.issue.DSP-42.>" },
+      details: { issue: "DSP-42", topic: dispatchIssueSubject("DSP-42", ">") },
     });
   });
 });

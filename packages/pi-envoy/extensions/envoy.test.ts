@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { dispatchToolSpecs } from "@legion/contracts";
+import { DISPATCH_ISSUE_TOPIC_PREFIX, dispatchIssueSubject, dispatchToolSpecs } from "@legion/contracts";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
@@ -594,14 +594,14 @@ describe("envoy OMP extension", () => {
         toolName: "dispatch_ask",
         toolCallId: "call_1",
         input: {},
-        details: { topic: "notifications.dispatch.issue.LEGION-1.>" },
+        details: { topic: dispatchIssueSubject("LEGION-1", ">") },
         isError: false,
       },
       sessionContext()
     );
 
-    const topic = "notifications.dispatch.issue.LEGION-1.>";
-    const base = "notifications.dispatch.issue.LEGION-1";
+    const topic = dispatchIssueSubject("LEGION-1", ">");
+    const base = `${DISPATCH_ISSUE_TOPIC_PREFIX}LEGION-1`;
     expect(natsState.controls.has(base)).toBe(true);
     expect(natsState.controls.has(topic)).toBe(true);
     const lastRegistration = interestRegistrations.at(-1) as { topics?: string[] } | undefined;
@@ -1006,7 +1006,7 @@ describe("envoy OMP extension", () => {
         toolName: "dispatch_ask",
         toolCallId: "failed",
         input: {},
-        details: { topic: "notifications.dispatch.issue.LEGION-1.>" },
+        details: { topic: dispatchIssueSubject("LEGION-1", ">") },
         isError: true,
       },
       sessionContext()
@@ -1022,7 +1022,7 @@ describe("envoy OMP extension", () => {
       sessionContext()
     );
 
-    expect(natsState.controls.has("notifications.dispatch.issue.LEGION-1.>")).toBe(false);
+    expect(natsState.controls.has(dispatchIssueSubject("LEGION-1", ">"))).toBe(false);
   });
 
   test("registers every shared Dispatch tool when URL and token are available", async () => {
@@ -1073,7 +1073,7 @@ describe("envoy OMP extension", () => {
       content: [{ type: "text", text: "Opened ask ask_1: Should we ship B3?" }],
       details: {
         issue: "LEGION-1",
-        topic: "notifications.dispatch.issue.LEGION-1.>",
+        topic: dispatchIssueSubject("LEGION-1", ">"),
         ask: "ask_1",
       },
     });

@@ -17,7 +17,8 @@ parsed event under `dispatch: { issue_key, type, actor, payload }` with `payload
 type; a payload whose shape disagrees with its event type's schema is preserved as its raw parsed
 value under `dispatch`, never dropped or reduced to prose. A dispatch envelope with no payload at
 all falls back to the same `summary` field every other source gets and marks `unrecognised:
-payload`. The renderer skips events authored by the reader's own session.
+payload`. The renderer skips Dispatch events marked `notify: false` on an issue topic before a host
+can steer or record them in its inbox, as well as events authored by the reader's own session.
 
 ## HTTP transport
 
