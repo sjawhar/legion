@@ -77,6 +77,34 @@ func TestResolveBootConfigDisablesNATS(t *testing.T) {
 	}
 }
 
+func TestResolveBootConfigDefaultsAndValidatesEnvoyURL(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL":            "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":    "t",
+		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+	}
+
+	boot, err := resolveBootConfig(envGetter(base))
+	if err != nil || boot.EnvoyURL != "http://127.0.0.1:9020" {
+		t.Fatalf("default: boot=%#v err=%v", boot, err)
+	}
+
+	withURL := map[string]string{}
+	for key, value := range base {
+		withURL[key] = value
+	}
+	withURL["ENVOY_URL"] = "http://envoy.internal:9020/"
+	if boot, err := resolveBootConfig(envGetter(withURL)); err != nil || boot.EnvoyURL != "http://envoy.internal:9020" {
+		t.Fatalf("explicit: boot=%#v err=%v", boot, err)
+	}
+
+	withURL["ENVOY_URL"] = "envoy.internal:9020"
+	if _, err := resolveBootConfig(envGetter(withURL)); err == nil || !strings.Contains(err.Error(), "ENVOY_URL") {
+		t.Fatalf("invalid: err = %v", err)
+	}
+}
+
 func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 	handler := dispatchHandler(http.NewServeMux(), nil, nil)
 	response := httptest.NewRecorder()

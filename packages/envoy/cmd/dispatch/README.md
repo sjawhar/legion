@@ -12,6 +12,7 @@ application state in Postgres.
 | `DISPATCH_AGENT_TOKEN` | Shared bearer token for agent API callers. |
 | `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection. Test/e2e only — leave unset in every real deployment. |
+| `ENVOY_URL` | Base URL of the Envoy listener (`GET /v1/sessions`) behind `GET /api/v1/agents`; defaults to `http://127.0.0.1:9020`. |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
@@ -151,6 +152,7 @@ the Postgres `postgres` database for a non-default local port.
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/events/_test/disconnect` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every open SSE connection; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/inbox?project=` | GET | cookie, trusted header, or bearer | List open asks newest-first, including their issue key and title. |
+| `/api/v1/agents` | GET | cookie or trusted header | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie or trusted header | Create a project from `key` and `name`; rejects a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie or trusted header | List external repository-to-project mappings. |

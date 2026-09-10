@@ -216,6 +216,16 @@ export interface DuplicateCandidate {
   readonly href: string;
 }
 
+export interface Agent {
+  readonly session_id: string;
+  readonly title: string;
+  readonly dir: string;
+  readonly machine_id: string;
+  readonly roles: string[];
+  readonly capabilities: string[];
+  readonly last_seen: number;
+}
+
 export interface ReferencedBy {
   readonly kind: "ask" | "comment" | "message";
   readonly id: string;
