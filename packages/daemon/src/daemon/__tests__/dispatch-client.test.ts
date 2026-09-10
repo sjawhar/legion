@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { createDispatchClient, DispatchHttpError } from "../dispatch-client";
+import { createDispatchClient, DispatchHttpError, writeStatus } from "../dispatch-client";
+import { newLegionState } from "../legion-state";
 
 function fakeFetch(handler: (url: string, init: RequestInit) => Response): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -94,5 +95,28 @@ describe("createDispatchClient", () => {
     expect(requests[0]?.init.body).toBeUndefined();
     expect(requests[1]?.url).toBe("http://127.0.0.1:8766/api/v1/issues/LEGION-7");
     expect(requests[1]?.init.method).toBe("GET");
+  });
+  it("records the applied Dispatch sequence with a failed daemon status write", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues["LEGION-7"] = {
+      key: "LEGION-7",
+      title: "Pending update",
+      status: "in_progress",
+      lastAppliedSeq: 19,
+      children: [],
+    };
+    const client = createDispatchClient({
+      baseUrl: "http://127.0.0.1:8766",
+      token: "test-token",
+      project: "LEGION",
+      fetch: fakeFetch(() => new Response("unavailable", { status: 503 })),
+    });
+
+    await writeStatus(state, client, "LEGION-7", "testing");
+
+    expect(state.pendingStatusWrites["LEGION-7"]).toEqual({
+      status: "testing",
+      lastAppliedSeq: 19,
+    });
   });
 });

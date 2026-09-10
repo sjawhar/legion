@@ -244,19 +244,13 @@ describe("Dispatch durable intake", () => {
     state.issues["LEGSMOKE-1"] = {
       key: "LEGSMOKE-1",
       title: "First issue",
-      state: "open",
       children: [],
-      released: true,
-      labels: [],
       status: "triage",
     };
     state.issues["LEGSMOKE-2"] = {
       key: "LEGSMOKE-2",
       title: "Second issue",
-      state: "open",
       children: [],
-      released: true,
-      labels: [],
       status: "triage",
     };
     const beforeIssues = structuredClone(state.issues);
@@ -346,10 +340,7 @@ describe("Dispatch durable intake", () => {
     state.issues["LEGSMOKE-1"] = {
       key: "LEGSMOKE-1",
       title: "Known issue",
-      state: "open",
       children: [],
-      released: true,
-      labels: [],
       status: "triage",
     };
     const beforeIssues = structuredClone(state.issues);

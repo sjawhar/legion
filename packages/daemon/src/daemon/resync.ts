@@ -4,7 +4,7 @@ import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { DispatchClient } from "./dispatch-client";
 import { writeStatus } from "./dispatch-client";
-import type { IssueStatus, LegionState } from "./legion-state";
+import type { LegionState } from "./legion-state";
 import {
   acceptGitHubFence,
   type CiSnapshot,
@@ -40,6 +40,7 @@ export interface RunResyncDeps {
   state: LegionState;
   config: Pick<DaemonConfig, "resyncIntervalMs" | "dispatchProject"> & ReducerConfig;
   dispatchClient: DispatchClient;
+  saveState(): Promise<void>;
   fetchCiStatusBatch(prRefs: Record<string, GitHubPRRef>): Promise<Record<string, CiFetchResult>>;
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
   now(): number;
@@ -191,34 +192,38 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
   return ciFetchFailures;
 }
 
-/** Retries every daemon-owned Dispatch status write recorded by `writeStatus` after an earlier
- * PATCH failure (`spawnTree`/`closeTree`/`phase/complete`/the `/issues/status` and
- * `/waves/release` routes) — the only retry mechanism for those writes; the client itself never
- * retries (see `dispatch-client.ts`). Runs before the drift scan below so a successful retry is
- * reflected in the same cycle's `listIssues` read instead of being reported as drift. A pending
- * `done` write whose issue is already locally `done` is dropped instead of retried: Dispatch
- * permanently refuses a further status PATCH on an issue it already considers closed, so
- * retrying would never succeed and would log the same failure every cycle forever (this can
- * only happen for a pending write recorded before `closeTreeLocked` learned to skip that same
- * redundant write itself — kept here as a self-healing backstop for any such write already on
- * disk). */
+/** Retries each failed daemon-owned Dispatch status write. A close intent is discarded only after
+ * Dispatch confirms the issue is already done; every intent is also fenced by a newer local
+ * Dispatch sequence, so a human status event cannot be overwritten by a stale daemon retry. */
 async function retryPendingStatusWrites(deps: RunResyncDeps): Promise<void> {
-  for (const [issue, status] of Object.entries(deps.state.pendingStatusWrites)) {
-    if (status === "done" && deps.state.issues[issue]?.status === "done") {
+  for (const [issue, pending] of Object.entries(deps.state.pendingStatusWrites)) {
+    if (pending.status === "done") {
+      const remote = await deps.dispatchClient.getIssue(issue);
+      if (remote.status === "done") {
+        delete deps.state.pendingStatusWrites[issue];
+        await deps.saveState();
+        continue;
+      }
+    }
+    const lastAppliedSeq = deps.state.issues[issue]?.lastAppliedSeq;
+    if (
+      pending.lastAppliedSeq !== undefined &&
+      lastAppliedSeq !== undefined &&
+      lastAppliedSeq > pending.lastAppliedSeq
+    ) {
       delete deps.state.pendingStatusWrites[issue];
+      await deps.saveState();
       continue;
     }
-    await writeStatus(deps.state, deps.dispatchClient, issue, status);
+    if (await writeStatus(deps.state, deps.dispatchClient, issue, pending.status)) {
+      await deps.saveState();
+    }
   }
 }
 
-/**
- * Replays every Dispatch issue whose status differs from this daemon's last-applied one as a
- * synthetic `issue.updated` event, fenced by that issue's own `last_seq` from Dispatch — the same
- * at-most-once fence `reduceDispatchEvent` applies to a live event, so an issue this daemon is
- * already caught up on (its `lastAppliedSeq` already at or past Dispatch's `last_seq`) is a no-op
- * here too. `listIssues` omits `last_seq` (only `getIssue` carries it), so a drifted issue costs
- * one extra read — bounded by how many issues actually drifted, not the whole project.
+/** Replays every Dispatch issue whose status differs from this daemon's last-applied one through
+ * the matching live reducer path, fenced by the summary's per-issue `last_seq`. Dispatch exposes
+ * `updated_since`, but contracts has no typed query option at this head, so this reads the full list.
  */
 async function healStatusDrift(deps: RunResyncDeps, now: number): Promise<number> {
   const summaries = await deps.dispatchClient.listIssues(deps.config.dispatchProject);
@@ -226,14 +231,13 @@ async function healStatusDrift(deps: RunResyncDeps, now: number): Promise<number
   for (const summary of summaries) {
     const node = deps.state.issues[summary.key];
     if (!node || node.status === summary.status) continue;
-    const details = await deps.dispatchClient.getIssue(summary.key);
     const event: DispatchIssueEvent = {
-      type: "issue.updated",
+      type: summary.status === "done" ? "issue.closed" : "issue.updated",
       key: summary.key,
-      seq: details.last_seq,
+      seq: summary.last_seq,
       notify: false,
-      payload: details,
-      eventId: `resync:${summary.key}:${details.last_seq}`,
+      payload: summary,
+      eventId: `resync:${summary.key}:${summary.last_seq}`,
     };
     const effects = reduceDispatchEvent(deps.state, event, deps.config);
     const envelope: EnvelopeJson = { event_id: event.eventId, issued_at: now };
@@ -288,14 +292,12 @@ function reportRootAnomalies(deps: RunResyncDeps, now: number): Promise<ResyncAn
       });
     }
   }
-  const launchFailedTrees = new Set<IssueKey>();
   for (const [issue, tree] of Object.entries(deps.state.trees) as Array<
     [IssueKey, LegionState["trees"][IssueKey]]
   >) {
     if (tree.status !== "launch-failed") continue;
-    const status: IssueStatus | undefined = deps.state.issues[issue]?.status;
+    const status = deps.state.issues[issue]?.status;
     if (status === "backlog" || status === "icebox") continue;
-    launchFailedTrees.add(issue);
     anomalies.push({
       kind: "launch-failed",
       issue,

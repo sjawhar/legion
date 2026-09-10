@@ -91,6 +91,7 @@ async function resyncWith(
     state,
     config,
     dispatchClient: fakeDispatchClient(),
+    saveState: async () => {},
     fetchCiStatusBatch: async () => status,
     applyEffects: async (effects) => {
       applied.push(effects);
@@ -684,6 +685,7 @@ it("does not apply a fetched green rollup after a live red settlement advances C
       state,
       config,
       dispatchClient: fakeDispatchClient(),
+      saveState: async () => {},
       fetchCiStatusBatch: async () => {
         fetchStarted.resolve();
         return fetchedStatuses.promise;
@@ -748,6 +750,7 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
     state,
     config,
     dispatchClient: fakeDispatchClient(),
+    saveState: async () => {},
     fetchCiStatusBatch: async () => {
       fetchStarted.resolve();
       return fetchedStatuses.promise;

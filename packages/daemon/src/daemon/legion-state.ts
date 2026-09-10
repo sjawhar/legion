@@ -21,6 +21,12 @@ export const ISSUE_STATUSES = [
   "done",
 ] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
+/** A daemon status intent is valid only against the Dispatch event sequence it observed when the
+ * write failed. A later applied event fences it before resync can replay stale daemon intent. */
+export interface PendingStatusWrite {
+  status: IssueStatus;
+  lastAppliedSeq?: number;
+}
 
 export interface IssueNode {
   key: IssueKey;
@@ -174,12 +180,9 @@ export interface LegionState {
    * registered via `/legion/v1/gates/register`; `designApproved` is set to that same ask id once
    * `ask.answered` selects `Approve` for it. Both absent before the architect opens the gate. */
   gates: Record<IssueKey, { designAskId?: string; designApproved?: string }>;
-  /** A daemon-owned lifecycle status write (`spawnTree`/`closeTree`/`phase/complete`, the
-   * `/issues/status` and `/waves/release` routes) that failed its Dispatch PATCH, keyed by issue
-   * — `dispatch-client.ts`'s `writeStatus` records it here instead of failing the caller; cleared
-   * on the next successful write for that issue, whether from the same call site or from
-   * `resync.ts`'s retry sweep. */
-  pendingStatusWrites: Record<IssueKey, IssueStatus>;
+  /** A daemon-owned lifecycle status write that failed its Dispatch PATCH. The recorded sequence
+   * lets resync discard an intent after a newer Dispatch event has been applied for that issue. */
+  pendingStatusWrites: Record<IssueKey, PendingStatusWrite>;
 }
 
 export interface LegionStateInit {
@@ -364,7 +367,17 @@ const LegionStateSchema = z
           .strict()
       )
       .default({}),
-    pendingStatusWrites: z.record(IssueKeySchema, z.enum(ISSUE_STATUSES)).default({}),
+    pendingStatusWrites: z
+      .record(
+        IssueKeySchema,
+        z
+          .object({
+            status: z.enum(ISSUE_STATUSES),
+            lastAppliedSeq: z.number().int().positive().optional(),
+          })
+          .strict()
+      )
+      .default({}),
   })
   .strict();
 

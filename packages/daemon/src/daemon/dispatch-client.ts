@@ -100,25 +100,28 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
   };
 }
 
-/** Writes a daemon-owned lifecycle status to Dispatch (spawnTree/closeTree/`phase/complete`, and
- * the `/issues/status`/`/waves/release` routes) — every one of these writes is a side effect of a
- * state transition that must complete regardless of Dispatch's momentary availability, so a
- * failure is logged and recorded on `state.pendingStatusWrites` for `resync.ts` to retry, never
- * thrown back at the caller. A later successful write (this one or resync's retry) clears the
- * pending entry. */
+/** Writes a daemon-owned lifecycle status to Dispatch. A failed write records both the requested
+ * status and the latest applied Dispatch sequence so resync can discard the intent after a newer
+ * human or daemon event. Returns whether this call changed pending-write state. */
 export async function writeStatus(
   state: LegionState,
   client: DispatchClient,
   issue: IssueKey,
   status: IssueStatus
-): Promise<void> {
+): Promise<boolean> {
+  const previous = state.pendingStatusWrites[issue];
   try {
     await client.setStatus(issue, status);
     delete state.pendingStatusWrites[issue];
+    return previous !== undefined;
   } catch (error) {
-    state.pendingStatusWrites[issue] = status;
+    const pending = { status, lastAppliedSeq: state.issues[issue]?.lastAppliedSeq };
+    state.pendingStatusWrites[issue] = pending;
     console.error(
       `[legion] failed to PATCH Dispatch status=${status} for ${issue} (recorded for resync retry): ${error instanceof Error ? error.message : String(error)}`
+    );
+    return (
+      previous?.status !== pending.status || previous?.lastAppliedSeq !== pending.lastAppliedSeq
     );
   }
 }

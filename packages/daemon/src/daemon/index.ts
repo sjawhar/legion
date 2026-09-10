@@ -468,6 +468,7 @@ async function startDaemonLocked(
         state,
         config,
         dispatchClient: deps.dispatchClient,
+        saveState: save,
         fetchCiStatusBatch,
         applyEffects: eventPump.applyEffects,
         now: deps.now,
