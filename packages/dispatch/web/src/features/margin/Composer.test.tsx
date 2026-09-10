@@ -87,7 +87,10 @@ test("Composer sends the selected quote occurrence alongside ranges for asks, co
     await waitFor(() =>
       expect(createAsk).toHaveBeenCalledWith("CORE-1", {
         anchor,
+        multiple: false,
+        options: [],
         question: "Why this text?",
+        urgency: "med",
       })
     );
     ask.unmount();
@@ -123,6 +126,86 @@ test("Composer sends the selected quote occurrence alongside ranges for asks, co
   } finally {
     createAsk.mockRestore();
     createComment.mockRestore();
+  }
+});
+
+test("Composer submits the configured ask options, multiple selection, and urgency", async () => {
+  const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
+  const anchor = { artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 };
+
+  try {
+    const composer = renderComposer("ask");
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Which path?" } });
+    fireEvent.click(screen.getByRole("button", { name: "High" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Allow multiple" }));
+    const firstLabel = screen.getByLabelText("Option 1 label");
+    fireEvent.change(firstLabel, { target: { value: "Ship" } });
+    fireEvent.change(screen.getByLabelText("Option 1 description"), {
+      target: { value: "Proceed now" },
+    });
+    fireEvent.keyDown(firstLabel, { key: "Enter" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText("Option 2 label"))
+    );
+    fireEvent.change(screen.getByLabelText("Option 2 label"), { target: { value: "Hold" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    await waitFor(() =>
+      expect(createAsk).toHaveBeenCalledWith("CORE-1", {
+        anchor,
+        multiple: true,
+        options: [{ description: "Proceed now", label: "Ship" }, { label: "Hold" }],
+        question: "Which path?",
+        urgency: "high",
+      })
+    );
+    composer.unmount();
+  } finally {
+    createAsk.mockRestore();
+  }
+});
+
+test("Composer adds and removes ask option rows", () => {
+  const composer = renderComposer("ask");
+
+  try {
+    expect(screen.getAllByLabelText(/Option \d+ label/)).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Add option" }));
+    expect(screen.getAllByLabelText(/Option \d+ label/)).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Remove option 2" }));
+    expect(screen.getAllByLabelText(/Option \d+ label/)).toHaveLength(1);
+  } finally {
+    composer.unmount();
+  }
+});
+
+test("Escape after typing only an ask option prompts before discarding", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  let closed = false;
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Composer
+        anchor={{ artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 }}
+        issueKey="CORE-1"
+        kind="ask"
+        onClose={() => {
+          closed = true;
+        }}
+      />
+    </QueryClientProvider>
+  );
+
+  try {
+    const label = screen.getByLabelText("Option 1 label");
+    fireEvent.change(label, { target: { value: "Ship" } });
+    fireEvent.keyDown(label, { key: "Escape" });
+
+    await waitFor(() => expect(screen.getByText("Discard draft?")).toBeDefined());
+    expect(closed).toBe(false);
+  } finally {
+    view.unmount();
   }
 });
 
