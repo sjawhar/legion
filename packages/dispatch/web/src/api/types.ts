@@ -25,6 +25,7 @@ export type {
   CreateCommentInput,
   CreateIssueInput,
   CreateMessageInput,
+  CreateProjectInput,
   CreateVersionInput,
   DispatchEvent,
   DocEditOp,

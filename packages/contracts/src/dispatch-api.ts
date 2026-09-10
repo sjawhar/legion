@@ -255,6 +255,12 @@ export interface UserIssueState {
 
 export type UserState = Record<string, UserIssueState>;
 
+export interface CreateProjectInput {
+  readonly key: string;
+  readonly name: string;
+  readonly actor?: Actor;
+}
+
 export interface CreateIssueInput {
   readonly project: string;
   readonly title: string;

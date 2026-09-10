@@ -107,7 +107,11 @@ test("API client sends the documented method and JSON body for mutations", async
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
 
-  await api.createProject({ key: "CORE", name: "Core" });
+  await api.createProject({
+    actor: { id: "session-1", kind: "session" },
+    key: "CORE",
+    name: "Core",
+  });
   await api.patchIssue("CORE-1", { status: "done" });
   await api.answerAsk("ask-1", { selected: ["Ship"], text: "Approved" });
   await api.editArtifact("artifact-1", {
@@ -121,7 +125,11 @@ test("API client sends the documented method and JSON body for mutations", async
     ["POST", "/api/v1/asks/ask-1/answer"],
     ["POST", "/api/v1/artifacts/artifact-1/edits"],
   ]);
-  expect(JSON.parse(stub.requests[0]?.body as string)).toEqual({ key: "CORE", name: "Core" });
+  expect(JSON.parse(stub.requests[0]?.body as string)).toEqual({
+    actor: { id: "session-1", kind: "session" },
+    key: "CORE",
+    name: "Core",
+  });
   expect(JSON.parse(stub.requests[1]?.body as string)).toEqual({ status: "done" });
   expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({
     selected: ["Ship"],
