@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -576,7 +576,7 @@ describe("legion state", () => {
     expect(loaded.controllerPendingNotices).toEqual([]);
   });
 
-  it("discards a malformed v16 controllerHeldEvents entry during migration instead of carrying garbage into controllerPendingNotices", async () => {
+  it("discards a malformed v16 controllerHeldEvents entry during migration instead of carrying garbage into controllerPendingNotices, logging what it discarded", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-malformed-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -590,10 +590,54 @@ describe("legion state", () => {
       ],
     };
     await writeFile(file, JSON.stringify(v16Input), "utf8");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const loaded = await loadState(file, initialState);
+
+      expect(loaded.controllerPendingNotices).toEqual([]);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      const [message] = errorLog.mock.calls[0] ?? [];
+      expect(message).toContain("evt-malformed");
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("merges converted v16 controllerHeldEvents entries with a controllerPendingNotices array already present on the raw state, rather than overwriting it", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-merge-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const alreadyPresent = { payloadJson: '{"text":"already queued"}', eventId: "evt-existing" };
+    const converted = {
+      payloadJson: '{"text":"@legion please investigate"}',
+      eventId: "evt-controller",
+    };
+    current.controllerPendingNotices = [alreadyPresent, converted];
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v16Input = {
+      ...currentWithoutNotices,
+      version: 16,
+      // An interrupted earlier migration attempt already wrote `controllerPendingNotices` for
+      // one entry, but the raw v16 `controllerHeldEvents` this migration reads still carries
+      // both -- neither may be lost: the already-present entry must survive untouched, and the
+      // held entry must still convert, merged alongside it.
+      controllerPendingNotices: [alreadyPresent],
+      controllerHeldEvents: [
+        {
+          role: "controller",
+          payloadJson: converted.payloadJson,
+          heldAt: "2026-09-01T00:00:00.000Z",
+          eventId: converted.eventId,
+        },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v16Input), "utf8");
 
     const loaded = await loadState(file, initialState);
 
-    expect(loaded.controllerPendingNotices).toEqual([]);
+    expect(loaded).toEqual(current);
+    expect(loaded.controllerPendingNotices).toEqual([alreadyPresent, converted]);
   });
 
   it("rejects removed v6 fields on current-version state", async () => {

@@ -638,21 +638,34 @@ function migrateV16State(state: unknown): unknown {
  * `{role, payloadJson, heldAt, eventId}` — onto its final `{payloadJson, eventId}` shape. `role`
  * and `heldAt` have no counterpart here: every notice's role is always the controller by
  * construction, and durability never depended on when it was originally held, only that it still
- * is. A state with no `controllerHeldEvents` at all (every state before v16 ever added one) gets
- * an empty array, same as before. */
+ * is. Merged with (never overwriting) any `controllerPendingNotices` already present on the raw
+ * state -- a state that reached this step more than once (e.g. an interrupted earlier migration
+ * attempt) must never lose whichever notices that first pass already converted. A malformed
+ * entry (missing a `payloadJson`/`eventId` string pair) is logged and discarded rather than
+ * silently dropped or carried forward broken. A state with no `controllerHeldEvents` at all
+ * (every state before v16 ever added one) gets an empty array, same as before. */
 function migrateV17State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 17) return state;
-  const { controllerHeldEvents, ...rest } = state;
-  const controllerPendingNotices = Array.isArray(controllerHeldEvents)
-    ? controllerHeldEvents
-        .filter(
-          (held): held is { payloadJson: string; eventId: string } =>
-            recordValue(held) &&
-            typeof held.payloadJson === "string" &&
-            typeof held.eventId === "string"
-        )
-        .map(({ payloadJson, eventId }) => ({ payloadJson, eventId }))
-    : [];
+  const { controllerHeldEvents, controllerPendingNotices: existingNotices, ...rest } = state;
+  const convertedNotices: Array<{ payloadJson: string; eventId: string }> = [];
+  if (Array.isArray(controllerHeldEvents)) {
+    for (const held of controllerHeldEvents) {
+      if (
+        recordValue(held) &&
+        typeof held.payloadJson === "string" &&
+        typeof held.eventId === "string"
+      ) {
+        convertedNotices.push({ payloadJson: held.payloadJson, eventId: held.eventId });
+      } else {
+        console.error(
+          `[legion] discarding malformed v16 controllerHeldEvents entry during v17->v18 migration (expected {payloadJson: string, eventId: string}, got: ${JSON.stringify(held)})`
+        );
+      }
+    }
+  }
+  const controllerPendingNotices = Array.isArray(existingNotices)
+    ? [...existingNotices, ...convertedNotices]
+    : convertedNotices;
   return { ...rest, version: 18, controllerPendingNotices };
 }
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
