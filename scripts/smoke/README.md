@@ -55,7 +55,6 @@ The sandbox repository includes the 20-second `ci` check and the `.fail-me`-cont
 ```sh
 export SMOKE_REPO=example-org/legion-smoke
 export SMOKE_PROJECT=example-org/24
-export SMOKE_PROJECT_ID=PVT_kwDODfEZEs4BhWFj
 export SMOKE_WEBHOOK_MODE=envoy
 export DISPATCH_URL=http://localhost:8766
 
@@ -82,7 +81,7 @@ Do not use `LEGION_OMP_INVOCATION=omp` as this negative test: the daemon rejects
 
 The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, generated configuration, process IDs, and logs live in `/tmp/legion-smoke` by default; set `SMOKE_DIR` to use another location. `NATS_PORT`, `ENVOY_PORT`, and `LEGION_DAEMON_PORT` override the scratch defaults. `up.sh` refuses to start when any configured port is already occupied, except for a live process recorded in its own PID file and matching Linux `/proc/<pid>/stat` start time. Re-running `up.sh` reuses only those verified rig processes and the `legion-smoke-nats` container. In `envoy` mode, `envoy-bridge.log` records readiness, the first-envelope validation verdict, every forwarded subject, and byte size.
 
-`SMOKE_WEBHOOK_EVENTS` overrides the supported repository-webhook event list in `forward` mode. The default includes `issues`, `issue_comment`, `sub_issues`, `pull_request`, `pull_request_review`, and `check_run`; GitHub rejects `projects_v2_item` on repository hooks, so Project V2 ingress remains gated by `SMOKE_PROJECT_ID`.
+`SMOKE_WEBHOOK_EVENTS` overrides the supported repository-webhook event list in `forward` mode. The default includes `issues`, `issue_comment`, `sub_issues`, `pull_request`, `pull_request_review`, and `check_run`.
 
 When `SMOKE_BRANCH_PROTECTION=1` is set, the rig configures `main` to require one approving review, opens a disposable pull request, approves it through the reviewer App, and reads `reviewDecision`. If GitHub reports `APPROVED`, the rig adds the existing `legion-human-approval` status check to branch protection; otherwise it leaves that check unrequired. The disposable pull request number and result are recorded under the smoke directory. This optional gate uses the user-authenticated `gh` identity described above.
 
@@ -124,10 +123,10 @@ Then post the comment and run checkpoint 10. The command captures the daemon-log
 
 | Checkpoint | Extra input when needed | Assertion |
 | --- | --- | --- |
-| 1 | `SMOKE_PROJECT_ID`, `SMOKE_ROOT_ISSUE` optional | The daemon records a sandbox issue and the controller tmux window exists. |
-| 2 | `SMOKE_PROJECT_ID`, `SMOKE_ROOT_ISSUE` optional | The root is admitted and its architect window exists. |
-| 3 | `SMOKE_PROJECT_ID`, `SMOKE_ROOT_ISSUE` optional | Root issue has a posted spec and `needs-approval`; a `legion-child` exists. |
-| 4 | `SMOKE_PROJECT_ID`, `SMOKE_ROOT_ISSUE` optional | A child is marked released in daemon state. |
+| 1 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue has progressed past `triage`; daemon state records a controller window/pane locator for a live tmux window. |
+| 2 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue is `in_progress`, is admitted, and has a recorded architect window/pane locator for a live tmux window. |
+| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact, its registered open design-gate ask offers `Approve`, and a Dispatch child issue exists. |
+| 4 | `SMOKE_ROOT_ISSUE` optional | A child in a released lifecycle status is tracked in active admission or an active/queued tree. |
 | 5 | `SMOKE_PR` optional | A Legion branch has implementation identity and `Legion-Session:` commit attribution. |
 | 6 | `SMOKE_ARCHITECT_WINDOW`, `SMOKE_VERDICT_FRAGMENT`, `SMOKE_RAW_CHECK_FRAGMENT` | One architect verdict appears in the pane; raw check noise is absent. |
 | 7 | `SMOKE_BRANCH_PROTECTION=1`, `SMOKE_PR`, `SMOKE_RETRO_COMMIT`, `SMOKE_REVIEWER_LOGIN` | Reviewer `.legion` deletion precedes its approval; retro is durable; final PR diff has no `.legion` path; records the pre-merge base for checkpoint 8. |

@@ -20,13 +20,31 @@ require_env() {
 state() {
   curl --fail --silent --show-error "${daemon_url}/legion/v1/state"
 }
-stored_board_scope() {
-  local scope_file="${smoke_dir}/board-scope"
-  if [[ -r "$scope_file" ]]; then
-    printf '%s\n' "$(<"$scope_file")"
-  else
-    printf '%s\n' "${SMOKE_BOARD_SCOPE:-}"
-  fi
+dispatch_request() {
+  local path="$1"
+  require_env DISPATCH_URL
+  require_env DISPATCH_TOKEN
+  curl --fail --silent --show-error \
+    -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+    "${DISPATCH_URL%/}/api/v1/${path}"
+}
+
+dispatch_issue() {
+  dispatch_request "issues/$1"
+}
+
+dispatch_open_asks() {
+  dispatch_request "issues/$1/asks?state=open"
+}
+
+dispatch_artifacts() {
+  dispatch_request "issues/$1/artifacts"
+}
+
+dispatch_children() {
+  local root="$1"
+  local project="${root%%-*}"
+  dispatch_request "issues?project=${project}&parent=${root}"
 }
 stored_webhook_mode() {
   local mode_file="${smoke_dir}/webhook-mode"
@@ -65,6 +83,13 @@ root_key() {
     return
   fi
   state | jq -er --arg prefix "${SMOKE_REPO}#" '[.trees | to_entries[] | select(.key | startswith($prefix)) | .value.root] | first'
+}
+dispatch_root_key() {
+  if [[ -n "${SMOKE_ROOT_ISSUE:-}" ]]; then
+    printf '%s\n' "$SMOKE_ROOT_ISSUE"
+    return
+  fi
+  state | jq -er '[.issues | to_entries[] | select((.value.parent // null) == null) | .key] | first'
 }
 
 issue_number() {
@@ -121,6 +146,14 @@ expect_window() {
   windows="$(tmux list-windows -t "legion-$(project_slug)" -F '#{window_name}')"
   grep -Fxq -- "$window" <<<"$windows" || fail "tmux window ${window} is absent"
 }
+expect_recorded_window() {
+  local recorded_window_id="$1"
+  local windows
+
+  windows="$(tmux list-windows -t "legion-$(project_slug)" -F '#{window_id}')"
+  grep -Fxq -- "$recorded_window_id" <<<"$windows" ||
+    fail "recorded tmux window ${recorded_window_id} is absent"
+}
 
 smoke_pr() {
   if [[ -n "${SMOKE_PR:-}" ]]; then
@@ -133,41 +166,99 @@ smoke_pr() {
 
 checkpoint_one() {
   local issue
-  issue="$(issue_key)"
-  state | jq -e --arg issue "$issue" '.issues | has($issue)' >/dev/null || fail "daemon state lacks ${issue}"
-  expect_window controller
-  printf 'CHECKPOINT 1 OK: daemon tracks %s; controller window is live\n' "$issue"
+  local dispatch_issue_state
+  local daemon_state
+  local controller_window
+
+  issue="$(dispatch_root_key)"
+  dispatch_issue_state="$(dispatch_issue "$issue")"
+  jq -e '
+    .status as $status |
+    ["icebox", "backlog", "todo", "in_progress", "testing", "needs_review", "retro", "done"] |
+    index($status) != null
+  ' >/dev/null <<<"$dispatch_issue_state" || fail "Dispatch issue ${issue} has not progressed past triage"
+  daemon_state="$(state)"
+  jq -e --arg issue "$issue" '.issues | has($issue)' >/dev/null <<<"$daemon_state" ||
+    fail "daemon state lacks ${issue}"
+  jq -e '
+    .controllerLocator |
+    (.tmuxWindowId | type == "string" and length > 0) and
+    (.tmuxPaneId | type == "string" and length > 0)
+  ' >/dev/null <<<"$daemon_state" || fail "daemon state lacks a controller window/pane locator"
+  controller_window="$(jq -er '.controllerLocator.tmuxWindowId' <<<"$daemon_state")"
+  expect_recorded_window "$controller_window"
+  printf 'CHECKPOINT 1 OK: Dispatch tracks %s past triage; controller locator is live\n' "$issue"
 }
 
 checkpoint_two() {
   local root
-  root="$(root_key)"
-  state | jq -e --arg root "$root" '.admission.active | index($root) != null' >/dev/null ||
+  local dispatch_issue_state
+  local daemon_state
+  local architect_window
+
+  root="$(dispatch_root_key)"
+  dispatch_issue_state="$(dispatch_issue "$root")"
+  jq -e '.status == "in_progress"' >/dev/null <<<"$dispatch_issue_state" ||
+    fail "Dispatch issue ${root} is not in_progress"
+  daemon_state="$(state)"
+  jq -e --arg root "$root" '.admission.active | index($root) != null' >/dev/null <<<"$daemon_state" ||
     fail "${root} is not admitted"
-  expect_window "$(tree_window "$root")"
-  printf 'CHECKPOINT 2 OK: %s is active; architect window is live\n' "$root"
+  jq -e --arg root "$root" '
+    .trees[$root].locator |
+    (.tmuxWindowId | type == "string" and length > 0) and
+    (.tmuxPaneId | type == "string" and length > 0)
+  ' >/dev/null <<<"$daemon_state" || fail "${root} lacks an architect window/pane locator"
+  architect_window="$(jq -er --arg root "$root" '.trees[$root].locator.tmuxWindowId' <<<"$daemon_state")"
+  expect_recorded_window "$architect_window"
+  printf 'CHECKPOINT 2 OK: Dispatch reports %s in_progress; architect locator is live\n' "$root"
 }
 
 checkpoint_three() {
   local root
-  local issue
+  local daemon_state
+  local design_ask_id
+  local asks
+  local artifacts
   local children
-  root="$(root_key)"
-  issue="$(gh issue view "$(issue_number "$root")" -R "$SMOKE_REPO" --json labels,body)"
-  jq -e '(.body | length > 0) and ([.labels[].name] | index("needs-approval") != null)' >/dev/null <<<"$issue" ||
-    fail "root issue lacks a posted spec or needs-approval"
-  children="$(gh issue list -R "$SMOKE_REPO" --label legion-child --state all --json number)"
-  jq -e 'length > 0' >/dev/null <<<"$children" || fail "no legion-child issue exists"
-  printf 'CHECKPOINT 3 OK: posted spec, needs-approval, and legion-child observed\n'
+
+  root="$(dispatch_root_key)"
+  daemon_state="$(state)"
+  design_ask_id="$(jq -er --arg root "$root" '.gates[$root].designAskId' <<<"$daemon_state")" ||
+    fail "${root} has no registered design-gate ask"
+  asks="$(dispatch_open_asks "$root")"
+  jq -e --arg ask "$design_ask_id" '
+    any(.[]; .id == $ask and .state == "open" and any(.options[]?; .label == "Approve"))
+  ' >/dev/null <<<"$asks" || fail "${root} lacks an open Approve design-gate ask"
+  artifacts="$(dispatch_artifacts "$root")"
+  jq -e '
+    any(.[]; .name == "spec.md" and .primary == true and (.versions | type == "array" and length > 0))
+  ' >/dev/null <<<"$artifacts" || fail "${root} lacks a posted primary spec.md artifact"
+  children="$(dispatch_children "$root")"
+  jq -e --arg root "$root" 'any(.[]; .parent == $root)' >/dev/null <<<"$children" ||
+    fail "${root} has no Dispatch child issue"
+  printf 'CHECKPOINT 3 OK: posted spec artifact, open design gate, and child issue observed\n'
 }
 
 checkpoint_four() {
   local root
-  root="$(root_key)"
-  state | jq -e --arg root "$root" \
-    '[.issues | to_entries[] | select(.key != $root and .value.released == true)] | length > 0' >/dev/null ||
-    fail "no child wave is released"
-  printf 'CHECKPOINT 4 OK: a child wave is released\n'
+  local daemon_state
+
+  root="$(dispatch_root_key)"
+  daemon_state="$(state)"
+  jq -e --arg root "$root" '
+    [
+      .issues[$root].children[]? as $child |
+      .issues[$child].status as $status |
+      .trees[$child].status as $tree_status |
+      select(
+        ($status == "todo" or $status == "in_progress" or $status == "testing" or
+          $status == "needs_review" or $status == "retro" or $status == "done") and
+          ((.admission.active | index($child)) != null or $tree_status == "queued" or
+            $tree_status == "active")
+      )
+    ] | length > 0
+  ' >/dev/null <<<"$daemon_state" || fail "no child is released into admission or an active tree"
+  printf 'CHECKPOINT 4 OK: a released child is tracked by admission or tree state\n'
 }
 
 checkpoint_five() {
@@ -386,10 +477,6 @@ case "$(stored_webhook_mode)" in
 esac
 
 case "$checkpoint" in
-  1 | 2 | 3 | 4)
-    [[ -n "${SMOKE_PROJECT_ID:-}" ]] ||
-      blocked "SMOKE_PROJECT_ID is required after the sandbox Projects V2 board exists"
-    ;;
   7 | 8)
     [[ "${SMOKE_BRANCH_PROTECTION:-}" == "1" ]] ||
       blocked "SMOKE_BRANCH_PROTECTION=1 requires branch protection/ruleset availability"
