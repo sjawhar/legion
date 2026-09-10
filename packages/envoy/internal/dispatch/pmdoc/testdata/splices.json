@@ -1,0 +1,1645 @@
+{
+  "schema": "pmdoc/replace-range-oracle/v1",
+  "cases": [
+    {
+      "name": "paragraph-inline",
+      "markdown": "Alpha first.\n\nSecond omega.\n",
+      "from": "first.",
+      "to": "Second",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Alpha X omega."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "paragraph-multiblock",
+      "markdown": "Alpha first.\n\nSecond omega.\n",
+      "from": "first.",
+      "to": "Second",
+      "replacement": "X\n\nY\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Alpha "
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "X"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Y"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": " omega."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "paragraph-list",
+      "markdown": "Alpha first.\n\nSecond omega.\n",
+      "from": "first.",
+      "to": "Second",
+      "replacement": "- X\n- Y\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Alpha "
+              }
+            ]
+          },
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "X"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Y"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": " omega."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "list-item-code",
+      "markdown": "- target\n- next\n",
+      "from": "target",
+      "to": "target",
+      "replacement": "```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  },
+                  {
+                    "type": "code_block",
+                    "attrs": {
+                      "language": null
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "code"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "next"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "list-items-paragraph",
+      "markdown": "- one\n- two\n- three\n",
+      "from": "one",
+      "to": "two",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "X"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "three"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "task-list-open-checked",
+      "markdown": "- [ ] keep\n- [x] one\n- [ ] two\n",
+      "from": "one",
+      "to": "two",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "keep"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "X"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "task-list-open-unchecked",
+      "markdown": "- [x] keep\n- [ ] one\n- [x] two\n",
+      "from": "one",
+      "to": "two",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "keep"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "X"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "list-items-join-inline",
+      "markdown": "- a one\n- two b\n",
+      "from": "one",
+      "to": "two",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a X b"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "table-cells-join-inline",
+      "markdown": "| left | right |\n| :--- | :--- |\n| a one | two b |\n",
+      "from": "one",
+      "to": "two",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "table_header_row",
+                "content": [
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "left"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "right"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_row",
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "a X b"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested-list-item-to-parent-next-inline",
+      "markdown": "- parent\n  - nested tail\n- head sibling\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "parent"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "bullet_list",
+                    "attrs": {
+                      "spread": false
+                    },
+                    "content": [
+                      {
+                        "type": "list_item",
+                        "attrs": {
+                          "label": "•",
+                          "listType": "bullet",
+                          "spread": false,
+                          "checked": null
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "nested X sibling"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "heading-into-paragraph-inline",
+      "markdown": "# Heading tail\n\nParagraph head after\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Heading X after"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "blockquote-last-paragraph-to-following-paragraph-inline",
+      "markdown": "> first\n>\n> tail\n\nhead after\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "first"
+                  }
+                ]
+              },
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "X after"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "open-side-deeper-than-close-side-inline",
+      "markdown": "- parent\n  - child tail\n- head sibling\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "parent"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "bullet_list",
+                    "attrs": {
+                      "spread": false
+                    },
+                    "content": [
+                      {
+                        "type": "list_item",
+                        "attrs": {
+                          "label": "•",
+                          "listType": "bullet",
+                          "spread": false,
+                          "checked": null
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "child X sibling"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "close-side-deeper-than-open-side-inline",
+      "markdown": "- parent tail\n  - head child\n- sibling\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "parent X child"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "sibling"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "task-list-replacement-in-plain-bullet",
+      "markdown": "- a target c\n- keep\n",
+      "from": "target",
+      "to": "target",
+      "replacement": "- [x] done\n- [ ] todo\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a "
+                      }
+                    ]
+                  },
+                  {
+                    "type": "bullet_list",
+                    "attrs": {
+                      "spread": false
+                    },
+                    "content": [
+                      {
+                        "type": "list_item",
+                        "attrs": {
+                          "label": "•",
+                          "listType": "bullet",
+                          "spread": false,
+                          "checked": true
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "done"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "list_item",
+                        "attrs": {
+                          "label": "•",
+                          "listType": "bullet",
+                          "spread": false,
+                          "checked": false
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "todo"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": " c"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "keep"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "heading-into-following-list-item-inline",
+      "markdown": "# Heading tail\n\n- head item\n- after\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Heading X item"
+              }
+            ]
+          },
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "after"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "list-item-into-following-heading-inline",
+      "markdown": "- tail\n\n# head after\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "X after"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "blockquote-into-following-list-inline",
+      "markdown": "> tail\n\n- head item\n- after\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "X item"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "after"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "blockquote-last-paragraph-into-following-list-inline",
+      "markdown": "> first\n>\n> tail\n\n- head item\n- after\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "first"
+                  }
+                ]
+              },
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "X item"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "after"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "blockquote-list",
+      "markdown": "> alpha\n>\n> beta\n",
+      "from": "alpha",
+      "to": "beta",
+      "replacement": "- X\n- Y\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "bullet_list",
+                "attrs": {
+                  "spread": false
+                },
+                "content": [
+                  {
+                    "type": "list_item",
+                    "attrs": {
+                      "label": "•",
+                      "listType": "bullet",
+                      "spread": false,
+                      "checked": null
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "X"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "list_item",
+                    "attrs": {
+                      "label": "•",
+                      "listType": "bullet",
+                      "spread": false,
+                      "checked": null
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Y"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "headings-paragraph",
+      "markdown": "# Alpha first.\n\n## Second omega.\n",
+      "from": "first.",
+      "to": "Second",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Alpha "
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "X"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": " omega."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "code-blocks-paragraph",
+      "markdown": "```go\nAlpha first.\n```\n\n```js\nSecond omega.\n```\n",
+      "from": "first.",
+      "to": "Second",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": "go"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Alpha "
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "X"
+              }
+            ]
+          },
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": "js"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": " omega."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "heading-code",
+      "markdown": "# a target c\n",
+      "from": "target",
+      "to": "target",
+      "replacement": "```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "a "
+              }
+            ]
+          },
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": null
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "code"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": " c"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "code-list",
+      "markdown": "```\na target c\n```\n",
+      "from": "target",
+      "to": "target",
+      "replacement": "- X\n- Y\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": null
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "a "
+              }
+            ]
+          },
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "X"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": false,
+                  "checked": null
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Y"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": null
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": " c"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "table-cell-code",
+      "markdown": "| head |\n| :--- |\n| a target c |\n",
+      "from": "target",
+      "to": "target",
+      "replacement": "```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "table_header_row",
+                "content": [
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "head"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_row",
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "a "
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": null
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "code"
+              }
+            ]
+          },
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "table_header_row"
+              },
+              {
+                "type": "table_row",
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": " c"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "table-cell-inline",
+      "markdown": "| head |\n| :--- |\n| a target c |\n",
+      "from": "target",
+      "to": "target",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "table_header_row",
+                "content": [
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "head"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_row",
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "a X c"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "table-header-into-first-body-cell-inline",
+      "markdown": "| a tail |\n| :--- |\n| head b |\n| after |\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "table_header_row",
+                "content": [
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "a X b"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_row",
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "after"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

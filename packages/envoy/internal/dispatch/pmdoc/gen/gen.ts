@@ -2,12 +2,15 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as Y from "yjs";
+import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
+import { Transform } from "prosemirror-transform";
 import { createHeadlessProof } from "@sjawhar/proof-editor/headless";
 
 const here = import.meta.dir;
 const corpus = join(here, "..", "testdata", "corpus");
 const out = join(here, "..", "testdata", "fixtures.json");
+const spliceOut = join(here, "..", "testdata", "splices.json");
 const check = process.argv.includes("--check");
 
 const engine = await createHeadlessProof();
@@ -25,12 +28,90 @@ const fixtures = readdirSync(corpus).filter((f) => f.endsWith(".md")).sort().map
     rendered_by_milkdown: engine.serializeMarkdown(doc),
   };
 });
+
+// These are browser-oracle replaceRange cases. A single paragraph replacement
+// is sliced open to model Splice's inline paragraph replacement contract.
+const replaceRangeCases = [
+  { name: "paragraph-inline", markdown: "Alpha first.\n\nSecond omega.\n", from: "first.", to: "Second", replacement: "X\n", inline: true },
+  { name: "paragraph-multiblock", markdown: "Alpha first.\n\nSecond omega.\n", from: "first.", to: "Second", replacement: "X\n\nY\n" },
+  { name: "paragraph-list", markdown: "Alpha first.\n\nSecond omega.\n", from: "first.", to: "Second", replacement: "- X\n- Y\n" },
+  { name: "list-item-code", markdown: "- target\n- next\n", from: "target", to: "target", replacement: "```\ncode\n```\n" },
+  { name: "list-items-paragraph", markdown: "- one\n- two\n- three\n", from: "one", to: "two", replacement: "X\n", inline: true },
+  { name: "task-list-open-checked", markdown: "- [ ] keep\n- [x] one\n- [ ] two\n", from: "one", to: "two", replacement: "X\n", inline: true },
+  { name: "task-list-open-unchecked", markdown: "- [x] keep\n- [ ] one\n- [x] two\n", from: "one", to: "two", replacement: "X\n", inline: true },
+  { name: "list-items-join-inline", markdown: "- a one\n- two b\n", from: "one", to: "two", replacement: "X\n", inline: true },
+  { name: "table-cells-join-inline", markdown: "| left | right |\n| :--- | :--- |\n| a one | two b |\n", from: "one", to: "two", replacement: "X\n", inline: true },
+  { name: "nested-list-item-to-parent-next-inline", markdown: "- parent\n  - nested tail\n- head sibling\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "heading-into-paragraph-inline", markdown: "# Heading tail\n\nParagraph head after\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "blockquote-last-paragraph-to-following-paragraph-inline", markdown: "> first\n>\n> tail\n\nhead after\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "open-side-deeper-than-close-side-inline", markdown: "- parent\n  - child tail\n- head sibling\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "close-side-deeper-than-open-side-inline", markdown: "- parent tail\n  - head child\n- sibling\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "task-list-replacement-in-plain-bullet", markdown: "- a target c\n- keep\n", from: "target", to: "target", replacement: "- [x] done\n- [ ] todo\n" },
+  { name: "heading-into-following-list-item-inline", markdown: "# Heading tail\n\n- head item\n- after\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "list-item-into-following-heading-inline", markdown: "- tail\n\n# head after\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "blockquote-into-following-list-inline", markdown: "> tail\n\n- head item\n- after\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "blockquote-last-paragraph-into-following-list-inline", markdown: "> first\n>\n> tail\n\n- head item\n- after\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+  { name: "blockquote-list", markdown: "> alpha\n>\n> beta\n", from: "alpha", to: "beta", replacement: "- X\n- Y\n" },
+  { name: "headings-paragraph", markdown: "# Alpha first.\n\n## Second omega.\n", from: "first.", to: "Second", replacement: "X\n" },
+  { name: "code-blocks-paragraph", markdown: "```go\nAlpha first.\n```\n\n```js\nSecond omega.\n```\n", from: "first.", to: "Second", replacement: "X\n" },
+  { name: "heading-code", markdown: "# a target c\n", from: "target", to: "target", replacement: "```\ncode\n```\n" },
+  { name: "code-list", markdown: "```\na target c\n```\n", from: "target", to: "target", replacement: "- X\n- Y\n" },
+  { name: "table-cell-code", markdown: "| head |\n| :--- |\n| a target c |\n", from: "target", to: "target", replacement: "```\ncode\n```\n" },
+  { name: "table-cell-inline", markdown: "| head |\n| :--- |\n| a target c |\n", from: "target", to: "target", replacement: "X\n", inline: true },
+  { name: "table-header-into-first-body-cell-inline", markdown: "| a tail |\n| :--- |\n| head b |\n| after |\n", from: "tail", to: "head", replacement: "X\n", inline: true },
+].map(({ name, markdown, from, to, replacement, inline = false }) => {
+  const doc = engine.parseMarkdown(markdown);
+  const inserted = engine.parseMarkdown(replacement);
+  const transformed = new Transform(doc);
+  const fromPos = quotePosition(doc, from);
+  const toPos = quotePosition(doc, to) + to.length;
+  const slice = inline
+    ? inserted.slice(1, inserted.content.size - 1)
+    : inserted.slice(0, inserted.content.size);
+  transformed.replaceRange(fromPos, toPos, slice);
+  return {
+    name,
+    markdown,
+    from,
+    to,
+    replacement,
+    pm_json: transformed.doc.toJSON(),
+  };
+});
+// Cases conform to the pmdoc/replace-range-oracle/v1 schema: {schema, cases},
+// each case a browser-oracle ProseMirror replaceRange result Splice must match.
+const replaceRangeOracle = {
+  schema: "pmdoc/replace-range-oracle/v1",
+  cases: replaceRangeCases,
+};
+const nextSplices = JSON.stringify(replaceRangeOracle, null, 2) + "\n";
+
+function quotePosition(doc: ProseMirrorNode, quote: string): number {
+  let result = -1;
+  doc.descendants((node, pos) => {
+    if (node.isText) {
+      const offset = node.text?.indexOf(quote) ?? -1;
+      if (offset >= 0) {
+        result = pos + offset;
+        return false;
+      }
+    }
+    return result < 0;
+  });
+  if (result < 0) throw new Error(`quote not found: ${quote}`);
+  return result;
+}
 const next = JSON.stringify(fixtures, null, 2) + "\n";
 if (check) {
   const current = readFileSync(out, "utf8");
-  if (current !== next) { console.error("fixtures.json is stale: run `bun run gen`"); process.exit(1); }
-  console.log(`fixtures.json up to date (${fixtures.length} fixtures)`);
+  const currentSplices = readFileSync(spliceOut, "utf8");
+  if (current !== next || currentSplices !== nextSplices) {
+    console.error("generated pmdoc fixtures are stale: run `bun run gen`");
+    process.exit(1);
+  }
+  console.log(`fixtures up to date (${fixtures.length} documents, ${replaceRangeCases.length} splice cases)`);
 } else {
   writeFileSync(out, next);
-  console.log(`wrote ${fixtures.length} fixtures`);
+  writeFileSync(spliceOut, nextSplices);
+  console.log(`wrote ${fixtures.length} documents and ${replaceRangeCases.length} splice cases`);
 }

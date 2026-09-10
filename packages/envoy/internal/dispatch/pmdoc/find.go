@@ -520,28 +520,6 @@ func markAttributeID(value any) string {
 	return id
 }
 
-func cloneAttrs(attrs Attrs) Attrs {
-	if len(attrs) == 0 {
-		return nil
-	}
-	out := make(Attrs, len(attrs))
-	for key, value := range attrs {
-		out[key] = value
-	}
-	return out
-}
-
-func cloneMarks(marks []Mark) []Mark {
-	if len(marks) == 0 {
-		return nil
-	}
-	out := make([]Mark, len(marks))
-	for index, mark := range marks {
-		out[index] = Mark{Type: mark.Type, Attrs: cloneAttrs(mark.Attrs)}
-	}
-	return out
-}
-
 // StripAnchorMarks returns a copy of doc with Proof and Dispatch anchors
 // removed, coalescing adjacent equal-mark text runs.
 func StripAnchorMarks(node *Node) *Node {
