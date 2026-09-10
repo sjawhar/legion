@@ -12,6 +12,7 @@ import type {
   Issue,
   Project,
   UpdateIssueInput,
+  UserIssueState,
 } from "../web/src/api/types";
 
 const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
@@ -187,6 +188,19 @@ export function createMessage(
   return request<{ id: string }>(
     `/api/v1/issues/${encodeURIComponent(issue)}/messages`,
     "POST",
+    input,
+    options
+  );
+}
+
+export function putIssueState(
+  key: string,
+  input: Partial<UserIssueState>,
+  options: ApiOptions = {}
+): Promise<UserIssueState> {
+  return request<UserIssueState>(
+    `/api/v1/me/issues/${encodeURIComponent(key)}/state`,
+    "PUT",
     input,
     options
   );

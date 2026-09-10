@@ -43,7 +43,8 @@ export function eventDescription(event: Event): string {
     return `Ask opened: ${typeof question === "string" ? question : "ask"}`;
   }
   if (event.type === "comment.created") {
-    return "Comment created";
+    const body = event.payload.body;
+    return typeof body === "string" ? body : "Comment created";
   }
   if (event.type === "issue.created") {
     return "Issue created";

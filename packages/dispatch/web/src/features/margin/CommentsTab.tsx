@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import type { Comment } from "../../api/types";
 import { AskCard } from "../inbox/AskCard";
+import { actorLabel } from "../refs/actor";
 import { buildIssuePath } from "../refs/routes";
 import { Unfurl } from "../refs/Unfurl";
 import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
@@ -91,7 +92,7 @@ function CommentCard({
       ) : null}
       <Unfurl body={comment.body} />
       <p className="mt-2 text-xs text-slate-500">
-        {comment.author.id} · {new Date(comment.created_at).toLocaleString()}
+        {actorLabel(comment.author)} · {new Date(comment.created_at).toLocaleString()}
       </p>
       <div className="mt-2 flex flex-wrap gap-3 text-sm">
         {suggestion !== null && suggestion.accepted === null && !comment.resolved ? (

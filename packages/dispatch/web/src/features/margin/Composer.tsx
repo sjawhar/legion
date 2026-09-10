@@ -35,7 +35,7 @@ export interface ComposerAnchor {
   to: number;
 }
 
-export type ComposerKind = "ask" | "comment" | "suggestion";
+export type ComposerKind = "ask" | "comment" | "message" | "suggestion";
 
 interface AskOptionDraft {
   description: string;
@@ -70,7 +70,7 @@ function submittedAskOptions(options: readonly AskOptionDraft[]): AskOption[] {
 }
 
 interface ComposerProps {
-  anchor: ComposerAnchor;
+  anchor?: ComposerAnchor;
   autoFocus?: boolean;
   kind: ComposerKind;
   issueKey: string;
@@ -227,13 +227,19 @@ export function Composer({
   const references = useMemo(() => composerReferences(body), [body]);
   const save = useMutation({
     mutationFn: async () => {
-      const selection = {
-        artifact: anchor.artifact,
-        from: anchor.from,
-        occurrence: anchor.occurrence,
-        quote: anchor.quote,
-        to: anchor.to,
-      };
+      const selection =
+        anchor === undefined
+          ? undefined
+          : {
+              artifact: anchor.artifact,
+              from: anchor.from,
+              occurrence: anchor.occurrence,
+              quote: anchor.quote,
+              to: anchor.to,
+            };
+      if (kind === "message") {
+        return api.createMessage(issueKey, { body: body.trim() });
+      }
       if (kind === "ask") {
         return api.createAsk(issueKey, {
           anchor: selection,
@@ -252,6 +258,7 @@ export function Composer({
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
+      void queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
       void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
       onClose();
@@ -321,20 +328,34 @@ export function Composer({
     event.preventDefault();
     uploadFiles([...event.dataTransfer.files]);
   };
+  const canSubmit = canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads);
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       setPickerOpen(true);
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      if (canSubmit) {
+        save.mutate();
+      }
     }
   };
-  const canSubmit = canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (canSubmit) {
       save.mutate();
     }
   };
-  const title = kind === "ask" ? "Ask" : kind === "suggestion" ? "Suggest" : "Comment";
+  const title =
+    kind === "ask"
+      ? "Ask"
+      : kind === "suggestion"
+        ? "Suggest"
+        : kind === "message"
+          ? "Message"
+          : "Comment";
 
   return (
     <form
@@ -345,17 +366,21 @@ export function Composer({
     >
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm font-semibold text-sky-950">{title}</p>
-        <button
-          className="text-sm text-slate-600 hover:text-slate-950"
-          onClick={onClose}
-          type="button"
-        >
-          Close
-        </button>
+        {anchor === undefined ? null : (
+          <button
+            className="text-sm text-slate-600 hover:text-slate-950"
+            onClick={onClose}
+            type="button"
+          >
+            Close
+          </button>
+        )}
       </div>
-      <blockquote className="border-l-2 border-sky-500 pl-2 text-sm text-slate-700">
-        {anchor.quote}
-      </blockquote>
+      {anchor === undefined ? null : (
+        <blockquote className="border-l-2 border-sky-500 pl-2 text-sm text-slate-700">
+          {anchor.quote}
+        </blockquote>
+      )}
       {confirmingDiscard ? (
         <div
           className="flex items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900"
@@ -393,9 +418,23 @@ export function Composer({
         </label>
       ) : null}
       <label className="block text-sm font-medium text-slate-700">
-        {kind === "ask" ? "Question" : kind === "suggestion" ? "Reason (optional)" : "Comment"}
+        {kind === "ask"
+          ? "Question"
+          : kind === "suggestion"
+            ? "Reason (optional)"
+            : kind === "message"
+              ? "Message"
+              : "Comment"}
         <textarea
-          aria-label={kind === "ask" ? "Question" : kind === "suggestion" ? "Reason" : "Comment"}
+          aria-label={
+            kind === "ask"
+              ? "Question"
+              : kind === "suggestion"
+                ? "Reason"
+                : kind === "message"
+                  ? "Message"
+                  : "Comment"
+          }
           className="mt-1 block min-h-24 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500"
           maxLength={kind === "ask" ? 800 : 2000}
           onChange={(event) => {

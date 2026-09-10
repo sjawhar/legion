@@ -181,6 +181,7 @@ function IssueHeader({
   const [title, setTitle] = useState(issue.title);
   const [titleDirty, setTitleDirty] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
+  const [routeEditing, setRouteEditing] = useState(false);
   const [route, setRoute] = useState(issue.route ?? "");
   const [routeDirty, setRouteDirty] = useState(false);
   // Mirrors of the drafts for mutation callbacks. Every draft write goes through
@@ -204,7 +205,7 @@ function IssueHeader({
   });
   const sessions = activeSessions(events.data ?? []);
   const updateIssue = useMutation({
-    mutationFn: (input: Partial<Pick<Issue, "title" | "status" | "route">>) =>
+    mutationFn: (input: Partial<Pick<Issue, "route" | "status" | "title">>) =>
       api.patchIssue(issue.key, input),
     onMutate: async () => {
       await queryClient.cancelQueries({ queryKey: ["issue", issue.key] });
@@ -262,9 +263,10 @@ function IssueHeader({
       event.currentTarget.blur();
     }
   };
+  const routeIsValid = route === "" || routePattern.test(route);
   const saveRoute = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!isClosed && (route === "" || routePattern.test(route))) {
+    if (!isClosed && routeIsValid) {
       const submitted = route;
       updateIssue.mutate(
         { route: submitted },
@@ -278,15 +280,27 @@ function IssueHeader({
       );
     }
   };
-  const routeIsValid = route === "" || routePattern.test(route);
   // A failed title/status/route save must not leave the optimistic h1 (or route field)
   // showing an unsaved value indefinitely — fall back to the last confirmed issue state.
   useEffect(() => {
     if (updateIssue.isError) {
       writeTitle(issue.title);
       setTitleDirty(false);
+      writeRoute(issue.route ?? "");
+      setRouteDirty(false);
+      setRouteEditing(false);
     }
-  }, [updateIssue.isError, issue.title, writeTitle]);
+  }, [updateIssue.isError, issue.title, issue.route, writeTitle, writeRoute]);
+  const cancelRouteEdit = () => {
+    writeRoute(issue.route ?? "");
+    setRouteDirty(false);
+    setRouteEditing(false);
+  };
+  const routeEditOnKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {
+      cancelRouteEdit();
+    }
+  };
 
   return (
     <header className="mb-6 border-b border-slate-200 pb-6">
@@ -388,33 +402,57 @@ function IssueHeader({
           </Link>
         )}
       </div>
-      <form className="mt-4 flex flex-wrap items-start gap-2" onSubmit={saveRoute}>
-        <label className="text-sm font-medium text-slate-700" htmlFor="issue-route">
-          Route
-        </label>
-        <input
-          aria-describedby="issue-route-help"
-          className="min-w-64 rounded border px-2 py-1 text-sm outline-none focus:border-sky-500"
-          id="issue-route"
-          onChange={(event) => {
-            setRouteDirty(true);
-            writeRoute(event.target.value);
-          }}
-          placeholder="role:legion-controller-core"
-          disabled={isClosed}
-          value={route}
-        />
+      {routeEditing ? (
+        <form className="mt-4 flex flex-wrap items-start gap-2" onSubmit={saveRoute}>
+          <label className="text-sm font-medium text-slate-700" htmlFor="issue-route">
+            Route
+          </label>
+          <input
+            aria-describedby="issue-route-help"
+            className="min-w-64 rounded border px-2 py-1 text-sm outline-none focus:border-sky-500"
+            id="issue-route"
+            onChange={(event) => {
+              setRouteDirty(true);
+              writeRoute(event.target.value);
+            }}
+            onKeyDown={routeEditOnKeyDown}
+            placeholder="role:legion-controller-core"
+            disabled={isClosed}
+            value={route}
+          />
+          <button
+            className="rounded border border-slate-300 px-2 py-1 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
+            disabled={isClosed || !routeIsValid || updateIssue.isPending}
+            type="submit"
+          >
+            Save route
+          </button>
+          <button
+            className="rounded border border-transparent px-2 py-1 text-sm font-medium text-slate-500 hover:text-slate-700"
+            onClick={cancelRouteEdit}
+            type="button"
+          >
+            Cancel
+          </button>
+          <span
+            className={routeIsValid ? "sr-only" : "text-sm text-rose-700"}
+            id="issue-route-help"
+          >
+            Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
+          </span>
+        </form>
+      ) : (
         <button
-          className="rounded border border-slate-300 px-2 py-1 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
-          disabled={isClosed || !routeIsValid || updateIssue.isPending}
-          type="submit"
+          className="mt-4 block rounded text-left text-sm text-slate-600 outline-none hover:text-slate-900 focus-visible:ring-2 focus-visible:ring-sky-500"
+          disabled={isClosed}
+          onClick={() => setRouteEditing(true)}
+          type="button"
         >
-          Save route
+          {issue.route === null
+            ? "No route — messages stay on the issue"
+            : `Messages also reach ${issue.route}`}
         </button>
-        <span className={routeIsValid ? "sr-only" : "text-sm text-rose-700"} id="issue-route-help">
-          Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
-        </span>
-      </form>
+      )}
       {issue.external_links.length === 0 ? null : (
         <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
           {issue.external_links.map((link) => (
@@ -684,7 +722,14 @@ function IssueDetail({
         id="issue-log-panel"
         role="tabpanel"
       >
-        {activeTab === "log" ? <LogTab issueKey={issueKey} state={state.data} /> : null}
+        {activeTab === "log" ? (
+          <LogTab
+            isClosed={isClosed}
+            issueKey={issueKey}
+            route={issue.data.route}
+            state={state.data}
+          />
+        ) : null}
       </div>
       <div
         aria-labelledby="issue-children-tab"

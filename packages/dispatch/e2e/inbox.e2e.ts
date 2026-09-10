@@ -125,6 +125,7 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
     .toMatchObject({ title: "First decision revised" });
   await alicePage.getByLabel("Status").selectOption("testing");
   await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ status: "testing" });
+  await alicePage.getByText("No route — messages stay on the issue").click();
   await alicePage.getByLabel("Route").fill("role:legion-controller-core");
   await alicePage.getByRole("button", { name: "Save route" }).click();
   await expect
@@ -215,4 +216,42 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
 
   await bob.close();
   await alice.close();
+});
+
+test("posting an issue-level comment with no selection reaches the Log and Margin", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Untouched issue" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    const composer = page.getByRole("form", { name: "Comment composer" });
+    await expect(composer).toBeVisible();
+    await composer.getByLabel("Comment").fill("No selection needed to comment.");
+    await composer.getByRole("button", { exact: true, name: "Comment" }).click();
+
+    await expect(
+      page.locator("article[data-event-seq]").getByText("No selection needed to comment.")
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath("issue-level-comment.png"),
+      fullPage: true,
+    });
+
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open review panel" }).click();
+    }
+    await expect(
+      page.getByLabel("Margin review items").getByText("No selection needed to comment.")
+    ).toBeVisible();
+  } finally {
+    await alice.close();
+  }
 });

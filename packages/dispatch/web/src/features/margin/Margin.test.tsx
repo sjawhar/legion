@@ -154,7 +154,7 @@ test("Margin hides an open composer when its issue closes", async () => {
   queryClient.setQueryData(["issue", issue.key], issue);
   queryClient.setQueryData(["inbox"], []);
   queryClient.setQueryData(["user-state"], {});
-  queryClient.setQueryData(["comments", issue.key, specArtifact.id], []);
+  queryClient.setQueryData(["comments", issue.key], []);
 
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
