@@ -11,7 +11,7 @@ readonly listener_port="${ENVOY_PORT:-19020}"
 readonly smoke_dispatch_project="LEGSMOKE"
 readonly daemon_port="${LEGION_DAEMON_PORT:-19370}"
 readonly nats_url="nats://127.0.0.1:${nats_port}"
-readonly omp_pin="github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841"
+readonly omp_pin="github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934"
 LEGION_IMPLEMENT_APP_ID="${LEGION_IMPLEMENT_APP_ID:-3202636}"
 readonly LEGION_IMPLEMENT_APP_ID
 LEGION_REVIEW_APP_ID="${LEGION_REVIEW_APP_ID:-3202653}"
@@ -212,10 +212,6 @@ wait_for_json() {
   fail "$name did not become healthy; inspect ${smoke_dir}"
 }
 
-project_owner() {
-  printf '%s\n' "${SMOKE_PROJECT%/*}"
-}
-
 repo_owner() {
   printf '%s\n' "${SMOKE_REPO%/*}"
 }
@@ -251,7 +247,7 @@ app_jwt() {
 app_installation_token() {
   local app_id="$1"
   local private_key_variable="$2"
-  local owner="${3:-$(project_owner)}"
+  local owner="${3:-$(repo_owner)}"
   local jwt
   local installation_id
 
@@ -269,6 +265,8 @@ envoy_url: http://127.0.0.1:${listener_port}
 nats_urls:
   - ${nats_url}
 dispatch_project: ${smoke_dispatch_project}
+repos:
+  - ${SMOKE_REPO}
 app_logins:
 $(printf '%s\n' "$LEGION_APP_LOGINS" | tr ',' '\n' | sed 's/^/  - /')
 admission_cap: 4
@@ -307,14 +305,6 @@ ensure_nats() {
     docker run -d --name "$nats_name" -p "${nats_port}:4222" nats:2.10 -js >/dev/null
     printf 'STARTED NATS container %s\n' "$nats_name"
   fi
-}
-ensure_labels() {
-  local token="$1"
-  local label
-  for label in needs-approval human-approved legion-child legion-backlog; do
-    GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" gh label create "$label" -R "$SMOKE_REPO" --force >/dev/null
-  done
-  printf 'GREEN sandbox labels present\n'
 }
 
 configure_branch_protection() {
@@ -523,10 +513,6 @@ main() {
   require_command ss
   require_command awk
   require_command setsid
-  local board_scope
-  local owner_type
-  local setup_bearer
-  local label_bearer
   local webhook_mode
 
   require_env SMOKE_REPO
@@ -551,15 +537,6 @@ main() {
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config
-  setup_bearer="$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64)"
-  board_scope="${SMOKE_BOARD_SCOPE:-}"
-  if [[ -z "$board_scope" ]]; then
-    owner_type="$(GH_TOKEN="$setup_bearer" GH_CONFIG_DIR="$gh_config_dir" gh api "users/$(project_owner)" --jq '.type')"
-    board_scope=$([[ "$owner_type" == "Organization" ]] && printf org || printf none)
-  fi
-  [[ "$board_scope" == "org" || "$board_scope" == "none" ]] ||
-    fail "SMOKE_BOARD_SCOPE must be org or none"
-  printf '%s\n' "$board_scope" >"${smoke_dir}/board-scope"
   (
     cd "${repo_root}/packages/envoy"
     go build -o out/envoy-listener ./cmd/listener
@@ -592,20 +569,6 @@ main() {
     fi
     wait_for_webhook_forwarder
     record_forwarder_hook webhook-forward "repos/${SMOKE_REPO}/hooks"
-    if [[ "$board_scope" == "org" ]]; then
-      if pid_is_live "${smoke_dir}/board-webhook-forward.pid" &&
-        [[ -r "${smoke_dir}/board-webhook-forward.log" && "$(<"${smoke_dir}/board-webhook-forward.log")" == *"Forwarding Webhook events from GitHub..."* ]]; then
-        printf 'REUSED board webhook forwarder (pgid %s)\n' "$(<"${smoke_dir}/board-webhook-forward.pid")"
-      else
-        remove_recorded_forwarder_hook board-webhook-forward
-        start_process_group board-webhook-forward gh webhook forward --org "$(project_owner)" \
-          --events projects_v2_item \
-          --secret "$GITHUB_WEBHOOK_SECRET" \
-          --url "http://127.0.0.1:${listener_port}/webhook/github"
-      fi
-      wait_for_webhook_forwarder board-webhook-forward
-      record_forwarder_hook board-webhook-forward "orgs/$(project_owner)/hooks"
-    fi
   elif [[ "$webhook_mode" == "envoy" ]]; then
     printf 'GREEN webhook ingress: production Envoy NATS bridge will forward only %s\n' "$SMOKE_REPO"
   else
@@ -632,8 +595,6 @@ main() {
       bun run "${repo_root}/scripts/smoke/envoy-bridge.ts"
     wait_for_envoy_bridge
   fi
-  label_bearer="$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64 "$(repo_owner)")"
-  ensure_labels "$label_bearer"
   case "${SMOKE_BRANCH_PROTECTION:-}" in
     1)
       configure_branch_protection

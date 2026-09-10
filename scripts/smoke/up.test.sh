@@ -12,8 +12,7 @@ headers_file="$(mktemp)"
 body_file="$(mktemp)"
 response_file="$(mktemp)"
 gh_call_file="$(mktemp)"
-gh_label_env_file="$(mktemp)"
-trap 'rm -f "$source_file" "$warning_file" "$assertion_file" "$headers_file" "$body_file" "$response_file" "$gh_call_file" "$gh_label_env_file"; rm -rf "$fake_bin"' EXIT
+trap 'rm -f "$source_file" "$warning_file" "$assertion_file" "$headers_file" "$body_file" "$response_file" "$gh_call_file"; rm -rf "$fake_bin"' EXIT
 export SMOKE_DIR="${fake_bin}/smoke"
 
 sed '$d' "$up_script" >"$source_file"
@@ -37,7 +36,7 @@ normalize_github_webhook_secret >"$warning_file" 2>&1
 }
 export SMOKE_REPO="sjawhar/legion-smoke"
 [[ "$(repo_owner)" == "sjawhar" ]] || {
-  printf 'expected repository owner for App-scoped label setup\n' >&2
+  printf 'expected repository owner for the default installation-token owner\n' >&2
   exit 1
 }
 
@@ -87,9 +86,6 @@ case "$1" in
       { printf 'unexpected gh invocation: %q\n' "$*" >&2; exit 1; }
     exit "${SMOKE_GH_WEBHOOK_HELP_EXIT:-0}"
     ;;
-  label)
-    printf '%s|%s\n' "${GH_TOKEN:-}" "${GH_CONFIG_DIR:-}" >>"$SMOKE_GH_LABEL_ENV_FILE"
-    ;;
   *)
     printf 'unexpected gh invocation: %q\n' "$*" >&2
     exit 1
@@ -97,9 +93,13 @@ case "$1" in
 esac
 EOF
 chmod +x "${fake_bin}/gh"
-SMOKE_GH_LABEL_ENV_FILE="$gh_label_env_file" ensure_labels "app-installation-token"
-[[ "$(<"$gh_label_env_file")" == $'app-installation-token|'"${SMOKE_DIR}"$'/gh-config\napp-installation-token|'"${SMOKE_DIR}"$'/gh-config\napp-installation-token|'"${SMOKE_DIR}"$'/gh-config\napp-installation-token|'"${SMOKE_DIR}"$'/gh-config' ]] || {
-  printf 'expected label setup to isolate gh from user auth state\n' >&2
+
+
+export SMOKE_PROJECT="sjawhar/24"
+mkdir -p "$SMOKE_DIR"
+write_daemon_config
+[[ "$(<"${SMOKE_DIR}/legion.yaml")" == *$'repos:\n  - sjawhar/legion-smoke'* ]] || {
+  printf 'expected generated daemon config to pin repos to SMOKE_REPO\n' >&2
   exit 1
 }
 
