@@ -387,6 +387,144 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+
+  it("arms a restored root's registration deadline before boot-time admission reconciliation settles", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const queuedIssue = "WIDGETS-42";
+    const restoredIssue = "WIDGETS-43";
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[queuedIssue] = {
+      key: queuedIssue,
+      title: "Queued at boot",
+      status: "todo",
+      children: [],
+    };
+    state.trees[queuedIssue] = {
+      root: queuedIssue,
+      generation: 0,
+      status: "queued",
+      launchFailures: 0,
+    };
+    state.admission.queue.push(queuedIssue);
+    state.issues[restoredIssue] = {
+      key: restoredIssue,
+      title: "Restored, never confirmed before this restart",
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[restoredIssue] = {
+      root: restoredIssue,
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@41",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/architect.sock",
+      },
+      status: "active",
+      launchFailures: 0,
+      // No readyConfirmedAt: this tree never reached /process/ready before the restart this
+      // test simulates.
+    };
+    state.admission.active.push(restoredIssue);
+    await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
+      recursive: true,
+    });
+    const listWindowsGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    let sleepCallsBeforeReapSettled = -1;
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      const starting = startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          sleep: async () => {
+            sleepCalls += 1;
+            await new Promise<void>(() => {});
+          },
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
+              const workspaceDir = command[3];
+              if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            if (command[0]?.endsWith("/tmux") && command[1] === "list-windows") {
+              // reconcileAdmission's boot-time orphan reap: slow enough to observe whether
+              // reconnectRoots (synchronous, no tmux calls of its own) has already armed the
+              // restored tree's deadline before this settles.
+              sleepCallsBeforeReapSettled = sleepCalls;
+              await listWindowsGate.promise;
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
+            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
+            if (
+              command[0]?.endsWith("/tmux") &&
+              (command[1] === "new-session" || command[1] === "new-window")
+            ) {
+              return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      let started = false;
+      void starting.then((handle) => {
+        started = true;
+        daemon = handle;
+      });
+
+      expect(started).toBe(false);
+
+      listWindowsGate.resolve();
+      daemon = await starting;
+      expect(started).toBe(true);
+      // The restored tree's deadline (one `sleep` call) was already armed before the reap's
+      // gated `list-windows` call settled -- i.e. before `reconcileAdmission`'s promotion
+      // cascade for the queued tree ever ran, not merely by the time the whole boot finished.
+      expect(sleepCallsBeforeReapSettled).toBe(1);
+      expect(state.admission.active).toEqual([restoredIssue, queuedIssue]);
+      expect(state.trees[queuedIssue]?.status).toBe("active");
+      expect(state.trees[restoredIssue]?.readyConfirmedAt).toBeUndefined();
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("logs an owner CI fetch failure instead of treating its PR as closed", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);

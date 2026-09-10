@@ -326,6 +326,7 @@ export default function legionExtension(pi: PiApi): void {
             tree,
             sessionId: sessionID,
             secret: started.secret,
+            generation: generation(process.env),
           })
         );
         registerArchitectTools();

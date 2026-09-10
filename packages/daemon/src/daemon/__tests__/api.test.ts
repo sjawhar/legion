@@ -47,6 +47,7 @@ describe("Legion HTTP API", () => {
   let treeReadyConnected: IssueKey[];
   let controllerConnected: boolean;
   let workerReadyConnected: boolean;
+  let confirmRootReadyCalls: Array<{ tree: IssueKey; generation: number }>;
   let now: number;
   let controllerSecret: string;
 
@@ -62,6 +63,7 @@ describe("Legion HTTP API", () => {
     treeReadyConnected = [];
     controllerConnected = false;
     workerReadyConnected = false;
+    confirmRootReadyCalls = [];
     now = 1_700_000_000_000;
     state = newLegionState("omp", 2);
     state.issues[root] = {
@@ -154,6 +156,9 @@ describe("Legion HTTP API", () => {
           releaseSlots.push(issue);
         },
         markTreeReady: options?.markTreeReadyImpl ?? (() => {}),
+        confirmRootReady: (tree, generation) => {
+          confirmRootReadyCalls.push({ tree, generation });
+        },
         markControllerReady: options?.markControllerReadyImpl ?? (() => {}),
         cancelBootWatchdog: () => {},
         spawnWorker:
@@ -812,10 +817,73 @@ describe("Legion HTTP API", () => {
           tree: root,
           sessionId: "ses_root",
           secret: started.body.secret,
+          generation: 3,
         })
       ).response.status
     ).toBe(200);
     expect(treeReady).toEqual([root]);
+    expect(confirmRootReadyCalls).toEqual([{ tree: root, generation: 3 }]);
+  });
+
+  it("rejects a stale generation at /process/ready with 409, never confirming or cancelling a newer deadline", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    // A park-then-re-admit started a newer generation for this tree while this exact session's
+    // capability (minted against generation 3) is still valid -- its own stale ready must never
+    // confirm or cancel whatever deadline the newer generation has armed.
+    const treeState = state.trees[root];
+    if (!treeState) throw new Error("test root tree is missing");
+    treeState.generation = 4;
+
+    const stale = await json("/legion/v1/process/ready", {
+      tree: root,
+      sessionId: "ses_root",
+      secret: started.body.secret,
+      generation: 3,
+    });
+    expect(stale.response.status).toBe(409);
+    expect(confirmRootReadyCalls).toEqual([]);
+  });
+
+  it("persists the ready confirmation before responding to /process/ready", async () => {
+    let saves = 0;
+    await start({
+      saveState: async () => {
+        saves += 1;
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const savesAfterStarted = saves;
+
+    const ready = await json("/legion/v1/process/ready", {
+      tree: root,
+      sessionId: "ses_root",
+      secret: started.body.secret,
+      generation: 3,
+    });
+    expect(ready.response.status).toBe(200);
+    expect(saves).toBeGreaterThan(savesAfterStarted);
   });
 
   it("responds to process/ready before the architect's own shim connects, delivering the connect afterward", async () => {
@@ -848,6 +916,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       sessionId: "ses_root",
       secret: started.body.secret,
+      generation: 3,
     });
     expect(ready.response.status).toBe(200);
     expect(treeReadyConnected).toEqual([]);
@@ -1663,6 +1732,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       sessionId: "ses_root",
       secret: started.body.secret,
+      generation: 3,
     });
     expect(stale.response.status).toBe(403);
     const recovered = await json<WorkerSessionResponse>("/legion/v1/worker-session", {
@@ -1682,6 +1752,7 @@ describe("Legion HTTP API", () => {
           tree: root,
           sessionId: "ses_root",
           secret: recovered.body.secret,
+          generation: 3,
         })
       ).response.status
     ).toBe(200);

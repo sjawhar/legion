@@ -78,6 +78,7 @@ interface DaemonDependencies {
   clearInterval(timer: unknown): void;
   onSignal(signal: NodeJS.Signals, listener: () => void): void;
   connectWorkerRpc: ProcessManagerDeps["connectWorkerRpc"];
+  sleep?: ProcessManagerDeps["sleep"];
   exit(code: number): void;
   now(): number;
 }
@@ -406,6 +407,7 @@ async function startDaemonLocked(
     workerCatchup: { runner, tokenManager: deps.tokenManager, repo: config.repo },
     dispatchClient: deps.dispatchClient,
     now: deps.now,
+    sleep: deps.sleep,
   });
 
   // Awaited (not fire-and-forget): reconnectWorkers is the source of truth
@@ -571,8 +573,12 @@ async function startDaemonLocked(
   // (and every `onIdle`/`markWorkerDead`/`closeTree` trigger from this point on) requires —
   // see `WorkerAdmission.workerPromotionEnabled`'s doc comment.
   processManager.enableWorkerPromotion();
-  await processManager.reconcileAdmission();
+  // Before `reconcileAdmission`'s own promotion cascade, which can take a while (spawning
+  // multiple queued roots): a restored active-with-a-locator-but-never-confirmed tree must have
+  // its registration deadline armed immediately, not only once that cascade finishes, or it sits
+  // unwatched for however long promotion takes. `reconnectRoots` is synchronous.
   processManager.reconnectRoots();
+  await processManager.reconcileAdmission();
   await processManager.reconcileWorkerAdmission();
   const ready = nats.ready();
 
