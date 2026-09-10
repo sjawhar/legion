@@ -29,6 +29,8 @@ const knownEventTypes: Record<EventType, true> = {
   "ask.resolved": true,
   "comment.created": true,
   "comment.resolved": true,
+  "comment.reopened": true,
+  "comment.edited": true,
   "suggestion.accepted": true,
   "suggestion.rejected": true,
   "message.created": true,
@@ -117,6 +119,8 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
   if (
     event.type === "comment.created" ||
     event.type === "comment.resolved" ||
+    event.type === "comment.reopened" ||
+    event.type === "comment.edited" ||
     event.type === "suggestion.accepted" ||
     event.type === "suggestion.rejected"
   ) {

@@ -116,14 +116,14 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await alice.close();
 });
 
-test("a comment replies to an agent-authored reply without copying its anchor", async ({
+test("a comment reply after an agent-authored reply targets the root without copying its anchor", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
     spec: "Keep this root visible.",
-    title: "Nested comment replies",
+    title: "Root-only comment replies",
   });
   const root = await createComment(issue.key, {
     anchor: { artifact: "spec", quote: "Keep" },
@@ -153,19 +153,17 @@ test("a comment replies to an agent-authored reply without copying its anchor", 
     await expect(replyCard.getByRole("button", { name: "Reply" })).toBeVisible();
     await replyCard.getByRole("button", { name: "Reply" }).click();
     const composer = page.getByRole("form", { name: "Comment composer" });
-    await composer.getByLabel("Comment").fill("Human nested reply.");
+    await composer.getByLabel("Comment").fill("Human thread reply.");
     await composer.getByRole("button", { name: "Comment" }).click();
     await expect.poll(() => submittedReplies).toHaveLength(1);
     expect(submittedReplies[0]).toMatchObject({
-      body: "Human nested reply.",
-      reply_to: agentReply.id,
+      body: "Human thread reply.",
+      reply_to: root.id,
     });
     expect(submittedReplies[0]).not.toHaveProperty("anchor");
     await expect
       .poll(() => listComments(issue.key))
-      .toContainEqual(
-        expect.objectContaining({ body: "Human nested reply.", reply_to: agentReply.id })
-      );
+      .toContainEqual(expect.objectContaining({ body: "Human thread reply.", reply_to: root.id }));
   } finally {
     await alice.close();
   }

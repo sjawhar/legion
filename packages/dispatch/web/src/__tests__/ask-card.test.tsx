@@ -30,7 +30,9 @@ function answered(input: Ask, selected: string[], text: string | null = null): A
   };
 }
 
-function reply(overrides: Partial<Comment> = {}): Comment {
+function reply(
+  overrides: Partial<Omit<Comment, "resolved_by" | "resolved_at" | "edited_at">> = {}
+): Comment {
   return {
     anchor: null,
     ask_id: "ask-1",
@@ -41,6 +43,9 @@ function reply(overrides: Partial<Comment> = {}): Comment {
     issue_key: "CORE-1",
     reply_to: null,
     resolved: false,
+    resolved_by: null,
+    resolved_at: null,
+    edited_at: null,
     suggestion: null,
     ...overrides,
   };

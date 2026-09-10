@@ -73,6 +73,9 @@ const comment: Comment = {
   issue_key: "CORE-1",
   reply_to: null,
   resolved: false,
+  resolved_by: null,
+  resolved_at: null,
+  edited_at: null,
   suggestion: null,
 };
 
@@ -581,7 +584,7 @@ test("Margin replies to an unanchored root without opening an anchored composer"
   }
 });
 
-test("Margin replies to an unanchored child without copying its root comment anchor", async () => {
+test("Margin replies to an unanchored child through its thread root without copying an anchor", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -592,12 +595,18 @@ test("Margin replies to an unanchored child without copying its root comment anc
   queryClient.setQueryData(["inbox"], []);
   queryClient.setQueryData(["asks", issue.key], []);
   queryClient.setQueryData(["user-state"], {});
-  queryClient.setQueryData(["comments", issue.key], [comment, replyToAnchoredComment]);
-  const createComment = spyOn(api, "createComment").mockResolvedValue({
+  const nestedReply: Comment = {
     ...replyToAnchoredComment,
-    body: "Nested reply.",
+    body: "Earlier nested reply.",
     id: "comment-reply-2",
     reply_to: replyToAnchoredComment.id,
+  };
+  queryClient.setQueryData(["comments", issue.key], [comment, replyToAnchoredComment, nestedReply]);
+  const createComment = spyOn(api, "createComment").mockResolvedValue({
+    ...nestedReply,
+    body: "Nested reply.",
+    id: "comment-reply-3",
+    reply_to: comment.id,
   });
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
@@ -610,7 +619,7 @@ test("Margin replies to an unanchored child without copying its root comment anc
   );
 
   try {
-    const replyCard = await screen.findByTestId(`margin-comment-${replyToAnchoredComment.id}`);
+    const replyCard = await screen.findByTestId(`margin-comment-${nestedReply.id}`);
     fireEvent.click(within(replyCard).getByRole("button", { name: "Reply" }));
     const composer = await screen.findByRole("form", { name: "Comment composer" });
     expect(composer.querySelector("blockquote")).toBeNull();
@@ -621,7 +630,7 @@ test("Margin replies to an unanchored child without copying its root comment anc
     await waitFor(() =>
       expect(createComment).toHaveBeenCalledWith(issue.key, {
         body: "Nested reply.",
-        reply_to: replyToAnchoredComment.id,
+        reply_to: comment.id,
         suggestion: undefined,
       })
     );
@@ -735,6 +744,9 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
     issue_key: "CORE-1",
     reply_to: null,
     resolved: false,
+    resolved_by: null,
+    resolved_at: null,
+    edited_at: null,
     suggestion: null,
   };
   queryClient.setQueryData(["issue", issue.key], issue);

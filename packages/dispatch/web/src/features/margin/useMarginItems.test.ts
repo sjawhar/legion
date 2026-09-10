@@ -59,6 +59,9 @@ function comment(id: string, quote: string | null, createdAt: string): Comment {
     issue_key: "CORE-1",
     reply_to: null,
     resolved: false,
+    resolved_by: null,
+    resolved_at: null,
+    edited_at: null,
     suggestion: null,
   };
 }

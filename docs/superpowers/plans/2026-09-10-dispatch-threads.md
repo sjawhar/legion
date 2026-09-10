@@ -55,7 +55,7 @@ None. The threads spec's own "Decisions needed" is empty; the thread-UI ownershi
 ## Decisions where the spec under-specifies (decided here)
 
 1. **Resolution provenance** = `resolved_by jsonb` (an `Actor`) + `resolved_at timestamptz`; accept/reject set them like resolve (an accepted or rejected suggestion is a resolved thread — spec § Acceptance "Accept applies doc edit and resolves thread"); reopen clears them and re-projects the mark with `resolved: false`.
-2. **Edit** is body-only, author-only (`403 NOT_AUTHOR`), agents may edit their own comments through the same route (no tool change in this plan — `dispatch_comment` stays create-only); `edited_at` set; the anchored root's `marks` projection re-runs so Proof's metadata carries the new text.
+2. **Edit** is body-only and limited to human authors (`403 HUMAN_ONLY` for bearer callers, `403 NOT_AUTHOR` for another user); agent edits await per-session credentials. `edited_at` is set; the anchored root's `marks` projection re-runs so Proof's metadata carries the new text.
 3. **Reopen** is `POST /comments/{id}/reopen` on a root (a reply id → `400 INVALID_COMMENT "reopen the thread root"`); event `comment.reopened`; asks are not reopened by this route (asks have their own lifecycle).
 4. **Thread key** = root id (`comment.id` or `ask.id`); exactly one thread is expanded at a time (`expandedThreadKey`); expansion sources: card click, `focusItemForMark`, route `/issues/KEY/comments/:id` or `/asks/:id`; `Esc` in the inline composer with an empty draft collapses; `Esc` with a draft shows the existing discard prompt.
 5. **Collapsed card** = root's first two lines (`line-clamp-2`) + `N replies · last reply <Timestamp>` (omitted when `N === 0`); expanded = root, flat replies (`marginLeft: 0`), actions, inline composer (hidden when the issue is closed).
@@ -160,7 +160,7 @@ func TestReplyMustTargetThreadRoot(t *testing.T) {
 }
 func TestEditCommentIsAuthorOnly(t *testing.T) {
 	// PATCH by the author → 200, body replaced, edited_at set, event comment.edited, anchored root's projection text updated;
-	// PATCH by another login → 403 NOT_AUTHOR, body unchanged; agent bearer editing a human comment → 403; over-cap body → 400 as createComment.
+	// PATCH by another login → 403 NOT_AUTHOR, body unchanged; bearer PATCH with a claimed session actor → 403 HUMAN_ONLY; over-cap body → 400 as createComment.
 }
 func TestResolveRecordsWhoAndWhen(t *testing.T) {
 	// POST /comments/{id}/resolve → resolved_by == actor, resolved_at within the last minute; same for accept/reject.
