@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useLayoutEffect } from "react";
 
 function isTextEditingTarget(target: EventTarget | null): boolean {
   return (
@@ -8,7 +8,7 @@ function isTextEditingTarget(target: EventTarget | null): boolean {
 
 /** Toggles global search without taking over editor and textarea shortcuts. */
 export function useSearchShortcut(toggle: () => void): void {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
         event.key === "k" &&

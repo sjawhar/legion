@@ -61,6 +61,8 @@ test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to 
   try {
     const page = await context.newPage();
     await page.goto("/");
+    await expect(page.getByRole("button", { name: /search/i })).toBeVisible();
+    await page.locator("body").focus();
     await page.keyboard.press("Control+k");
 
     const dialog = page.getByRole("dialog", { name: "Search" });
