@@ -909,10 +909,11 @@ describe("startDaemon", () => {
         "sh",
         "-c",
         expect.stringContaining(
-          '/tools/omp models --no-extensions --extension "$1" --json >/dev/null'
+          'exec /tools/omp models --no-extensions --extension "$1" --json >/dev/null'
         ),
         "sh",
       ]);
+      expect(probeCommand?.[2]).toStartWith("exec ");
       expect(probeCommand?.at(-1)).toContain("legion-omp-probe-");
       expect(loadedState).toBeFalse();
       expect(natsCreated).toBeFalse();
@@ -971,10 +972,10 @@ describe("startDaemon", () => {
     try {
       expect(probeCommands).toHaveLength(2);
       expect(probeCommands[0]?.[2]).toStartWith(
-        'secrets ANTHROPIC_API_KEY -- /tools/omp models --no-extensions --extension "$1"'
+        'exec secrets ANTHROPIC_API_KEY -- /tools/omp models --no-extensions --extension "$1"'
       );
       expect(probeCommands[1]?.[2]).toStartWith(
-        'secrets ANTHROPIC_API_KEY -- /tools/omp models --extension "$1"'
+        'exec secrets ANTHROPIC_API_KEY -- /tools/omp models --extension "$1"'
       );
     } finally {
       await daemon.stop();

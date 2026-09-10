@@ -152,6 +152,11 @@ async function publishToEnvoy(
     throw new EnvoyPublishError(topic, response.status);
   }
 }
+/** `exec` in the built `sh -c` command below (both this probe and `verifyLegionPluginLoaded`'s)
+ * replaces the shell process image with the launch prefix/OMP invocation instead of leaving it
+ * as a child: on the runner's own timeout, only the `sh` process would otherwise be killed,
+ * leaving a hung prefix child (e.g. a prompting `secrets` daemon) holding the inherited pipes
+ * and the daemon boot hanging. With `exec`, the kill signal reaches the real process directly. */
 async function verifyOmpAgentsCapability(
   ompInvocation: string,
   ompLaunchPrefix: readonly string[],
@@ -164,7 +169,7 @@ async function verifyOmpAgentsCapability(
     const result = await runner([
       "sh",
       "-c",
-      `${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --no-extensions --extension "$1" --json >/dev/null`,
+      `exec ${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --no-extensions --extension "$1" --json >/dev/null`,
       "sh",
       probePath,
     ]);
@@ -222,7 +227,7 @@ async function verifyLegionPluginLoaded(
     const result = await runner([
       "sh",
       "-c",
-      `${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --extension "$1" --json >/dev/null`,
+      `exec ${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --extension "$1" --json >/dev/null`,
       "sh",
       probePath,
     ]);
