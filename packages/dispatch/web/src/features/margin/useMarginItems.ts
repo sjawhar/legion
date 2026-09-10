@@ -69,9 +69,9 @@ export function useMarginItems(tab: MarginTab) {
     (ask) => ask.issue_key === issueKey && ask.state === "open"
   ).length;
   const comments = useQuery({
-    enabled: issueKey !== undefined && visibleArtifact !== undefined,
-    queryKey: ["comments", issueKey, visibleArtifact?.id],
-    queryFn: () => api.listComments(issueKey ?? "", visibleArtifact?.id),
+    enabled: issueKey !== undefined,
+    queryKey: ["comments", issueKey],
+    queryFn: () => api.listComments(issueKey ?? ""),
   });
   const userState = useQuery({
     enabled: issueKey !== undefined,
@@ -85,13 +85,18 @@ export function useMarginItems(tab: MarginTab) {
     queryFn: () => api.getIssueEvents(issueKey ?? "", { ids: pinnedIds }),
   });
   const items = useMemo<MarginItem[]>(() => {
-    if (visibleArtifact === undefined) {
-      return [];
-    }
-    const anchoredAsks = (asks.data ?? [])
-      .filter((ask) => ask.issue_key === issueKey && ask.anchor?.artifact_id === visibleArtifact.id)
-      .map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
-    const threads = commentThreads(comments.data ?? []).map((thread) =>
+    const anchoredAsks =
+      visibleArtifact === undefined
+        ? []
+        : (asks.data ?? [])
+            .filter(
+              (ask) => ask.issue_key === issueKey && ask.anchor?.artifact_id === visibleArtifact.id
+            )
+            .map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
+    const visibleComments = (comments.data ?? []).filter(
+      (comment) => comment.anchor === null || comment.anchor.artifact_id === visibleArtifact?.id
+    );
+    const threads = commentThreads(visibleComments).map((thread) =>
       thread.map(({ comment, depth }) => ({ comment, depth, kind: "comment" as const }))
     );
     const roots: MarginItem[][] = [...anchoredAsks.map((ask) => [ask]), ...threads];

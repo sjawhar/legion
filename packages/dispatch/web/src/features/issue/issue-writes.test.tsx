@@ -102,6 +102,7 @@ test("IssuePage keeps an unsaved route draft when a stale refetch arrives", asyn
   patchIssue.mockImplementationOnce(() => firstSave.promise);
 
   try {
+    fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
     const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
     const saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });
@@ -133,6 +134,7 @@ test("IssuePage keeps a route cleared while the previous save was still in fligh
   patchIssue.mockImplementationOnce(() => firstSave.promise);
 
   try {
+    fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
     const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
     const saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });
@@ -164,6 +166,7 @@ test("IssuePage keeps the document and a route draft across a save response", as
   const { unmount } = renderIssuePage();
 
   try {
+    fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
     const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(screen.getByRole("button", { name: "Save route" }));
@@ -190,6 +193,7 @@ test("IssuePage ignores a stale route refetch after a newer successful save", as
   const staleRefetch = deferred<IssueDetails>();
 
   try {
+    fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
     const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
     const saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });

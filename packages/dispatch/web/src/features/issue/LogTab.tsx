@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Event, UserIssueState, UserState } from "../../api/types";
+import { Composer, type ComposerKind } from "../margin/Composer";
 import { actorLabel } from "../refs/actor";
 import { buildLogItems, eventDescription, eventItemId, isPinnedEvent } from "./log-model";
 import {
@@ -10,6 +11,7 @@ import {
   type DismissedStateOperation,
   IssueStateWriteQueue,
 } from "./state-write-queue";
+import { usePreserveReaderPosition } from "./use-preserve-reader-position";
 
 const stateWrites = new IssueStateWriteQueue();
 
@@ -29,9 +31,13 @@ function eventState(state: UserState | undefined, issueKey: string): UserIssueSt
 
 export function LogTab({
   issueKey,
+  isClosed,
+  route,
   state,
 }: {
   issueKey: string;
+  isClosed: boolean;
+  route: string | null;
   state: UserState | undefined;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -51,6 +57,7 @@ export function LogTab({
   const lastRead = useRef(issueState.last_read_seq);
   const observed = useRef(new Map<Element, number>());
   const timers = useRef(new Map<Element, number>());
+  const setLogSection = usePreserveReaderPosition();
   const events = eventItems(log.data);
   const items = useMemo(
     () => buildLogItems(events, issueState.dismissed, issueState.last_read_seq),
@@ -244,7 +251,7 @@ export function LogTab({
   }
 
   return (
-    <section aria-label="Issue log" className="space-y-3">
+    <section aria-label="Issue log" className="space-y-3" ref={setLogSection}>
       {hasFailedOps ? (
         <div className="flex items-center gap-3 text-sm text-rose-700" role="alert">
           <p>Couldn't save pin/dismiss — retry</p>
@@ -314,7 +321,70 @@ export function LogTab({
           {log.isFetchingNextPage ? "Loading…" : "Load older"}
         </button>
       ) : null}
+      <IssueComposer isClosed={isClosed} issueKey={issueKey} route={route} />
     </section>
+  );
+}
+
+function IssueComposer({
+  isClosed,
+  issueKey,
+  route,
+}: {
+  isClosed: boolean;
+  issueKey: string;
+  route: string | null;
+}): ReactNode {
+  const [kind, setKind] = useState<ComposerKind>("comment");
+  const [resetCount, setResetCount] = useState(0);
+
+  if (isClosed) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2 border-t border-slate-200 bg-white pt-3 pb-3 md:sticky md:bottom-0 md:z-10">
+      {route === null ? null : (
+        <div
+          aria-label="Compose target"
+          className="inline-flex gap-1 rounded-lg border border-slate-300 bg-slate-100 p-1 text-sm"
+          role="tablist"
+        >
+          <button
+            aria-selected={kind === "comment"}
+            className={
+              kind === "comment"
+                ? "rounded-md bg-white px-3 py-1 font-semibold text-sky-700 shadow-sm"
+                : "rounded-md px-3 py-1 text-slate-600"
+            }
+            onClick={() => setKind("comment")}
+            role="tab"
+            type="button"
+          >
+            Comment
+          </button>
+          <button
+            aria-selected={kind === "message"}
+            className={
+              kind === "message"
+                ? "rounded-md bg-white px-3 py-1 font-semibold text-sky-700 shadow-sm"
+                : "rounded-md px-3 py-1 text-slate-600"
+            }
+            onClick={() => setKind("message")}
+            role="tab"
+            type="button"
+          >
+            Message · {route}
+          </button>
+        </div>
+      )}
+      <Composer
+        issueKey={issueKey}
+        key={resetCount}
+        kind={route === null ? "comment" : kind}
+        onClose={() => setResetCount((count) => count + 1)}
+      />
+    </div>
   );
 }
 
