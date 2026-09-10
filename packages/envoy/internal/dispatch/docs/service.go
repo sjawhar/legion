@@ -284,8 +284,22 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		state.mu.Unlock()
 		return
 	}
-	markdown := doc.GetText("content").ToString()
+	tree, err := treeOf(doc)
+	var markdown string
+	if err == nil {
+		var markdownErr error
+		markdown, markdownErr = renderTree(tree)
+		err = markdownErr
+	}
 	state.mu.Unlock()
+	if err != nil {
+		if errors.Is(err, ErrDocSchema) {
+			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+			return
+		}
+		s.retrySettle(room, generation, err)
+		return
+	}
 	ctx := context.Background()
 
 	tx, err := s.store.Pool.Begin(ctx)
@@ -322,17 +336,28 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		state.mu.Unlock()
 		return
 	}
-	markdown = doc.GetText("content").ToString()
+	tree, err = treeOf(doc)
+	if err == nil {
+		markdown, err = renderTree(tree)
+	}
 	pending := make(map[string]model.Actor, len(state.pending))
 	for key, actor := range state.pending {
 		pending[key] = actor
 	}
 	state.mu.Unlock()
+	if err != nil {
+		if errors.Is(err, ErrDocSchema) {
+			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+			return
+		}
+		s.retrySettle(room, generation, err)
+		return
+	}
 	if latest.markdown == markdown {
 		return
 	}
 	authors := actorSlice(pending)
-	version, err := s.writeVersionTx(ctx, tx, room, markdown, &versionWrite{authors: authors})
+	version, err := s.writeVersionTx(ctx, tx, room, markdown, tree, &versionWrite{authors: authors})
 	if err != nil {
 		s.retrySettle(room, generation, err)
 		return

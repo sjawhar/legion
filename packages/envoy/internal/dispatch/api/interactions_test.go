@@ -417,7 +417,7 @@ func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
 	notFound := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Missing text", "anchor": map[string]any{"artifact": "spec", "quote": "missing"}, "actor": sessionActor(),
 	})
-	if notFound.Code != http.StatusUnprocessableEntity || !strings.Contains(notFound.Body.String(), `"code":"TARGET_NOT_FOUND"`) {
+	if notFound.Code != http.StatusNotFound || !strings.Contains(notFound.Body.String(), `"code":"TARGET_NOT_FOUND"`) {
 		t.Fatalf("missing anchor target: status=%d body=%s", notFound.Code, notFound.Body.String())
 	}
 	ambiguous := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -613,7 +613,7 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 		return documentService
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Dirty document", "The quick brown fox")
-	if err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The clever brown fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The clever brown fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("change live document: %v", err)
 	}
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -629,7 +629,7 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 		t.Fatalf("anchor against changed document = %#v; want version 2 [11,16)", ask.Anchor)
 	}
 	version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions/2", nil, "alice")
-	if version.Code != http.StatusOK || !strings.Contains(version.Body.String(), `"markdown":"The clever brown fox"`) || !strings.Contains(version.Body.String(), `"named":false`) {
+	if version.Code != http.StatusOK || !strings.Contains(version.Body.String(), `"markdown":"The clever brown fox\n"`) || !strings.Contains(version.Body.String(), `"named":false`) {
 		t.Fatalf("unnamed anchor version: status=%d body=%s", version.Code, version.Body.String())
 	}
 	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
@@ -662,7 +662,7 @@ func TestDocumentEditMapsMissingAndAmbiguousTargets(t *testing.T) {
 		t.Fatalf("missing edit: status=%d body=%s", missing.Code, missing.Body.String())
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
-	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"same same"`) {
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"same same\n"`) {
 		t.Fatalf("failed edit changed document: status=%d body=%s", text.Code, text.Body.String())
 	}
 }
@@ -822,7 +822,7 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read accepted document: %v", err)
 	}
-	if markdown != "The quick red fox" {
+	if markdown != "The quick red fox\n" {
 		t.Fatalf("accepted document = %q; want replacement applied", markdown)
 	}
 	repeated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
@@ -926,7 +926,7 @@ func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read document after concurrent acceptance: %v", err)
 	}
-	if markdown != "foo2" {
+	if markdown != "foo2\n" {
 		t.Fatalf("document after concurrent acceptance = %q, want foo2", markdown)
 	}
 }
@@ -974,7 +974,7 @@ func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read closed document: %v", err)
 	}
-	if markdown != "foo" {
+	if markdown != "foo\n" {
 		t.Fatalf("closed suggestion changed document to %q, want foo", markdown)
 	}
 }
@@ -1601,7 +1601,7 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 	if handlerResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
 	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
 	waitForDocumentConnectionClose(t, connection)
 	reconnected, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
@@ -1609,7 +1609,7 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 		t.Fatalf("reconnect evicted document: response=%#v err=%v", wsResponse, err)
 	}
 	t.Cleanup(func() { _ = reconnected.Close() })
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 }
 
 func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
@@ -1668,7 +1668,7 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 	if handlerResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("accept with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
 	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
 	waitForDocumentConnectionClose(t, connection)
 	reconnected, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
@@ -1676,7 +1676,7 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 		t.Fatalf("reconnect evicted document: response=%#v err=%v", wsResponse, err)
 	}
 	t.Cleanup(func() { _ = reconnected.Close() })
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 }
 
 func TestDocumentUploadRollbackEvictsLiveDocument(t *testing.T) {
@@ -1703,7 +1703,7 @@ func TestDocumentUploadRollbackEvictsLiveDocument(t *testing.T) {
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("upload with forced post-replace failure: status=%d body=%s", response.Code, response.Body.String())
 	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before")
+	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 }
 
 type recordingVersionedStore struct {
@@ -1758,14 +1758,15 @@ func (d *postApplyFailureDocs) ApplyReplace(ctx context.Context, artifactID stri
 	return errors.New("forced post-apply failure")
 }
 
-func (d *postApplyFailureDocs) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) error {
+func (d *postApplyFailureDocs) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
 	d.waitBeforeApply()
-	if err := d.API.ReplaceText(ctx, artifactID, markdown, actor); err != nil {
-		return err
+	_, err := d.API.ReplaceText(ctx, artifactID, markdown, actor)
+	if err != nil {
+		return "", err
 	}
 	close(d.applied)
 	<-d.release
-	return errors.New("forced post-apply failure")
+	return "", errors.New("forced post-apply failure")
 }
 
 func (d *postApplyFailureDocs) Evict(ctx context.Context, artifactID string) error {

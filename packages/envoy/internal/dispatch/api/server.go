@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -196,7 +197,16 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
 		return
 	}
-	var ambiguous *text.ErrTargetAmbiguous
+	var textAmbiguous *text.ErrTargetAmbiguous
+	if errors.As(err, &textAmbiguous) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":      textAmbiguous.Error(),
+			"code":       "TARGET_AMBIGUOUS",
+			"candidates": textAmbiguous.Candidates,
+		})
+		return
+	}
+	var ambiguous *pmdoc.ErrTargetAmbiguous
 	if errors.As(err, &ambiguous) {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":      ambiguous.Error(),
@@ -210,8 +220,17 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_OP", http.StatusBadRequest, invalidOp.Error())
 		return
 	}
-	if errors.Is(err, text.ErrTargetNotFound) {
+	if errors.Is(err, pmdoc.ErrTargetNotFound) || errors.Is(err, text.ErrTargetNotFound) {
 		writeError(w, "TARGET_NOT_FOUND", http.StatusNotFound, err.Error())
+		return
+	}
+	if errors.Is(err, docs.ErrInvalidMarkdown) {
+		writeError(w, "INVALID_MARKDOWN", http.StatusBadRequest, err.Error())
+		return
+	}
+	if errors.Is(err, docs.ErrDocSchema) {
+		writeError(w, "DOC_SCHEMA", http.StatusInternalServerError, err.Error())
+		slog.Error("dispatch: API document outside Proof schema", "error", err)
 		return
 	}
 	if errors.Is(err, docs.ErrIssueClosed) {

@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -55,7 +56,15 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, issueKey string, 
 			return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor range must satisfy 0 <= from < to and quote must not be empty")
 		}
 		anchor.Quote = *input.Quote
-		if *input.To <= text.Len16(live) && text.Slice16(live, *input.From, *input.To) == anchor.Quote {
+		if input.Occurrence == nil && *input.To <= text.Len16(live) && text.Slice16(live, *input.From, *input.To) == anchor.Quote {
+			_, _, resolveErr := text.Resolve(live, anchor.Quote, nil)
+			var ambiguous *text.ErrTargetAmbiguous
+			if errors.As(resolveErr, &ambiguous) {
+				return nil, "", nil, errorf(http.StatusConflict, "ANCHOR_STALE", "anchor quote %q occurs %d times", anchor.Quote, len(ambiguous.Candidates))
+			}
+			if resolveErr != nil {
+				return nil, "", nil, resolveErr
+			}
 			anchor.From = *input.From
 			anchor.To = *input.To
 			break
@@ -94,11 +103,11 @@ func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, issueKey, ar
 	`, issueKey, artifactRef))
 }
 
-// anchorResolveError maps a missing quote to 422 (the caller's input is at
-// fault); an ambiguous quote already renders as 409 TARGET_AMBIGUOUS.
+// anchorResolveError maps a missing quote to 404; ambiguity reaches the
+// standard target error mapping as 409 TARGET_AMBIGUOUS.
 func anchorResolveError(err error) error {
-	if errors.Is(err, text.ErrTargetNotFound) {
-		return errorf(http.StatusUnprocessableEntity, "TARGET_NOT_FOUND", "anchor quote was not found")
+	if errors.Is(err, text.ErrTargetNotFound) || errors.Is(err, pmdoc.ErrTargetNotFound) {
+		return errorf(http.StatusNotFound, "TARGET_NOT_FOUND", "anchor quote was not found")
 	}
 	return err
 }

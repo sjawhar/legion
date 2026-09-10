@@ -138,7 +138,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 
-	if err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text before persistence failure: %v", err)
 	}
 	connection.SetReadDeadline(time.Now().Add(time.Second))
@@ -149,7 +149,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 	}
 	_ = connection.Close()
 	waitForNoLiveDocument(t, service, artifactID)
-	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "before" {
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "before\n" {
 		t.Fatalf("reloaded text after append failure = %q (%v), want persisted text before", got, err)
 	}
 }

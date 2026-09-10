@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,10 +12,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
+	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -37,6 +40,45 @@ func newTestService(t *testing.T) (*Service, string) {
 	return service, artifactID
 }
 
+func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+	version := waitForDocumentVersion(t, service.store, artifactID, 2)
+	var markdown string
+	if err := service.store.Pool.QueryRow(context.Background(), `select markdown from artifact_versions where artifact_id = $1 and number = 2`, artifactID).Scan(&markdown); err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "after\n" || version.Named {
+		t.Fatalf("version 2 = %q named=%v", markdown, version.Named)
+	}
+}
+
+func TestSettleSkipsVersionWhenTreeLeavesTheSchema(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 20 * time.Millisecond
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		transact(func(txn *crdt.Transaction) {
+			fragment.InsertElement(txn, 0, crdt.NewYXmlElement("callout"))
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	var versions int
+	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 1 {
+		t.Fatalf("settle wrote %d versions for a document outside the schema", versions)
+	}
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocSchema) {
+		t.Fatalf("Text err = %v, want ErrDocSchema", err)
+	}
+}
+
 func TestEvictDropsUnconnectedRoomAndCancelsSettlement(t *testing.T) {
 	service, artifactID := newTestService(t)
 	const settleInterval = 50 * time.Millisecond
@@ -47,7 +89,7 @@ func TestEvictDropsUnconnectedRoomAndCancelsSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
-	if err := service.ReplaceText(WithTx(ctx, tx), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := service.ReplaceText(WithTx(ctx, tx), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text before eviction: %v", err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
@@ -57,7 +99,7 @@ func TestEvictDropsUnconnectedRoomAndCancelsSettlement(t *testing.T) {
 		t.Fatalf("evict unconnected document: %v", err)
 	}
 	waitForNoLiveDocument(t, service, artifactID)
-	if got, err := service.Text(ctx, artifactID); err != nil || got != "before" {
+	if got, err := service.Text(ctx, artifactID); err != nil || got != "before\n" {
 		t.Fatalf("document after eviction = %q (%v), want persisted text before", got, err)
 	}
 	time.Sleep(3 * settleInterval)
@@ -79,15 +121,7 @@ func TestSettlePersistsPendingAuthorAfterDisconnect(t *testing.T) {
 	connectionID := service.nextConnection.Add(1)
 	service.addConnection(artifactID, connectionID, actor)
 
-	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		content := doc.GetText("content")
-		transact(func(tx *crdt.Transaction) {
-			content.Delete(tx, 0, content.Len())
-			content.Insert(tx, 0, "after", nil)
-		})
-	}); err != nil {
-		t.Fatalf("apply connected client update: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	service.removeConnection(artifactID, connectionID)
 
 	version := waitForDocumentVersion(t, service.store, artifactID, 2)
@@ -100,15 +134,7 @@ func TestSettleWritesDirtyVersionWithoutPendingAuthors(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
 
-	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		content := doc.GetText("content")
-		transact(func(tx *crdt.Transaction) {
-			content.Delete(tx, 0, content.Len())
-			content.Insert(tx, 0, "after", nil)
-		})
-	}); err != nil {
-		t.Fatalf("apply unattributed update: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 
 	version := waitForDocumentVersion(t, service.store, artifactID, 2)
 	if len(version.Authors) != 0 {
@@ -123,16 +149,10 @@ func TestConnectedActorIsPendingAfterEachDocumentUpdate(t *testing.T) {
 	connectionID := service.nextConnection.Add(1)
 	service.addConnection(artifactID, connectionID, actor)
 
+	current := "before"
 	for number, markdown := range []string{"after first update", "after second update"} {
-		if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-			content := doc.GetText("content")
-			transact(func(tx *crdt.Transaction) {
-				content.Delete(tx, 0, content.Len())
-				content.Insert(tx, 0, markdown, nil)
-			})
-		}); err != nil {
-			t.Fatalf("apply connected update %d: %v", number+1, err)
-		}
+		editLiveTree(t, service, artifactID, replaceRun(current, markdown))
+		current = markdown
 		version := waitForDocumentVersion(t, service.store, artifactID, number+2)
 		if len(version.Authors) != 1 || version.Authors[0] != actor {
 			t.Fatalf("version %d authors = %#v, want %v", number+2, version.Authors, actor)
@@ -145,15 +165,7 @@ func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 
-	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		content := doc.GetText("content")
-		transact(func(tx *crdt.Transaction) {
-			content.Delete(tx, 0, content.Len())
-			content.Insert(tx, 0, "after", nil)
-		})
-	}); err != nil {
-		t.Fatalf("apply first update: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	state := service.room(artifactID)
 	state.mu.Lock()
 	stale := state.gen
@@ -207,7 +219,7 @@ func TestSettleRetriesTransientVersionWriteFailure(t *testing.T) {
 		_, _ = service.store.Pool.Exec(context.Background(), `drop sequence if exists dispatch_test_settle_failure`)
 	})
 
-	if err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("change document before transient settle failure: %v", err)
 	}
 	time.Sleep(20 * service.settle)
@@ -235,15 +247,7 @@ func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 	`, artifactID); err != nil {
 		t.Fatalf("lock document issue: %v", err)
 	}
-	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		content := doc.GetText("content")
-		transact(func(tx *crdt.Transaction) {
-			content.Delete(tx, 0, content.Len())
-			content.Insert(tx, 0, "after", nil)
-		})
-	}); err != nil {
-		t.Fatalf("apply document update: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	locked := false
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -287,7 +291,7 @@ func TestIssueReopenRestoresLiveWrites(t *testing.T) {
 		t.Fatalf("close document issue: %v", err)
 	}
 	service.SetIssueClosed("DOC-1", true)
-	if err := service.ReplaceText(context.Background(), artifactID, "closed", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrIssueClosed) {
+	if _, err := service.ReplaceText(context.Background(), artifactID, "closed", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("write to closed issue = %v, want ErrIssueClosed", err)
 	}
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = null where key = 'DOC-1'`); err != nil {
@@ -298,10 +302,10 @@ func TestIssueReopenRestoresLiveWrites(t *testing.T) {
 	if got := service.events.SubscriberCount(); got != 0 {
 		t.Fatalf("stale issue.closed event gained %d subscriptions, want none", got)
 	}
-	if err := service.ReplaceText(context.Background(), artifactID, "reopened", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := service.ReplaceText(context.Background(), artifactID, "reopened", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write to reopened issue: %v", err)
 	}
-	waitForDocumentText(t, service, artifactID, "reopened")
+	waitForDocumentText(t, service, artifactID, "reopened\n")
 }
 
 func TestCancelledTextLoadDoesNotQuarantineRoom(t *testing.T) {
@@ -329,7 +333,7 @@ func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	first := model.Actor{Kind: "user", ID: "alice"}
 	second := model.Actor{Kind: "user", ID: "bob"}
-	if err := service.ReplaceText(context.Background(), artifactID, "after", first); err != nil {
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", first); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
 	state := service.room(artifactID)
@@ -432,11 +436,91 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 		t.Fatalf("begin seed text: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	if err := service.SeedText(context.Background(), tx, artifactID, markdown); err != nil {
+	if _, err := service.SeedText(context.Background(), tx, artifactID, markdown); err != nil {
 		t.Fatalf("seed service text: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit seed text: %v", err)
+	}
+}
+
+// editLiveTree writes a browser-style tree change through the live Yjs room.
+func editLiveTree(t *testing.T, service *Service, artifactID string, edit func(*pmdoc.Node) *pmdoc.Node) {
+	t.Helper()
+	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		tree, err := pmdoc.Read(fragment)
+		if err != nil {
+			t.Fatalf("read live tree: %v", err)
+		}
+		want := edit(tree)
+		transact(func(txn *crdt.Transaction) {
+			if err := pmdoc.Update(txn, fragment, want); err != nil {
+				t.Errorf("update live tree: %v", err)
+			}
+		})
+	})
+	if err != nil {
+		t.Fatalf("apply browser edit: %v", err)
+	}
+}
+
+// liveTree reads the resident tree under the room lock.
+func liveTree(t *testing.T, service *Service, artifactID string) *pmdoc.Node {
+	t.Helper()
+	var tree *pmdoc.Node
+	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		var readErr error
+		tree, readErr = pmdoc.Read(doc.GetXmlFragment(fragmentName))
+		if readErr != nil {
+			t.Errorf("read live tree: %v", readErr)
+		}
+	})
+	if err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+		t.Fatalf("read live document: %v", err)
+	}
+	return tree
+}
+
+// replaceRun rewrites the text of the first run containing find, keeping its marks.
+func replaceRun(find, with string) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		var visit func(*pmdoc.Node) bool
+		visit = func(node *pmdoc.Node) bool {
+			if node.Type == "text" && strings.Contains(node.Text, find) {
+				node.Text = strings.Replace(node.Text, find, with, 1)
+				return true
+			}
+			for _, child := range node.Children {
+				if visit(child) {
+					return true
+				}
+			}
+			return false
+		}
+		visit(tree)
+		return tree
+	}
+}
+
+// deleteRun removes the first text run with exactly text, preserving ProseMirror's no-empty-text invariant.
+func deleteRun(text string) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		var visit func(*pmdoc.Node) bool
+		visit = func(node *pmdoc.Node) bool {
+			for index, child := range node.Children {
+				if child.Type == "text" && child.Text == text {
+					node.Children = append(node.Children[:index], node.Children[index+1:]...)
+					return true
+				}
+				if visit(child) {
+					return true
+				}
+			}
+			return false
+		}
+		visit(tree)
+		return tree
 	}
 }
 func waitForRoomClosed(t *testing.T, service *Service, artifactID string) {

@@ -48,8 +48,8 @@ func TestBrowserAnchorResolvesShiftedQuoteNearOriginalRange(t *testing.T) {
 	ask := decodeBody[struct {
 		Anchor model.Anchor `json:"anchor"`
 	}](t, created)
-	if ask.Anchor.Quote != "brown" || ask.Anchor.From != 16 || ask.Anchor.To != 21 {
-		t.Fatalf("shifted browser anchor = %#v, want brown at [16,21)", ask.Anchor)
+	if ask.Anchor.Quote != "brown" || ask.Anchor.From != 18 || ask.Anchor.To != 23 {
+		t.Fatalf("shifted browser anchor = %#v, want brown at [18,23)", ask.Anchor)
 	}
 }
 
@@ -134,8 +134,8 @@ func TestBrowserAnchorRequiresOccurrenceWhenShiftedQuoteRepeats(t *testing.T) {
 	ask := decodeBody[struct {
 		Anchor model.Anchor `json:"anchor"`
 	}](t, occurrence)
-	if ask.Anchor.From != 14 || ask.Anchor.To != 19 {
-		t.Fatalf("occurrence browser anchor = %#v, want second brown at [14,19)", ask.Anchor)
+	if ask.Anchor.From != 16 || ask.Anchor.To != 21 {
+		t.Fatalf("occurrence browser anchor = %#v, want second brown at [16,21)", ask.Anchor)
 	}
 
 	ambiguous := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
