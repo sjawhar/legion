@@ -193,3 +193,24 @@ fi
 printf 'PASS: asserts a signed local GitHub ping without webhook forwarding\n'
 
 printf 'PASS: normalizes stored GitHub webhook secret before child processes start\n'
+
+mkdir -p "$SMOKE_DIR"
+SMOKE_PROJECT="acme/1" SMOKE_OMP_LAUNCH_PREFIX="" write_daemon_config
+[[ "$(grep -c '^omp_launch_prefix: \[\]$' "${SMOKE_DIR}/legion.yaml")" == "1" ]] || {
+  printf 'expected omp_launch_prefix: [] when SMOKE_OMP_LAUNCH_PREFIX is explicitly empty, got:\n%s\n' "$(<"${SMOKE_DIR}/legion.yaml")" >&2
+  exit 1
+}
+if grep -q '^  - $' "${SMOKE_DIR}/legion.yaml"; then
+  printf 'unexpected blank list item in generated config\n' >&2
+  exit 1
+fi
+
+printf 'PASS: SMOKE_OMP_LAUNCH_PREFIX="" disables the launch prefix (omp_launch_prefix: [])\n'
+
+SMOKE_PROJECT="acme/1" write_daemon_config
+[[ "$(grep -A1 '^omp_launch_prefix:$' "${SMOKE_DIR}/legion.yaml" | tail -1)" == "  - secrets" ]] || {
+  printf 'expected the default secrets prefix when SMOKE_OMP_LAUNCH_PREFIX is unset, got:\n%s\n' "$(<"${SMOKE_DIR}/legion.yaml")" >&2
+  exit 1
+}
+
+printf 'PASS: unset SMOKE_OMP_LAUNCH_PREFIX defaults to the secrets wrapper prefix\n'
