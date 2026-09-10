@@ -26,6 +26,10 @@ interface CancelableSleepHandle {
 
 export interface WorkerBootWatchdogDeps {
   workerBootTimeoutSeconds(): number;
+  /** Caps how many consecutive observation intervals a boot may spend probe-alive-but-still-
+   * unconfirmed before the watch stops re-arming and treats it as a boot failure instead — see
+   * `WorkerBootWatchdog`'s own doc comment. */
+  registrationDeadlineIntervals(): number;
   now(): number;
   run: TmuxRun;
   isOmpPane(pid: number): Promise<boolean>;
@@ -38,8 +42,9 @@ export interface WorkerBootWatchdogDeps {
    * worker claim, or has moved on since this watch was armed. */
   getClaim(token: string): WatchedClaim | undefined;
   /** Handles a boot the watchdog has confirmed dead (pane gone *and* socket refusing a
-   * connection): retires it, counts a launch failure, and retries or escalates at the
-   * threshold. Owned by `ProcessManager` — see its own doc comment. */
+   * connection) or one that has exhausted its registration deadline (pane/socket alive on every
+   * probe, but never actually confirmed): retires it, counts a launch failure, and retries or
+   * escalates at the threshold. Owned by `ProcessManager` — see its own doc comment. */
   retireUnconfirmedBoot(
     token: string,
     locator: WorkerLocator,
@@ -57,17 +62,19 @@ export interface WorkerBootWatchdogDeps {
  * opened it yet) and, once connected, races the client's `closed` promise against the rest of
  * the interval — the fast path for a socket that closes well before the interval elapses.
  * Whichever way the interval ends, if `/worker/started` still has not confirmed this exact
- * generation, the watchdog probes before acting (`probeAlive`): a live pane or a reachable
- * socket re-arms the watch for another interval, touching neither the claim nor
- * `launchFailures`; only a pane that is both gone and refusing a connection is actually dead,
- * handled by `retireUnconfirmedBoot` (retire, count a launch failure, retry or give up at the
- * threshold). Every wait races the watchdog's own cancellation, armed under `token` so a
- * confirmed `/worker/started`, a retirement, a tree close, or `cancelAll()` can cancel it
- * outright instead of leaving it to poll or sleep unobserved. A no-op once cancelled, once
- * disposed, or once the claim has moved on (superseded by a later launch attempt). The whole
- * watch is wrapped in an outer catch so an unexpected throw anywhere in it can never abandon
- * its own registry entry (and the claim it is watching) stuck "booting" forever with nothing
- * left to observe it.
+ * generation, the watchdog probes before acting (`probeAlive`): a pane that is both gone and
+ * refusing a connection is dead, handled immediately by `retireUnconfirmedBoot` (retire, count a
+ * launch failure, retry or give up at the threshold). A live pane or a reachable socket re-arms
+ * the watch for another interval instead — but only up to `registrationDeadlineIntervals`
+ * consecutive times: a pane that keeps answering forever without ever registering has not merely
+ * had a slow boot, it never actually completed one, so past that many intervals it is treated
+ * exactly like a dead one (same `retireUnconfirmedBoot` call) rather than watched indefinitely.
+ * Every wait races the watchdog's own cancellation, armed under `token` so a confirmed
+ * `/worker/started`, a retirement, a tree close, or `cancelAll()` can cancel it outright instead
+ * of leaving it to poll or sleep unobserved. A no-op once cancelled, once disposed, or once the
+ * claim has moved on (superseded by a later launch attempt). The whole watch is wrapped in an
+ * outer catch so an unexpected throw anywhere in it can never abandon its own registry entry
+ * (and the claim it is watching) stuck "booting" forever with nothing left to observe it.
  */
 export class WorkerBootWatchdog {
   private readonly armed = new Map<string, { generation: number; cancel: () => void }>();
@@ -240,6 +247,7 @@ export class WorkerBootWatchdog {
     };
 
     const watch = async (): Promise<void> => {
+      let aliveButUnconfirmedIntervals = 0;
       while (!cancelled) {
         await watchOneInterval();
         if (cancelled) return;
@@ -249,19 +257,33 @@ export class WorkerBootWatchdog {
           return;
         }
         if (await this.probeAlive(token, locator)) {
+          aliveButUnconfirmedIntervals += 1;
+          const deadline = this.deps.registrationDeadlineIntervals();
+          if (aliveButUnconfirmedIntervals < deadline) {
+            console.error(
+              `[legion] worker ${issue}/${role} has not confirmed its boot within ${this.deps.workerBootTimeoutSeconds()}s but its pane/socket is still alive; re-arming the watch instead of evicting a slow boot (${aliveButUnconfirmedIntervals}/${deadline} intervals)`
+            );
+            // A real macrotask boundary, never merely another microtask: a mocked `sleep`/`now`
+            // that never advances real time (test fixtures routinely do this for speed) would
+            // otherwise let this loop re-arm indefinitely without ever yielding to the event
+            // loop's timer phase, starving everything else — including the test runner's own
+            // per-test timeout — of a turn. Production's own real timers make this a no-op in
+            // practice (the interval wait itself already yields for real). Routed through
+            // `deps.yield` (a real timer by default) rather than a raw `setTimeout` inline, so a
+            // test using an injected fake clock still owns every wait this watchdog makes.
+            await this.yieldToEventLoop();
+            continue;
+          }
+          if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
           console.error(
-            `[legion] worker ${issue}/${role} has not confirmed its boot within ${this.deps.workerBootTimeoutSeconds()}s but its pane/socket is still alive; re-arming the watch instead of evicting a slow boot`
+            `[legion] worker ${issue}/${role} never registered after ${aliveButUnconfirmedIntervals} consecutive alive-but-unconfirmed intervals; retiring and retrying`
           );
-          // A real macrotask boundary, never merely another microtask: a mocked `sleep`/`now`
-          // that never advances real time (test fixtures routinely do this for speed) would
-          // otherwise let this loop re-arm indefinitely without ever yielding to the event
-          // loop's timer phase, starving everything else — including the test runner's own
-          // per-test timeout — of a turn. Production's own real timers make this a no-op in
-          // practice (the interval wait itself already yields for real). Routed through
-          // `deps.yield` (a real timer by default) rather than a raw `setTimeout` inline, so a
-          // test using an injected fake clock still owns every wait this watchdog makes.
-          await this.yieldToEventLoop();
-          continue;
+          await this.deps.retireUnconfirmedBoot(token, locator, generation, {
+            treeKey,
+            issue,
+            role,
+          });
+          return;
         }
         if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
         console.error(

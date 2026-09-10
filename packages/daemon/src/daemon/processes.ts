@@ -269,6 +269,7 @@ export class ProcessManager {
     });
     this.bootWatchdog = new WorkerBootWatchdog({
       workerBootTimeoutSeconds: () => this.deps.config.workerBootTimeoutSeconds,
+      registrationDeadlineIntervals: () => this.deps.config.workerBootRegistrationDeadlineIntervals,
       now: () => this.deps.now(),
       run: this.deps.run,
       isOmpPane: (pid) => this.isOmpPane(pid),

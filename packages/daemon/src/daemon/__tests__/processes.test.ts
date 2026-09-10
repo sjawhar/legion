@@ -172,6 +172,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     workerStopTimeoutSeconds: 10,
     treeStopTimeoutSeconds: 60,
     workerBootTimeoutSeconds: 120,
+    workerBootRegistrationDeadlineIntervals: 3,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir,
@@ -2580,7 +2581,12 @@ describe("ProcessManager", () => {
       publications,
       state: managedState,
     } = manager(state, {
-      config: config(stateDir, { workerBootTimeoutSeconds: 1 }),
+      config: config(stateDir, {
+        workerBootTimeoutSeconds: 1,
+        // High enough that 3 full observation cycles (this test's own scenario) never hits the
+        // registration deadline -- this test is about the alive-vs-dead probe, not the deadline.
+        workerBootRegistrationDeadlineIntervals: 1_000,
+      }),
       now: () => currentTime,
       sleep: async (ms) => {
         currentTime += ms;
@@ -2655,7 +2661,12 @@ describe("ProcessManager", () => {
       publications,
       state: managedState,
     } = manager(state, {
-      config: config(stateDir, { workerBootTimeoutSeconds: 1 }),
+      config: config(stateDir, {
+        workerBootTimeoutSeconds: 1,
+        // High enough that 3 full observation cycles (this test's own scenario) never hits the
+        // registration deadline -- this test is about the alive-vs-dead probe, not the deadline.
+        workerBootRegistrationDeadlineIntervals: 1_000,
+      }),
       now: () => currentTime,
       sleep: async (ms) => {
         currentTime += ms;

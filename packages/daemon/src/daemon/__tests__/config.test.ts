@@ -341,6 +341,59 @@ describe("daemon config", () => {
     expect(withoutEither.workerBootTimeoutSeconds).toBe(120);
   });
 
+  it("resolves workerBootRegistrationDeadlineIntervals: YAML beats env, env beats the 3 default", () => {
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "envoy_url: http://listener:9020",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "board_project_ids:",
+        "  - PVT_one",
+        "repos:",
+        "  - acme/widgets",
+        "app_logins:",
+        "  - legion-implement[bot]",
+        "worker_boot_registration_deadline_intervals: 5",
+        "gates:",
+        "  design: off",
+        "  merge: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+
+    const fromYaml = resolveDaemonConfig({ configFile: file });
+    expect(fromYaml.config.workerBootRegistrationDeadlineIntervals).toBe(5);
+
+    // Config-file value wins over env, matching every other lifecycle setting's precedence
+    // (`resolveValue`: cli > config > env > default).
+    const fileBeatsEnv = resolveDaemonConfig({
+      configFile: file,
+      env: { LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS: "2" },
+    });
+    expect(fileBeatsEnv.config.workerBootRegistrationDeadlineIntervals).toBe(5);
+
+    const { config: fromEnvOnly } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_BOARD_PROJECT_IDS: "PVT_alpha",
+        LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS: "2",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(fromEnvOnly.workerBootRegistrationDeadlineIntervals).toBe(2);
+
+    const { config: withoutEither } = resolveDaemonConfig({
+      env: { ...requiredEnv, LEGION_BOARD_PROJECT_IDS: "PVT_alpha" },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(withoutEither.workerBootRegistrationDeadlineIntervals).toBe(3);
+  });
+
   it("rejects the retired dispatch_mcp_url key from the YAML loader shape with a helpful message", () => {
     expect(() =>
       loadConfigFromFile(

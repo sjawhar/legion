@@ -61,6 +61,12 @@ export interface DaemonConfig {
    * interval. Only a boot whose pane is gone *and* whose socket refuses a connection is retired,
    * launch-failure counted, and retried (or escalated to `worker-died` at the threshold). */
   workerBootTimeoutSeconds: number;
+  /** Caps how many consecutive `workerBootTimeoutSeconds` intervals a boot may spend
+   * probe-alive-but-still-unconfirmed before the watchdog stops re-arming and treats it as a
+   * boot failure instead (retired, launch-failure counted, retried through the same threshold
+   * path a dead pane would be) — a pane that keeps answering forever without ever registering
+   * is not "slow", it never actually completed its boot. */
+  workerBootRegistrationDeadlineIntervals: number;
   gates: { design: "root-issues" | "off"; merge: "human" | "off" };
   githubApps: GitHubAppsConfig;
   stateDir: string;
@@ -110,6 +116,7 @@ const DEFAULT_RESYNC_INTERVAL_MS = 600_000;
 const DEFAULT_WORKER_STOP_TIMEOUT_SECONDS = 10;
 const DEFAULT_TREE_STOP_TIMEOUT_SECONDS = 60;
 const DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS = 120;
+const DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS = 3;
 const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp";
 
 const CONFIG_SCHEMA: ConfigSchema = {
@@ -137,6 +144,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   worker_stop_timeout_seconds: null,
   tree_stop_timeout_seconds: null,
   worker_boot_timeout_seconds: null,
+  worker_boot_registration_deadline_intervals: null,
   state_dir: null,
   gates: { design: null, merge: null },
   github_apps: {
@@ -468,6 +476,7 @@ export function loadConfigFromFile(
     ["worker_stop_timeout_seconds", "workerStopTimeoutSeconds"],
     ["tree_stop_timeout_seconds", "treeStopTimeoutSeconds"],
     ["worker_boot_timeout_seconds", "workerBootTimeoutSeconds"],
+    ["worker_boot_registration_deadline_intervals", "workerBootRegistrationDeadlineIntervals"],
   ] as const) {
     const value = readPositiveInteger(config[fileKey], fileKey);
     if (value !== undefined) fields[configKey] = value;
@@ -653,6 +662,15 @@ export function resolveDaemonConfig(
     ),
     DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS
   );
+  const workerBootRegistrationDeadlineIntervals = resolveValue(
+    opts.cliOverrides?.workerBootRegistrationDeadlineIntervals,
+    fileNumber(fields, "workerBootRegistrationDeadlineIntervals"),
+    parseEnvPositiveInteger(
+      env.LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS,
+      "LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS"
+    ),
+    DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS
+  );
 
   const lifecycleNumbers: Record<string, number> = {
     admissionCap: admissionCap.value,
@@ -664,6 +682,7 @@ export function resolveDaemonConfig(
     workerStopTimeoutSeconds: workerStopTimeoutSeconds.value,
     treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
     workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
+    workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
   };
   for (const [field, value] of Object.entries(lifecycleNumbers)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
@@ -718,6 +737,7 @@ export function resolveDaemonConfig(
       workerStopTimeoutSeconds: workerStopTimeoutSeconds.value,
       treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
       workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
+      workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
       gates: parsedGates,
       githubApps: githubApps.value,
       stateDir: stateDir.value,
