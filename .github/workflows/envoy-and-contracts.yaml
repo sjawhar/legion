@@ -272,12 +272,8 @@ jobs:
       - name: Generate Go contracts from shared schema
         run: bun run gen:go
         working-directory: packages/contracts
-      - name: Prepare pmdoc fixture generator dependencies
-        # Temporary until @sjawhar/proof-editor is published to npm; see
-        # packages/envoy/internal/dispatch/pmdoc/doc.go.
-        run: |
-          bash prepare-dist.sh
-          bun install
+      - name: Install pmdoc fixture generator dependencies
+        run: bun install
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
       - name: Check pmdoc fixtures are up to date
         run: bun run check

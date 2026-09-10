@@ -54,19 +54,4 @@
 // Go tests decode Yjs updates with Read, compare browser fixture JSON, and
 // compare Splice with those replaceRange results; Update output is decoded
 // by the browser's y-prosemirror through gen/decode.ts.
-//
-// # Temporary: building @sjawhar/proof-editor from source
-//
-// @sjawhar/proof-editor is not yet published to npm (the trusted-publisher
-// setup is pending), so gen/package.json cannot depend on a registry version
-// yet. Until it is published, gen/package.json points at a local
-// "file:./proof-editor-dist" dependency that gen/prepare-dist.sh populates
-// before `bun install`: it copies an already-built checkout when
-// $PROOF_EDITOR_DIST is set (local dev), or clones sjawhar/proof-sdk at the
-// pinned revision in gen/prepare-dist.sh and runs `npm install && npm run
-// build:lib` to produce one (CI). gen/proof-editor-dist/ is gitignored —
-// every environment rebuilds it.
-// Once the package is published, replace the file: dependency with
-// "@sjawhar/proof-editor": "^0.1.0", delete prepare-dist.sh and its CI step,
-// and drop this section.
 package pmdoc
