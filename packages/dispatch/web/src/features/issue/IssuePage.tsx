@@ -24,6 +24,7 @@ import { DocEditor } from "../doc/DocEditor";
 import { DocView } from "../doc/DocView";
 import { actorLabel } from "../refs/actor";
 import { buildIssuePath, type DispatchRoute, parseIssuePath } from "../refs/routes";
+import { Timestamp } from "../refs/Timestamp";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { BoardStrip } from "./BoardStrip";
@@ -177,6 +178,7 @@ function IssueHeader({
   const queryClient = useQueryClient();
   const [title, setTitle] = useState(issue.title);
   const [titleDirty, setTitleDirty] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
   const [route, setRoute] = useState(issue.route ?? "");
   const [routeDirty, setRouteDirty] = useState(false);
   const titleRef = useRef(title);
@@ -268,6 +270,14 @@ function IssueHeader({
     }
   };
   const routeIsValid = route === "" || routePattern.test(route);
+  // A failed title/status/route save must not leave the optimistic h1 (or route field)
+  // showing an unsaved value indefinitely — fall back to the last confirmed issue state.
+  useEffect(() => {
+    if (updateIssue.isError) {
+      setTitle(issue.title);
+      setTitleDirty(false);
+    }
+  }, [updateIssue.isError, issue.title]);
 
   return (
     <header className="mb-6 border-b border-slate-200 pb-6">
@@ -282,18 +292,61 @@ function IssueHeader({
           {state.pinned ? "Unpin issue" : "Pin issue"}
         </button>
       </div>
-      <input
-        aria-label="Issue title"
-        className="mt-2 w-full rounded-lg border border-transparent bg-transparent px-2 py-1 text-2xl font-semibold text-slate-950 outline-none hover:border-slate-300 focus:border-sky-500"
-        onBlur={saveTitle}
-        onChange={(event) => {
-          setTitleDirty(true);
-          setTitle(event.target.value);
-        }}
-        onKeyDown={saveTitleOnEnter}
-        disabled={isClosed}
-        value={title}
-      />
+      {editingTitle ? (
+        <input
+          aria-label="Issue title"
+          className="mt-2 w-full rounded-lg border border-transparent bg-transparent px-2 py-1 text-2xl font-semibold text-slate-950 outline-none hover:border-slate-300 focus:border-sky-500"
+          disabled={isClosed || updateIssue.isPending}
+          onBlur={() => {
+            saveTitle();
+            setEditingTitle(false);
+            setTitleDirty(false);
+          }}
+          onChange={(event) => {
+            setTitle(event.target.value);
+            setTitleDirty(true);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setTitle(issue.title);
+              setEditingTitle(false);
+              setTitleDirty(false);
+              return;
+            }
+            saveTitleOnEnter(event);
+          }}
+          ref={(node) => node?.focus()}
+          value={title}
+        />
+      ) : (
+        <h1
+          className={`mt-2 w-full rounded-lg border border-transparent px-2 py-1 text-2xl font-semibold break-words text-slate-950 dark:text-slate-100 ${
+            isClosed ? "" : "cursor-text hover:border-slate-300"
+          }`}
+          onClick={() => {
+            if (!isClosed) {
+              setEditingTitle(true);
+            }
+          }}
+          onFocus={() => {
+            if (!isClosed) {
+              setEditingTitle(true);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (!isClosed && (event.key === "Enter" || event.key === " ")) {
+              event.preventDefault();
+              setEditingTitle(true);
+            }
+          }}
+          tabIndex={isClosed ? -1 : 0}
+          title={issue.title}
+        >
+          {/* Optimistic: `title` already reflects the pending edit; it resets to
+              `issue.title` once the server confirms (or the field is reverted). */}
+          {title}
+        </h1>
+      )}
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <label className="text-sm font-medium text-slate-700">
           Status
@@ -415,12 +468,14 @@ function historicalHighlight(
 
 function ArtifactVersionView({
   artifactId,
+  createdAt,
   from,
   issueKey,
   to,
   version,
 }: {
   artifactId: string;
+  createdAt: string | undefined;
   from: number | undefined;
   issueKey: string;
   to: number | undefined;
@@ -455,7 +510,14 @@ function ArtifactVersionView({
   );
   return (
     <section aria-label={`Document version ${version}`} className="space-y-3">
-      <h2 className="text-lg font-semibold text-slate-900">Version {version}</h2>
+      <h2 className="text-lg font-semibold text-slate-900">
+        Version {version}
+        {createdAt === undefined ? null : (
+          <span className="ml-2 text-sm font-normal text-slate-500">
+            <Timestamp at={createdAt} />
+          </span>
+        )}
+      </h2>
       <DocView highlight={highlight} markdown={content.data.markdown} />
     </section>
   );
@@ -595,6 +657,10 @@ function IssueDetail({
           ) : (
             <ArtifactVersionView
               artifactId={selectedArtifact.id}
+              createdAt={
+                selectedArtifact.versions.find((item) => item.number === artifactRoute.version)
+                  ?.created_at
+              }
               from={highlight?.from}
               issueKey={issueKey}
               to={highlight?.to}

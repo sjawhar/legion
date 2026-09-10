@@ -128,7 +128,7 @@ test("the spec renders as a formatted document by default, with no click require
     await page.goto(`/issues/${issue.key}`);
     await page.getByRole("tab", { name: "Spec" }).click();
 
-    const heading = page.getByRole("heading", { level: 1 });
+    const heading = page.getByRole("article").getByRole("heading", { level: 1 });
     const paragraph = page.getByRole("article").locator("p").first();
     await expect(heading).toBeVisible();
     await expect(paragraph).toBeVisible();

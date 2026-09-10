@@ -5,6 +5,14 @@
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   color: #0f172a;
   background: #f8fafc;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #e2e8f0;
+    background: #0f172a;
+  }
 }
 
 body {

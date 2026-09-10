@@ -11,6 +11,7 @@ import type {
 } from "../../api/types";
 import { VersionDiff } from "../doc/VersionDiff";
 import { buildIssuePath, parseIssuePath } from "../refs/routes";
+import { Timestamp } from "../refs/Timestamp";
 import { Unfurl } from "../refs/Unfurl";
 import { Upload } from "./Upload";
 
@@ -157,17 +158,19 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
 
   return (
     <article
-      className={`space-y-3 border-b border-slate-200 py-4 last:border-b-0 ${
+      className={`space-y-3 border-b border-slate-200 py-4 last:border-b-0 dark:border-slate-800 ${
         highlighted ? "rounded-xl px-3 ring-2 ring-sky-400" : ""
       }`}
       data-testid={`artifact-${artifact.slug}`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2 text-slate-700">
+        <div className="flex min-w-0 items-center gap-2 text-slate-700 dark:text-slate-300">
           {kindIcon(artifact.kind)}
           <div className="min-w-0">
-            <h2 className="truncate font-semibold text-slate-950">{artifact.name}</h2>
-            <p className="text-xs text-slate-500">
+            <h2 className="truncate font-semibold text-slate-950 dark:text-slate-100">
+              {artifact.name}
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
               {artifact.slug} · {versions.length} {versions.length === 1 ? "version" : "versions"}
             </p>
           </div>
@@ -241,11 +244,12 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
                 >
                   Download version {version.number}
                 </a>
-                {artifact.kind === "doc" ? null : (
-                  <span className="w-full text-xs text-slate-500">
-                    {formatBytes(version.size)} · SHA-256 {version.sha256 ?? "unavailable"}
-                  </span>
-                )}
+                <span className="w-full text-xs text-slate-500 dark:text-slate-400">
+                  <Timestamp at={version.created_at} />
+                  {artifact.kind === "doc"
+                    ? null
+                    : ` · ${formatBytes(version.size)} · SHA-256 ${version.sha256 ?? "unavailable"}`}
+                </span>
               </li>
             ))}
           </ul>
