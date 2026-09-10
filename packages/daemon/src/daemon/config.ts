@@ -484,7 +484,11 @@ function loadGitHubApps(value: unknown, resolveSecrets: boolean): GitHubAppsConf
   return apps;
 }
 
+/** `gates` is optional in the file: absent means the `DaemonConfig` defaults
+ * (`design: root-issues`, `merge: human`), applied by `resolveDaemonConfig`. A present block
+ * must be a mapping; each key inside it is individually optional. */
 function parseGates(value: unknown, field: string): DaemonConfig["gates"] | undefined {
+  if (value === undefined) return undefined;
   const parsed = UnknownRecordSchema.safeParse(value);
   if (!parsed.success) throw new Error(`${field} must be a mapping`);
   const design = readString(parsed.data.design, `${field}.design`) ?? "root-issues";
