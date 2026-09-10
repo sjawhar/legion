@@ -37,6 +37,7 @@ type Deps struct {
 	AgentToken  string
 	ServerURL   string
 	Settle      time.Duration
+	MarkWait    time.Duration
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -56,6 +57,7 @@ type Service struct {
 	agentToken     string
 	serverURL      string
 	settle         time.Duration
+	markWait       time.Duration
 	rooms          sync.Map
 	nextConnection atomic.Uint64
 	stopping       atomic.Bool
@@ -172,6 +174,10 @@ func New(deps Deps) *Service {
 	if settle <= 0 {
 		settle = 2 * time.Second
 	}
+	markWait := deps.MarkWait
+	if markWait <= 0 {
+		markWait = time.Second
+	}
 	if deps.Events == nil {
 		deps.Events = events.NewBroker()
 	}
@@ -187,6 +193,7 @@ func New(deps Deps) *Service {
 		agentToken:  deps.AgentToken,
 		serverURL:   strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:      settle,
+		markWait:    markWait,
 		suppressed:  make(map[string][]*suppressSlot),
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
