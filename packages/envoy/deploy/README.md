@@ -109,7 +109,8 @@ available. Host adapters use the same file or the `DISPATCH_URL` and
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |
 | `DISPATCH_IDENTITY` | no | `cookie` (default) or `header:<name>` for a trusted proxy or tests. |
 | `DISPATCH_IDENTITY_HEADER_TRUSTED` | conditional | Set to `1` when header identity and GitHub OAuth credentials share a deployment. |
-| `DISPATCH_REPO_PROJECTS` | no | Maps external repositories to native Dispatch projects. |
+| `DISPATCH_REPO_PROJECTS` | no | Maps specific external repositories to native Dispatch projects. |
+| `DISPATCH_DEFAULT_PROJECT` | conditional | Native Dispatch project for repositories `DISPATCH_REPO_PROJECTS` doesn't map. Required unless `DISPATCH_REPO_PROJECTS` covers every repository; validated against Postgres at boot. |
 | `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS; otherwise `natsUrls` in `envoy.json` is required. |
 | `DISPATCH_URL` | no | Host-adapter override for the Dispatch base URL; use with `DISPATCH_TOKEN`. |
 | `DISPATCH_TOKEN` | host adapters | Bearer token paired with `DISPATCH_URL`. |

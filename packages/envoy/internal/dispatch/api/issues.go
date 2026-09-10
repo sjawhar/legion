@@ -78,6 +78,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var externalRepo, externalNumber string
+	usingDefaultProject := false
 	if input.External != "" {
 		var err error
 		externalRepo, externalNumber, err = externalRef(input.External)
@@ -87,8 +88,13 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		project, mapped := s.deps.RepoProjects[externalRepo]
 		if !mapped {
-			writeError(w, "PROJECT_UNMAPPED", http.StatusBadRequest, "repository is not mapped in DISPATCH_REPO_PROJECTS")
-			return
+			project = s.deps.DefaultProject
+			if project == "" {
+				writeError(w, "PROJECT_UNMAPPED", http.StatusBadRequest,
+					"repository is not mapped in DISPATCH_REPO_PROJECTS and DISPATCH_DEFAULT_PROJECT is not configured")
+				return
+			}
+			usingDefaultProject = true
 		}
 		if input.Project != "" && input.Project != project {
 			writeError(w, "EXTERNAL_PROJECT_MISMATCH", http.StatusBadRequest, "external issue project must match DISPATCH_REPO_PROJECTS")
@@ -137,10 +143,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if parentKey != "" {
 		parent = parentKey
 	}
+	labels := []string{}
+	if usingDefaultProject {
+		labels = []string{repoLabelPrefix + externalRepo}
+	}
 	if _, err := tx.Exec(r.Context(), `
-		insert into issues (key, project_key, number, title, parent_key, created_by)
-		values ($1, $2, $3, $4, $5, $6)
-	`, key, input.Project, number, input.Title, parent, actorJSON); err != nil {
+		insert into issues (key, project_key, number, title, parent_key, created_by, labels)
+		values ($1, $2, $3, $4, $5, $6, $7)
+	`, key, input.Project, number, input.Title, parent, actorJSON, labels); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

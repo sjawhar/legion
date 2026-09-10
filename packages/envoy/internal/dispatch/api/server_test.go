@@ -109,6 +109,37 @@ func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
 	return mux, database
 }
 
+func newTestHandlerWithDefaultProject(t *testing.T) (http.Handler, *store.Store) {
+	t.Helper()
+	database := openEmptyTestStore(t)
+	broker := events.NewBroker()
+	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond})
+	t.Cleanup(func() {
+		if err := documentService.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	deps, err := NewDeps(DepsInput{
+		Store: database,
+		Identity: identity.HeaderIdentity{
+			Header:        "X-Dispatch-User",
+			AllowedLogins: map[string]struct{}{"alice": {}, "bob": {}},
+		},
+		AgentToken:      "agent-token",
+		RepoProjectsRaw: "owner/repo=TEST",
+		DefaultProject:  "DEFAULT",
+		ServerURL:       "https://dispatch.example",
+		Docs:            documentService,
+		Events:          broker,
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, deps)
+	return mux, database
+}
+
 func waitForDatabaseLocks(t *testing.T, database *store.Store, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -392,8 +423,71 @@ func TestExternalIssueRejectsUnmappedProject(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
 		"external": "unmapped/repository#1",
 	}, "alice")
-	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"PROJECT_UNMAPPED"`) {
-		t.Fatalf("create unmapped external issue: status=%d body=%s", response.Code, response.Body.String())
+	body := response.Body.String()
+	if response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"PROJECT_UNMAPPED"`) ||
+		!strings.Contains(body, "DISPATCH_REPO_PROJECTS") || !strings.Contains(body, "DISPATCH_DEFAULT_PROJECT") {
+		t.Fatalf("create unmapped external issue: status=%d body=%s", response.Code, body)
+	}
+}
+
+func TestExternalIssueUsesDefaultProjectForUnmappedRepository(t *testing.T) {
+	handler, _ := newTestHandlerWithDefaultProject(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "DEFAULT", "name": "Default project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create default project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"external": "another/repo#5",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create default-project external issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key           string   `json:"key"`
+		Labels        []string `json:"labels"`
+		ExternalLinks []struct {
+			URL string `json:"url"`
+		} `json:"external_links"`
+	}](t, created)
+	if issue.Key != "DEFAULT-1" {
+		t.Fatalf("default-project issue key: got %q, want DEFAULT-1", issue.Key)
+	}
+	if len(issue.Labels) != 1 || issue.Labels[0] != repoLabelPrefix+"another/repo" {
+		t.Fatalf("default-project issue labels: got %#v, want [%sanother/repo]", issue.Labels, repoLabelPrefix)
+	}
+	if len(issue.ExternalLinks) != 1 || issue.ExternalLinks[0].URL != "https://github.com/another/repo/issues/5" {
+		t.Fatalf("default-project issue external links: got %#v", issue.ExternalLinks)
+	}
+}
+
+func TestExternalIssueExplicitMappingTakesPrecedenceOverDefaultProject(t *testing.T) {
+	handler, _ := newTestHandlerWithDefaultProject(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create mapped project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "DEFAULT", "name": "Default project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create default project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"external": "owner/repo#9",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create mapped external issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key    string   `json:"key"`
+		Labels []string `json:"labels"`
+	}](t, created)
+	if issue.Key != "TEST-1" {
+		t.Fatalf("explicit-mapping issue key: got %q, want TEST-1", issue.Key)
+	}
+	if len(issue.Labels) != 0 {
+		t.Fatalf("explicit-mapping issue labels: got %#v, want none", issue.Labels)
 	}
 }
 

@@ -17,6 +17,7 @@ func TestResolveBootConfigRejectsUntrustedHeaderIdentityWithOAuth(t *testing.T) 
 		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
 		"DISPATCH_APP_CLIENT_ID":  "client-id",
 		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+		"DISPATCH_REPO_PROJECTS":  "owner/repo=TEST",
 	}))
 	if err == nil || !strings.Contains(err.Error(), "DISPATCH_IDENTITY_HEADER_TRUSTED") {
 		t.Fatalf("error: got %v, want trusted header rejection", err)
@@ -25,11 +26,37 @@ func TestResolveBootConfigRejectsUntrustedHeaderIdentityWithOAuth(t *testing.T) 
 
 func TestResolveBootConfigRejectsCookieModeWithoutAllowlist(t *testing.T) {
 	_, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":         "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN": "agent-token",
+		"DATABASE_URL":           "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":   "agent-token",
+		"DISPATCH_REPO_PROJECTS": "owner/repo=TEST",
 	}))
 	if err == nil || !strings.Contains(err.Error(), "DISPATCH_ALLOWED_LOGINS") {
 		t.Fatalf("error: got %v, want missing allowlist rejection", err)
+	}
+}
+
+func TestResolveBootConfigRequiresDefaultProjectWithoutRepoMapping(t *testing.T) {
+	_, err := resolveBootConfig(envGetter(map[string]string{
+		"DATABASE_URL":            "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":    "agent-token",
+		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_DEFAULT_PROJECT") {
+		t.Fatalf("error: got %v, want default project requirement", err)
+	}
+}
+
+func TestResolveBootConfigAcceptsDefaultProjectWithoutRepoMapping(t *testing.T) {
+	_, err := resolveBootConfig(envGetter(map[string]string{
+		"DATABASE_URL":             "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":     "agent-token",
+		"DISPATCH_IDENTITY":        "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS":  "sjawhar",
+		"DISPATCH_DEFAULT_PROJECT": "TEST",
+	}))
+	if err != nil {
+		t.Fatalf("resolve boot config: %v", err)
 	}
 }
 
@@ -40,6 +67,7 @@ func TestResolveBootConfigDisablesNATS(t *testing.T) {
 		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
 		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
 		"DISPATCH_NATS_DISABLED":  "1",
+		"DISPATCH_REPO_PROJECTS":  "owner/repo=TEST",
 	}))
 	if err != nil {
 		t.Fatalf("resolve boot config: %v", err)

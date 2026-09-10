@@ -530,7 +530,9 @@ async function ensureIssue(
   } catch (error) {
     if (error instanceof DispatchServiceError && error.code === "PROJECT_UNMAPPED") {
       const repository = issueReference.slice(0, issueReference.lastIndexOf("#"));
-      throw new Error(`repository ${repository} is not mapped in DISPATCH_REPO_PROJECTS`);
+      throw new Error(
+        `repository ${repository} is not mapped in DISPATCH_REPO_PROJECTS and no DISPATCH_DEFAULT_PROJECT is configured`
+      );
     }
     throw error;
   }

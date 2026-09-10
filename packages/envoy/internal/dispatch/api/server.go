@@ -27,15 +27,21 @@ var (
 	externalRefPattern = regexp.MustCompile(`^([^/\s]+)/([^/\s#]+)#([1-9][0-9]*)$`)
 )
 
+// repoLabelPrefix marks an issue created through DISPATCH_DEFAULT_PROJECT
+// with the external repository it came from, so the repository stays
+// visible and filterable once it's no longer named by the project key.
+const repoLabelPrefix = "repo:"
+
 // Deps are the API's application dependencies.
 type Deps struct {
-	Store        *store.Store
-	Identity     identity.Identity
-	AgentToken   string
-	RepoProjects map[string]string
-	ServerURL    string
-	Docs         docs.API
-	Events       *events.Broker
+	Store          *store.Store
+	Identity       identity.Identity
+	AgentToken     string
+	RepoProjects   map[string]string
+	DefaultProject string
+	ServerURL      string
+	Docs           docs.API
+	Events         *events.Broker
 }
 
 // DepsInput contains raw boot values used to construct API dependencies.
@@ -44,6 +50,7 @@ type DepsInput struct {
 	Identity        identity.Identity
 	AgentToken      string
 	RepoProjectsRaw string
+	DefaultProject  string
 	ServerURL       string
 	Docs            docs.API
 	Events          *events.Broker
@@ -54,6 +61,10 @@ func NewDeps(input DepsInput) (Deps, error) {
 	repoProjects, err := ParseRepoProjects(input.RepoProjectsRaw)
 	if err != nil {
 		return Deps{}, err
+	}
+	defaultProject := strings.TrimSpace(input.DefaultProject)
+	if defaultProject != "" && !projectKeyPattern.MatchString(defaultProject) {
+		return Deps{}, fmt.Errorf("invalid DISPATCH_DEFAULT_PROJECT %q (expected project key)", defaultProject)
 	}
 	if input.Events == nil {
 		input.Events = events.NewBroker()
@@ -68,13 +79,14 @@ func NewDeps(input DepsInput) (Deps, error) {
 		})
 	}
 	return Deps{
-		Store:        input.Store,
-		Identity:     input.Identity,
-		AgentToken:   input.AgentToken,
-		RepoProjects: repoProjects,
-		ServerURL:    strings.TrimSuffix(input.ServerURL, "/"),
-		Docs:         input.Docs,
-		Events:       input.Events,
+		Store:          input.Store,
+		Identity:       input.Identity,
+		AgentToken:     input.AgentToken,
+		RepoProjects:   repoProjects,
+		DefaultProject: defaultProject,
+		ServerURL:      strings.TrimSuffix(input.ServerURL, "/"),
+		Docs:           input.Docs,
+		Events:         input.Events,
 	}, nil
 }
 
