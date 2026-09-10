@@ -14,13 +14,20 @@ trap 'rm -rf "$temporary_dir"' EXIT
 
 mkdir -p "$fake_bin" "$smoke_dir"
 printf 'none\n' >"${smoke_dir}/webhook-mode"
+# LEGSMOKE-1 is this rig's own root; LEGSMOKE-99 is a second parentless issue with no relation to
+# it at all, standing in for a concurrent rig's own root sharing the same LEGSMOKE project. The
+# recorded root-issue file below must make every checkpoint below target LEGSMOKE-1 regardless --
+# a regression back to guessing "the first parentless issue" could as easily land on LEGSMOKE-99,
+# which has no case in the fake curl script below and would fail loudly instead of silently
+# checking the wrong exercise.
+printf 'LEGSMOKE-1\n' >"${smoke_dir}/root-issue"
 cat >"${fake_bin}/curl" <<'EOF'
 #!/usr/bin/env bash
 request="$*"
 printf '%s\n' "$request" >>"$CURL_LOG"
 case "$request" in
   *"/legion/v1/state"*)
-    printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":{"LEGSMOKE-1":{"designAskId":"ask-design"}}}'
+    printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":{"LEGSMOKE-1":{"designAskId":"ask-design"}}}'
     ;;
   *"/api/v1/issues/LEGSMOKE-1/asks?state=open"*)
     printf '%s' '[{"id":"ask-design","state":"open","options":[{"label":"Approve"}]}]'
@@ -139,3 +146,26 @@ fi
   exit 1
 }
 printf 'PASS: allows resync checkpoints and blocks live-event checkpoints in none mode\n'
+
+bare_temporary_dir="$(mktemp -d)"
+bare_smoke_dir="${bare_temporary_dir}/smoke"
+mkdir -p "$bare_smoke_dir"
+printf 'none\n' >"${bare_smoke_dir}/webhook-mode"
+if PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$bare_smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected checkpoint 1 to fail without SMOKE_ROOT_ISSUE or a recorded root-issue file\n' >&2
+  rm -rf "$bare_temporary_dir"
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'SMOKE_ROOT_ISSUE is unset'* && "$(<"$output_file")" == *'root-issue'* ]] || {
+  cat "$output_file" >&2
+  rm -rf "$bare_temporary_dir"
+  exit 1
+}
+rm -rf "$bare_temporary_dir"
+printf 'PASS: fails with a clear message when neither SMOKE_ROOT_ISSUE nor a recorded root-issue file is present\n'

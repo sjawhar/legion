@@ -69,27 +69,27 @@ project_slug() {
   printf '%s\n' "$project"
 }
 
-issue_key() {
+# The root Dispatch issue for this exercise: `up.sh` creates it once and records its key at
+# `${smoke_dir}/root-issue` for every later checkpoints.sh invocation to read (it never guesses
+# by picking "the first parentless issue" -- LEGSMOKE is a shared project, and other concurrent
+# rigs' own root issues would make that guess pick the wrong one). SMOKE_ROOT_ISSUE always
+# overrides both, for pointing a single checkpoint at a specific exercise's root by hand.
+smoke_root_issue() {
   if [[ -n "${SMOKE_ROOT_ISSUE:-}" ]]; then
     printf '%s\n' "$SMOKE_ROOT_ISSUE"
     return
   fi
-  state | jq -er --arg prefix "${SMOKE_REPO}#" '[.issues | keys[] | select(startswith($prefix))] | first'
+  local root_file="${smoke_dir}/root-issue"
+  [[ -s "$root_file" ]] ||
+    fail "SMOKE_ROOT_ISSUE is unset and ${root_file} is missing or empty; run up.sh (it records the root issue there) or set SMOKE_ROOT_ISSUE"
+  printf '%s\n' "$(<"$root_file")"
 }
 
 root_key() {
-  if [[ -n "${SMOKE_ROOT_ISSUE:-}" ]]; then
-    printf '%s\n' "$SMOKE_ROOT_ISSUE"
-    return
-  fi
-  state | jq -er --arg prefix "${SMOKE_REPO}#" '[.trees | to_entries[] | select(.key | startswith($prefix)) | .value.root] | first'
+  smoke_root_issue
 }
 dispatch_root_key() {
-  if [[ -n "${SMOKE_ROOT_ISSUE:-}" ]]; then
-    printf '%s\n' "$SMOKE_ROOT_ISSUE"
-    return
-  fi
-  state | jq -er '[.issues | to_entries[] | select((.value.parent // null) == null) | .key] | first'
+  smoke_root_issue
 }
 
 issue_number() {

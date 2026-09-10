@@ -193,3 +193,37 @@ fi
 printf 'PASS: asserts a signed local GitHub ping without webhook forwarding\n'
 
 printf 'PASS: normalizes stored GitHub webhook secret before child processes start\n'
+
+export DISPATCH_URL="http://dispatch.test"
+export DISPATCH_TOKEN="test-dispatch-token"
+printf '{"key":"LEGSMOKE-7"}' >"$response_file"
+if ! (ensure_root_issue) >"$assertion_file" 2>&1; then
+  cat "$assertion_file" >&2
+  exit 1
+fi
+[[ "$(<"${SMOKE_DIR}/root-issue")" == "LEGSMOKE-7" ]] || {
+  printf 'expected ensure_root_issue to record the created Dispatch root issue key\n' >&2
+  exit 1
+}
+[[ "$(<"$assertion_file")" == *'CREATED root issue LEGSMOKE-7'* ]] || {
+  printf 'expected a CREATED root issue message\n' >&2
+  exit 1
+}
+
+# Idempotent rerun against the same SMOKE_DIR: reuses the recorded file instead of creating a
+# second Dispatch issue for the same exercise.
+printf '{"key":"LEGSMOKE-8"}' >"$response_file"
+if ! (ensure_root_issue) >"$assertion_file" 2>&1; then
+  cat "$assertion_file" >&2
+  exit 1
+fi
+[[ "$(<"${SMOKE_DIR}/root-issue")" == "LEGSMOKE-7" ]] || {
+  printf 'expected ensure_root_issue to reuse the already-recorded root issue on rerun\n' >&2
+  exit 1
+}
+[[ "$(<"$assertion_file")" == *'REUSED root issue LEGSMOKE-7'* ]] || {
+  printf 'expected a REUSED root issue message on rerun\n' >&2
+  exit 1
+}
+
+printf 'PASS: records a created Dispatch root issue and reuses it on a later rerun\n'

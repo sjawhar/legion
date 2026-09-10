@@ -290,6 +290,34 @@ github_apps:
 EOF
 }
 
+# Creates this exercise's Dispatch root issue in the shared LEGSMOKE project and records its key
+# at `${smoke_dir}/root-issue` -- the daemon's own "root-issues" design gate then discovers it as
+# a parentless issue, and checkpoints.sh's `smoke_root_issue` reads this exact file to name the
+# right root instead of guessing "the first parentless issue" in a project other concurrent
+# rigs also share. Idempotent across a rerun against the same SMOKE_DIR: a rig that already
+# recorded a root issue reuses it rather than creating a second one.
+ensure_root_issue() {
+  local root_file="${smoke_dir}/root-issue"
+  local title
+  local response
+  local key
+
+  if [[ -s "$root_file" ]]; then
+    printf 'REUSED root issue %s\n' "$(<"$root_file")"
+    return
+  fi
+  title="Legion smoke exercise: ${SMOKE_REPO} ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+  response="$(curl --fail --silent --show-error \
+    -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg project "$smoke_dispatch_project" --arg title "$title" '{project: $project, title: $title}')" \
+    "${DISPATCH_URL%/}/api/v1/issues")" ||
+    fail "could not create Dispatch root issue in ${smoke_dispatch_project}"
+  key="$(jq -er '.key' <<<"$response")" || fail "Dispatch issue creation response lacked a key: ${response}"
+  printf '%s\n' "$key" >"$root_file"
+  printf 'CREATED root issue %s\n' "$key"
+}
+
 ensure_nats() {
   if docker container inspect "$nats_name" >/dev/null 2>&1; then
     [[ "$(docker port "$nats_name" 4222/tcp)" == *":${nats_port}"* ]] ||
@@ -537,6 +565,7 @@ main() {
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config
+  ensure_root_issue
   (
     cd "${repo_root}/packages/envoy"
     go build -o out/envoy-listener ./cmd/listener

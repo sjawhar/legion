@@ -25,7 +25,7 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | `LEGION_REVIEW_APP_ID` | Numeric reviewer App ID. | `3202653` |
 | `LEGION_APP_LOGINS` | Comma-separated GitHub bot logins for both Legion Apps. | `legion-implementer[bot],legion-reviewer[bot]` |
 
-`LEGSMOKE` must already exist on the server named by `DISPATCH_URL` before starting the rig (project creation is human-only); it is not configurable.
+`LEGSMOKE` must already exist on the server named by `DISPATCH_URL` before starting the rig (project creation is human-only); it is not configurable. `up.sh` creates this exercise's own root Dispatch issue inside that shared project (or reuses one already recorded under `SMOKE_DIR` from an earlier run of the same rig) and records its key at `${SMOKE_DIR}/root-issue`; checkpoints read that file (or `SMOKE_ROOT_ISSUE`, if set) rather than guessing which of the shared project's parentless issues belongs to this run.
 
 It also requires these secret inputs:
 
@@ -104,7 +104,7 @@ Run the numbered assertions during the end-to-end exercise:
 bash scripts/smoke/checkpoints.sh <1-12>
 ```
 
-Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints infer the root issue and Legion pull request from daemon state where possible. Set the listed variable when a later exercise has more than one candidate:
+Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints 1–4, 9, and 12 read the root issue `up.sh` recorded at `${SMOKE_DIR}/root-issue`; checkpoint 5 infers the Legion pull request from `gh pr list` where possible. Set the listed variable when a later exercise has more than one candidate, or when checkpoints run against a `SMOKE_DIR` `up.sh` never populated:
 
 With a recorded `SMOKE_WEBHOOK_MODE=none`, resync-driven checkpoints 1–4 still run. Checkpoints 5–7 and 9–11 are blocked because they directly assert pull-request, check-run, issue-comment, or issue-event delivery. `envoy` and `forward` both count as live ingress.
 
