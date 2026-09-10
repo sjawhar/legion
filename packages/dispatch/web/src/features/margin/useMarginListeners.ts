@@ -78,6 +78,12 @@ export function useMarginListeners({
     const cardForTarget = (target: EventTarget | null) =>
       target instanceof Element ? target.closest<HTMLElement>("[data-margin-item]") : null;
     const selectCard = (event: MouseEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest("a, button, input, label, select, textarea") !== null
+      ) {
+        return;
+      }
       const card = cardForTarget(event.target);
       if (card?.dataset.marginItem !== undefined) {
         selectItem(card.dataset.marginItem);

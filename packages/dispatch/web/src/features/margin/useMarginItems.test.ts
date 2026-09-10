@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
-import type { Event } from "../api/types";
-import { fetchPinnedEvents } from "../features/issue/BoardStrip";
+import type { Event } from "../../api/types";
+import { fetchPinnedEvents } from "./useMarginItems";
 
 function event(id: string): Event {
   const seq = Number(id);

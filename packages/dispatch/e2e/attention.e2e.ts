@@ -38,7 +38,7 @@ test("new events leave the reader's scroll position unchanged", async ({ browser
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   await expect(page.getByText("Existing message 29")).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 500));
 
@@ -82,7 +82,7 @@ test("a reader already at the top sees a new event appear without any scroll com
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   const firstArticle = page.locator("[data-event-seq]").first();
   await expect(page.getByText("Existing message 9")).toBeVisible();
   const before = (await firstArticle.boundingBox())?.y;
@@ -112,7 +112,7 @@ test("scrolling without a state-changing render still compensates against the re
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   await expect(page.getByText("Existing message 29")).toBeVisible();
 
   await page.evaluate(() => window.scrollTo(0, 200));
@@ -142,7 +142,7 @@ test("returning to the top after reading further down is not undone by a stale a
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   await expect(page.getByText("Existing message 29")).toBeVisible();
 
   // Force a genuine render while scrolled away from the top (deterministically, via a Pin click
@@ -184,7 +184,7 @@ test("returning to the top is safe even if no animation frame ever samples the s
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   await expect(page.getByText("Existing message 29")).toBeVisible();
 
   // Force a genuine render while scrolled away from the top, same as above.
@@ -248,7 +248,7 @@ async function verifyGapDetection(
   if (viewport !== undefined) {
     await page.setViewportSize(viewport);
   }
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   await expect(page.getByText("Msg 19")).toBeVisible();
 
   // Find a gap between two adjacent cards near the middle of the log (comfortable content on

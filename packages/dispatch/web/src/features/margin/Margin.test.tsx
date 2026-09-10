@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 
@@ -77,6 +77,21 @@ const comment: Comment = {
   suggestion: null,
 };
 
+const replyToAnchoredComment: Comment = {
+  ...comment,
+  anchor: null,
+  body: "Can you clarify?",
+  id: "comment-reply-1",
+  reply_to: comment.id,
+};
+
+const unanchoredRootComment: Comment = {
+  ...comment,
+  anchor: null,
+  body: "Issue-level comment.",
+  id: "comment-unanchored-root",
+};
+
 const anchoredAsk: Ask = {
   anchor: {
     artifact_id: "artifact-1",
@@ -96,6 +111,13 @@ const anchoredAsk: Ask = {
   question: "Should this ship?",
   state: "open",
   urgency: "med",
+};
+
+const unanchoredAsk: Ask = {
+  ...anchoredAsk,
+  anchor: null,
+  id: "ask-unanchored",
+  question: "Approve the release?",
 };
 
 function CommentLink(): ReactNode {
@@ -428,6 +450,188 @@ test("Margin surfaces and retries a failed fetch for the issue's asks", async ()
   } finally {
     view.unmount();
     listIssueAsks.mockRestore();
+  }
+});
+
+test("Margin puts an unanchored open ask under Needs you and sends its answer", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  const answeredAsk: Ask = {
+    ...unanchoredAsk,
+    answer: {
+      at: "2026-09-10T00:01:00Z",
+      selected: ["Ship"],
+      text: null,
+      user: "alice",
+    },
+    state: "answered",
+  };
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], [unanchoredAsk]);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  const answerAsk = spyOn(api, "answerAsk").mockResolvedValue(answeredAsk);
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const needsYou = await screen.findByRole("region", { name: "Needs you" });
+    expect(within(needsYou).getByText(unanchoredAsk.question)).toBeTruthy();
+    const shipOption = within(needsYou).getByRole("radio", { name: "Ship" });
+    fireEvent.click(shipOption);
+    expect((shipOption as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(needsYou).getByRole("button", { name: "Submit answer" }));
+    await waitFor(() =>
+      expect(answerAsk).toHaveBeenCalledWith(unanchoredAsk.id, { selected: ["Ship"] })
+    );
+  } finally {
+    view.unmount();
+    answerAsk.mockRestore();
+  }
+});
+
+test("Margin clears an answered anchored ask from Needs you without an event stream", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  const answeredAsk: Ask = {
+    ...anchoredAsk,
+    answer: {
+      at: "2026-09-10T00:01:00Z",
+      selected: ["Ship"],
+      text: null,
+      user: "alice",
+    },
+    state: "answered",
+  };
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], [anchoredAsk]);
+  queryClient.setQueryData(["asks", issue.key], [anchoredAsk]);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  const answerAsk = spyOn(api, "answerAsk").mockResolvedValue(answeredAsk);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([answeredAsk]);
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const needsYou = await screen.findByRole("region", { name: "Needs you" });
+    fireEvent.click(within(needsYou).getByRole("radio", { name: "Ship" }));
+    fireEvent.click(within(needsYou).getByRole("button", { name: "Submit answer" }));
+    await waitFor(() =>
+      expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, { selected: ["Ship"] })
+    );
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
+    expect(screen.getByRole("button", { name: "Open review panel (0 open asks)" })).toBeTruthy();
+    expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, { selected: ["Ship"] });
+  } finally {
+    view.unmount();
+    answerAsk.mockRestore();
+    listIssueAsks.mockRestore();
+  }
+});
+
+test("Margin replies to an unanchored root without opening an anchored composer", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [unanchoredRootComment]);
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const rootCard = await screen.findByTestId(`margin-comment-${unanchoredRootComment.id}`);
+    fireEvent.click(within(rootCard).getByRole("button", { name: "Reply" }));
+    const composer = await screen.findByRole("form", { name: "Comment composer" });
+    expect(composer.querySelector("blockquote")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("Margin replies to an unanchored child with its root comment's anchor", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [comment, replyToAnchoredComment]);
+  const createComment = spyOn(api, "createComment").mockResolvedValue({
+    ...replyToAnchoredComment,
+    body: "Nested reply.",
+    id: "comment-reply-2",
+    reply_to: replyToAnchoredComment.id,
+  });
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const replyCard = await screen.findByTestId(`margin-comment-${replyToAnchoredComment.id}`);
+    fireEvent.click(within(replyCard).getByRole("button", { name: "Reply" }));
+    const composer = await screen.findByRole("form", { name: "Comment composer" });
+    expect(within(composer).getByText(comment.anchor?.quote ?? "")).toBeTruthy();
+    fireEvent.change(within(composer).getByLabelText("Comment"), {
+      target: { value: "Nested reply." },
+    });
+    fireEvent.click(within(composer).getByRole("button", { name: "Comment" }));
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith(issue.key, {
+        body: "Nested reply.",
+        reply_to: replyToAnchoredComment.id,
+        suggestion: undefined,
+      })
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
   }
 });
 

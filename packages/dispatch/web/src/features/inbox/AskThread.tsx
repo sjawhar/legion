@@ -108,10 +108,8 @@ export function AskThread({
   createReply: reply = createReply,
   getAskThread: getThread = getAskThread,
 }: AskThreadProps): ReactNode {
-  // The same ask can render simultaneously in more than one place (the issue
-  // board and the margin both show open anchored asks) - useId keeps this
-  // instance's reply field id/label pairing unique across those mounts,
-  // instead of colliding on a shared `ask.id`-derived id.
+  // Each AskThread instance owns its reply field label so transient duplicate
+  // mounts during a responsive transition cannot share an ask-id-derived id.
   const replyFieldId = `${useId()}-reply`;
   const { replies, body, setBody, submitReply, isPending, isError, retry } = useAskThread(
     ask,

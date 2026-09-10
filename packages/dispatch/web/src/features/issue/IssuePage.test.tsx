@@ -5,7 +5,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import { api, type ListEventsOptions } from "../../api/client";
-import type { IssueDetails } from "../../api/types";
+import type { Ask, IssueDetails } from "../../api/types";
 import { IssuePage } from "./IssuePage";
 
 class WebSocketStub {
@@ -64,17 +64,31 @@ const issue: IssueDetails = {
   updated_at: "2026-09-09T00:00:00Z",
 };
 
+const openIssueAsk: Ask = {
+  anchor: null,
+  answer: null,
+  author: { id: "session-1", kind: "session" },
+  created_at: "2026-09-10T00:00:00Z",
+  id: "ask-open",
+  issue_key: "CORE-1",
+  multiple: false,
+  options: [],
+  question: "Should this ship?",
+  state: "open",
+  urgency: "med",
+};
+
 function issueWithExternalLink(url: string): IssueDetails {
   return { ...issue, external_links: [{ url }] };
 }
 
-function stubIssuePage(nextIssue: IssueDetails): () => void {
+function stubIssuePage(nextIssue: IssueDetails, inbox: Ask[] = []): () => void {
   const originalGetIssue = api.getIssue;
   const originalGetIssueEvents = api.getIssueEvents;
   const originalGetInbox = api.getInbox;
   const originalGetMyState = api.getMyState;
   api.getIssue = async () => nextIssue;
-  api.getInbox = async () => [];
+  api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false } });
   api.getIssueEvents = async () => [];
   return () => {
@@ -130,7 +144,7 @@ test("IssuePage reads newest events when looking for active sessions", async () 
     };
 
     const view = render(
-      <MemoryRouter initialEntries={["/issues/CORE-1"]}>
+      <MemoryRouter initialEntries={["/issues/CORE-1/log"]}>
         <QueryClientProvider client={queryClient}>
           <Routes>
             <Route
@@ -228,14 +242,15 @@ test("IssuePage continues to unfurl GitHub issues through the issues endpoint", 
   }
 });
 
-test("IssuePage defaults the bare issue route to the Log tab", async () => {
-  const restore = stubIssuePage(issue);
+test("IssuePage opens the Spec tab and leaves open asks out of the main column", async () => {
+  const restore = stubIssuePage(issue, [openIssueAsk]);
   const view = renderIssuePage("/issues/CORE-1");
 
   try {
-    await screen.findByRole("tab", { name: "Log", selected: true });
-    expect(screen.getByRole("tab", { name: "Spec", selected: false })).toBeDefined();
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    expect(screen.getByRole("tab", { name: "Log", selected: false })).toBeDefined();
     expect(screen.getByRole("tab", { name: "Children", selected: false })).toBeDefined();
+    expect(screen.queryByLabelText("Issue board")).toBeNull();
   } finally {
     view.unmount();
     restore();
@@ -290,7 +305,7 @@ test("IssuePage keeps the document provider alive while switching tabs", async (
 
 test("IssuePage preserves an in-progress Log composer draft across a tab round-trip", async () => {
   const restore = stubIssuePage(issue);
-  const view = renderIssuePage("/issues/CORE-1");
+  const view = renderIssuePage("/issues/CORE-1/log");
 
   try {
     await screen.findByRole("tab", { name: "Log", selected: true });

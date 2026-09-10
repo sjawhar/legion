@@ -1,9 +1,10 @@
 import type { ReactNode, RefObject } from "react";
 import { Link } from "react-router-dom";
 
-import type { Comment } from "../../api/types";
+import type { Anchor, Ask, Comment } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
+  borderDefault,
   card,
   dangerHoverText,
   dangerText,
@@ -24,6 +25,7 @@ import {
   suggestionRemovedText,
   textMutedOnSurface,
   textMutedOnSurfaceMuted,
+  textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
@@ -34,7 +36,7 @@ import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
 import { type MarginItem, type MarginItemAction, marginItemId } from "./useMarginItems";
 
 export interface MarginComposer {
-  anchor: ComposerAnchor;
+  anchor: ComposerAnchor | undefined;
   kind: ComposerKind;
   replyTo?: string;
 }
@@ -51,10 +53,11 @@ interface CommentsTabProps {
   isClosed: boolean;
   issueKey: string;
   items: MarginItem[];
+  needsYou: Ask[];
   list: RefObject<HTMLDivElement | null>;
   onAction: (id: string, action: MarginItemAction) => void;
   onCloseComposer: () => void;
-  onReply: (comment: Comment) => void;
+  onReply: (comment: Comment, threadAnchor: Anchor | null) => void;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
@@ -67,6 +70,7 @@ function CommentCard({
   artifactSlug,
   comment,
   depth,
+  threadAnchor,
   onAction,
   onReply,
   onRetryAction,
@@ -77,8 +81,9 @@ function CommentCard({
   artifactSlug: string;
   comment: Comment;
   depth: number;
+  threadAnchor: Anchor | null;
   onAction: (id: string, action: MarginItemAction) => void;
-  onReply: (comment: Comment) => void;
+  onReply: (comment: Comment, threadAnchor: Anchor | null) => void;
   onRetryAction: () => void;
   pendingAction: boolean;
   selected: boolean;
@@ -180,10 +185,10 @@ function CommentCard({
             Saving…
           </span>
         ) : null}
-        {anchor === null ? null : (
+        {comment.resolved ? null : (
           <button
             className={`font-medium ${linkText} ${linkHoverText}`}
-            onClick={() => onReply(comment)}
+            onClick={() => onReply(comment, threadAnchor)}
             type="button"
           >
             Reply
@@ -203,6 +208,18 @@ function CommentCard({
   );
 }
 
+function AskCardItem({ ask, selected }: { ask: Ask; selected: boolean }): ReactNode {
+  return (
+    <div className={selected ? `rounded-xl ${highlightRing}` : undefined} data-margin-item={ask.id}>
+      <AskCard ask={ask} />
+      <Unfurl body={ask.question} />
+      <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
+        {new Date(ask.created_at).toLocaleString()}
+      </p>
+    </div>
+  );
+}
+
 export function CommentsTab({
   actionErrorId,
   answeredAsksPending,
@@ -216,6 +233,7 @@ export function CommentsTab({
   issueKey,
   items,
   list,
+  needsYou,
   onAction,
   onCloseComposer,
   onReply,
@@ -237,60 +255,73 @@ export function CommentsTab({
           replyTo={composer.replyTo}
         />
       )}
-      {commentsError ? (
-        <QueryError message="Could not load this document's comments." onRetry={onRetryComments} />
-      ) : (
-        <section
-          aria-label="Margin review items"
-          className="space-y-3 md:max-h-[45dvh] md:overflow-y-auto"
-          ref={list}
-        >
-          {onRetryAnsweredAsk === undefined ? null : (
-            <QueryError
-              message="Could not load this document's asks."
-              onRetry={onRetryAnsweredAsk}
-              retrying={answeredAsksPending}
-            />
-          )}
-          {items.map((item) => {
-            const id = marginItemId(item);
-            const active = selectedItemId === id || hoveredItemId === id;
-            return (
-              <div key={id}>
-                {item.kind === "ask" ? (
-                  <div
-                    className={active ? `rounded-xl ${highlightRing}` : undefined}
-                    data-margin-item={id}
-                  >
-                    <AskCard ask={item.ask} />
-                    <Unfurl body={item.ask.question} />
-                    <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
-                      {new Date(item.ask.created_at).toLocaleString()}
-                    </p>
-                  </div>
-                ) : (
-                  <CommentCard
-                    actionError={actionErrorId === item.comment.id}
-                    artifactSlug={artifactSlug}
-                    comment={item.comment}
-                    depth={item.depth}
-                    onAction={onAction}
-                    onReply={onReply}
-                    onRetryAction={onRetryAction}
-                    pendingAction={pendingActionId === item.comment.id}
-                    selected={active}
-                  />
-                )}
-              </div>
-            );
-          })}
-          {items.length === 0 && !asksPending && !commentsPending && !answeredAsksPending ? (
-            <p className={`text-sm ${textMutedOnSurface}`}>
-              No comments, asks, or suggestions on this document.
-            </p>
-          ) : null}
-        </section>
-      )}
+      <section
+        aria-label="Margin review items"
+        className="space-y-3 md:max-h-[45dvh] md:overflow-y-auto"
+        ref={list}
+      >
+        {needsYou.length === 0 ? null : (
+          <section aria-label="Needs you" className={`space-y-3 border-b pb-3 ${borderDefault}`}>
+            <h2 className={`text-sm font-semibold ${textPrimaryOnSurface}`}>Needs you</h2>
+            {needsYou.map((ask) => (
+              <AskCardItem
+                ask={ask}
+                key={ask.id}
+                selected={selectedItemId === ask.id || hoveredItemId === ask.id}
+              />
+            ))}
+          </section>
+        )}
+        {onRetryAnsweredAsk === undefined ? null : (
+          <QueryError
+            message="Could not load this document's asks."
+            onRetry={onRetryAnsweredAsk}
+            retrying={answeredAsksPending}
+          />
+        )}
+        {commentsError ? (
+          <QueryError
+            message="Could not load this document's comments."
+            onRetry={onRetryComments}
+          />
+        ) : (
+          <>
+            {items.map((item) => {
+              const id = marginItemId(item);
+              const active = selectedItemId === id || hoveredItemId === id;
+              return (
+                <div key={id}>
+                  {item.kind === "ask" ? (
+                    <AskCardItem ask={item.ask} selected={active} />
+                  ) : (
+                    <CommentCard
+                      actionError={actionErrorId === item.comment.id}
+                      artifactSlug={artifactSlug}
+                      comment={item.comment}
+                      depth={item.depth}
+                      threadAnchor={item.threadAnchor}
+                      onAction={onAction}
+                      onReply={onReply}
+                      onRetryAction={onRetryAction}
+                      pendingAction={pendingActionId === item.comment.id}
+                      selected={active}
+                    />
+                  )}
+                </div>
+              );
+            })}
+            {items.length === 0 &&
+            needsYou.length === 0 &&
+            !asksPending &&
+            !commentsPending &&
+            !answeredAsksPending ? (
+              <p className={`text-sm ${textMutedOnSurface}`}>
+                No comments, asks, or suggestions on this document.
+              </p>
+            ) : null}
+          </>
+        )}
+      </section>
     </div>
   );
 }

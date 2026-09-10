@@ -124,7 +124,7 @@ test("live: new events on the open issue appear in the Log and mark it read as t
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   await expect(page.getByRole("tab", { name: "Log" })).toHaveAttribute("aria-selected", "true");
 
   await createMessage(issue.key, { body: "Live message from bob" }, bob);
@@ -198,7 +198,7 @@ test("live: a forced server disconnect reconnects from the last event id, not fr
     }
   });
 
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   await expect(page.getByText("Before disconnect")).toBeVisible();
   // A live message the client actually observes before the outage — the cold
   // connect itself resolves its head internally without reporting it back, so
@@ -247,7 +247,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
     }
   });
 
-  await page.goto(`/issues/${issue.key}`);
+  await page.goto(`/issues/${issue.key}/log`);
   await expect(page.getByText("Backlog message 4")).toBeVisible();
 
   const streamRequest = apiRequestUrls.find((url) => /\/api\/v1\/events(\?|$)/.test(url));
@@ -260,12 +260,11 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   expect(since).toBeNull();
 
   // Exactly 10 on desktop (chromium) for this fixture: whoami, issues,
-  // me/state, issue detail, inbox (BoardStrip + Margin's open-ask count,
-  // deduped to one request by TanStack Query), the stream connection, two
-  // active-sessions/log event reads, the primary artifact's comments, and
-  // the margin's own issue-asks list (+1: the margin lists the issue's
-  // asks so answered anchored asks render for every viewer, not only a
-  // tab that watched one get answered live).
+  // me/state, issue detail, the shared inbox query for the margin's open-ask
+  // count, the stream connection, two active-sessions/log event reads, the
+  // primary artifact's comments, and the margin's own issue-asks list (+1:
+  // the margin lists the issue's asks so answered anchored asks render for
+  // every viewer, not only a tab that watched one get answered live).
   // The phone project (iphone) never fetches the bare `/api/v1/issues` list —
   // its sidebar sits behind a drawer that starts closed — so its budget is 9.
   // Asserted exactly (not a ceiling) so a panel that starts eagerly fetching
@@ -292,7 +291,7 @@ test("live: the Reconnecting pill never covers the phone margin sheet toggle", a
   const page = await alice.newPage();
   await page.goto(`/issues/${issue.key}`);
 
-  const toggle = page.getByRole("button", { name: "Open review panel" });
+  const toggle = page.getByRole("button", { name: /Open review panel/ });
   await expect(toggle).toBeVisible();
 
   await alice.setOffline(true);

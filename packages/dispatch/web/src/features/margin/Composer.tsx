@@ -293,12 +293,15 @@ export function Composer({
           urgency,
         });
       }
-      return api.createComment(issueKey, {
-        anchor: selection,
+      const comment = {
         body: kind === "suggestion" && body.trim() === "" ? "Suggested replacement." : body.trim(),
         reply_to: replyTo,
         suggestion: kind === "suggestion" ? { replace_with: replacement } : undefined,
-      });
+      };
+      return api.createComment(
+        issueKey,
+        replyTo === undefined ? { ...comment, anchor: selection } : comment
+      );
     },
     onSettled: () => {
       submitGuard.release();

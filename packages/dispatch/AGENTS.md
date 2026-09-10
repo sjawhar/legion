@@ -6,7 +6,7 @@ production build from `web/dist`.
 
 ## Layout
 
-- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The issue main column has Spec, Log, Children, and Artifacts tabs; the review margin holds Comments and Pinned. The three-column layout begins at the `xl` breakpoint (1280px); compact and tablet widths use the navigation drawer and margin bottom sheet.
+- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The issue main column has Spec, Log, Children, and Artifacts tabs; a bare issue route opens the primary Spec document. The margin holds historical Comments and Pinned, with open anchored and issue-level asks in a Needs you group before comments. The three-column layout begins at the `xl` breakpoint (1280px); compact and tablet widths use the navigation drawer and margin bottom sheet, whose review toggle exposes the open-ask count.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
   browser API boundary.
@@ -86,5 +86,5 @@ server, set `PLAYWRIGHT_DATABASE_URL` for the same database and
 The `iphone` Playwright project uses Chromium with the iPhone 13 viewport,
 touch input, and user agent. It verifies the responsive drawer, bottom-sheet
 margin, and compact Inbox layout. It does not replace the manual phone check:
-run the server on a tailnet-reachable address, open it from a phone, and answer
-an open ask from the Inbox.
+run the server on a tailnet-reachable address, open it from a phone, open the
+review panel, and answer an open ask in Needs you.

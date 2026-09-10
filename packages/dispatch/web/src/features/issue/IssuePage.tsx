@@ -62,7 +62,6 @@ import {
 } from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
 import { IssueTabs } from "./IssueTabs";
 import { LogTab } from "./LogTab";
@@ -283,84 +282,64 @@ function IssueHeader({
   };
 
   return (
-    <header className={`mb-6 border-b pb-6 ${borderDefault}`}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className={`text-sm font-semibold ${linkText}`}>{issue.key}</p>
-        <button
-          className={`rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-          disabled={updateState.isPending}
-          onClick={() => pinGuard.guard(() => updateState.mutate(!state.pinned))}
-          type="button"
-        >
-          {state.pinned ? "Unpin issue" : "Pin issue"}
-        </button>
-      </div>
-      {updateState.isError ? (
-        <QueryError
-          message="Could not save pin status."
-          onRetry={() => pinGuard.retryLast(updateState)}
-          retrying={updateState.isPending}
-        />
-      ) : null}
-      {editingTitle ? (
-        <input
-          aria-describedby={drafts.titleError === null ? undefined : "issue-title-help"}
-          aria-label="Issue title"
-          className={`mt-2 w-full rounded-lg border px-2 py-1 text-2xl font-semibold outline-none ${borderTransparent} ${bgTransparent} ${textPrimaryOnCanvas} ${borderStrongHover} ${focusBorder}`}
-          disabled={isClosed}
-          onBlur={() => {
-            drafts.requestTitleSubmit();
-            setEditingTitle(false);
-          }}
-          onChange={(event) => drafts.writeTitle(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              drafts.discardTitle();
+    <header className={`mb-3 border-b pb-3 ${borderDefault}`}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <p className={`shrink-0 text-sm font-semibold ${linkText}`}>{issue.key}</p>
+        {editingTitle ? (
+          <input
+            aria-describedby={drafts.titleError === null ? undefined : "issue-title-help"}
+            aria-label="Issue title"
+            className={`min-w-40 flex-1 rounded-lg border px-2 py-1 text-lg font-semibold outline-none ${borderTransparent} ${bgTransparent} ${textPrimaryOnCanvas} ${borderStrongHover} ${focusBorder}`}
+            disabled={isClosed}
+            onBlur={() => {
+              drafts.requestTitleSubmit();
               setEditingTitle(false);
-              return;
-            }
-            saveTitleOnEnter(event);
-          }}
-          ref={(node) => node?.focus()}
-          value={drafts.title}
-        />
-      ) : (
-        <h1
-          className={`mt-2 w-full rounded-lg border px-2 py-1 text-2xl font-semibold break-words ${borderTransparent} ${textPrimaryOnCanvas} ${
-            isClosed ? "" : `cursor-text ${borderStrongHover}`
-          }`}
-          onClick={() => {
-            if (!isClosed) {
-              setEditingTitle(true);
-            }
-          }}
-          onFocus={() => {
-            if (!isClosed) {
-              setEditingTitle(true);
-            }
-          }}
-          onKeyDown={(event) => {
-            if (!isClosed && (event.key === "Enter" || event.key === " ")) {
-              event.preventDefault();
-              setEditingTitle(true);
-            }
-          }}
-          tabIndex={isClosed ? -1 : 0}
-          title={issue.title}
+            }}
+            onChange={(event) => drafts.writeTitle(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                drafts.discardTitle();
+                setEditingTitle(false);
+                return;
+              }
+              saveTitleOnEnter(event);
+            }}
+            ref={(node) => node?.focus()}
+            value={drafts.title}
+          />
+        ) : (
+          <h1
+            className={`min-w-40 flex-1 truncate rounded-lg border px-2 py-1 text-lg font-semibold ${borderTransparent} ${textPrimaryOnCanvas} ${
+              isClosed ? "" : `cursor-text ${borderStrongHover}`
+            }`}
+            onClick={() => {
+              if (!isClosed) {
+                setEditingTitle(true);
+              }
+            }}
+            onFocus={() => {
+              if (!isClosed) {
+                setEditingTitle(true);
+              }
+            }}
+            onKeyDown={(event) => {
+              if (!isClosed && (event.key === "Enter" || event.key === " ")) {
+                event.preventDefault();
+                setEditingTitle(true);
+              }
+            }}
+            tabIndex={isClosed ? -1 : 0}
+            title={issue.title}
+          >
+            {drafts.title}
+          </h1>
+        )}
+        <label
+          className={`flex shrink-0 items-center gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
         >
-          {drafts.title}
-        </h1>
-      )}
-      {drafts.titleError === null ? null : (
-        <p className={`mt-1 text-sm ${dangerText}`} id="issue-title-help">
-          {drafts.titleError}
-        </p>
-      )}
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <label className={`text-sm font-medium ${textSecondaryOnCanvas}`}>
           Status
           <select
-            className={`ml-2 rounded px-2 py-1 font-normal disabled:cursor-not-allowed ${inputClasses(false)} ${surfaceMutedDisabledBg} ${secondaryButtonDisabledText}`}
+            className={`rounded px-2 py-1 font-normal disabled:cursor-not-allowed ${inputClasses(false)} ${surfaceMutedDisabledBg} ${secondaryButtonDisabledText}`}
             disabled={updateIssue.isPending}
             onChange={(event) => drafts.requestStatusSubmit(event.target.value)}
             value={issue.status}
@@ -372,93 +351,118 @@ function IssueHeader({
             ))}
           </select>
         </label>
-        {statusSaving ? (
-          <span className={`text-xs ${textMutedOnCanvas}`} role="status">
-            Saving…
-          </span>
-        ) : null}
-        {issue.labels.map((label) => (
-          <span
-            className={`rounded-full px-2 py-1 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}
-            key={label}
-          >
-            {label}
-          </span>
-        ))}
-        {issue.parent === null ? null : (
-          <Link
-            className={`text-sm underline ${linkText} ${linkHoverText}`}
-            to={buildIssuePath({ key: issue.parent, kind: "issue" })}
-          >
-            Parent: {issue.parent}
-          </Link>
-        )}
-      </div>
-      {routeEditing ? (
-        <form className="mt-4 flex flex-wrap items-start gap-2" onSubmit={saveRoute}>
-          <label className={`text-sm font-medium ${textSecondaryOnCanvas}`} htmlFor="issue-route">
-            Route
-          </label>
-          <input
-            aria-describedby="issue-route-help"
-            className={`min-w-64 rounded border px-2 py-1 text-sm outline-none ${focusBorder}`}
-            id="issue-route"
-            onChange={(event) => drafts.writeRoute(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
+        {routeEditing ? (
+          <form className="flex min-w-0 flex-1 flex-wrap items-center gap-2" onSubmit={saveRoute}>
+            <label className="sr-only" htmlFor="issue-route">
+              Route
+            </label>
+            <input
+              aria-describedby="issue-route-help"
+              className={`min-w-0 flex-1 rounded px-2 py-1 text-sm outline-none ${inputClasses(false)}`}
+              disabled={isClosed}
+              id="issue-route"
+              onChange={(event) => drafts.writeRoute(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  drafts.discardRoute();
+                  setRouteEditing(false);
+                }
+              }}
+              placeholder="role:legion-controller-core"
+              value={drafts.route}
+            />
+            <button
+              className={`rounded px-2 py-1 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonDisabledText}`}
+              disabled={isClosed || !drafts.routeIsValid || updateIssue.isPending}
+              type="submit"
+            >
+              Save route
+            </button>
+            <button
+              className={`rounded border px-2 py-1 text-sm font-medium ${borderTransparent} ${textMutedHoverToSecondary}`}
+              onClick={() => {
                 drafts.discardRoute();
                 setRouteEditing(false);
-              }
-            }}
-            placeholder="role:legion-controller-core"
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+            <span
+              className={drafts.routeIsValid ? "sr-only" : `text-sm ${dangerText}`}
+              id="issue-route-help"
+            >
+              Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
+            </span>
+          </form>
+        ) : (
+          <button
+            className={`min-w-40 flex-1 truncate rounded px-2 py-1 text-left text-sm outline-none focus-visible:ring-2 ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
             disabled={isClosed}
-            value={drafts.route}
-          />
-          <button
-            className={`rounded px-2 py-1 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonDisabledText}`}
-            disabled={isClosed || !drafts.routeIsValid || updateIssue.isPending}
-            type="submit"
-          >
-            Save route
-          </button>
-          <button
-            className={`rounded border px-2 py-1 text-sm font-medium ${borderTransparent} ${textMutedHoverToSecondary}`}
-            onClick={() => {
-              drafts.discardRoute();
-              setRouteEditing(false);
-            }}
+            onClick={() => setRouteEditing(true)}
+            title={drafts.route === "" ? undefined : `Messages also reach ${drafts.route}`}
             type="button"
           >
-            Cancel
+            {drafts.route === ""
+              ? "No route — messages stay on the issue"
+              : `Messages also reach ${drafts.route}`}
           </button>
-          <span
-            className={drafts.routeIsValid ? "sr-only" : `text-sm ${dangerText}`}
-            id="issue-route-help"
-          >
-            Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
-          </span>
-        </form>
-      ) : (
+        )}
         <button
-          className={`mt-4 block rounded text-left text-sm outline-none focus-visible:ring-2 ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
-          disabled={isClosed}
-          onClick={() => setRouteEditing(true)}
+          className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+          disabled={updateState.isPending}
+          onClick={() => pinGuard.guard(() => updateState.mutate(!state.pinned))}
           type="button"
         >
-          {drafts.route === ""
-            ? "No route — messages stay on the issue"
-            : `Messages also reach ${drafts.route}`}
+          {state.pinned ? "Unpin issue" : "Pin issue"}
         </button>
+      </div>
+      {drafts.titleError === null ? null : (
+        <p className={`mt-1 text-sm ${dangerText}`} id="issue-title-help">
+          {drafts.titleError}
+        </p>
       )}
+      {statusSaving ? (
+        <span className={`mt-1 block text-xs ${textMutedOnCanvas}`} role="status">
+          Saving…
+        </span>
+      ) : null}
+      {issue.labels.length === 0 && issue.parent === null ? null : (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {issue.labels.map((label) => (
+            <span
+              className={`break-all rounded-full px-2 py-1 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}
+              key={label}
+            >
+              {label}
+            </span>
+          ))}
+          {issue.parent === null ? null : (
+            <Link
+              className={`text-sm underline ${linkText} ${linkHoverText}`}
+              to={buildIssuePath({ key: issue.parent, kind: "issue" })}
+            >
+              Parent: {issue.parent}
+            </Link>
+          )}
+        </div>
+      )}
+      {updateState.isError ? (
+        <QueryError
+          message="Could not save pin status."
+          onRetry={() => pinGuard.retryLast(updateState)}
+          retrying={updateState.isPending}
+        />
+      ) : null}
       {issue.external_links.length === 0 ? null : (
-        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
           {issue.external_links.map((link) => (
             <GitHubLink key={link.url} link={link} />
           ))}
         </div>
       )}
       {sessions.length === 0 ? null : (
-        <section aria-label="Active sessions" className="mt-4">
+        <section aria-label="Active sessions" className="mt-2">
           <h2 className={`text-sm font-semibold ${textSecondaryOnCanvas}`}>Active sessions</h2>
           <ul className="mt-2 flex flex-wrap gap-2">
             {sessions.map((session) => {
@@ -635,7 +639,6 @@ function IssueDetail({
         </p>
       ) : null}
       <IssueHeader isClosed={isClosed} issue={issue.data} state={issueState} />
-      <BoardStrip issue={issue.data} state={issueState} />
       <IssueTabs
         activeTab={activeTab}
         issueKey={issueKey}

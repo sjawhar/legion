@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Ask, Comment } from "../../api/types";
+import type { Anchor, Ask, Comment, Event } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { pinnedEventIds } from "../issue/log-model";
 import { parseIssuePath } from "../refs/routes";
@@ -13,7 +13,26 @@ export type MarginTab = "comments" | "pinned";
 export type MarginItemAction = "accept" | "reject" | "resolve";
 export type MarginItem =
   | { ask: Ask; depth: number; kind: "ask" }
-  | { comment: Comment; depth: number; kind: "comment" };
+  | { comment: Comment; depth: number; kind: "comment"; threadAnchor: Anchor | null };
+
+const pinnedEventBatchSize = 50;
+
+type IssueEventsFetcher = (issueKey: string, options: { ids: string[] }) => Promise<Event[]>;
+
+export async function fetchPinnedEvents(
+  listIssueEvents: IssueEventsFetcher,
+  issueKey: string,
+  ids: string[]
+): Promise<Event[]> {
+  const batches: string[][] = [];
+  for (let index = 0; index < ids.length; index += pinnedEventBatchSize) {
+    batches.push(ids.slice(index, index + pinnedEventBatchSize));
+  }
+  const events = await Promise.all(
+    batches.map((batch) => listIssueEvents(issueKey, { ids: batch }))
+  );
+  return events.flat().sort((left, right) => left.seq - right.seq);
+}
 
 // A comment that replies directly to an ask (`ask_id` set), or transitively replies to one
 // of those replies, belongs to that ask's own thread — AskCard already renders it via
@@ -40,7 +59,13 @@ function withoutAskThreadReplies(comments: Comment[]): Comment[] {
   return comments.filter((comment) => !askThreadIds.has(comment.id));
 }
 
-function commentThreads(comments: Comment[]): Array<Array<{ comment: Comment; depth: number }>> {
+interface CommentThreadItem {
+  comment: Comment;
+  depth: number;
+  threadAnchor: Anchor | null;
+}
+
+function commentThreads(comments: Comment[]): CommentThreadItem[][] {
   const byParent = new Map<string, Comment[]>();
   const roots: Comment[] = [];
   const known = new Set(comments.map((comment) => comment.id));
@@ -57,9 +82,9 @@ function commentThreads(comments: Comment[]): Array<Array<{ comment: Comment; de
   return [...roots]
     .sort((left, right) => right.created_at.localeCompare(left.created_at))
     .map((root) => {
-      const thread: Array<{ comment: Comment; depth: number }> = [];
+      const thread: CommentThreadItem[] = [];
       const append = (comment: Comment, depth: number) => {
-        thread.push({ comment, depth });
+        thread.push({ comment, depth, threadAnchor: root.anchor });
         for (const reply of [...(byParent.get(comment.id) ?? [])].sort((left, right) =>
           right.created_at.localeCompare(left.created_at)
         )) {
@@ -92,9 +117,10 @@ export function useMarginItems(tab: MarginTab) {
       ? issue.data?.artifacts.find((artifact) => artifact.id === issue.data?.primary_artifact_id)
       : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug);
   const asks = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
-  const openAskCount = (asks.data ?? []).filter(
-    (ask) => ask.issue_key === issueKey && ask.state === "open"
-  ).length;
+  const inboxOpenAsks = useMemo(
+    () => (asks.data ?? []).filter((ask) => ask.issue_key === issueKey && ask.state === "open"),
+    [asks.data, issueKey]
+  );
   const comments = useQuery({
     enabled: issueKey !== undefined,
     queryKey: ["comments", issueKey],
@@ -109,10 +135,23 @@ export function useMarginItems(tab: MarginTab) {
   const pinned = useQuery({
     enabled: issueKey !== undefined && tab === "pinned" && pinnedIds.length > 0,
     queryKey: ["events", issueKey, "margin-pinned", pinnedIds],
-    queryFn: () => api.getIssueEvents(issueKey ?? "", { ids: pinnedIds }),
+    queryFn: () => fetchPinnedEvents(api.getIssueEvents.bind(api), issueKey ?? "", pinnedIds),
   });
   const answeredAsks = useAnsweredAsks(issueKey, visibleArtifact?.id);
-  const anchoredAsks = answeredAsks.asks;
+  const needsYou = useMemo(() => {
+    const openAsks = new Map(inboxOpenAsks.map((ask) => [ask.id, ask]));
+    for (const ask of answeredAsks.asks) {
+      if (ask.state === "open") {
+        openAsks.set(ask.id, ask);
+      }
+    }
+    return [...openAsks.values()];
+  }, [answeredAsks.asks, inboxOpenAsks]);
+  const openAskCount = needsYou.length;
+  const anchoredAsks = useMemo(
+    () => answeredAsks.asks.filter((ask) => ask.state !== "open"),
+    [answeredAsks.asks]
+  );
   const items = useMemo<MarginItem[]>(() => {
     const anchoredItems = anchoredAsks.map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
     const visibleComments = withoutAskThreadReplies(
@@ -121,7 +160,12 @@ export function useMarginItems(tab: MarginTab) {
       )
     );
     const threads = commentThreads(visibleComments).map((thread) =>
-      thread.map(({ comment, depth }) => ({ comment, depth, kind: "comment" as const }))
+      thread.map(({ comment, depth, threadAnchor }) => ({
+        comment,
+        depth,
+        kind: "comment" as const,
+        threadAnchor,
+      }))
     );
     const roots: MarginItem[][] = [...anchoredItems.map((ask) => [ask]), ...threads];
     return roots
@@ -152,16 +196,23 @@ export function useMarginItems(tab: MarginTab) {
       })
       .flat();
   }, [anchoredAsks, comments.data, visibleArtifact]);
+  const marginItems = useMemo<MarginItem[]>(
+    () => [...needsYou.map((ask) => ({ ask, depth: 0, kind: "ask" as const })), ...items],
+    [items, needsYou]
+  );
   const decorationAnchors = useMemo(
     () =>
-      items.flatMap((item) => {
+      marginItems.flatMap((item) => {
         const anchor = item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
         const open = item.kind === "ask" ? item.ask.state === "open" : !item.comment.resolved;
-        return anchor === null || anchor.orphaned || !open
+        return anchor === null ||
+          anchor.artifact_id !== visibleArtifact?.id ||
+          anchor.orphaned ||
+          !open
           ? []
           : [{ anchor, id: marginItemId(item) }];
       }),
-    [items]
+    [marginItems, visibleArtifact?.id]
   );
   const actionGuard = useSubmitGuard();
   const action = useMutation({
@@ -225,6 +276,8 @@ export function useMarginItems(tab: MarginTab) {
     issueKey,
     issuePending: issue.isPending,
     items,
+    marginItems,
+    needsYou,
     mutateItem: (input: { id: string; kind: MarginItemAction }) =>
       actionGuard.guard(() => action.mutate(input)),
     pendingActionId: action.isPending ? action.variables?.id : undefined,

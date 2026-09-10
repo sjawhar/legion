@@ -30,6 +30,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           issueKey: "CORE-1",
           issuePending: false,
           openAskCount: 3,
+          needsYou: [],
           issueError: false,
           pinned: [],
           pendingActionId: undefined,
@@ -54,7 +55,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
   );
 
   try {
-    expect(screen.getByText("3 open asks")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Open review panel (3 open asks)" })).not.toBeNull();
     expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
       "true"
     );

@@ -1,6 +1,6 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createIssue, createMessage, createProject } from "./api";
+import { createAsk, createIssue, createMessage, createProject, getAsk } from "./api";
 import { enterEditMode } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -82,9 +82,33 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       await expect(closeButton).toBeHidden();
       await expect(menuButton).toBeFocused();
     }
+    const openAsk = await createAsk(
+      issue.key,
+      { question: "Is this landing view ready?" },
+      session
+    );
 
     await page.goto(`/issues/${issue.key}`);
-    await page.getByRole("tab", { name: "Spec" }).click();
+    await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
+    if (isPhone) {
+      const reviewToggle = page.getByRole("button", { name: "Open review panel (1 open ask)" });
+      await expect(reviewToggle).toBeVisible();
+      await reviewToggle.click();
+      const askCard = page
+        .getByRole("region", { name: "Needs you" })
+        .getByTestId(`ask-${openAsk.id}`);
+      await askCard.getByLabel("Your answer").fill("Yes.");
+      await askCard.getByRole("button", { name: "Submit answer" }).click();
+      await expect
+        .poll(() => getAsk(openAsk.id))
+        .toMatchObject({
+          ask: { answer: { text: "Yes.", user: "alice" }, state: "answered" },
+        });
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+      ).toBe(true);
+      await page.getByRole("button", { name: /Close review panel/ }).click();
+    }
     await enterEditMode(page);
     const editor = page.getByRole("textbox", { name: "Document editor" });
     await expect(editor).toContainText(initialMarkdown);
@@ -122,8 +146,8 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
     await commentBody.press("Escape");
     await expect(commentComposer).toHaveCount(0);
     if (isPhone) {
-      await expect(page.getByRole("button", { name: "Close review panel" })).toBeVisible();
-      await page.getByRole("button", { name: "Close review panel" }).click();
+      await expect(page.getByRole("button", { name: /Close review panel/ })).toBeVisible();
+      await page.getByRole("button", { name: /Close review panel/ }).click();
     }
 
     // D25: a pinned log event renders its own description, never the literal "Event <seq>".
@@ -133,7 +157,7 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       .getByRole("button", { name: "Pin" })
       .click();
     if (isPhone) {
-      await page.getByRole("button", { name: "Open review panel" }).click();
+      await page.getByRole("button", { name: /Open review panel/ }).click();
     }
     await page.getByRole("tab", { name: "Pinned" }).click();
     const margin = page.getByTestId("margin-sheet");

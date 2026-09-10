@@ -140,11 +140,12 @@ export function createComment(
 
 export function listComments(
   issue: string,
-  artifact: string,
+  artifact: string | undefined = undefined,
   options: ApiOptions = {}
 ): Promise<Comment[]> {
+  const suffix = artifact === undefined ? "" : `?artifact=${encodeURIComponent(artifact)}`;
   return request<Comment[]>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/comments?artifact=${encodeURIComponent(artifact)}`,
+    `/api/v1/issues/${encodeURIComponent(issue)}/comments${suffix}`,
     "GET",
     undefined,
     options

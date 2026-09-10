@@ -26,7 +26,7 @@ async function setSheet(page: Page, project: string, open: boolean): Promise<voi
     return;
   }
   const toggle = page.getByRole("button", {
-    name: open ? "Open review panel" : "Close review panel",
+    name: open ? /Open review panel/ : /Close review panel/,
   });
   if ((await toggle.count()) > 0) {
     await toggle.click();
@@ -190,8 +190,8 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await expect(page.locator("mark.dispatch-anchor-history")).toContainText("fox");
 
     await page.goto(`/issues/${issue.key}`);
-    await page.getByRole("tab", { name: "Spec" }).click();
-    const askCard = page.getByRole("region", { name: "Issue board" }).getByTestId(`ask-${ask.id}`);
+    await setSheet(page, testInfo.project.name, true);
+    const askCard = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
     await expect(askCard).toContainText("brown");
     await askCard.getByLabel("Your answer").fill("Because it is precise.");
     await askCard.getByRole("button", { name: "Submit answer" }).click();
@@ -202,10 +202,10 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     const marginItems = page.getByLabel("Margin review items");
     if (testInfo.project.name === "iphone") {
-      await expect(page.getByRole("button", { name: "Close review panel" })).toBeVisible();
+      await expect(page.getByRole("button", { name: /Close review panel/ })).toBeVisible();
       await expect(page.getByTestId(`margin-comment-${comment.id}`)).toBeVisible();
-      await page.getByRole("button", { name: "Close review panel" }).click();
-      await expect(page.getByRole("button", { name: "Open review panel" })).toBeVisible();
+      await page.getByRole("button", { name: /Close review panel/ }).click();
+      await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
     } else {
       await expect
         .poll(() => marginItems.evaluate((element) => element.scrollTop))
@@ -327,10 +327,9 @@ test("margin ask composer sends option choices that the inbox records as a selec
     await composer.getByRole("button", { exact: true, name: "Ask" }).click();
 
     const createdCard = page
-      .getByRole("region", { name: "Issue board" })
+      .getByRole("region", { name: "Needs you" })
       .locator("[data-testid^=ask-]")
       .filter({ hasText: "Which direction should we take?" });
-    await expect(createdCard).toBeVisible();
     const askTestId = await createdCard.getAttribute("data-testid");
     if (askTestId === null) {
       throw new Error("The created ask has no test id.");

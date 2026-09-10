@@ -43,6 +43,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
       pendingActionId,
       pinned,
       pinnedIds,
+      needsYou,
       visibleArtifact,
     },
     selection,
@@ -57,6 +58,10 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
     onClose: () => sheet.toggle(false),
     open: sheet.expanded && isCompactViewport,
   });
+
+  const reviewToggleLabel = `${sheet.expanded ? "Close" : "Open"} review panel (${openAskCount} open ${
+    openAskCount === 1 ? "ask" : "asks"
+  })`;
 
   return (
     <>
@@ -91,7 +96,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
             />
             <button
               aria-expanded={sheet.expanded}
-              aria-label={sheet.expanded ? "Close review panel" : "Open review panel"}
+              aria-label={reviewToggleLabel}
               className={`flex h-16 w-full items-center justify-between px-4 text-left text-sm font-semibold ${textPrimaryOnSurface}`}
               onClick={() => {
                 if (sheetDragMoved.current) {
@@ -114,10 +119,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
               }}
               type="button"
             >
-              <span>Review panel</span>
-              <span className={`font-normal ${textMutedOnSurface}`}>
-                {openAskCount} open {openAskCount === 1 ? "ask" : "asks"}
-              </span>
+              <span>Review ({openAskCount})</span>
             </button>
           </>
         ) : null}
@@ -182,6 +184,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
               isClosed={isClosed}
               issueKey={issueKey ?? ""}
               items={comments}
+              needsYou={needsYou}
               list={commentListRef}
               onAction={actions.onAction}
               onCloseComposer={actions.closeComposer}
