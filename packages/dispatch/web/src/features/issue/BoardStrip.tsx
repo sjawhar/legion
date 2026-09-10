@@ -3,6 +3,12 @@ import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
 import type { Event, Issue, UserIssueState } from "../../api/types";
+import {
+  borderDefault,
+  surfaceMutedBg,
+  textPrimaryOnCanvas,
+  textSecondaryOnCanvas,
+} from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
 import { pinnedEventIds } from "./log-model";
 
@@ -43,12 +49,12 @@ export function BoardStrip({ issue, state }: { issue: Issue; state: UserIssueSta
   return (
     <section
       aria-label="Issue board"
-      className="mb-6 space-y-4 rounded-xl border border-slate-200 bg-slate-100 p-4"
+      className={`mb-6 space-y-4 rounded-xl p-4 ${borderDefault} ${surfaceMutedBg}`}
     >
       {pinned.length === 0 ? null : (
         <div>
-          <h2 className="text-sm font-semibold text-slate-800">Pinned items</h2>
-          <ul className="mt-2 space-y-1 text-sm text-slate-600">
+          <h2 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>Pinned items</h2>
+          <ul className={`mt-2 space-y-1 text-sm ${textSecondaryOnCanvas}`}>
             {pinned.map((event) => (
               <li key={event.id}>Event {event.seq}</li>
             ))}
@@ -57,7 +63,7 @@ export function BoardStrip({ issue, state }: { issue: Issue; state: UserIssueSta
       )}
       {openAsks.length === 0 ? null : (
         <div className="space-y-3">
-          <h2 className="text-sm font-semibold text-slate-800">Open asks</h2>
+          <h2 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>Open asks</h2>
           {openAsks.map((ask) => (
             <AskCard ask={ask} key={ask.id} />
           ))}

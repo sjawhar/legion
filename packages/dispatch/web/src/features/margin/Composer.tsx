@@ -15,6 +15,40 @@ import { ApiError, api } from "../../api/client";
 import type { AskOption, AskUrgency } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import {
+  badgeBlocking,
+  badgeHigh,
+  badgeLow,
+  badgeMed,
+  borderStrong,
+  calloutInfoBg,
+  calloutInfoBorder,
+  calloutInfoTitleText,
+  calloutWarningBg,
+  calloutWarningBorder,
+  calloutWarningText,
+  cardHoverBorder,
+  checkboxAccent,
+  controlHoverBorder,
+  dangerHoverBorder,
+  dismissButtonText,
+  focusRing,
+  hoverToDangerText,
+  inputClasses,
+  linkHoverText,
+  linkText,
+  primaryButtonBg,
+  primaryButtonDisabled,
+  primaryButtonEnabledHoverBg,
+  quoteAccentBorder,
+  quoteBodyText,
+  referencePillBorder,
+  secondaryButtonBorder,
+  secondaryButtonText,
+  surfaceRecessedBg,
+  textMutedOnSurfaceMuted,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import {
@@ -51,6 +85,13 @@ const askUrgencies = [
   ["high", "High"],
   ["blocking", "Blocking"],
 ] as const satisfies readonly (readonly [AskUrgency, string])[];
+
+const URGENCY_BUTTON_STYLES: Record<AskUrgency, string> = {
+  blocking: `${badgeBlocking.bg} ${badgeBlocking.text}`,
+  high: `${badgeHigh.bg} ${badgeHigh.text}`,
+  low: `${badgeLow.bg} ${badgeLow.text}`,
+  med: `${badgeMed.bg} ${badgeMed.text}`,
+};
 
 let nextAskOptionId = 0;
 
@@ -368,30 +409,26 @@ export function Composer({
   return (
     <form
       aria-label={`${title} composer`}
-      className="space-y-3 rounded-xl border border-sky-200 bg-sky-50 p-3"
+      className={`space-y-3 rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`}
       onSubmit={submit}
       ref={formRef}
     >
       <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-sky-950">{title}</p>
+        <p className={`text-sm font-semibold ${calloutInfoTitleText}`}>{title}</p>
         {anchor === undefined ? null : (
-          <button
-            className="text-sm text-slate-600 hover:text-slate-950"
-            onClick={onClose}
-            type="button"
-          >
+          <button className={`text-sm ${dismissButtonText}`} onClick={onClose} type="button">
             Close
           </button>
         )}
       </div>
       {anchor === undefined ? null : (
-        <blockquote className="border-l-2 border-sky-500 pl-2 text-sm text-slate-700">
+        <blockquote className={`border-l-2 pl-2 text-sm ${quoteAccentBorder} ${quoteBodyText}`}>
           {anchor.quote}
         </blockquote>
       )}
       {confirmingDiscard ? (
         <div
-          className="flex items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900"
+          className={`flex items-center gap-3 rounded-lg border p-2 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
           role="alert"
         >
           <span>Discard draft?</span>
@@ -411,11 +448,11 @@ export function Composer({
         </div>
       ) : null}
       {kind === "suggestion" ? (
-        <label className="block text-sm font-medium text-slate-700">
+        <label className={`block text-sm font-medium ${textSecondaryOnSurface}`}>
           Replace with
           <textarea
             aria-label="Replacement"
-            className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500"
+            className={`mt-1 block w-full rounded-lg border px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
             onChange={(event) => {
               setReplacement(event.target.value);
               setConfirmingDiscard(false);
@@ -425,7 +462,7 @@ export function Composer({
           />
         </label>
       ) : null}
-      <label className="block text-sm font-medium text-slate-700">
+      <label className={`block text-sm font-medium ${textSecondaryOnSurface}`}>
         {kind === "ask"
           ? "Question"
           : kind === "suggestion"
@@ -443,7 +480,7 @@ export function Composer({
                   ? "Message"
                   : "Comment"
           }
-          className="mt-1 block min-h-24 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500"
+          className={`mt-1 block min-h-24 w-full rounded-lg border px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
           maxLength={kind === "ask" ? 800 : 2000}
           onChange={(event) => {
             setBody(event.target.value);
@@ -459,15 +496,15 @@ export function Composer({
       {kind === "ask" ? (
         <>
           <fieldset>
-            <legend className="text-sm font-medium text-slate-700">Urgency</legend>
+            <legend className={`text-sm font-medium ${textSecondaryOnSurface}`}>Urgency</legend>
             <div className="mt-1 flex flex-wrap gap-1">
               {askUrgencies.map(([value, label]) => (
                 <button
                   aria-pressed={urgency === value}
                   className={`rounded-md px-2.5 py-1 text-sm font-medium ${
                     urgency === value
-                      ? "bg-sky-600 text-white"
-                      : "border border-slate-300 bg-white text-slate-700 hover:border-sky-400"
+                      ? URGENCY_BUTTON_STYLES[value]
+                      : `border ${secondaryButtonBorder} ${surfaceRecessedBg} ${secondaryButtonText} ${cardHoverBorder}`
                   }`}
                   key={value}
                   onClick={() => setUrgency(value)}
@@ -478,10 +515,12 @@ export function Composer({
               ))}
             </div>
           </fieldset>
-          <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+          <label
+            className={`flex items-center gap-2 text-sm font-medium ${textSecondaryOnSurface}`}
+          >
             <input
               checked={multiple}
-              className="size-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+              className={`size-4 rounded ${borderStrong} ${checkboxAccent} ${focusRing}`}
               onChange={(event) => setMultiple(event.target.checked)}
               type="checkbox"
             />
@@ -489,9 +528,9 @@ export function Composer({
           </label>
           <section aria-label="Options" className="space-y-2">
             <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium text-slate-700">Options</p>
+              <p className={`text-sm font-medium ${textSecondaryOnSurface}`}>Options</p>
               <button
-                className="text-sm font-medium text-sky-700 hover:text-sky-900"
+                className={`text-sm font-medium ${linkText} ${linkHoverText}`}
                 onClick={addAskOption}
                 type="button"
               >
@@ -503,7 +542,7 @@ export function Composer({
                 <div className="space-y-2">
                   <input
                     aria-label={`Option ${index + 1} label`}
-                    className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-sky-500"
+                    className={`block w-full rounded-lg border px-3 py-2 text-sm outline-none ${inputClasses(true)}`}
                     onChange={(event) => updateAskOption(index, "label", event.target.value)}
                     onKeyDown={handleOptionLabelKeyDown}
                     placeholder="Label"
@@ -514,7 +553,7 @@ export function Composer({
                   />
                   <input
                     aria-label={`Option ${index + 1} description`}
-                    className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-sky-500"
+                    className={`block w-full rounded-lg border px-3 py-2 text-sm outline-none ${inputClasses(true)}`}
                     onChange={(event) => updateAskOption(index, "description", event.target.value)}
                     placeholder="Description (optional)"
                     value={option.description}
@@ -522,7 +561,7 @@ export function Composer({
                 </div>
                 <button
                   aria-label={`Remove option ${index + 1}`}
-                  className="self-start rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:border-rose-300 hover:text-rose-700"
+                  className={`self-start rounded-lg border px-3 py-2 text-sm font-medium ${borderStrong} ${secondaryButtonText} ${dangerHoverBorder} ${hoverToDangerText}`}
                   onClick={() => removeAskOption(index)}
                   type="button"
                 >
@@ -533,14 +572,14 @@ export function Composer({
           </section>
         </>
       ) : null}
-      <p className="text-xs text-slate-500">
+      <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
         Paste or drop a file to add it as an artifact. Ctrl+K inserts a reference.
       </p>
       {references.length === 0 ? null : (
         <section aria-label="References" className="flex flex-wrap gap-2">
           {references.map((reference) => (
             <a
-              className="rounded-full border border-sky-300 bg-white px-2 py-1 text-xs font-medium text-sky-800 hover:border-sky-500"
+              className={`rounded-full border px-2 py-1 text-xs font-medium ${referencePillBorder} ${surfaceRecessedBg} ${badgeMed.text} ${controlHoverBorder}`}
               href={reference.href}
               key={reference.reference}
             >
@@ -557,7 +596,7 @@ export function Composer({
         />
       ) : null}
       {pendingUploads > 0 ? (
-        <p className="text-sm text-slate-500" role="status">
+        <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
           Uploading file…
         </p>
       ) : null}
@@ -582,7 +621,7 @@ export function Composer({
         />
       ) : null}
       <button
-        className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white enabled:hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+        className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
         disabled={!canSubmit}
         type="submit"
       >

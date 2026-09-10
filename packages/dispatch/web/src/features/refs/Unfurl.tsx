@@ -3,6 +3,13 @@ import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
 import type { ArtifactText, ArtifactVersionContent } from "../../api/types";
+import {
+  borderDefault,
+  cardHoverBorder,
+  linkText,
+  surfaceMutedBg,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 
 import { type ComposerReference, composerReferences } from "../margin/Composer";
 import { parseDispatchReference } from "./routes";
@@ -49,12 +56,12 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
 
   return (
     <a
-      className="block rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm hover:border-sky-400"
+      className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault} ${cardHoverBorder}`}
       href={reference.href}
     >
-      <span className="block font-medium text-sky-800">{title ?? reference.reference}</span>
+      <span className={`block font-medium ${linkText}`}>{title ?? reference.reference}</span>
       {description === undefined ? null : (
-        <span className="mt-1 block text-slate-600">{description}</span>
+        <span className={`mt-1 block ${textSecondaryOnSurface}`}>{description}</span>
       )}
     </a>
   );
@@ -80,14 +87,14 @@ function GitHubUnfurl({ href, path }: { href: string; path: string }): ReactNode
   });
   return (
     <a
-      className="block rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm hover:border-sky-400"
+      className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault} ${cardHoverBorder}`}
       href={href}
       rel="noreferrer"
       target="_blank"
     >
-      <span className="block font-medium text-sky-800">{issue.data?.title ?? href}</span>
+      <span className={`block font-medium ${linkText}`}>{issue.data?.title ?? href}</span>
       {excerpt(issue.data?.body) === undefined ? null : (
-        <span className="mt-1 block text-slate-600">{excerpt(issue.data?.body)}</span>
+        <span className={`mt-1 block ${textSecondaryOnSurface}`}>{excerpt(issue.data?.body)}</span>
       )}
     </a>
   );

@@ -5,6 +5,33 @@ import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import {
+  badgeBlocking,
+  badgeHigh,
+  badgeLow,
+  badgeMed,
+  borderDefault,
+  calloutSuccessBg,
+  calloutSuccessBodyText,
+  calloutSuccessBorder,
+  calloutSuccessText,
+  calloutSuccessTimestampText,
+  card,
+  cardHoverBorder,
+  inputClasses,
+  linkHoverText,
+  linkText,
+  primaryButtonBg,
+  primaryButtonDisabled,
+  primaryButtonEnabledHoverBg,
+  quoteAccentBorder,
+  quoteBodyText,
+  successQuoteAccentBorder,
+  textMutedOnSurface,
+  textPrimaryOnSuccessCallout,
+  textPrimaryOnSurface,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { actorLabel } from "../refs/actor";
 import { Timestamp } from "../refs/Timestamp";
 import { AskThread } from "./AskThread";
@@ -19,12 +46,13 @@ export interface AskCardProps {
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
 }
 
-const URGENCY_STYLES: Record<Ask["urgency"], string> = {
-  blocking: "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300",
-  high: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
-  low: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
-  med: "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300",
+const URGENCY_STYLES: Record<Ask["urgency"], { bg: string; text: string }> = {
+  blocking: badgeBlocking,
+  high: badgeHigh,
+  low: badgeLow,
+  med: badgeMed,
 };
+
 const URGENCY_LABELS: Record<Ask["urgency"], string> = {
   blocking: "Blocking",
   high: "High",
@@ -36,15 +64,17 @@ function AnsweredAsk({ ask }: { ask: Ask & { answer: NonNullable<Ask["answer"]> 
   const { answer } = ask;
   return (
     <article
-      className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
+      className={`rounded-xl p-4 text-sm ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
       data-testid={`ask-${ask.id}`}
     >
       {ask.anchor === null ? null : (
-        <blockquote className="mb-2 border-l-2 border-emerald-400 pl-3 text-emerald-800 dark:text-emerald-300">
+        <blockquote
+          className={`mb-2 border-l-2 pl-3 ${successQuoteAccentBorder} ${calloutSuccessBodyText}`}
+        >
           {ask.anchor.quote}
         </blockquote>
       )}
-      <p className="font-medium text-slate-950 dark:text-slate-100">{ask.question}</p>
+      <p className={`font-medium ${textPrimaryOnSuccessCallout}`}>{ask.question}</p>
       <p className="mt-2">
         <span className="font-semibold">{answer.user}</span> answered
         {answer.selected.length > 0 ? `: ${answer.selected.join(", ")}` : ""}
@@ -52,10 +82,7 @@ function AnsweredAsk({ ask }: { ask: Ask & { answer: NonNullable<Ask["answer"]> 
       {answer.text === null || answer.text === "" ? null : (
         <p className="mt-1 whitespace-pre-wrap">{answer.text}</p>
       )}
-      <Timestamp
-        at={answer.at}
-        className="mt-2 block text-xs text-emerald-700 dark:text-emerald-400"
-      />
+      <Timestamp at={answer.at} className={`mt-2 block text-xs ${calloutSuccessTimestampText}`} />
     </article>
   );
 }
@@ -124,31 +151,30 @@ export function AskCard({
 
   return (
     <>
-      <article
-        className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900"
-        data-testid={`ask-${ask.id}`}
-      >
+      <article className={`rounded-xl p-4 shadow-sm ${card}`} data-testid={`ask-${ask.id}`}>
         {ask.anchor === null ? null : (
-          <blockquote className="mb-3 border-l-2 border-sky-400 pl-3 text-sm text-slate-600 dark:text-slate-400">
+          <blockquote
+            className={`mb-3 border-l-2 pl-3 text-sm ${quoteAccentBorder} ${quoteBodyText}`}
+          >
             {ask.anchor.quote}
           </blockquote>
         )}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="font-medium text-slate-950 dark:text-slate-100">{ask.question}</p>
-            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            <p className={`font-medium ${textPrimaryOnSurface}`}>{ask.question}</p>
+            <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
               {actorLabel(ask.author)} · <Timestamp at={ask.created_at} />
             </p>
           </div>
           <span
-            className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[ask.urgency]}`}
+            className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[ask.urgency].bg} ${URGENCY_STYLES[ask.urgency].text}`}
           >
             {URGENCY_LABELS[ask.urgency]}
           </span>
         </div>
         {tmuxTarget === undefined ? null : (
           <button
-            className="mt-3 text-sm font-medium text-sky-700 hover:text-sky-900 dark:text-sky-400 dark:hover:text-sky-300"
+            className={`mt-3 text-sm font-medium ${linkText} ${linkHoverText}`}
             onClick={() => {
               void navigator.clipboard?.writeText(tmuxTarget);
             }}
@@ -165,7 +191,7 @@ export function AskCard({
                 const checked = selected.includes(option.label);
                 return (
                   <label
-                    className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 px-3 py-2 hover:border-sky-400 dark:border-slate-700"
+                    className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
                     key={option.label}
                   >
                     <input
@@ -185,11 +211,9 @@ export function AskCard({
                       type={ask.multiple ? "checkbox" : "radio"}
                     />
                     <span>
-                      <span className="font-medium text-slate-800 dark:text-slate-200">
-                        {option.label}
-                      </span>
+                      <span className={`font-medium ${textPrimaryOnSurface}`}>{option.label}</span>
                       {option.description === undefined ? null : (
-                        <span className="mt-0.5 block text-sm text-slate-500 dark:text-slate-400">
+                        <span className={`mt-0.5 block text-sm ${textMutedOnSurface}`}>
                           {option.description}
                         </span>
                       )}
@@ -200,12 +224,12 @@ export function AskCard({
             </fieldset>
           )}
           <label
-            className="block text-sm font-medium text-slate-700 dark:text-slate-300"
+            className={`block text-sm font-medium ${textSecondaryOnSurface}`}
             htmlFor={answerFieldId}
           >
             Your answer
             <textarea
-              className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950"
+              className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
               disabled={mutation.isPending}
               id={answerFieldId}
               onChange={(event) => setAnswerText(event.target.value)}
@@ -213,7 +237,7 @@ export function AskCard({
             />
           </label>
           <button
-            className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white enabled:hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
             disabled={!canSubmit || mutation.isPending}
             type="submit"
           >

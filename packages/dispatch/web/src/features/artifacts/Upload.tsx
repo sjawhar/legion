@@ -3,6 +3,16 @@ import { type ChangeEvent, type DragEvent, type ReactNode, useRef, useState } fr
 
 import { ApiError, api } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
+import {
+  borderDefault,
+  borderStrong,
+  dangerText,
+  inputClasses,
+  surfaceBg,
+  surfaceMutedBg,
+  textMutedOnSurface,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 
 export interface UploadResult {
   artifact: Artifact;
@@ -67,27 +77,32 @@ export function Upload({ issueKey }: UploadProps): ReactNode {
   };
 
   return (
-    <section className="space-y-3 border-b border-slate-200 py-3">
-      <label className="block text-sm font-medium text-slate-700" htmlFor="artifact-summary">
+    <section className={`space-y-3 border-b py-3 ${borderDefault}`}>
+      <label
+        className={`block text-sm font-medium ${textSecondaryOnSurface}`}
+        htmlFor="artifact-summary"
+      >
         Summary (optional)
         <input
-          className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500"
+          className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
           id="artifact-summary"
           onChange={(event) => setSummary(event.target.value)}
           value={summary}
         />
       </label>
       <button
-        className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-center"
+        className={`w-full rounded-xl border border-dashed p-4 text-center ${borderStrong} ${surfaceMutedBg}`}
         onClick={() => input.current?.click()}
         onDragOver={(event) => event.preventDefault()}
         onDrop={dropFile}
         type="button"
       >
-        <span className="block text-sm text-slate-600">
+        <span className={`block text-sm ${textSecondaryOnSurface}`}>
           Drop a file here, or choose one to upload.
         </span>
-        <span className="mt-3 inline-block rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700">
+        <span
+          className={`mt-3 inline-block rounded-lg border px-3 py-2 text-sm font-medium ${borderStrong} ${surfaceBg} ${textSecondaryOnSurface}`}
+        >
           Choose file
         </span>
       </button>
@@ -99,12 +114,12 @@ export function Upload({ issueKey }: UploadProps): ReactNode {
         type="file"
       />
       {upload.isPending ? (
-        <p className="text-sm text-slate-500" role="status">
+        <p className={`text-sm ${textMutedOnSurface}`} role="status">
           Uploading artifact…
         </p>
       ) : null}
       {upload.isError ? (
-        <p className="text-sm text-rose-700" role="alert">
+        <p className={`text-sm ${dangerText}`} role="alert">
           {uploadErrorMessage(upload.error)}
         </p>
       ) : null}

@@ -1,10 +1,25 @@
 import { canonicalRepo } from "@legion/contracts/repo";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-
 import { api } from "../../api/client";
 import type { RepoProject } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import {
+  borderDefault,
+  card,
+  dangerHoverText,
+  dangerText,
+  inputClasses,
+  primaryButtonBg,
+  primaryButtonHoverBg,
+  surfaceMutedBg,
+  textMutedOnCanvas,
+  textMutedOnSurface,
+  textPrimaryOnCanvas,
+  textPrimaryOnSurface,
+  textSecondaryOnCanvas,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ProjectsSection } from "./ProjectsSection";
 
@@ -91,22 +106,25 @@ export function SettingsPage(): ReactNode {
   return (
     <section className="max-w-4xl">
       <header className="mb-6">
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="mt-1 text-slate-600">
+        <h1 className={`text-2xl font-semibold ${textPrimaryOnCanvas}`}>Settings</h1>
+        <p className={`mt-1 ${textSecondaryOnCanvas}`}>
           Control where external repository issues appear in Dispatch.
         </p>
       </header>
       <ProjectsSection />
       <section aria-labelledby="repository-projects-heading">
-        <h2 className="text-xl font-semibold" id="repository-projects-heading">
+        <h2
+          className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
+          id="repository-projects-heading"
+        >
           Repositories → Projects
         </h2>
-        <p className="mt-1 text-sm text-slate-600">
+        <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
           External issues use these mappings before falling back to the default project.
         </p>
 
         {mappings.isPending || projects.isPending ? (
-          <p className="mt-6 text-slate-500">Loading settings…</p>
+          <p className={`mt-6 ${textMutedOnCanvas}`}>Loading settings…</p>
         ) : null}
         {mappings.isError ? (
           <div className="mt-6">
@@ -128,9 +146,11 @@ export function SettingsPage(): ReactNode {
         ) : null}
         {mappings.isSuccess && projects.isSuccess ? (
           <>
-            <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white">
+            <div className={`mt-6 overflow-x-auto rounded-xl border ${card}`}>
               <table className="w-full text-left text-sm">
-                <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                <thead
+                  className={`border-b ${surfaceMutedBg} ${borderDefault} ${textSecondaryOnSurface}`}
+                >
                   <tr>
                     <th className="px-4 py-3 font-semibold" scope="col">
                       Repository
@@ -146,19 +166,21 @@ export function SettingsPage(): ReactNode {
                 <tbody>
                   {mappings.data.length === 0 ? (
                     <tr>
-                      <td className="px-4 py-5 text-slate-500" colSpan={3}>
+                      <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={3}>
                         No repository mappings yet.
                       </td>
                     </tr>
                   ) : (
                     mappings.data.map((mapping) => (
-                      <tr className="border-b border-slate-100 last:border-0" key={mapping.repo}>
-                        <td className="px-4 py-3 font-mono text-slate-800">{mapping.repo}</td>
-                        <td className="px-4 py-3 text-slate-700">{mapping.project}</td>
+                      <tr className={`border-b last:border-0 ${borderDefault}`} key={mapping.repo}>
+                        <td className={`px-4 py-3 font-mono ${textPrimaryOnSurface}`}>
+                          {mapping.repo}
+                        </td>
+                        <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>{mapping.project}</td>
                         <td className="px-4 py-3 text-right">
                           <button
                             aria-label={`Delete mapping for ${mapping.repo}`}
-                            className="font-medium text-rose-700 hover:text-rose-900 disabled:cursor-not-allowed disabled:opacity-50"
+                            className={`font-medium disabled:cursor-not-allowed disabled:opacity-50 ${dangerText} ${dangerHoverText}`}
                             disabled={deleteMapping.isPending || putMapping.isPending}
                             onClick={() => deleteMapping.mutate(mapping.repo)}
                             type="button"
@@ -174,13 +196,16 @@ export function SettingsPage(): ReactNode {
             </div>
 
             <form
-              className="mt-6 grid gap-4 rounded-xl border border-slate-200 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
+              className={`mt-6 grid gap-4 rounded-xl border p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end ${borderDefault}`}
               onSubmit={submit}
             >
-              <label className="grid gap-1 text-sm font-medium text-slate-700" htmlFor="repository">
+              <label
+                className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
+                htmlFor="repository"
+              >
                 Repository
                 <input
-                  className="rounded-md border border-slate-300 px-3 py-2 font-mono text-slate-900"
+                  className={`rounded-md px-3 py-2 font-mono ${inputClasses(false)} ${textPrimaryOnSurface}`}
                   id="repository"
                   onChange={(event) => setRepository(event.target.value)}
                   pattern="[^/\s]+/[^/\s]+"
@@ -189,10 +214,13 @@ export function SettingsPage(): ReactNode {
                   value={repository}
                 />
               </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700" htmlFor="project">
+              <label
+                className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
+                htmlFor="project"
+              >
                 Project
                 <select
-                  className="rounded-md border border-slate-300 px-3 py-2 text-slate-900"
+                  className={`rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
                   id="project"
                   onChange={(event) => setProject(event.target.value)}
                   required
@@ -209,7 +237,7 @@ export function SettingsPage(): ReactNode {
                 </select>
               </label>
               <button
-                className="rounded-md bg-sky-700 px-4 py-2 font-medium text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
+                className={`rounded-md px-4 py-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 ${primaryButtonBg} ${primaryButtonHoverBg}`}
                 disabled={putMapping.isPending || deleteMapping.isPending}
                 type="submit"
               >

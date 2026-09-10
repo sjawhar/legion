@@ -3,6 +3,14 @@ import { type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Event, UserState } from "../../api/types";
+import {
+  borderDefault,
+  linkHoverText,
+  linkText,
+  textMutedOnSurface,
+  textPrimaryOnSurface,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { dismissedEventIds, eventDescription } from "../issue/log-model";
 import { actorLabel } from "../refs/actor";
 
@@ -45,13 +53,15 @@ export function PinnedTab({ events, issueKey, pinnedIds }: PinnedTabProps): Reac
   return (
     <div className="pt-3 md:max-h-[45dvh] md:overflow-y-auto">
       {events.map((event) => (
-        <article className="rounded-lg border border-slate-200 p-3 text-sm" key={event.id}>
-          <p className="font-medium text-slate-900">{eventDescription(event)}</p>
-          <p className="mt-1 text-xs text-slate-500">{actorLabel(event.actor)}</p>
+        <article className={`rounded-lg border p-3 text-sm ${borderDefault}`} key={event.id}>
+          <p className={`font-medium ${textPrimaryOnSurface}`}>{eventDescription(event)}</p>
+          <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(event.actor)}</p>
         </article>
       ))}
-      {pinnedIds.length === 0 ? <p className="text-sm text-slate-500">No pinned items.</p> : null}
-      <label className="mt-3 flex items-center gap-2 text-sm text-slate-600">
+      {pinnedIds.length === 0 ? (
+        <p className={`text-sm ${textMutedOnSurface}`}>No pinned items.</p>
+      ) : null}
+      <label className={`mt-3 flex items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
         <input
           checked={showDismissed}
           onChange={(event) => setShowDismissed(event.target.checked)}
@@ -63,12 +73,12 @@ export function PinnedTab({ events, issueKey, pinnedIds }: PinnedTabProps): Reac
         <div className="mt-2 space-y-2">
           {(dismissedEvents.data ?? []).map((event) => (
             <article
-              className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 p-3 text-sm"
+              className={`flex items-center justify-between gap-3 rounded-lg border p-3 text-sm ${borderDefault}`}
               key={event.id}
             >
               <span>{eventDescription(event)}</span>
               <button
-                className="shrink-0 text-sky-700 hover:text-sky-900"
+                className={`shrink-0 ${linkText} ${linkHoverText}`}
                 disabled={undismiss.isPending}
                 onClick={() => undismiss.mutate(event.id)}
                 type="button"
@@ -78,7 +88,7 @@ export function PinnedTab({ events, issueKey, pinnedIds }: PinnedTabProps): Reac
             </article>
           ))}
           {dismissedIds.length === 0 ? (
-            <p className="text-sm text-slate-500">No dismissed items.</p>
+            <p className={`text-sm ${textMutedOnSurface}`}>No dismissed items.</p>
           ) : null}
         </div>
       ) : null}

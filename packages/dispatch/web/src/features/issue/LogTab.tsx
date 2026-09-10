@@ -3,6 +3,27 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Event, UserIssueState, UserState } from "../../api/types";
+import {
+  borderDefault,
+  borderStrong,
+  card,
+  dangerText,
+  linkHoverText,
+  linkText,
+  newDividerLine,
+  secondaryButtonBorder,
+  secondaryButtonHoverBorder,
+  secondaryButtonText,
+  surfaceBg,
+  surfaceMutedBg,
+  surfaceRecessedBg,
+  textMutedHoverToPrimary,
+  textMutedOnCanvas,
+  textMutedOnSurface,
+  textPrimaryOnSurface,
+  textSecondaryOnCanvas,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { Composer, type ComposerKind } from "../margin/Composer";
 import { actorLabel } from "../refs/actor";
 import { buildLogItems, eventDescription, eventItemId, isPinnedEvent } from "./log-model";
@@ -246,16 +267,16 @@ export function LogTab({
   };
 
   if (log.isPending) {
-    return <p className="text-slate-500">Loading log…</p>;
+    return <p className={textMutedOnCanvas}>Loading log…</p>;
   }
   if (log.isError) {
-    return <p className="text-rose-700">Could not load the issue log.</p>;
+    return <p className={dangerText}>Could not load the issue log.</p>;
   }
 
   return (
     <section aria-label="Issue log" className="space-y-3" ref={setLogSection}>
       {hasFailedOps ? (
-        <div className="flex items-center gap-3 text-sm text-rose-700" role="alert">
+        <div className={`flex items-center gap-3 text-sm ${dangerText}`} role="alert">
           <p>Couldn't save pin/dismiss — retry</p>
           <button
             className="font-medium underline disabled:cursor-not-allowed disabled:opacity-50"
@@ -279,13 +300,13 @@ export function LogTab({
         if (item.kind === "new-divider") {
           return (
             <div
-              className="flex items-center gap-3 text-xs font-semibold tracking-wide text-sky-700 uppercase"
+              className={`flex items-center gap-3 text-xs font-semibold tracking-wide uppercase ${linkText}`}
               key="new-divider"
             >
-              <span className="h-px flex-1 bg-sky-200" />
+              <span className={`h-px flex-1 ${newDividerLine}`} />
               <span aria-hidden="true">↑</span>
               New since you last read
-              <span className="h-px flex-1 bg-sky-200" />
+              <span className={`h-px flex-1 ${newDividerLine}`} />
             </div>
           );
         }
@@ -312,10 +333,10 @@ export function LogTab({
           />
         );
       })}
-      {items.length === 0 ? <p className="text-slate-500">No activity yet.</p> : null}
+      {items.length === 0 ? <p className={textMutedOnCanvas}>No activity yet.</p> : null}
       {log.hasNextPage ? (
         <button
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:border-sky-500"
+          className={`rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
           disabled={log.isFetchingNextPage}
           onClick={() => void log.fetchNextPage()}
           type="button"
@@ -345,19 +366,21 @@ function IssueComposer({
   }
 
   return (
-    <div className="space-y-2 border-t border-slate-200 bg-white pt-3 pb-3 md:sticky md:bottom-0 md:z-10">
+    <div
+      className={`space-y-2 border-t pt-3 pb-3 md:sticky md:bottom-0 md:z-10 ${borderDefault} ${surfaceBg}`}
+    >
       {route === null ? null : (
         <div
           aria-label="Compose target"
-          className="inline-flex gap-1 rounded-lg border border-slate-300 bg-slate-100 p-1 text-sm"
+          className={`inline-flex gap-1 rounded-lg p-1 text-sm ${borderStrong} ${surfaceMutedBg}`}
           role="tablist"
         >
           <button
             aria-selected={kind === "comment"}
             className={
               kind === "comment"
-                ? "rounded-md bg-white px-3 py-1 font-semibold text-sky-700 shadow-sm"
-                : "rounded-md px-3 py-1 text-slate-600"
+                ? `rounded-md px-3 py-1 font-semibold shadow-sm ${surfaceRecessedBg} ${linkText}`
+                : `rounded-md px-3 py-1 ${textSecondaryOnCanvas}`
             }
             onClick={() => setKind("comment")}
             role="tab"
@@ -369,8 +392,8 @@ function IssueComposer({
             aria-selected={kind === "message"}
             className={
               kind === "message"
-                ? "rounded-md bg-white px-3 py-1 font-semibold text-sky-700 shadow-sm"
-                : "rounded-md px-3 py-1 text-slate-600"
+                ? `rounded-md px-3 py-1 font-semibold shadow-sm ${surfaceRecessedBg} ${linkText}`
+                : `rounded-md px-3 py-1 ${textSecondaryOnCanvas}`
             }
             onClick={() => setKind("message")}
             role="tab"
@@ -409,22 +432,26 @@ function LogEvent({
 }): ReactNode {
   return (
     <article
-      className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+      className={`rounded-xl p-4 shadow-sm ${card}`}
       data-event-seq={event.seq}
       ref={register}
     >
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className={folded ? "text-sm text-slate-600" : "font-medium text-slate-900"}>
+          <p
+            className={
+              folded ? `text-sm ${textSecondaryOnSurface}` : `font-medium ${textPrimaryOnSurface}`
+            }
+          >
             {eventDescription(event)}
           </p>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
             {actorLabel(event.actor)} · {new Date(event.created_at).toLocaleString()}
           </p>
         </div>
         <div className="flex gap-2">
           <button
-            className="text-sm text-sky-700 hover:text-sky-900"
+            className={`text-sm ${linkText} ${linkHoverText}`}
             disabled={disabled}
             onClick={onPin}
             type="button"
@@ -432,7 +459,7 @@ function LogEvent({
             {pinned ? "Unpin" : "Pin"}
           </button>
           <button
-            className="text-sm text-slate-500 hover:text-slate-800"
+            className={`text-sm ${textMutedHoverToPrimary}`}
             disabled={disabled}
             onClick={onDismiss}
             type="button"

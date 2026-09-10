@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { badgeMed, borderStrong, calloutInfoHoverBg, surfaceBg } from "../../theme/classes";
 import type { ComposerKind } from "./Composer";
 import type { MarginSelection } from "./Margin";
 
@@ -18,13 +19,13 @@ export function SelectionMenu({ onAction, selection }: SelectionMenuProps): Reac
   return (
     <div
       aria-label="Selection actions"
-      className="fixed z-20 flex gap-1 rounded-lg border border-slate-300 bg-white p-1 shadow-lg"
+      className={`fixed z-20 flex gap-1 rounded-lg border p-1 shadow-lg ${borderStrong} ${surfaceBg}`}
       role="toolbar"
       style={{ left, top }}
     >
       {actions.map((kind) => (
         <button
-          className="rounded px-2 py-1 text-sm font-medium text-sky-800 hover:bg-sky-50"
+          className={`rounded px-2 py-1 text-sm font-medium ${badgeMed.text} ${calloutInfoHoverBg}`}
           key={kind}
           onClick={() => onAction(kind)}
           type="button"

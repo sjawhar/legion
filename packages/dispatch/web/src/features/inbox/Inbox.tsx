@@ -3,6 +3,13 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
+import {
+  borderStrong,
+  dangerText,
+  linkHoverText,
+  linkText,
+  textMutedOnCanvas,
+} from "../../theme/classes";
 import { buildIssuePath } from "../refs/routes";
 import { AskCard } from "./AskCard";
 
@@ -13,14 +20,14 @@ export function Inbox(): ReactNode {
   });
 
   if (inbox.isPending) {
-    return <p className="text-slate-500">Loading your inbox…</p>;
+    return <p className={textMutedOnCanvas}>Loading your inbox…</p>;
   }
   if (inbox.isError) {
-    return <p className="text-rose-700">Could not load your inbox.</p>;
+    return <p className={dangerText}>Could not load your inbox.</p>;
   }
   if (inbox.data.length === 0) {
     return (
-      <p className="rounded-xl border border-dashed border-slate-300 p-8 text-slate-500">
+      <p className={`rounded-xl border border-dashed p-8 ${borderStrong} ${textMutedOnCanvas}`}>
         Nothing needs you
       </p>
     );
@@ -31,7 +38,7 @@ export function Inbox(): ReactNode {
       {inbox.data.map((ask) => (
         <li key={ask.id}>
           <Link
-            className="mb-2 flex flex-col items-start gap-1 text-sm text-sky-700 hover:text-sky-900 md:inline-flex md:flex-row md:items-baseline md:gap-2"
+            className={`mb-2 flex flex-col items-start gap-1 text-sm md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
             to={buildIssuePath({ id: ask.id, key: ask.issue_key, kind: "ask" })}
           >
             <span className="font-semibold">{ask.issue_key}</span>
