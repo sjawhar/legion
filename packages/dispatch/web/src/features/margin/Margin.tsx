@@ -59,7 +59,7 @@ export interface MarginSheetModel {
     comments: MarginItem[];
     commentsError: boolean;
     commentsPending: boolean;
-    commentListRef: RefObject<HTMLDivElement | null>;
+    marginRef: RefObject<HTMLElement | null>;
     isClosed: boolean;
     issueError: boolean;
     issueKey: string | undefined;
@@ -137,7 +137,7 @@ function useMarginSheet(): MarginSheetModel {
   const [tab, setTab] = useState<MarginTab>("comments");
   const [composer, setComposer] = useState<MarginComposer>();
   const [expandedIssueKey, setExpandedIssueKey] = useState<string>();
-  const commentListRef = useRef<HTMLDivElement>(null);
+  const marginRef = useRef<HTMLElement>(null);
   const {
     actionErrorId,
     answeredAsksPending,
@@ -199,7 +199,7 @@ function useMarginSheet(): MarginSheetModel {
 
   useMarginListeners({
     items: marginItems,
-    list: commentListRef,
+    margin: marginRef,
     routeItemId,
     selectItem,
     setHoveredItemId,
@@ -262,7 +262,7 @@ function useMarginSheet(): MarginSheetModel {
       comments: items,
       commentsError,
       commentsPending,
-      commentListRef,
+      marginRef,
       isClosed,
       issueError,
       issueKey,

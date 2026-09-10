@@ -2,7 +2,7 @@ import { renderMermaidSVG } from "beautiful-mermaid";
 import DOMPurify from "dompurify";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import {
   calloutDangerBg,
@@ -13,14 +13,7 @@ import {
   errorCodeBlockText,
   inlineWarningText,
 } from "../../theme/classes";
-
-const sanitizeSchema = {
-  ...defaultSchema,
-  attributes: {
-    ...defaultSchema.attributes,
-    "*": [...(defaultSchema.attributes?.["*"] ?? []), "dataDispatchSegments"],
-  },
-};
+import { sanitizeSchema } from "./sanitize";
 
 interface MermaidDiagramProps {
   source: string;

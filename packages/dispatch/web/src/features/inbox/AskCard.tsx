@@ -34,6 +34,7 @@ import {
 } from "../../theme/classes";
 import { actorLabel } from "../refs/actor";
 import { Timestamp } from "../refs/Timestamp";
+import { AskOptionList } from "./AskOptionList";
 import { AskThread } from "./AskThread";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
@@ -60,7 +61,7 @@ const URGENCY_LABELS: Record<Ask["urgency"], string> = {
   med: "Medium",
 };
 
-function AnsweredAsk({ ask }: { ask: Ask & { answer: NonNullable<Ask["answer"]> } }): ReactNode {
+function AnsweredAsk({ ask }: { ask: Ask }): ReactNode {
   const { answer } = ask;
   return (
     <article
@@ -75,14 +76,30 @@ function AnsweredAsk({ ask }: { ask: Ask & { answer: NonNullable<Ask["answer"]> 
         </blockquote>
       )}
       <p className={`font-medium ${textPrimaryOnSuccessCallout}`}>{ask.question}</p>
-      <p className="mt-2">
-        <span className="font-semibold">{answer.user}</span> answered
-        {answer.selected.length > 0 ? `: ${answer.selected.join(", ")}` : ""}
-      </p>
-      {answer.text === null || answer.text === "" ? null : (
-        <p className="mt-1 whitespace-pre-wrap">{answer.text}</p>
+      <AskOptionList
+        descriptionClass={calloutSuccessBodyText}
+        labelClass={textPrimaryOnSuccessCallout}
+        options={ask.options}
+        selected={answer?.selected ?? []}
+      />
+      {answer === null ? null : (
+        <>
+          <p className="mt-2">
+            <span className="font-semibold">{answer.user}</span> answered
+          </p>
+          {answer.text === null || answer.text === "" ? null : (
+            <p className="mt-1 whitespace-pre-wrap">{answer.text}</p>
+          )}
+        </>
       )}
-      <Timestamp at={answer.at} className={`mt-2 block text-xs ${calloutSuccessTimestampText}`} />
+      <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
+        Opened <Timestamp at={ask.created_at} />
+      </p>
+      {answer === null ? null : (
+        <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>
+          Answered <Timestamp at={answer.at} />
+        </p>
+      )}
     </article>
   );
 }
@@ -133,17 +150,14 @@ export function AskCard({
     submitGuard.guard(() => mutation.mutate(text === "" ? { selected } : { selected, text }));
   };
   const canSubmit = selected.length > 0 || answerText.trim() !== "";
-  if (ask.state === "resolved") {
-    return <AskThread ask={ask} createReply={reply} getAskThread={getThread} />;
-  }
-
   const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
-  const answered = justAnswered ?? (ask.state === "answered" ? ask : null);
 
-  if (answered !== null && answered.answer !== null) {
+  const completed = justAnswered ?? (ask.state === "open" ? null : ask);
+
+  if (completed !== null) {
     return (
       <>
-        <AnsweredAsk ask={{ ...answered, answer: answered.answer }} />
+        <AnsweredAsk ask={completed} />
         <AskThread ask={ask} createReply={reply} getAskThread={getThread} />
       </>
     );

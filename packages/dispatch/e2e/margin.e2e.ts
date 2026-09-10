@@ -200,16 +200,14 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await expect(page.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
 
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    const marginItems = page.getByLabel("Margin review items");
+    const margin = page.getByTestId("margin-sheet");
     if (testInfo.project.name === "iphone") {
       await expect(page.getByRole("button", { name: /Close review panel/ })).toBeVisible();
       await expect(page.getByTestId(`margin-comment-${comment.id}`)).toBeVisible();
       await page.getByRole("button", { name: /Close review panel/ }).click();
       await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
     } else {
-      await expect
-        .poll(() => marginItems.evaluate((element) => element.scrollTop))
-        .toBeGreaterThan(0);
+      await expect.poll(() => margin.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
     }
     await page.goto(`/issues/${issue.key}/spec`);
     await enterEditMode(page);
@@ -407,7 +405,11 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     await expect(bobCard).toContainText("Why brown?");
     await expect(bobCard).toContainText("alice answered");
     await expect(bobCard).toContainText("Because it is precise.");
-    await expect(bobCard.locator("time")).toHaveAttribute("datetime", /.+/);
+    const timestamps = bobCard.locator("time");
+    await expect(timestamps).toHaveCount(2);
+    for (const timestamp of await timestamps.all()) {
+      await expect(timestamp).toHaveAttribute("datetime", /.+/);
+    }
     await bobPage.screenshot({
       path: testInfo.outputPath("fresh-viewer-answered-anchored-ask.png"),
       fullPage: true,

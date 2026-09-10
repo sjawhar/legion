@@ -163,7 +163,15 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
       .getByRole("link", { name: `${childIssue.key} · Child decision` })
   ).toBeVisible();
   await alicePage.getByRole("tab", { name: "Log" }).click();
-  await expect(alicePage.getByText("Ask answered: Newest ask")).toBeVisible();
+  const logAsk = alicePage
+    .getByRole("region", { name: "Issue log" })
+    .locator("[data-event-seq]")
+    .filter({ hasText: "Newest ask" });
+  await expect(logAsk).toHaveCount(1);
+  await expect(logAsk).toContainText("Opened");
+  await expect(logAsk).toContainText("alice");
+  await expect(logAsk.getByRole("list", { name: "Answer options" })).toContainText("Ship");
+  await expect(logAsk.getByRole("list", { name: "Answer options" })).toContainText("Hold");
   await alicePage.screenshot({ path: testInfo.outputPath("issue-page.png"), fullPage: true });
 
   const inboxContext = await asUser(browser, "alice");

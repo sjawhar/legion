@@ -20,12 +20,12 @@ import {
   textMutedHoverToPrimary,
   textMutedOnCanvas,
   textMutedOnSurface,
-  textPrimaryOnSurface,
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Composer, type ComposerKind } from "../margin/Composer";
 import { actorLabel } from "../refs/actor";
+import { EventBody, isAskEvent } from "./EventBody";
 import { buildLogItems, eventDescription, eventItemId, isPinnedEvent } from "./log-model";
 import {
   applyDismissedStateOperation,
@@ -315,7 +315,7 @@ export function LogTab({
             disabled={hasFailedOps}
             event={item.event}
             folded={item.folded}
-            key={item.event.id}
+            key={item.kind === "ask" ? item.event.payload.id : item.event.id}
             onDismiss={() => updateDismissed({ id: eventItemId(item.event), op: "dismiss" })}
             onPin={() =>
               updateDismissed((dismissed) => ({
@@ -438,16 +438,16 @@ function LogEvent({
     >
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p
-            className={
-              folded ? `text-sm ${textSecondaryOnSurface}` : `font-medium ${textPrimaryOnSurface}`
-            }
-          >
-            {eventDescription(event)}
-          </p>
-          <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-            {actorLabel(event.actor)} · {new Date(event.created_at).toLocaleString()}
-          </p>
+          {folded ? (
+            <p className={`text-sm ${textSecondaryOnSurface}`}>{eventDescription(event)}</p>
+          ) : (
+            <EventBody event={event} />
+          )}
+          {isAskEvent(event) ? null : (
+            <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
+              {actorLabel(event.actor)} · {new Date(event.created_at).toLocaleString()}
+            </p>
+          )}
         </div>
         <div className="flex gap-2">
           <button

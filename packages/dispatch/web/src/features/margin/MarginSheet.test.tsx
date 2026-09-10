@@ -1,7 +1,20 @@
 import { expect, test } from "bun:test";
 import { render, screen, within } from "@testing-library/react";
+import type { Artifact } from "../../api/types";
 
 import { MarginSheet } from "./MarginSheet";
+
+const specArtifact: Artifact = {
+  created_at: "2026-09-10T00:00:00Z",
+  created_by: { id: "alice", kind: "user" },
+  id: "artifact-1",
+  issue_key: "CORE-1",
+  kind: "doc",
+  name: "Spec",
+  primary: true,
+  slug: "spec",
+  versions: [],
+};
 
 test("MarginSheet renders its tab and open ask count from its model", () => {
   const view = render(
@@ -25,7 +38,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           comments: [],
           commentsPending: false,
           commentsError: false,
-          commentListRef: { current: null },
+          marginRef: { current: null },
           isClosed: false,
           issueKey: "CORE-1",
           issuePending: false,
@@ -35,7 +48,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           pinned: [],
           pendingActionId: undefined,
           pinnedIds: [],
-          visibleArtifact: undefined,
+          visibleArtifact: specArtifact,
         },
         selection: {
           hoveredItemId: undefined,
@@ -56,6 +69,15 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
 
   try {
     expect(screen.getByRole("button", { name: "Open review panel (3 open asks)" })).not.toBeNull();
+    const margin = screen.getByTestId("margin-sheet");
+    expect(margin.className).toContain("xl:sticky");
+    expect(margin.className).toContain("xl:top-0");
+    expect(margin.className).toContain("xl:h-auto");
+    expect(margin.className).toContain("xl:max-h-dvh");
+    expect(margin.className).toContain("xl:overflow-y-auto");
+    const reviewItems = screen.getByLabelText("Margin review items");
+    expect(reviewItems.className).not.toContain("max-h-");
+    expect(reviewItems.className).not.toContain("overflow-y-auto");
     expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
       "true"
     );

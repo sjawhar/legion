@@ -6,7 +6,7 @@ production build from `web/dist`.
 
 ## Layout
 
-- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The issue main column has Spec, Log, Children, and Artifacts tabs; a bare issue route opens the primary Spec document. The margin holds historical Comments and Pinned, with open anchored and issue-level asks in a Needs you group before comments. The three-column layout begins at the `xl` breakpoint (1280px); compact and tablet widths use the navigation drawer and margin bottom sheet, whose review toggle exposes the open-ask count.
+- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The issue main column has Spec, Log, Children, and Artifacts tabs; a bare issue route opens the primary Spec document. The margin holds historical Comments and Pinned, with open anchored and issue-level asks in a Needs you group before comments. The three-column layout begins at the `xl` breakpoint (1280px), where the margin is a sticky, full-viewport-height column with its own scrollbar; compact and tablet widths use the navigation drawer and margin bottom sheet, whose review toggle exposes the open-ask count.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
   browser API boundary.
@@ -14,7 +14,7 @@ production build from `web/dist`.
   Query cache entries for the affected issue.
 - `web/src/main.tsx` installs React Router and the shared Query client.
 
-Resolved asks leave the Inbox and open-ask badges, but their thread and log entry remain available with the actor and reason. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
+Resolved asks leave the Inbox and open-ask badges, but their thread and log entry remain available with the actor and reason. The Log renders Markdown text bodies and coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
 
 `AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the GitHub
 sign-in link at `/auth/start`. Authenticated humans can create native projects
