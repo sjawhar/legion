@@ -1,0 +1,720 @@
+{
+  "source": "interim-hand-schema",
+  "fixtures": [
+    {
+      "name": "code",
+      "markdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n    indent\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": "go"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "fmt.Println(\"hi\")"
+              }
+            ]
+          },
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": ""
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              }
+            ]
+          },
+          {
+            "type": "code_block",
+            "attrs": {
+              "language": ""
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "indent"
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "AQwBAAcBC3Byb3NlbWlycm9yAwpjb2RlX2Jsb2NrBwABAAYEAAEBEWZtdC5QcmludGxuKCJoaSIpKAABAAhsYW5ndWFnZQF3AmdvhwEAAwpjb2RlX2Jsb2NrBwABFAYEAAEVBXBsYWluKAABFAhsYW5ndWFnZQF3AIcBFAMKY29kZV9ibG9jawcAARwGBAABHQZpbmRlbnQoAAEcCGxhbmd1YWdlAXcAAA==",
+      "rendered_by_milkdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n    indent\n"
+    },
+    {
+      "name": "emphasis",
+      "markdown": "**strong** *emphasis* ~~strike~~ `code` and ***nested***\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "strong",
+                    "attrs": {
+                      "marker": "*"
+                    }
+                  }
+                ],
+                "text": "strong"
+              },
+              {
+                "type": "text",
+                "text": " "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "emphasis",
+                    "attrs": {
+                      "marker": "*"
+                    }
+                  }
+                ],
+                "text": "emphasis"
+              },
+              {
+                "type": "text",
+                "text": " "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "strike_through"
+                  }
+                ],
+                "text": "strike"
+              },
+              {
+                "type": "text",
+                "text": " "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "inlineCode"
+                  }
+                ],
+                "text": "code"
+              },
+              {
+                "type": "text",
+                "text": " and "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "strong",
+                    "attrs": {
+                      "marker": "*"
+                    }
+                  },
+                  {
+                    "type": "emphasis",
+                    "attrs": {
+                      "marker": "*"
+                    }
+                  }
+                ],
+                "text": "nested"
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "ARcBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgYAAQEGc3Ryb25nDnsibWFya2VyIjoiKiJ9hAECBnN0cm9uZ4YBCAZzdHJvbmcEbnVsbIQBCQEghgEKCGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hAELCGVtcGhhc2lzhgETCGVtcGhhc2lzBG51bGyEARQBIIYBFQ5zdHJpa2VfdGhyb3VnaAJ7fYQBFgZzdHJpa2WGARwOc3RyaWtlX3Rocm91Z2gEbnVsbIQBHQEghgEeCmlubGluZUNvZGUCe32EAR8EY29kZYYBIwppbmxpbmVDb2RlBG51bGyEASQFIGFuZCCGASkGc3Ryb25nDnsibWFya2VyIjoiKiJ9hgEqCGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hAErBm5lc3RlZIYBMQZzdHJvbmcEbnVsbIYBMghlbXBoYXNpcwRudWxsAA==",
+      "rendered_by_milkdown": "**strong** *emphasis* ~~strike~~ `code` and ***nested***\n"
+    },
+    {
+      "name": "headings",
+      "markdown": "# One\n\n## Two\n\n### Three\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1,
+              "id": ""
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "One"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2,
+              "id": ""
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Two"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3,
+              "id": ""
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Three"
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "AQ8BAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwABAAYEAAEBA09uZSgAAQAFbGV2ZWwBfQEoAAEAAmlkAXcAhwEAAwdoZWFkaW5nBwABBwYEAAEIA1R3bygAAQcFbGV2ZWwBfQIoAAEHAmlkAXcAhwEHAwdoZWFkaW5nBwABDgYEAAEPBVRocmVlKAABDgVsZXZlbAF9AygAAQ4CaWQBdwAA",
+      "rendered_by_milkdown": "# One\n\n## Two\n\n### Three\n"
+    },
+    {
+      "name": "links",
+      "markdown": "[untitled](https://example.com) and [titled](https://example.org \"Title\") and <https://example.net>\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com",
+                      "title": null
+                    }
+                  }
+                ],
+                "text": "untitled"
+              },
+              {
+                "type": "text",
+                "text": " and "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.org",
+                      "title": "Title"
+                    }
+                  }
+                ],
+                "text": "titled"
+              },
+              {
+                "type": "text",
+                "text": " and "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.net",
+                      "title": null
+                    }
+                  }
+                ],
+                "text": "https://example.net"
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "AQ0BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgYAAQEEbGluayt7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tIiwidGl0bGUiOm51bGx9hAECCHVudGl0bGVkhgEKBGxpbmsEbnVsbIQBCwUgYW5kIIYBEARsaW5rLnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5vcmciLCJ0aXRsZSI6IlRpdGxlIn2EAREGdGl0bGVkhgEXBGxpbmsEbnVsbIQBGAUgYW5kIIYBHQRsaW5rK3siaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5uZXQiLCJ0aXRsZSI6bnVsbH2EAR4TaHR0cHM6Ly9leGFtcGxlLm5ldIYBMQRsaW5rBG51bGwA",
+      "rendered_by_milkdown": "[untitled](https://example.com) and [titled](https://example.org \"Title\") and <https://example.net>\n"
+    },
+    {
+      "name": "lists",
+      "markdown": "- one\n  - nested\n- two\n\n3. three\n4. four\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "checked": null,
+                  "spread": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "one"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "bullet_list",
+                    "attrs": {
+                      "spread": false
+                    },
+                    "content": [
+                      {
+                        "type": "list_item",
+                        "attrs": {
+                          "label": "•",
+                          "checked": null,
+                          "spread": false
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "nested"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "checked": null,
+                  "spread": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "two"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "ordered_list",
+            "attrs": {
+              "order": 3,
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "checked": null,
+                  "spread": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "three"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "checked": null,
+                  "spread": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "four"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "ASUBAAcBC3Byb3NlbWlycm9yAwtidWxsZXRfbGlzdAcAAQADCWxpc3RfaXRlbQcAAQEDCXBhcmFncmFwaAcAAQIGBAABAwNvbmWHAQIDC2J1bGxldF9saXN0BwABBwMJbGlzdF9pdGVtBwABCAMJcGFyYWdyYXBoBwABCQYEAAEKBm5lc3RlZCgAAQgFbGFiZWwBdwPigKIoAAEIBnNwcmVhZAF5KAABBwZzcHJlYWQBeSgAAQEFbGFiZWwBdwPigKIoAAEBBnNwcmVhZAF5hwEBAwlsaXN0X2l0ZW0HAAEWAwlwYXJhZ3JhcGgHAAEXBgQAARgDdHdvKAABFgVsYWJlbAF3A+KAoigAARYGc3ByZWFkAXkoAAEABnNwcmVhZAF5hwEAAwxvcmRlcmVkX2xpc3QHAAEfAwlsaXN0X2l0ZW0HAAEgAwlwYXJhZ3JhcGgHAAEhBgQAASIFdGhyZWUoAAEgBWxhYmVsAXcD4oCiKAABIAZzcHJlYWQBeYcBIAMJbGlzdF9pdGVtBwABKgMJcGFyYWdyYXBoBwABKwYEAAEsBGZvdXIoAAEqBWxhYmVsAXcD4oCiKAABKgZzcHJlYWQBeSgAAR8Fb3JkZXIBfQMoAAEfBnNwcmVhZAF5AA==",
+      "rendered_by_milkdown": "- one\n  - nested\n- two\n\n3. three\n4. four\n"
+    },
+    {
+      "name": "marks",
+      "markdown": "A sentence with <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:sami\">a commented span</span> and <span data-dispatch=\"ask\" data-id=\"a1\" data-by=\"session:01a0\">an ask span</span>.\n\nProposed <span data-proof=\"suggestion\" data-id=\"s1\" data-by=\"session:01a0\" data-kind=\"replace\">replacement</span> here.\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A sentence with "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "proofComment",
+                    "attrs": {
+                      "id": "c1",
+                      "by": "user:sami"
+                    }
+                  }
+                ],
+                "text": "a commented span"
+              },
+              {
+                "type": "text",
+                "text": " and "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "dispatchAsk",
+                    "attrs": {
+                      "id": "a1",
+                      "by": "session:01a0"
+                    }
+                  }
+                ],
+                "text": "an ask span"
+              },
+              {
+                "type": "text",
+                "text": "."
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Proposed "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "proofSuggestion",
+                    "attrs": {
+                      "id": "s1",
+                      "by": "session:01a0",
+                      "kind": "replace"
+                    }
+                  }
+                ],
+                "text": "replacement"
+              },
+              {
+                "type": "text",
+                "text": " here."
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "ARIBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEQQSBzZW50ZW5jZSB3aXRoIIYBEQxwcm9vZkNvbW1lbnQceyJpZCI6ImMxIiwiYnkiOiJ1c2VyOnNhbWkifYQBEhBhIGNvbW1lbnRlZCBzcGFuhgEiDHByb29mQ29tbWVudARudWxshAEjBSBhbmQghgEoC2Rpc3BhdGNoQXNrH3siaWQiOiJhMSIsImJ5Ijoic2Vzc2lvbjowMWEwIn2EASkLYW4gYXNrIHNwYW6GATQLZGlzcGF0Y2hBc2sEbnVsbIQBNQEuhwEAAwlwYXJhZ3JhcGgHAAE3BgQAATgJUHJvcG9zZWQghgFBD3Byb29mU3VnZ2VzdGlvbjB7ImlkIjoiczEiLCJieSI6InNlc3Npb246MDFhMCIsImtpbmQiOiJyZXBsYWNlIn2EAUILcmVwbGFjZW1lbnSGAU0PcHJvb2ZTdWdnZXN0aW9uBG51bGyEAU4GIGhlcmUuAA==",
+      "rendered_by_milkdown": "A sentence with <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:sami\">a commented span</span> and <span data-dispatch=\"ask\" data-id=\"a1\" data-by=\"session:01a0\">an ask span</span>.\n\nProposed <span data-proof=\"suggestion\" data-id=\"s1\" data-by=\"session:01a0\" data-kind=\"replace\">replacement</span> here.\n"
+    },
+    {
+      "name": "paragraphs",
+      "markdown": "First paragraph with a hard break.  \nContinues here.\n\nSecond paragraph.\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "First paragraph with a hard break."
+              },
+              {
+                "type": "hardbreak",
+                "attrs": {
+                  "isInline": false
+                }
+              },
+              {
+                "type": "text",
+                "text": "Continues here."
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Second paragraph."
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "AQoBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEiRmlyc3QgcGFyYWdyYXBoIHdpdGggYSBoYXJkIGJyZWFrLocBAQMJaGFyZGJyZWFrKAABJAhpc0lubGluZQF5hwEkBgQAASYPQ29udGludWVzIGhlcmUuhwEAAwlwYXJhZ3JhcGgHAAE2BgQAATcRU2Vjb25kIHBhcmFncmFwaC4A",
+      "rendered_by_milkdown": "First paragraph with a hard break.  \nContinues here.\n\nSecond paragraph.\n"
+    },
+    {
+      "name": "table",
+      "markdown": "| Left | Center | Right |\n| :--- | :----: | ---: |\n| **a** | *b* | `c` |\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "table_header_row",
+                "content": [
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Left"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "alignment": "center"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Center"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "alignment": "right"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Right"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_row",
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "alignment": "left"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "strong",
+                            "attrs": {
+                              "marker": "*"
+                            }
+                          }
+                        ],
+                        "text": "a"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "alignment": "center"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "emphasis",
+                            "attrs": {
+                              "marker": "*"
+                            }
+                          }
+                        ],
+                        "text": "b"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "alignment": "right"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "marks": [
+                          {
+                            "type": "inlineCode"
+                          }
+                        ],
+                        "text": "c"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "ASEBAAcBC3Byb3NlbWlycm9yAwV0YWJsZQcAAQADEHRhYmxlX2hlYWRlcl9yb3cHAAEBAwx0YWJsZV9oZWFkZXIHAAECBgQAAQMETGVmdCgAAQIJYWxpZ25tZW50AXcEbGVmdIcBAgMMdGFibGVfaGVhZGVyBwABCQYEAAEKBkNlbnRlcigAAQkJYWxpZ25tZW50AXcGY2VudGVyhwEJAwx0YWJsZV9oZWFkZXIHAAESBgQAARMFUmlnaHQoAAESCWFsaWdubWVudAF3BXJpZ2h0hwEBAwl0YWJsZV9yb3cHAAEaAwp0YWJsZV9jZWxsBwABGwYGAAEcBnN0cm9uZw57Im1hcmtlciI6IioifYQBHQFhhgEeBnN0cm9uZwRudWxsKAABGwlhbGlnbm1lbnQBdwRsZWZ0hwEbAwp0YWJsZV9jZWxsBwABIQYGAAEiCGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hAEjAWKGASQIZW1waGFzaXMEbnVsbCgAASEJYWxpZ25tZW50AXcGY2VudGVyhwEhAwp0YWJsZV9jZWxsBwABJwYGAAEoCmlubGluZUNvZGUCe32EASkBY4YBKgppbmxpbmVDb2RlBG51bGwoAAEnCWFsaWdubWVudAF3BXJpZ2h0AA==",
+      "rendered_by_milkdown": "| Left | Center | Right |\n| :--- | :----: | ---: |\n| **a** | *b* | `c` |\n"
+    },
+    {
+      "name": "tasks",
+      "markdown": "- [ ] unchecked\n- [x] checked\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "checked": false,
+                  "spread": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "unchecked"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "checked": true,
+                  "spread": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "checked"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "ARABAAcBC3Byb3NlbWlycm9yAwtidWxsZXRfbGlzdAcAAQADCWxpc3RfaXRlbQcAAQEDCXBhcmFncmFwaAcAAQIGBAABAwl1bmNoZWNrZWQoAAEBBWxhYmVsAXcD4oCiKAABAQdjaGVja2VkAXkoAAEBBnNwcmVhZAF5hwEBAwlsaXN0X2l0ZW0HAAEQAwlwYXJhZ3JhcGgHAAERBgQAARIHY2hlY2tlZCgAARAFbGFiZWwBdwPigKIoAAEQB2NoZWNrZWQBeCgAARAGc3ByZWFkAXkoAAEABnNwcmVhZAF5AA==",
+      "rendered_by_milkdown": "- [ ] unchecked\n- [x] checked\n"
+    },
+    {
+      "name": "unicode",
+      "markdown": "😀 before **marked** 漢字\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "😀 before "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "strong",
+                    "attrs": {
+                      "marker": "*"
+                    }
+                  }
+                ],
+                "text": "marked"
+              },
+              {
+                "type": "text",
+                "text": " 漢字"
+              }
+            ]
+          }
+        ]
+      },
+      "yjs_update_v1_b64": "AQcBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEM8J+YgCBiZWZvcmUghgELBnN0cm9uZw57Im1hcmtlciI6IioifYQBDAZtYXJrZWSGARIGc3Ryb25nBG51bGyEARMHIOa8ouWtlwA=",
+      "rendered_by_milkdown": "😀 before **marked** 漢字\n"
+    }
+  ]
+}
