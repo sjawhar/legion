@@ -714,4 +714,87 @@ describe("executeDispatchTool", () => {
     });
     expect(dispatchSubscriptionTopic(result.details)).toBe("notifications.dispatch.issue.DSP-42.>");
   });
+
+  test("reads recent events from a Dispatch log reference", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: 3,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") {
+        return response([
+          {
+            seq: 3,
+            type: "comment.created",
+            actor: { kind: "user", id: "sami" },
+            created_at: "2026-09-09T00:02:00Z",
+          },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/log" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "Key: DSP-42",
+        "Events:",
+        "- #3 comment.created · user sami · 2026-09-09T00:02:00Z",
+      ].join("\n"),
+      details: { issue: "DSP-42", topic: "notifications.dispatch.issue.DSP-42.>" },
+    });
+  });
+
+  test("reads the children listing from a Dispatch children reference", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [{ key: "DSP-43", title: "A child issue", status: "todo" }],
+          last_seq: 0,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/children" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: ["Key: DSP-42", "Children:", "- DSP-43: A child issue (todo)"].join("\n"),
+      details: { issue: "DSP-42", topic: "notifications.dispatch.issue.DSP-42.>" },
+    });
+  });
 });

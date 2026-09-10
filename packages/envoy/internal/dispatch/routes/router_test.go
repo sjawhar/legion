@@ -265,7 +265,7 @@ func TestBuildAppContextRejectsMalformedRepoProjectMapping(t *testing.T) {
 	}
 }
 
-func TestStaticHandlerRejectsUnknownRoute(t *testing.T) {
+func TestStaticHandlerServesSpaShellForUnknownRoute(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
@@ -276,7 +276,167 @@ func TestStaticHandlerRejectsUnknownRoute(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/unroutable", nil))
 
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("unknown route status: got %d, want %d; body=%s", response.Code, http.StatusNotFound, response.Body.String())
+	// An unknown path isn't a static asset, so the server hands back the SPA
+	// shell (like any client-routed app) and lets the client router render its
+	// own not-found view, instead of a bare JSON 404 the client never sees.
+	if response.Code != http.StatusOK {
+		t.Fatalf("unknown route status: got %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if response.Body.String() != "<!doctype html>" {
+		t.Fatalf("unknown route body: got %q, want dashboard shell", response.Body.String())
+	}
+}
+
+func TestStaticHandlerServesIndexAtRoot(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("root status: got %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if response.Body.String() != "<!doctype html>" {
+		t.Fatalf("root body: got %q, want dashboard shell", response.Body.String())
+	}
+}
+
+func TestStaticHandlerServesSpaShellForBrowserDeepLink(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	for _, path := range []string{
+		"/issues/CORE-1/not-a-tab",
+		"/issues",
+		// An artifact slug is user-controlled and may legitimately contain a
+		// dot; it must never be misclassified as a missing static asset.
+		"/issues/CORE-1/artifacts/notes.md",
+	} {
+		t.Run(path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("deep link status for %s: got %d, want %d; body=%s", path, response.Code, http.StatusOK, response.Body.String())
+			}
+			if response.Body.String() != "<!doctype html>" {
+				t.Fatalf("deep link body for %s: got %q, want dashboard shell", path, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestStaticHandlerRoutingRules(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	for _, tc := range []struct {
+		path string
+		want string // "404" | "shell" | "health"
+	}{
+		// Exact reserved roots: no static asset or SPA route lives here.
+		{path: "/api", want: "404"},
+		{path: "/auth", want: "404"},
+		{path: "/ws", want: "404"},
+		{path: "/assets", want: "404"},
+		// Reserved subpaths.
+		{path: "/api/v1/does-not-exist", want: "404"},
+		{path: "/auth/does-not-exist", want: "404"},
+		{path: "/ws/does-not-exist", want: "404"},
+		{path: "/assets/missing.js", want: "404"},
+		{path: "/healthz/extra", want: "404"},
+		// A path that merely starts with the same characters as a reserved
+		// root, but isn't the root or a subpath of it, is a real browser
+		// route and must still get the SPA shell.
+		{path: "/apix", want: "shell"},
+		// A missing static asset outside any reserved root.
+		{path: "/favicon.png", want: "404"},
+		// The exact "GET /healthz" mux route has its own dedicated handler
+		// and must stay unaffected by the static-fallback rules above:
+		// neither a 404 nor the SPA shell, but the real health body.
+		{path: "/healthz", want: "health"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
+			switch tc.want {
+			case "404":
+				if response.Code != http.StatusNotFound {
+					t.Fatalf("status for %s: got %d, want %d; body=%s", tc.path, response.Code, http.StatusNotFound, response.Body.String())
+				}
+				if response.Body.String() == "<!doctype html>" {
+					t.Fatalf("%s served the SPA shell instead of a 404", tc.path)
+				}
+			case "shell":
+				if response.Code != http.StatusOK {
+					t.Fatalf("status for %s: got %d, want %d; body=%s", tc.path, response.Code, http.StatusOK, response.Body.String())
+				}
+				if response.Body.String() != "<!doctype html>" {
+					t.Fatalf("%s body: got %q, want dashboard shell", tc.path, response.Body.String())
+				}
+			case "health":
+				if response.Body.String() == "<!doctype html>" {
+					t.Fatalf("%s served the SPA shell instead of the health handler", tc.path)
+				}
+				if !strings.Contains(response.Body.String(), `"ok"`) {
+					t.Fatalf("%s body: got %q, want the health handler's JSON", tc.path, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestStaticHandlerServesFaviconIcoAsSvg(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "favicon.svg"), []byte("<svg></svg>"), 0o600); err != nil {
+		t.Fatalf("write favicon: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("favicon status: got %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "image/svg+xml" {
+		t.Fatalf("favicon content-type: got %q, want image/svg+xml", contentType)
+	}
+	if response.Body.String() != "<svg></svg>" {
+		t.Fatalf("favicon body: got %q, want svg source", response.Body.String())
+	}
+}
+
+func TestStaticHandlerFaviconIcoFallsBackToNoContent(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("favicon status: got %d, want %d; body=%s", response.Code, http.StatusNoContent, response.Body.String())
 	}
 }

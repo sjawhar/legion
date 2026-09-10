@@ -323,6 +323,15 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	if normalized == "/" {
 		normalized = "/index.html"
 	}
+	if normalized == "/favicon.ico" {
+		faviconPath := filepath.Join(r.ctx.WebDistDir, "favicon.svg")
+		if info, err := os.Stat(faviconPath); err == nil && !info.IsDir() {
+			serveFile(w, req, faviconPath)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
 	if !strings.HasPrefix(candidate, r.ctx.WebDistDir) {
 		writeError(w, http.StatusNotFound, "not found")
@@ -337,16 +346,47 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "stat failed")
 		return
 	}
+	if !isBrowserRoute(normalized) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
 	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
 	if _, err := os.Stat(indexPath); err != nil {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
 	}
-	if normalized != "/issues" && !strings.HasPrefix(normalized, "/issues/") {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
 	serveFile(w, req, indexPath)
+}
+
+// isBrowserRoute reports whether an unmatched, non-static path should fall
+// back to the SPA shell so the client router can render its own view
+// (including its own not-found page). Reserved server prefixes and anything
+// that looks like a missing static asset must stay a real 404 instead, so
+// API/asset clients never get an HTML body where they expected JSON or a
+// file.
+func isBrowserRoute(normalized string) bool {
+	if isReservedPath(normalized, []string{"/api", "/auth", "/ws", "/healthz", "/assets"}) {
+		return false
+	}
+	// Issue routes carry user-controlled segments (artifact slugs, ask/comment
+	// ids) that may legitimately contain a dot, so the file-extension
+	// heuristic below must never apply to them.
+	if normalized == "/issues" || strings.HasPrefix(normalized, "/issues/") {
+		return true
+	}
+	return !strings.Contains(filepath.Base(normalized), ".")
+}
+
+// isReservedPath reports whether normalized is exactly one of roots or a
+// subpath of one — never a mere string-prefix match, so a root like "/api"
+// does not also claim an unrelated path like "/apix".
+func isReservedPath(normalized string, roots []string) bool {
+	for _, root := range roots {
+		if normalized == root || strings.HasPrefix(normalized, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func serveFile(w http.ResponseWriter, req *http.Request, path string) {

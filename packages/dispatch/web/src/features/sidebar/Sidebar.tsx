@@ -130,10 +130,12 @@ function activeIssueKey(pathname: string): string | undefined {
 }
 
 function IssueLink({
+  currentIssue,
   entry,
   issues,
   onNavigate,
 }: {
+  currentIssue: string | undefined;
   entry: SidebarEntry;
   issues: Map<string, IssueSummary>;
   onNavigate?: () => void;
@@ -143,11 +145,17 @@ function IssueLink({
   if (issue === undefined) {
     return null;
   }
+  const isActive = key === currentIssue;
   const children = typeof entry === "string" ? [] : entry.children;
   return (
     <li>
       <Link
-        className="block rounded px-2 py-1.5 text-sm hover:bg-slate-800"
+        aria-current={isActive ? "page" : undefined}
+        className={
+          isActive
+            ? "block rounded bg-slate-800 px-2 py-1.5 text-sm font-medium text-sky-300"
+            : "block rounded px-2 py-1.5 text-sm hover:bg-slate-800"
+        }
         onClick={onNavigate}
         to={buildIssuePath({ key: issue.key, kind: "issue" })}
       >
@@ -163,6 +171,7 @@ function IssueLink({
         <ul className="ml-3 border-l border-slate-700 pl-2">
           {children.map((child) => (
             <IssueLink
+              currentIssue={currentIssue}
               entry={child}
               issues={issues}
               key={typeof child === "string" ? child : child.key}
@@ -226,6 +235,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }): ReactNode 
           <ul className="mt-1 space-y-0.5">
             {group.items.map((entry) => (
               <IssueLink
+                currentIssue={currentIssue}
                 entry={entry}
                 issues={issueByKey}
                 key={typeof entry === "string" ? entry : entry.key}

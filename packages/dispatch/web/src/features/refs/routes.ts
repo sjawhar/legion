@@ -1,6 +1,8 @@
 export type DispatchRoute =
   | { key: string; kind: "issue" }
   | { key: string; kind: "spec" }
+  | { key: string; kind: "log" }
+  | { key: string; kind: "children" }
   | { key: string; kind: "artifact"; slug: string; version?: number }
   | { key: string; kind: "ask"; id: string }
   | { key: string; kind: "comment"; id: string };
@@ -54,6 +56,12 @@ export function parseDispatchReference(value: string): DispatchRoute | undefined
   if (target === "spec") {
     return { key, kind: "spec" };
   }
+  if (target === "log") {
+    return { key, kind: "log" };
+  }
+  if (target === "children") {
+    return { key, kind: "children" };
+  }
   const artifact = target.match(/^artifact\/([^@/?#\s]+)(?:@v([1-9]\d*))?$/);
   if (artifact !== null) {
     return artifactRoute(key, artifact[1] ?? "", artifact[2]);
@@ -82,6 +90,12 @@ export function parseIssuePath(pathname: string, search = ""): DispatchRoute | u
   if (target === "spec") {
     return { key, kind: "spec" };
   }
+  if (target === "log") {
+    return { key, kind: "log" };
+  }
+  if (target === "children") {
+    return { key, kind: "children" };
+  }
   const artifact = target.match(/^artifacts?\/([^/?#\s]+)$/);
   if (artifact !== null) {
     return artifactRoute(key, artifact[1] ?? "", new URLSearchParams(search).get("v"));
@@ -102,6 +116,12 @@ export function buildDispatchReference(route: DispatchRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec`;
   }
+  if (route.kind === "log") {
+    return `${issue}/log`;
+  }
+  if (route.kind === "children") {
+    return `${issue}/children`;
+  }
   if (route.kind === "artifact") {
     return `${issue}/artifact/${encodeURIComponent(route.slug)}${
       route.version === undefined ? "" : `@v${route.version}`
@@ -117,6 +137,12 @@ export function buildIssuePath(route: DispatchRoute): string {
   }
   if (route.kind === "spec") {
     return `${issue}/spec`;
+  }
+  if (route.kind === "log") {
+    return `${issue}/log`;
+  }
+  if (route.kind === "children") {
+    return `${issue}/children`;
   }
   if (route.kind === "artifact") {
     const artifact = `${issue}/artifacts/${encodeURIComponent(route.slug)}`;
