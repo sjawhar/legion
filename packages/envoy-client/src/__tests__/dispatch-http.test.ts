@@ -35,6 +35,18 @@ const actor = {
 };
 
 describe("DispatchClient", () => {
+  test("serializes the updated_since boundary when listing issues", async () => {
+    const { fetchImpl, requests } = fakeFetch([jsonResponse([])]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await client.listIssues({ project: "DSP", updated_since: "2026-09-10T12:00:00Z" });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain(
+      "/api/v1/issues?project=DSP&updated_since=2026-09-10T12%3A00%3A00Z"
+    );
+  });
+
   test("maps dispatch operations to authenticated JSON and multipart API requests", async () => {
     const { fetchImpl, requests } = fakeFetch([
       ...Array.from({ length: 15 }, () => jsonResponse({ ok: true })),

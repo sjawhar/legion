@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -150,7 +153,173 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 	assertOpenAskCount(1)
 }
 
-func TestListIssuesIncludesLastSequence(t *testing.T) {
+func TestListIssuesFiltersByUpdatedSince(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	for _, project := range []string{"TEST", "OTHER"} {
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+			"key": project, "name": project + " project",
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project %s: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+	}
+	createIssue := func(project string) model.Issue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": project, "title": project + " issue",
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create issue in %s: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+
+	before := createIssue("TEST")
+	boundary := createIssue("TEST")
+	after := createIssue("OTHER")
+	updatedAt := map[string]time.Time{
+		before.Key:   time.Date(2026, time.September, 10, 11, 59, 59, 0, time.UTC),
+		boundary.Key: time.Date(2026, time.September, 10, 12, 0, 0, 0, time.UTC),
+		after.Key:    time.Date(2026, time.September, 10, 12, 0, 0, 123457000, time.UTC),
+	}
+	for key, value := range updatedAt {
+		if _, err := database.Pool.Exec(context.Background(), "update issues set updated_at = $2 where key = $1", key, value); err != nil {
+			t.Fatalf("set %s updated_at: %v", key, err)
+		}
+	}
+
+	listed := dispatchRequest(t, handler, http.MethodGet,
+		"/api/v1/issues?project=TEST&updated_since="+url.QueryEscape(updatedAt[boundary.Key].Format(time.RFC3339)), nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list issues since boundary: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	summaries := decodeBody[[]model.IssueSummary](t, listed)
+	if len(summaries) != 1 || summaries[0].Key != boundary.Key {
+		t.Fatalf("issues at or after boundary = %#v, want only %s", summaries, boundary.Key)
+	}
+
+	nanosecondListed := dispatchRequest(t, handler, http.MethodGet,
+		"/api/v1/issues?project=OTHER&updated_since="+url.QueryEscape("2026-09-10T12:00:00.123456789Z"), nil, "alice")
+	if nanosecondListed.Code != http.StatusOK {
+		t.Fatalf("list issues with nanosecond timestamp: status=%d body=%s", nanosecondListed.Code, nanosecondListed.Body.String())
+	}
+	nanosecondSummaries := decodeBody[[]model.IssueSummary](t, nanosecondListed)
+	if len(nanosecondSummaries) != 1 || nanosecondSummaries[0].Key != after.Key {
+		t.Fatalf("issues after nanosecond timestamp = %#v, want only %s", nanosecondSummaries, after.Key)
+	}
+
+	invalid := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?updated_since=not-a-timestamp", nil, "alice")
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_UPDATED_SINCE"`) {
+		t.Fatalf("invalid updated_since: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestListIssuesIncludesEventUpdatedIssuesSinceWatermark(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	createIssue := func(title string) model.Issue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": "TEST", "title": title,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create issue %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+
+	updatedByEvent := createIssue("Updated by message")
+	atWatermark := createIssue("At watermark")
+	watermark := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Minute)
+	for key, updatedAt := range map[string]time.Time{
+		updatedByEvent.Key: watermark.Add(-time.Minute),
+		atWatermark.Key:    watermark,
+	} {
+		if _, err := database.Pool.Exec(context.Background(), "update issues set updated_at = $2 where key = $1", key, updatedAt); err != nil {
+			t.Fatalf("set %s updated_at: %v", key, err)
+		}
+	}
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+updatedByEvent.Key+"/messages", map[string]string{
+		"body": "Advance this issue after the watermark.",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create message: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	listed := dispatchRequest(t, handler, http.MethodGet,
+		"/api/v1/issues?project=TEST&updated_since="+url.QueryEscape(watermark.Format(time.RFC3339Nano)), nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list issues since watermark: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	summaries := decodeBody[[]model.IssueSummary](t, listed)
+	byKey := make(map[string]model.IssueSummary, len(summaries))
+	for _, summary := range summaries {
+		byKey[summary.Key] = summary
+	}
+	if len(byKey) != 2 || byKey[updatedByEvent.Key].Key == "" || byKey[atWatermark.Key].Key == "" {
+		t.Fatalf("issues at or after watermark = %#v, want %s and %s", summaries, updatedByEvent.Key, atWatermark.Key)
+	}
+
+	eventsResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+updatedByEvent.Key+"/events", nil, "alice")
+	if eventsResponse.Code != http.StatusOK {
+		t.Fatalf("read issue events: status=%d body=%s", eventsResponse.Code, eventsResponse.Body.String())
+	}
+	events := decodeBody[[]model.Event](t, eventsResponse)
+	var messageEvent *model.Event
+	for index := range events {
+		if events[index].Type == "message.created" {
+			messageEvent = &events[index]
+			break
+		}
+	}
+	if messageEvent == nil {
+		t.Fatalf("message event not found in %#v", events)
+	}
+	if got := byKey[updatedByEvent.Key].UpdatedAt; !got.Equal(messageEvent.CreatedAt) {
+		t.Fatalf("event-updated issue timestamp = %s, want event timestamp %s", got, messageEvent.CreatedAt)
+	}
+}
+
+func TestEventDoesNotMoveIssueUpdatedAtBackward(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Future issue update",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[model.Issue](t, created)
+	future := time.Now().UTC().Truncate(time.Microsecond).Add(time.Hour)
+	if _, err := database.Pool.Exec(context.Background(), "update issues set updated_at = $2 where key = $1", issue.Key, future); err != nil {
+		t.Fatalf("set future updated_at: %v", err)
+	}
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]string{
+		"body": "Do not move this timestamp backward.",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create message: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list issues: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	summaries := decodeBody[[]model.IssueSummary](t, listed)
+	if len(summaries) != 1 {
+		t.Fatalf("listed issues = %#v, want one summary", summaries)
+	}
+	if got := summaries[0].UpdatedAt; !got.Equal(future) {
+		t.Fatalf("issue timestamp after event = %s, want later timestamp %s", got, future)
+	}
+}
+
+func TestListIssuesReportsLastSequenceAfterEvent(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -164,17 +333,22 @@ func TestListIssuesIncludesLastSequence(t *testing.T) {
 		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
 	}
 	issue := decodeBody[model.Issue](t, created)
+	if message := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]string{
+		"body": "An event advances the sequence.",
+	}, "alice"); message.Code != http.StatusCreated {
+		t.Fatalf("create message: status=%d body=%s", message.Code, message.Body.String())
+	}
 
 	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice")
 	if listed.Code != http.StatusOK {
 		t.Fatalf("list issues: status=%d body=%s", listed.Code, listed.Body.String())
 	}
-	summaries := decodeBody[[]map[string]any](t, listed)
+	summaries := decodeBody[[]model.IssueSummary](t, listed)
 	if len(summaries) != 1 {
 		t.Fatalf("listed issues = %#v, want one summary", summaries)
 	}
-	if got, ok := summaries[0]["last_seq"].(float64); !ok || int(got) != issue.LastSeq {
-		t.Fatalf("list last_seq = %#v, want %d", summaries[0]["last_seq"], issue.LastSeq)
+	if got, want := summaries[0].LastSeq, issue.LastSeq+1; got != want {
+		t.Fatalf("list last_seq = %d, want %d after creating a message", got, want)
 	}
 }
 
@@ -196,7 +370,7 @@ func TestListIssuesQueryUsesAsksOpenIndex(t *testing.T) {
 	}
 
 	var planJSON []byte
-	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "").Scan(&planJSON); err != nil {
+	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "", nil).Scan(&planJSON); err != nil {
 		t.Fatalf("explain list query: %v", err)
 	}
 

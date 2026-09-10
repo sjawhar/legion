@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -26,6 +27,7 @@ const listIssuesQuery = `
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
 	  and ($3 = '' or i.parent_key = $3)
+	  and ($4::timestamptz is null or i.updated_at >= $4)
 	group by i.key
 	order by i.updated_at desc, i.key desc
 `
@@ -34,10 +36,20 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	project := strings.TrimSpace(r.URL.Query().Get("project"))
-	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	parent := strings.TrimSpace(r.URL.Query().Get("parent"))
-	rows, err := s.deps.Store.Pool.Query(r.Context(), listIssuesQuery, project, status, parent)
+	query := r.URL.Query()
+	project := strings.TrimSpace(query.Get("project"))
+	status := strings.TrimSpace(query.Get("status"))
+	parent := strings.TrimSpace(query.Get("parent"))
+	var updatedSince *time.Time
+	if query.Has("updated_since") {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(query.Get("updated_since")))
+		if err != nil {
+			writeError(w, "INVALID_UPDATED_SINCE", http.StatusBadRequest, "updated_since must be an RFC3339 timestamp")
+			return
+		}
+		updatedSince = &parsed
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), listIssuesQuery, project, status, parent, updatedSince)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
