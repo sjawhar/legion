@@ -1476,12 +1476,30 @@ export class ProcessManager {
    * decision, never be raced into resurrecting a root after shutdown or into a closed/lingering
    * tree. Either branch counts toward the same threshold, dead or merely unconfirmed, so
    * repeated never-confirmed cycles always escalate instead of looping forever. */
+  /** True if `tree` -- assumed freshly re-read from `deps.state.trees`, never a reference held
+   * across an await -- is still exactly as an in-flight unconfirmed-root recovery attempt found
+   * it: not disposed, still on `generation`, still `"active"`, and still missing
+   * `readyConfirmedAt`. Shared by `retireUnconfirmedRoot`'s own per-await re-checks and
+   * `escalateOrRetryUnconfirmedRoot`'s post-persist re-check below, so every one of them applies
+   * the identical predicate: a `/process/ready` landing, a `dispose()`, or a newer generation's
+   * own spawn arriving during any of those awaits always wins over the stale recovery decision. */
+  private treeStillUnconfirmed(tree: TreeState | undefined, generation: number): tree is TreeState {
+    return (
+      !this.disposed &&
+      tree !== undefined &&
+      tree.generation === generation &&
+      tree.status === "active" &&
+      tree.readyConfirmedAt === undefined
+    );
+  }
+
   private async escalateOrRetryUnconfirmedRoot(
     treeKey: IssueKey,
     tree: TreeState,
     onRetry: () => Promise<void>
   ): Promise<void> {
-    this.cancelRootRegistrationDeadline(treeKey, tree.generation);
+    const generation = tree.generation;
+    this.cancelRootRegistrationDeadline(treeKey, generation);
     tree.launchFailures += 1;
     if (tree.launchFailures >= MAX_LAUNCH_FAILURES) {
       tree.status = "launch-failed";
@@ -1502,10 +1520,11 @@ export class ProcessManager {
       return;
     }
     await this.persist();
-    // Re-check after the persist's own await: see this method's own doc comment.
-    if (this.disposed || this.deps.state.trees[treeKey] !== tree || tree.status !== "active") {
-      return;
-    }
+    // Re-check after the persist's own await, via the same predicate `retireUnconfirmedRoot`'s
+    // own probe path uses (see `treeStillUnconfirmed`'s doc comment): a ready confirmation or a
+    // newer generation's spawn landing during this persist must still win over the retry, not
+    // just a dispose/closeTree/beginLinger status change.
+    if (!this.treeStillUnconfirmed(this.deps.state.trees[treeKey], generation)) return;
     await onRetry();
   }
 
@@ -1535,19 +1554,10 @@ export class ProcessManager {
    */
   private async retireUnconfirmedRoot(treeKey: IssueKey, generation: number): Promise<void> {
     const stillUnconfirmed = (): TreeState | undefined => {
-      if (this.disposed) return undefined;
       const wait = this.rootRegistrationWaits.get(treeKey);
       if (!wait || wait.generation !== generation) return undefined;
       const tree = this.deps.state.trees[treeKey];
-      if (
-        !tree ||
-        tree.generation !== generation ||
-        tree.status !== "active" ||
-        tree.readyConfirmedAt !== undefined
-      ) {
-        return undefined;
-      }
-      return tree;
+      return this.treeStillUnconfirmed(tree, generation) ? tree : undefined;
     };
 
     if (!stillUnconfirmed()) return;

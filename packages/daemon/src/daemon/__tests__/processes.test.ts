@@ -4356,6 +4356,75 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]?.launchFailures).toBe(1);
   });
 
+  it("a /process/ready confirmation landing during the pre-resurrect persist prevents the retry from resurrecting an already-confirmed root", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const sleepGate = Promise.withResolvers<void>();
+    const saveGate = Promise.withResolvers<void>();
+    let saveStateCalls = 0;
+    let sessionExists = false;
+    let windowCount = 0;
+    let paneAlive = true;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      saveState: async () => {
+        saveStateCalls += 1;
+        // The 1st save is spawnRoot's own happy-path save for the initial spawn; the 2nd is
+        // escalateOrRetryUnconfirmedRoot's own pre-resurrect persist -- the one this test gates.
+        if (saveStateCalls === 2) await saveGate.promise;
+      },
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    paneAlive = false;
+    sleepGate.resolve();
+    await flushEventLoopUntil(() => saveStateCalls >= 2, 20_000);
+
+    // The real root process answers /process/ready for this exact generation while the retry's
+    // own pre-resurrect persist is still in flight -- the probe that found it "dead" a moment
+    // earlier was wrong (or already stale), and this confirmation must still win over the
+    // decision already in flight.
+    processes.confirmRootReady(root, 1);
+    saveGate.resolve();
+    await flushEventLoop();
+
+    expect(windowCount).toBe(1);
+    expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
+    expect(managedState.trees[root]?.readyConfirmedAt).toBeDefined();
+    // confirmRootReady resets launchFailures on a durable confirmation, exactly as it does for
+    // the ordinary happy path -- the failed probe that preceded it is forgiven, not stranded.
+    expect(managedState.trees[root]?.launchFailures).toBe(0);
+  });
+
   it("closeTree landing during the pre-resurrect persist prevents the retry from resurrecting into a closed tree", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
