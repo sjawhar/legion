@@ -227,7 +227,7 @@ test("IssuePage renders a not-found view for an unrecognized tab suffix without 
 });
 
 test("IssuePage remounts when switching issues, discarding unsaved local state", async () => {
-  const secondIssue: Issue = {
+  const secondIssue: IssueDetails = {
     ...issue,
     artifacts: [
       {

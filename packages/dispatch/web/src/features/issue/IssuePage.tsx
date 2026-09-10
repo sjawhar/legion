@@ -1,5 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -169,8 +176,17 @@ function IssueHeader({
 }): ReactNode {
   const queryClient = useQueryClient();
   const [title, setTitle] = useState(issue.title);
+  const [titleDirty, setTitleDirty] = useState(false);
   const [route, setRoute] = useState(issue.route ?? "");
   const [routeDirty, setRouteDirty] = useState(false);
+  const titleRef = useRef(title);
+  const routeRef = useRef(route);
+  useEffect(() => {
+    titleRef.current = title;
+  }, [title]);
+  useEffect(() => {
+    routeRef.current = route;
+  }, [route]);
   const events = useQuery({
     queryKey: ["events", issue.key, "active-sessions"],
     queryFn: () => api.getIssueEvents(issue.key, { limit: 200, order: "desc" }),
@@ -179,6 +195,9 @@ function IssueHeader({
   const updateIssue = useMutation({
     mutationFn: (input: Partial<Pick<Issue, "title" | "status" | "route">>) =>
       api.patchIssue(issue.key, input),
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: ["issue", issue.key] });
+    },
     onSuccess: (next) => {
       queryClient.setQueryData(["issue", issue.key], next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
@@ -197,19 +216,34 @@ function IssueHeader({
     },
   });
 
-  useEffect(() => setTitle(issue.title), [issue.title]);
   useEffect(() => {
-    if (!routeDirty) {
+    if (!titleDirty && !updateIssue.isPending) {
+      setTitle(issue.title);
+    }
+  }, [issue.title, titleDirty, updateIssue.isPending]);
+  useEffect(() => {
+    if (!routeDirty && !updateIssue.isPending) {
       setRoute(issue.route ?? "");
     }
-  }, [issue.route, routeDirty]);
+  }, [issue.route, routeDirty, updateIssue.isPending]);
 
   const saveTitle = () => {
     const next = title.trim();
     if (!isClosed && next !== "" && next !== issue.title) {
-      updateIssue.mutate({ title: next });
+      setTitleDirty(true);
+      updateIssue.mutate(
+        { title: next },
+        {
+          onSuccess: () => {
+            if (titleRef.current === next) {
+              setTitleDirty(false);
+            }
+          },
+        }
+      );
     } else {
       setTitle(issue.title);
+      setTitleDirty(false);
     }
   };
   const saveTitleOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -220,7 +254,17 @@ function IssueHeader({
   const saveRoute = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!isClosed && (route === "" || routePattern.test(route))) {
-      updateIssue.mutate({ route }, { onSuccess: () => setRouteDirty(false) });
+      const submitted = route;
+      updateIssue.mutate(
+        { route: submitted },
+        {
+          onSuccess: () => {
+            if (routeRef.current === submitted) {
+              setRouteDirty(false);
+            }
+          },
+        }
+      );
     }
   };
   const routeIsValid = route === "" || routePattern.test(route);
@@ -242,7 +286,10 @@ function IssueHeader({
         aria-label="Issue title"
         className="mt-2 w-full rounded-lg border border-transparent bg-transparent px-2 py-1 text-2xl font-semibold text-slate-950 outline-none hover:border-slate-300 focus:border-sky-500"
         onBlur={saveTitle}
-        onChange={(event) => setTitle(event.target.value)}
+        onChange={(event) => {
+          setTitleDirty(true);
+          setTitle(event.target.value);
+        }}
         onKeyDown={saveTitleOnEnter}
         disabled={isClosed}
         value={title}
