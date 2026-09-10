@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly daemon_url="${SMOKE_DAEMON_URL:-http://127.0.0.1:${LEGION_DAEMON_PORT:-19370}}"
 readonly smoke_dir="${SMOKE_DIR:-/tmp/legion-smoke}"
 
 fail() {
@@ -17,8 +16,16 @@ require_env() {
   [[ -n "${!1:-}" ]] || fail "$1 is required"
 }
 
+# The daemon's own persisted LegionState -- `GET /legion/v1/state` only ever returns `{project}`
+# (see LegionDaemonApi.State.response and its handler), so the tree/role/gate/admission fields
+# every checkpoint below reads have never been servable over that endpoint. `state_dir` in the
+# generated `legion.yaml` is `${smoke_dir}/daemon` (see up.sh's `write_daemon_config`), and the
+# daemon persists to `state.json` inside it -- local to this rig, so reading it directly needs no
+# network round trip at all.
 state() {
-  curl --fail --silent --show-error "${daemon_url}/legion/v1/state"
+  local state_file="${smoke_dir}/daemon/state.json"
+  [[ -r "$state_file" ]] || fail "daemon state file is missing: ${state_file}"
+  cat "$state_file"
 }
 require_dispatch_token() {
   [[ -n "${DISPATCH_TOKEN:-}" ]] ||
