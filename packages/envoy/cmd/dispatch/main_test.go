@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -13,8 +14,10 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -195,5 +198,51 @@ func TestSeedRepoProjectsRejectsMissingProject(t *testing.T) {
 	err := seedRepoProjects(context.Background(), database, "missing/repo=MISSING")
 	if err == nil || !strings.Contains(err.Error(), `seed repository project "missing/repo"`) {
 		t.Fatalf("seed missing project: got %v", err)
+	}
+}
+
+func TestCheckDocumentsReportsLegacyParseFailures(t *testing.T) {
+	database := openSeedTestStore(t)
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('TEST', 'Test')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, created_by)
+		values ('TEST-1', 'TEST', 1, 'Legacy document', '{"kind":"user","id":"alice"}')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	var artifactID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (issue_key, slug, name, kind, created_by)
+		values ('TEST-1', 'legacy', 'legacy.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&artifactID); err != nil {
+		t.Fatal(err)
+	}
+	doc := crdt.New()
+	content := doc.GetText("content")
+	doc.Transact(func(txn *crdt.Transaction) {
+		content.Insert(txn, 0, "<details>\nblock HTML\n</details>\n", nil)
+	})
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := docs.NewPgVersioned(database).AppendUpdateTx(ctx, tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if exitCode := checkDocuments(ctx, database.Pool.Config().ConnString(), &output); exitCode != 1 {
+		t.Fatalf("check-documents exit = %d, want 1; output=%s", exitCode, output.String())
+	}
+	if got := output.String(); !strings.Contains(got, artifactID) || !strings.Contains(got, "parse=error:") || !strings.Contains(got, "block HTML") {
+		t.Fatalf("check-documents output = %q, want artifact parse failure", got)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -46,7 +47,9 @@ type bootConfig struct {
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-
+	if len(os.Args) > 1 && os.Args[1] == "check-documents" {
+		os.Exit(checkDocuments(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
+	}
 	boot, err := resolveBootConfig(os.Getenv)
 	if err != nil {
 		slog.Error("dispatch: resolve boot config", "error", err)
@@ -88,6 +91,11 @@ func main() {
 		slog.Error("dispatch: migrate database", "error", err)
 		os.Exit(1)
 	}
+	if err := docs.MigrateLegacyDocuments(ctx, database); err != nil {
+		slog.Error("dispatch: migrate legacy documents", "error", err)
+		os.Exit(1)
+	}
+
 	if err := seedRepoProjects(ctx, database, boot.RepoProjects); err != nil {
 		slog.Error("dispatch: seed repository projects", "error", err)
 		os.Exit(1)
@@ -429,4 +437,34 @@ func listenAddress() (string, error) {
 		return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
 	}
 	return host + ":" + port, nil
+}
+
+func checkDocuments(ctx context.Context, databaseURL string, out io.Writer) int {
+	if strings.TrimSpace(databaseURL) == "" {
+		fmt.Fprintln(out, "check-documents: DATABASE_URL is required")
+		return 1
+	}
+	database, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		fmt.Fprintf(out, "check-documents: open database: %v\n", err)
+		return 1
+	}
+	defer database.Pool.Close()
+
+	reports, err := docs.InspectLegacyDocuments(ctx, database)
+	if err != nil {
+		fmt.Fprintf(out, "check-documents: inspect documents: %v\n", err)
+		return 1
+	}
+	exitCode := 0
+	for _, report := range reports {
+		parse := "ok"
+		if report.ParseError != nil {
+			parse = "error: " + report.ParseError.Error()
+			exitCode = 1
+		}
+		fmt.Fprintf(out, "%s %s/%s %s parse=%s anchors=%d resolvable=%d\n",
+			report.ArtifactID, report.IssueKey, report.Name, report.State, parse, report.Anchors, report.Resolvable)
+	}
+	return exitCode
 }
