@@ -211,6 +211,12 @@ export class ProcessManager {
    * issue splits into it instead of racing to open its own. */
   private readonly issueWindowIds = new Map<IssueKey, string>();
   private controllerSpawn?: Promise<void>;
+  /** Set while a bounded wait for the controller to claim its role is in flight (see
+   * `ensureController`'s doc comment) -- guards against arming a second, concurrent wait for the
+   * same stuck pane; a later `ensureController` call that observes the role newly claimed clears
+   * this directly rather than tracking a cancel handle, since the armed wait's own callback
+   * re-checks the role before acting either way. */
+  private controllerRegistrationArmed = false;
   private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
@@ -1229,8 +1235,27 @@ export class ProcessManager {
     }
   }
 
+  /**
+   * A live pane is not proof of a role holder: `controllerAlive()` only confirms the tmux pane
+   * itself is running, not that it ever reached `/controller/ready` (a stuck plugin) or that its
+   * Envoy role claim survived while the pane did (lost independently of the pane dying). Either
+   * way, an alive-but-unclaimed controller would otherwise strand every pending notice forever,
+   * since nothing else ever retries a pane this method already considers "there". Arms a bounded
+   * wait the first time this is observed (`workerBootTimeoutSeconds * workerBootRegistrationDeadlineIntervals`,
+   * the same budget a worker's own boot gets to register) rather than resetting the clock on
+   * every call; if the role is still unclaimed once that wait elapses, retires the stuck pane and
+   * spawns a fresh one in its place.
+   */
   async ensureController(): Promise<void> {
-    if (await this.controllerAlive()) return;
+    if (await this.controllerAlive()) {
+      if (this.deps.state.roles[controllerToken(this.deps.state.project)]) {
+        this.controllerRegistrationArmed = false;
+      } else {
+        this.armControllerRegistrationDeadline();
+      }
+      return;
+    }
+    this.controllerRegistrationArmed = false;
     if (!this.controllerSpawn) {
       this.controllerSpawn = (async () => {
         const controllerSecret = await this.deps.mintControllerCapability();
@@ -1240,6 +1265,43 @@ export class ProcessManager {
       });
     }
     await this.controllerSpawn;
+  }
+
+  private armControllerRegistrationDeadline(): void {
+    if (this.controllerRegistrationArmed) return;
+    this.controllerRegistrationArmed = true;
+    const deadlineMs =
+      this.deps.config.workerBootTimeoutSeconds *
+      1_000 *
+      this.deps.config.workerBootRegistrationDeadlineIntervals;
+    const wait = this.deps.sleep
+      ? this.deps.sleep(deadlineMs)
+      : new Promise<void>((resolve) => setTimeout(resolve, deadlineMs));
+    void wait.then(() =>
+      this.retireAndRespawnStuckController().catch((error) => {
+        console.error("[legion] failed to retire and respawn a stuck controller:", error);
+      })
+    );
+  }
+
+  /** Runs once the registration deadline armed above elapses. Re-checks both conditions that
+   * would make this a no-op fresh, rather than trusting whatever was true when the wait was
+   * armed: the role may have been claimed in the meantime (the pane was never actually stuck, it
+   * was merely slow), or the pane may already be gone on its own (nothing left to retire). */
+  private async retireAndRespawnStuckController(): Promise<void> {
+    this.controllerRegistrationArmed = false;
+    const token = controllerToken(this.deps.state.project);
+    if (this.deps.state.roles[token]) return;
+    if (!(await this.controllerAlive())) return;
+    const locator = this.deps.state.controllerLocator;
+    if (!locator) return;
+    delete this.deps.state.controllerLocator;
+    try {
+      await this.stopProcess(token, locator, this.workerStopTimeoutMs);
+    } catch (error) {
+      console.error("[legion] failed to stop a stuck controller pane before respawn:", error);
+    }
+    await this.ensureController();
   }
 
   /** Probes a tree's recorded locator for liveness. Backfills `locator.tmuxPaneId` once

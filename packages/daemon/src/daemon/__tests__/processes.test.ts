@@ -2872,6 +2872,101 @@ describe("ProcessManager", () => {
     expect(windows[1]).toContain("LEGION_CONTROLLER_SECRET=controller-secret-2");
   });
 
+  it("ensureController's registration-deadline callback leaves an alive controller alone once its role claim arrives before the deadline elapses", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.controllerLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+    };
+    const sleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@43 %2 54321\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Alive pane, no role claim yet: arms the registration deadline instead of treating this as
+    // "there's nothing to do".
+    await processes.ensureController();
+    // The role claim arrives (what a real `/controller/ready` does) before the deadline elapses.
+    managedState.roles[controllerToken("omp")] = {
+      role: "controller",
+      sessionId: "ses-controller",
+    };
+    // Only now does the deadline elapse -- its own callback must re-check the role rather than
+    // trust whatever was true when it was armed.
+    sleepGate.resolve();
+    await flushEventLoop();
+
+    expect(commands.some((command) => command[1] === "new-window")).toBe(false);
+    expect(commands.some((command) => command[1] === "kill-pane")).toBe(false);
+    expect(managedState.controllerLocator).toEqual(state.controllerLocator);
+  });
+
+  it("ensureController retires a stuck controller pane and spawns a fresh one once its registration deadline elapses with no role claim", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const staleLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+    };
+    state.controllerLocator = { ...staleLocator };
+    const sleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@44 %3 65432\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Alive pane, no role claim: arms the registration deadline.
+    await processes.ensureController();
+    // The role never gets claimed -- the deadline elapses with nothing having changed.
+    sleepGate.resolve();
+    await flushEventLoop();
+
+    // The stuck pane was retired (no graceful shim response, so straight to kill-pane) and a
+    // fresh one spawned in its place.
+    const killPaneRan = commands.some(
+      (command) => command[0] === "tmux" && command[1] === "kill-pane"
+    );
+    expect(killPaneRan).toBe(true);
+    expect(commands.some((command) => command[1] === "new-window")).toBe(true);
+    expect(managedState.controllerLocator).toEqual({
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@44",
+      tmuxPaneId: "%3",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+    });
+  });
+
   it("spawns a replacement when a stale controller claim receives a delivery exception", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
