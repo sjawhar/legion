@@ -56,7 +56,6 @@ test("exposes every shared Dispatch tool with its required JSON Schema fields wh
   const previous = { ...process.env }
   process.env["DISPATCH_URL"] = "http://127.0.0.1:1"
   process.env["DISPATCH_TOKEN"] = "test-token"
-  delete process.env["DISPATCH_MCP_URL"]
   const stderr = captureStderr()
   try {
     const module = await loadServer("dispatch-enabled")
@@ -89,7 +88,6 @@ test("omits all Dispatch tools when Dispatch is not enabled", async () => {
   const previous = { ...process.env }
   delete process.env["DISPATCH_URL"]
   delete process.env["DISPATCH_TOKEN"]
-  delete process.env["DISPATCH_MCP_URL"]
   process.env["HOME"] = "/nonexistent-home-for-dispatch-gating"
   const stderr = captureStderr()
   try {
@@ -113,7 +111,6 @@ test("omits Dispatch tools and logs the missing bearer token once", async () => 
   const previous = { ...process.env }
   process.env["DISPATCH_URL"] = "http://127.0.0.1:8766"
   delete process.env["DISPATCH_TOKEN"]
-  delete process.env["DISPATCH_MCP_URL"]
   process.env["HOME"] = "/nonexistent-home-for-dispatch-gating"
   const stderr = captureStderr()
   try {
@@ -328,7 +325,6 @@ test("dispatch_ask sends the native ask request with the Claude session origin a
   delete process.env["ENVOY_NATS_URL"]
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${service.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
-  delete process.env["DISPATCH_MCP_URL"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
   const stderr: string[] = []
   const stderrSpy = spyOn(process.stderr, "write").mockImplementation((chunk) => {
@@ -397,7 +393,6 @@ test("a rejected native Dispatch ask follows no topic", async () => {
   delete process.env["ENVOY_SESSION_ID"]
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${service.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
-  delete process.env["DISPATCH_MCP_URL"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
   try {
     const module = await loadServer("dispatch-rejected")
@@ -444,7 +439,6 @@ test("a failed auto-subscribe does not fail a native Dispatch ask", async () => 
   delete process.env["ENVOY_NATS_URL"]
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${service.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
-  delete process.env["DISPATCH_MCP_URL"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
   try {
     const module = await loadServer("dispatch-subscribe-fails")
@@ -564,7 +558,6 @@ test("a manual subscription fails without a reachable NATS forwarder while a nat
   process.env["ENVOY_NATS_URL"] = "nats://127.0.0.1:1"
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${service.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
-  delete process.env["DISPATCH_MCP_URL"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
   const stderr = captureStderr()
   try {
