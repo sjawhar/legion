@@ -1,11 +1,22 @@
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
-import type { Anchor } from "../../api/types";
+import type { Anchor, Artifact, Comment, Event } from "../../api/types";
 import type { MarginComposer } from "./CommentsTab";
 import type { ComposerAnchor, ComposerKind } from "./Composer";
 import { MarginSheet } from "./MarginSheet";
-import type { MarginTab } from "./useMarginItems";
+import type { MarginItem, MarginItemAction, MarginTab } from "./useMarginItems";
 import { useMarginItems } from "./useMarginItems";
+import { useMarginListeners } from "./useMarginListeners";
 
 export interface MarginSelection extends ComposerAnchor {
   artifactId: string;
@@ -27,6 +38,42 @@ interface MarginContextValue {
   setAnchors: (anchors: MarginAnchor[]) => void;
   setHoveredItemId: (id: string | undefined) => void;
   setSelection: (selection: MarginSelection | undefined) => void;
+}
+
+export interface MarginSheetModel {
+  actions: {
+    closeComposer: () => void;
+    onAction: (id: string, action: MarginItemAction) => void;
+    onReply: (comment: Comment) => void;
+    onSelectionAction: (kind: ComposerKind, anchor: ComposerAnchor) => void;
+  };
+  composer: MarginComposer | undefined;
+  items: {
+    asksPending: boolean;
+    comments: MarginItem[];
+    commentsPending: boolean;
+    commentListRef: RefObject<HTMLDivElement | null>;
+    isClosed: boolean;
+    issueKey: string | undefined;
+    issuePending: boolean;
+    openAskCount: number;
+    pinned: Event[];
+    pinnedIds: string[];
+    visibleArtifact: Artifact | undefined;
+  };
+  selection: {
+    hoveredItemId: string | undefined;
+    selectedItemId: string | undefined;
+    value: MarginSelection | undefined;
+  };
+  sheet: {
+    expanded: boolean;
+    toggle: (expanded?: boolean) => void;
+  };
+  tab: {
+    set: (tab: MarginTab) => void;
+    value: MarginTab;
+  };
 }
 
 const noMargin = () => {};
@@ -67,11 +114,7 @@ export function useMargin(): MarginContextValue {
   return useContext(MarginContext);
 }
 
-interface MarginProps {
-  ArtifactsTabSlot?: () => ReactNode;
-}
-
-export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
+function useMarginSheet(): MarginSheetModel {
   const {
     hoveredItemId,
     selectItem,
@@ -83,6 +126,8 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
   } = useMargin();
   const [tab, setTab] = useState<MarginTab>("comments");
   const [composer, setComposer] = useState<MarginComposer>();
+  const [expandedIssueKey, setExpandedIssueKey] = useState<string>();
+  const commentListRef = useRef<HTMLDivElement>(null);
   const {
     asksPending,
     commentsPending,
@@ -99,6 +144,14 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
     routeItemId,
     visibleArtifact,
   } = useMarginItems(tab);
+  const sheetExpanded = issueKey !== undefined && expandedIssueKey === issueKey;
+  const toggleSheet = useCallback(
+    (expanded?: boolean) => {
+      const nextExpanded = expanded ?? !sheetExpanded;
+      setExpandedIssueKey(nextExpanded ? issueKey : undefined);
+    },
+    [issueKey, sheetExpanded]
+  );
 
   useEffect(() => {
     setAnchors(decorationAnchors);
@@ -113,52 +166,109 @@ export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
       setComposer(undefined);
     }
   }, [composer, isClosed, visibleArtifact?.id]);
+  useEffect(() => {
+    if (
+      routeArtifactSlug === undefined ||
+      visibleArtifact === undefined ||
+      visibleArtifact.kind === "doc"
+    ) {
+      return;
+    }
+    setTab("artifacts");
+    if (window.matchMedia("(max-width: 767px)").matches) {
+      setExpandedIssueKey(issueKey);
+    }
+  }, [issueKey, routeArtifactSlug, visibleArtifact]);
 
-  const openComposer = (kind: ComposerKind, anchor: ComposerAnchor, replyTo?: string) => {
-    setComposer({ anchor, kind, replyTo });
-    setSelection(undefined);
-  };
+  useMarginListeners({
+    items,
+    list: commentListRef,
+    routeItemId,
+    selectItem,
+    setHoveredItemId,
+    setTab,
+    sheetExpanded,
+    tab,
+    visibleArtifact,
+  });
 
-  return (
-    <MarginSheet
-      ArtifactsTabSlot={ArtifactsTabSlot}
-      asksPending={asksPending}
-      commentsPending={commentsPending}
-      composer={composer}
-      hoveredItemId={hoveredItemId}
-      isClosed={isClosed}
-      issueKey={issueKey}
-      issuePending={issuePending}
-      items={items}
-      onAction={(id, kind) => mutateItem({ id, kind })}
-      onCloseComposer={() => setComposer(undefined)}
-      onReply={(comment) => {
-        if (comment.anchor !== null) {
-          openComposer(
-            "comment",
-            {
-              artifact: comment.anchor.artifact_id,
-              from: comment.anchor.from,
-              quote: comment.anchor.quote,
-              to: comment.anchor.to,
-            },
-            comment.id
-          );
-        }
-      }}
-      onSelectionAction={openComposer}
-      openAskCount={openAskCount}
-      pinned={pinned}
-      pinnedIds={pinnedIds}
-      routeArtifactSlug={routeArtifactSlug}
-      routeItemId={routeItemId}
-      selectItem={selectItem}
-      selectedItemId={selectedItemId}
-      selection={selection}
-      setHoveredItemId={setHoveredItemId}
-      setTab={setTab}
-      tab={tab}
-      visibleArtifact={visibleArtifact}
-    />
+  const openComposer = useCallback(
+    (kind: ComposerKind, anchor: ComposerAnchor, replyTo?: string) => {
+      setComposer({ anchor, kind, replyTo });
+      setSelection(undefined);
+    },
+    [setSelection]
   );
+  const onAction = useCallback(
+    (id: string, action: MarginItemAction) => {
+      mutateItem({ id, kind: action });
+    },
+    [mutateItem]
+  );
+  const onReply = useCallback(
+    (comment: Comment) => {
+      if (comment.anchor !== null) {
+        openComposer(
+          "comment",
+          {
+            artifact: comment.anchor.artifact_id,
+            from: comment.anchor.from,
+            quote: comment.anchor.quote,
+            to: comment.anchor.to,
+          },
+          comment.id
+        );
+      }
+    },
+    [openComposer]
+  );
+  const closeComposer = useCallback(() => {
+    setComposer(undefined);
+  }, []);
+
+  return {
+    actions: {
+      closeComposer,
+      onAction,
+      onReply,
+      onSelectionAction: openComposer,
+    },
+    composer,
+    items: {
+      asksPending,
+      comments: items,
+      commentsPending,
+      commentListRef,
+      isClosed,
+      issueKey,
+      issuePending,
+      openAskCount,
+      pinned,
+      pinnedIds,
+      visibleArtifact,
+    },
+    selection: {
+      hoveredItemId,
+      selectedItemId,
+      value: selection,
+    },
+    sheet: {
+      expanded: sheetExpanded,
+      toggle: toggleSheet,
+    },
+    tab: {
+      set: setTab,
+      value: tab,
+    },
+  };
+}
+
+interface MarginProps {
+  ArtifactsTabSlot?: () => ReactNode;
+}
+
+export function Margin({ ArtifactsTabSlot }: MarginProps): ReactNode {
+  const model = useMarginSheet();
+
+  return <MarginSheet ArtifactsTabSlot={ArtifactsTabSlot} model={model} />;
 }
