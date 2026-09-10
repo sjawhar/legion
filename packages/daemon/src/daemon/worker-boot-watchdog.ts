@@ -26,6 +26,10 @@ interface CancelableSleepHandle {
 
 export interface WorkerBootWatchdogDeps {
   workerBootTimeoutSeconds(): number;
+  /** The daemon-configured worker RPC timeout in milliseconds (`worker_rpc_timeout_seconds`),
+   * passed through to `probeWorkerSocket`'s own `get_state` call so a boot-alive probe
+   * respects the same timeout every other RPC request in this daemon does. */
+  workerRpcTimeoutMs(): number;
   /** Caps how many consecutive observation intervals a boot may spend probe-alive-but-still-
    * unconfirmed before the watch stops re-arming and treats it as a boot failure instead — see
    * `WorkerBootWatchdog`'s own doc comment. */
@@ -174,7 +178,8 @@ export class WorkerBootWatchdog {
     if (pid !== undefined && (await this.deps.isOmpPane(pid))) return true;
     const probe = await probeWorkerSocket(
       (socketPath) => this.deps.workerClient(token, socketPath),
-      locator.socketPath
+      locator.socketPath,
+      this.deps.workerRpcTimeoutMs()
     );
     if (!probe.client) return false;
     if (!probe.stateAnswered) {

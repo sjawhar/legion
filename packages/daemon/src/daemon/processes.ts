@@ -79,7 +79,7 @@ export interface ProcessManagerDeps {
     generation: number,
     expectedSessionId?: string
   ): Promise<string>;
-  connectWorkerRpc(socketPath: string): Promise<WorkerRpcClient>;
+  connectWorkerRpc(socketPath: string, timeoutMs?: number): Promise<WorkerRpcClient>;
   provisioningToken(owner: string): Promise<string>;
   statPrompt?(promptPath: string): Promise<unknown>;
   readProcessCmdline?(pid: number): Promise<string>;
@@ -275,6 +275,7 @@ export class ProcessManager {
       run: this.deps.run,
       isOmpPane: (pid) => this.isOmpPane(pid),
       workerClient: (token, socketPath) => this.workerClient(token, socketPath),
+      workerRpcTimeoutMs: () => this.workerRpcTimeoutMs,
       sleep: this.deps.sleep,
       yield: this.deps.yield,
       getClaim: (token) => {
@@ -468,7 +469,8 @@ export class ProcessManager {
           const socketPath = claim.locator.socketPath;
           const probe = await probeWorkerSocket(
             (path) => this.workerClient(token, path),
-            socketPath
+            socketPath,
+            this.workerRpcTimeoutMs
           );
           if (this.closingTrees.has(treeKey)) {
             throw new TreeClosingError(treeKey);
@@ -718,7 +720,8 @@ export class ProcessManager {
         }
         const probe = await probeWorkerSocket(
           (socketPath) => this.workerClient(token, socketPath),
-          probedLocator.socketPath
+          probedLocator.socketPath,
+          this.workerRpcTimeoutMs
         );
         if (!probe.client) {
           console.error(`[legion] failed to reconnect worker ${token}:`, probe.connectError);
@@ -1889,7 +1892,7 @@ export class ProcessManager {
     const inFlight = this.workerConnections.get(token);
     if (inFlight) return inFlight;
     const connecting = (async () => {
-      const client = await this.deps.connectWorkerRpc(socketPath);
+      const client = await this.deps.connectWorkerRpc(socketPath, this.workerRpcTimeoutMs);
       try {
         await client.negotiate();
       } catch (error) {
@@ -1981,7 +1984,8 @@ export class ProcessManager {
     this.reconnectAttempted.add(attemptKey);
     const probe = await probeWorkerSocket(
       (socketPath) => this.workerClient(token, socketPath),
-      locator.socketPath
+      locator.socketPath,
+      this.workerRpcTimeoutMs
     );
     if (!probe.client) {
       // Reconnect failed to connect at all; the worker is confirmed dead.
@@ -2374,7 +2378,7 @@ export class ProcessManager {
     const cached = this.workerClients.get(token);
     if (cached) return cached;
     try {
-      return await this.deps.connectWorkerRpc(socketPath);
+      return await this.deps.connectWorkerRpc(socketPath, this.workerRpcTimeoutMs);
     } catch {
       return undefined;
     }
@@ -2471,6 +2475,15 @@ export class ProcessManager {
 
   private get treeStopTimeoutMs(): number {
     return this.deps.config.treeStopTimeoutSeconds * 1000;
+  }
+
+  /** The daemon-configured `worker_rpc_timeout_seconds` (default 5), in milliseconds -- the
+   * timeout every `connectWorkerRpc`/`probeWorkerSocket` call in this file uses for a single
+   * worker RPC request (`negotiate_protocol`/`get_state`), including the background
+   * connect `markTreeReady`/`workerReady`/`markControllerReady` kick off after
+   * `/process/ready`/`/worker/ready`/`/controller/ready` already responded. */
+  private get workerRpcTimeoutMs(): number {
+    return this.deps.config.workerRpcTimeoutSeconds * 1000;
   }
 
   /** Probes the controller's recorded locator for liveness. Backfills `tmuxPaneId` once

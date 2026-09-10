@@ -76,6 +76,13 @@ export interface DaemonConfig {
    * path a dead pane would be) — a pane that keeps answering forever without ever registering
    * is not "slow", it never actually completed its boot. */
   workerBootRegistrationDeadlineIntervals: number;
+  /** Seconds before a single worker RPC request over a `legion worker-shim` unix socket
+   * (`negotiate_protocol`/`get_state`/`prompt`) times out. Governs the connect-time
+   * `negotiate_protocol` round trip that `markTreeReady`/`workerReady`/`markControllerReady`
+   * kick off in the background after `/process/ready`/`/worker/ready`/`/controller/ready`
+   * already responded — small by default, raised only under measured load sensitivity, never a
+   * substitute for those routes responding before they dial back into the caller's own socket. */
+  workerRpcTimeoutSeconds: number;
   gates: { design: "root-issues" | "off"; merge: "human" | "off" };
   githubApps: GitHubAppsConfig;
   stateDir: string;
@@ -126,6 +133,7 @@ const DEFAULT_WORKER_STOP_TIMEOUT_SECONDS = 10;
 const DEFAULT_TREE_STOP_TIMEOUT_SECONDS = 60;
 const DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS = 120;
 const DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS = 3;
+const DEFAULT_WORKER_RPC_TIMEOUT_SECONDS = 5;
 const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp";
 
 const CONFIG_SCHEMA: ConfigSchema = {
@@ -157,6 +165,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   tree_stop_timeout_seconds: null,
   worker_boot_timeout_seconds: null,
   worker_boot_registration_deadline_intervals: null,
+  worker_rpc_timeout_seconds: null,
   state_dir: null,
   gates: { design: null, merge: null },
   github_apps: {
@@ -503,6 +512,7 @@ export function loadConfigFromFile(
     ["tree_stop_timeout_seconds", "treeStopTimeoutSeconds"],
     ["worker_boot_timeout_seconds", "workerBootTimeoutSeconds"],
     ["worker_boot_registration_deadline_intervals", "workerBootRegistrationDeadlineIntervals"],
+    ["worker_rpc_timeout_seconds", "workerRpcTimeoutSeconds"],
   ] as const) {
     const value = readPositiveInteger(config[fileKey], fileKey);
     if (value !== undefined) fields[configKey] = value;
@@ -714,6 +724,15 @@ export function resolveDaemonConfig(
     ),
     DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS
   );
+  const workerRpcTimeoutSeconds = resolveValue(
+    opts.cliOverrides?.workerRpcTimeoutSeconds,
+    fileNumber(fields, "workerRpcTimeoutSeconds"),
+    parseEnvPositiveInteger(
+      env.LEGION_WORKER_RPC_TIMEOUT_SECONDS,
+      "LEGION_WORKER_RPC_TIMEOUT_SECONDS"
+    ),
+    DEFAULT_WORKER_RPC_TIMEOUT_SECONDS
+  );
 
   const lifecycleNumbers: Record<string, number> = {
     admissionCap: admissionCap.value,
@@ -726,6 +745,7 @@ export function resolveDaemonConfig(
     treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
     workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
     workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
+    workerRpcTimeoutSeconds: workerRpcTimeoutSeconds.value,
   };
   for (const [field, value] of Object.entries(lifecycleNumbers)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
@@ -779,6 +799,7 @@ export function resolveDaemonConfig(
       treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
       workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
       workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
+      workerRpcTimeoutSeconds: workerRpcTimeoutSeconds.value,
       gates: parsedGates,
       githubApps: githubApps.value,
       stateDir: stateDir.value,
