@@ -202,7 +202,6 @@ const originalDispatchToken = process.env.DISPATCH_TOKEN;
 
 beforeEach(() => {
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
-  delete process.env.DISPATCH_MCP_URL;
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;
   process.env.HOME = "/nonexistent-home-for-envoy-tests";
@@ -212,7 +211,6 @@ afterEach(() => {
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   globalThis.fetch = originalFetch;
-  delete process.env.DISPATCH_MCP_URL;
   if (originalDispatchUrl === undefined) delete process.env.DISPATCH_URL;
   else process.env.DISPATCH_URL = originalDispatchUrl;
   if (originalDispatchToken === undefined) delete process.env.DISPATCH_TOKEN;

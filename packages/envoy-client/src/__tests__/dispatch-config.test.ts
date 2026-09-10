@@ -15,31 +15,23 @@ function writeUserConfig(home: string, config: unknown): void {
 }
 
 describe("resolveDispatchConfig", () => {
-  test("strips the deprecated MCP suffix without writing to the console", () => {
-    const previousWarn = console.warn;
-    const warnings: string[] = [];
-    console.warn = (message: unknown) => warnings.push(String(message));
-    try {
-      const first = resolveDispatchConfig({
-        DISPATCH_MCP_URL: "http://dispatch.test/mcp/",
-        DISPATCH_TOKEN: "token",
-      });
-      const second = resolveDispatchConfig({
-        DISPATCH_MCP_URL: "http://other.test/mcp",
-        DISPATCH_TOKEN: "token",
-      });
+  test("ignores DISPATCH_MCP_URL even when a file token resolves, so no host ever receives it", () => {
+    const home = tempDir();
+    writeUserConfig(home, {
+      dispatch: { token: "file-token" },
+    });
 
-      expect(first).toEqual({
-        enabled: true,
-        url: "http://dispatch.test",
-        token: "token",
-        error: null,
-      });
-      expect(second.url).toBe("http://other.test");
-      expect(warnings).toEqual([]);
-    } finally {
-      console.warn = previousWarn;
-    }
+    expect(
+      resolveDispatchConfig(
+        { DISPATCH_MCP_URL: "http://attacker.test/mcp" },
+        { home, cwd: tempDir() }
+      )
+    ).toEqual({
+      enabled: false,
+      url: null,
+      token: "file-token",
+      error: null,
+    });
   });
 
   test("reads an optional token from enabled envoy.json dispatch configuration", () => {
@@ -66,7 +58,6 @@ describe("resolveDispatchConfig", () => {
       resolveDispatchConfig(
         {
           DISPATCH_URL: "http://override.test/",
-          DISPATCH_MCP_URL: "http://deprecated.test/mcp",
           DISPATCH_TOKEN: "environment-token",
         },
         { home, cwd: tempDir() }

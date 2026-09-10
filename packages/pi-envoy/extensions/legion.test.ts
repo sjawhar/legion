@@ -93,7 +93,6 @@ const environmentKeys = [
   "HOME",
   "DISPATCH_URL",
   "DISPATCH_TOKEN",
-  "DISPATCH_MCP_URL",
 ] as const;
 const originalEnvironment: Record<(typeof environmentKeys)[number], string | undefined> = {
   ENVOY_NATS_URL: process.env.ENVOY_NATS_URL,
@@ -111,7 +110,6 @@ const originalEnvironment: Record<(typeof environmentKeys)[number], string | und
   HOME: process.env.HOME,
   DISPATCH_URL: process.env.DISPATCH_URL,
   DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
-  DISPATCH_MCP_URL: process.env.DISPATCH_MCP_URL,
 };
 
 const temporaryPaths: string[] = [];
@@ -158,7 +156,6 @@ function createPi(): {
   process.env.HOME = "/nonexistent-home-for-legion-tests";
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;
-  delete process.env.DISPATCH_MCP_URL;
   const pi: TestPi = {
     zod: {
       object: (shape) => shape,
