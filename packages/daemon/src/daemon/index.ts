@@ -244,11 +244,10 @@ async function verifyLegionPluginLoaded(
     }
     if (result.exitCode !== 0) {
       // The launch command itself (the configured `omp_launch_prefix` plus the OMP invocation)
-      // failed to even run the probe — e.g. `secrets` denying a key — never reaching omp. This
-      // is a launch failure, not a plugin-registration problem, and must say so distinctly: a
-      // nonzero exit here previously got the identical "disabled or unregistered; run omp
-      // plugin list" diagnosis a genuinely-unloaded plugin gets, misdirecting the operator
-      // toward `omp plugin list` when the real fix is the launch prefix/credential itself.
+      // failed before reaching omp — e.g. `secrets` denying a key. That is a launch failure,
+      // not a plugin-registration problem, so it gets its own message: the plugin-disabled
+      // diagnosis below would send the operator to `omp plugin list` when the fix is the
+      // prefix/credential.
       const launchCommand = withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation);
       const stderr = result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH);
       throw new Error(
