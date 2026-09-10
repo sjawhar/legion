@@ -128,17 +128,16 @@ export class DispatchClient {
   }
 
   async artifact(issue: string, input: CreateArtifactInput): Promise<ArtifactUploadResponse> {
+    const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"];
+    if ("content" in input) return this.#json("POST", artifactPath, input);
+
     const form = new FormData();
     form.set("name", input.name);
     if (input.primary !== undefined) form.set("primary", String(input.primary));
     if (input.summary !== undefined) form.set("summary", input.summary);
     if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
-    return this.#form(
-      "POST",
-      ["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"],
-      form
-    );
+    return this.#form("POST", artifactPath, form);
   }
 
   async getArtifact(id: string): Promise<ArtifactDetails> {

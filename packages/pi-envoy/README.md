@@ -118,6 +118,10 @@ The shared contract supplies the model-facing schemas and descriptions. The
 `dispatch` skill describes when to use each operation for issues, asks, review
 feedback, documents, artifacts, and status reads.
 
+`dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
+For example, an architect can post its primary specification with
+`{ issue, name: "spec.md", content: "# Design", primary: true }`.
+
 Lifecycle and scope decisions between Legion roles go through `envoy_publish` to the owning
 architect's role topic; Dispatch is for durable questions to the human and the shared
 document, not for coordination between roles.

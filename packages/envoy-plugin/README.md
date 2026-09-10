@@ -29,6 +29,10 @@ envoy.json (`~/.config/opencode/envoy.json`, merged with `<repo>/.opencode/envoy
 the session working directory, stamps it with the OpenCode session id and title, and stores
 `details.topic` as tool metadata so a successful mutation subscribes to that exact Dispatch topic.
 
+`dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
+An architect can post a primary specification directly with
+`{ issue, name: "spec.md", content: "# Design", primary: true }`.
+
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 
 Slack topic examples must use the real Slack `team_id`, for example:

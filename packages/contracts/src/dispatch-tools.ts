@@ -4,6 +4,22 @@ export interface DispatchToolSpec {
   readonly name: string;
   readonly description: string;
   readonly arguments: <E extends SchemaNode<E>>(z: SchemaApi<E>) => ToolArgumentsShape;
+  readonly validation?: {
+    readonly check: (value: unknown) => boolean;
+    readonly message: string;
+  };
+}
+
+/** Builds a host-owned schema and applies any tool-level cross-field validation. */
+export function dispatchToolSchema<E extends SchemaNode<E>>(
+  spec: DispatchToolSpec,
+  z: SchemaApi<E>,
+  opts?: { readonly strict?: boolean }
+): E {
+  const shape = spec.arguments(z) as Record<string, E>;
+  return spec.validation === undefined
+    ? z.object(shape, opts)
+    : z.refineObject(shape, spec.validation.check, spec.validation.message, opts);
 }
 
 const ISSUE_REFERENCE =
@@ -156,15 +172,23 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_artifact",
     description:
-      "Upload a local file as an issue artifact. Do not use it to edit a live document; use dispatch_doc_edit " +
-      `instead. Files are limited to 25 MiB. ${ISSUE_REFERENCE}`,
+      "Attach a local file or inline text as an issue artifact. Do not use it to edit a live document; use " +
+      `dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       name: z.string().describe("Artifact filename shown in Dispatch."),
-      path: z.string().describe("Local path to the file to upload."),
+      path: z.string().describe("Local path to the file to upload.").optional(),
+      content: z.string().describe("Inline text to store as a Markdown document.").optional(),
       primary: z.boolean().describe("Make this document the issue primary artifact.").optional(),
       summary: z.string().describe("Optional version summary.").optional(),
     }),
+    validation: {
+      check: (value) => {
+        const input = value as { readonly path?: unknown; readonly content?: unknown };
+        return (typeof input.path === "string") !== (typeof input.content === "string");
+      },
+      message: "Exactly one of path or content is required.",
+    },
   },
   {
     name: "dispatch_read",
