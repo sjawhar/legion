@@ -3,7 +3,6 @@ import {
   DISPATCH_ISSUE_TOPIC_PREFIX,
   dispatchIssueSubject,
   EnvelopeSchema,
-  type EventType,
   type IssueKey,
   parseRoleToken,
   roleTopic,
@@ -11,11 +10,11 @@ import {
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import { createCancellableSleep } from "./cancellable-sleep";
 import type { DaemonConfig } from "./config";
+import { DispatchDecodeFailure, dispatchIssueEvent } from "./dispatch-events";
 import type { LegionState } from "./legion-state";
 import type { DurableMessageControl, NatsTransport } from "./nats-transport";
 import {
   classifySettlement,
-  type DispatchIssueEvent,
   type Effect,
   type EnvelopeJson,
   effectiveOutcome,
@@ -39,26 +38,6 @@ const MAX_TERM_REASON_BYTES = 1_024;
 const TERM_REASON_ELLIPSIS = "…";
 const textEncoder = new TextEncoder();
 const DISPATCH_DURABLE_SUBJECT = dispatchIssueSubject("*", ">");
-
-const DISPATCH_EVENT_TYPES: Record<EventType, true> = {
-  "issue.created": true,
-  "issue.updated": true,
-  "issue.closed": true,
-  "artifact.created": true,
-  "artifact.version": true,
-  "ask.opened": true,
-  "ask.answered": true,
-  "comment.created": true,
-  "comment.resolved": true,
-  "suggestion.accepted": true,
-  "suggestion.rejected": true,
-  "message.created": true,
-  "child.status": true,
-};
-
-function isDispatchEventType(value: unknown): value is EventType {
-  return typeof value === "string" && value in DISPATCH_EVENT_TYPES;
-}
 
 /** Truncates `reason` so its UTF-8 byte length, including the appended ellipsis, never exceeds `MAX_TERM_REASON_BYTES`. */
 export function truncateTermReason(reason: string): string {
@@ -112,23 +91,6 @@ class DurableFatalFailure extends Error {
   constructor(cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause));
     this.name = "DurableFatalFailure";
-  }
-}
-
-/**
- * Thrown when a Dispatch durable message's inner `Event` fails to decode — malformed JSON, a
- * missing or invalid `id`/`seq`/`notify`/`issue_key`/`type`, or a payload's `issue_key`
- * disagreeing with the subject's own key. Decoded and checked in `handleEnvelope` before
- * `applyDurableEvent` ever runs a reducer, so this is poison exactly like the top-level
- * `EnvelopeSchema` parse failure `processDurableMessage` already handles: termed and logged, no
- * reducer has touched live state, and the daemon never goes fatal for it (unlike
- * `DurableReducerFailure`, which can only be thrown after a reducer call and therefore always
- * pairs its term with a restart).
- */
-class DispatchDecodeFailure extends Error {
-  constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause));
-    this.name = "DispatchDecodeFailure";
   }
 }
 
@@ -217,31 +179,6 @@ function recordPayload(envelope: EnvelopeJson): JsonRecord | undefined {
   } catch {
     return undefined;
   }
-}
-function dispatchIssueEvent(envelope: EnvelopeJson): DispatchIssueEvent {
-  const event = recordPayload(envelope);
-  const id = event?.id;
-  const key = event?.issue_key;
-  const seq = event?.seq;
-  const notify = event?.notify;
-  const type = event?.type;
-  const payload = event?.payload;
-  if (
-    typeof id !== "number" ||
-    !Number.isSafeInteger(id) ||
-    id <= 0 ||
-    typeof key !== "string" ||
-    !/^[A-Z][A-Z0-9]*-[0-9]+$/.test(key) ||
-    typeof seq !== "number" ||
-    !Number.isSafeInteger(seq) ||
-    seq <= 0 ||
-    typeof notify !== "boolean" ||
-    !isDispatchEventType(type) ||
-    !asRecord(payload)
-  ) {
-    throw new Error("Dispatch durable message payload is not a valid Dispatch event");
-  }
-  return { type, key, seq, notify, payload, eventId: `dispatch-${id}` };
 }
 
 function statusGroup(
@@ -831,15 +768,10 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       // malformed inner Event or a subject/payload key mismatch is poison the daemon can log and
       // move past (see `DispatchDecodeFailure`), not a `DurableReducerFailure` that would also
       // restart the process for a message no redelivery can ever fix.
-      let event: DispatchIssueEvent;
-      try {
-        event = dispatchIssueEvent(envelope);
-      } catch (error) {
-        throw new DispatchDecodeFailure(error);
-      }
+      const event = dispatchIssueEvent(envelope);
       if (event.key !== subjectKey) {
         throw new DispatchDecodeFailure(
-          `Dispatch durable subject key ${subjectKey} disagrees with payload key ${event.key}`
+          `Dispatch durable subject key ${subjectKey} disagrees with event issue_key ${event.key}`
         );
       }
       await applyDurableEvent(subject, envelope, (state) =>
@@ -980,22 +912,16 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     control.ack();
   };
 
-  // Durable GitHub messages and resync (see `runExclusive`, used by
-  // index.ts's resync scheduler) run one at a time, in delivery order,
-  // through a single promise chain: both mutate the same `PrState` CI
-  // fields (durable checks via writeCiFence/settleCiVerdict, resync via
-  // reconcilePrs's GitHub read), so interleaving them could publish an
-  // older resync-derived verdict after a newer durable settlement, or vice
-  // versa. The core-NATS lanes below (mention/exception) stay concurrent
-  // with this queue and with each other: they only ever touch role claims
-  // and tree status/locators (via `onException`), never a `PrState`, and
-  // no writer ever replaces or restores another writer's in-flight object,
-  // so that remaining overlap is safe without serialization.
-  let githubQueue: Promise<void> = Promise.resolve();
+  // Every durable state mutation and the resync scheduler run serially through this promise
+  // chain. Dispatch issue events, GitHub check settlement, and their resync counterparts all
+  // update LegionState and can derive effects from the same issue/PR records, so interleaving
+  // them could persist an older derived state after a newer event. Core-NATS mention and
+  // exception lanes remain concurrent because they do not enter the durable save transaction.
+  let durableQueue: Promise<void> = Promise.resolve();
 
   const runExclusive = <T>(fn: () => Promise<T>): Promise<T> => {
-    const result = githubQueue.then(fn);
-    githubQueue = result.then(
+    const result = durableQueue.then(fn);
+    durableQueue = result.then(
       () => {},
       () => {}
     );

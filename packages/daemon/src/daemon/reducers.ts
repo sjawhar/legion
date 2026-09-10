@@ -1,11 +1,6 @@
-import {
-  type EventType,
-  type IssueKey,
-  isLegionRole,
-  type LegionRole,
-  roleToken,
-} from "@legion/contracts";
+import { type IssueKey, isLegionRole, type LegionRole, roleToken } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
+import type { DispatchIssueEvent } from "./dispatch-events";
 import {
   ISSUE_STATUSES,
   type IssueNode,
@@ -15,6 +10,8 @@ import {
   type TreeState,
   type UpdateSource,
 } from "./legion-state";
+
+export type { DispatchIssueEvent } from "./dispatch-events";
 
 export interface LegionEventPayload {
   type: string;
@@ -844,23 +841,6 @@ export function reduceCiEmission(
     : [];
 }
 
-/** The decoded Dispatch envelope `events.ts`'s durable consumer produces: `type`/`key`/`seq`
- * pulled from the underlying Dispatch `Event`, `payload` is that event's own inner payload object
- * (the full issue for `issue.*`, `{child_key, from, to}` for `child.status`, the `Ask` for
- * `ask.*`), `eventId` is `dispatch-<id>`. `seq` is the per-issue at-most-once fence
- * `reduceDispatchEvent` enforces (see `IssueNode.lastAppliedSeq`). `notify` is decoded for
- * completeness (the Dispatch event header always carries it) but never branched on: the issue
- * topic now carries every event regardless of `notify`, which only marks whether Dispatch itself
- * woke a human — irrelevant to what the daemon derives from the event. */
-export interface DispatchIssueEvent {
-  type: EventType;
-  key: IssueKey;
-  seq: number;
-  notify: boolean;
-  payload: unknown;
-  eventId: string;
-}
-
 function dispatchEnvelope(eventId: string): EnvelopeJson {
   return { event_id: eventId, issued_at: Date.now() };
 }
@@ -877,12 +857,11 @@ interface DispatchIssuePayload {
   parent: IssueKey | null;
 }
 
-function dispatchIssuePayload(payload: unknown): DispatchIssuePayload | undefined {
+function dispatchIssuePayload(payload: unknown, key: IssueKey): DispatchIssuePayload | undefined {
   const raw = asRecord(payload);
-  const key = stringValue(raw?.key);
   const title = stringValue(raw?.title);
   const status = stringValue(raw?.status);
-  if (!raw || !key || !title || !status || !isIssueStatus(status)) return undefined;
+  if (!raw || !title || !status || !isIssueStatus(status)) return undefined;
   const parent = typeof raw.parent === "string" ? raw.parent : null;
   return { key, title, status, parent };
 }
@@ -900,7 +879,7 @@ function applyDispatchIssueFields(node: IssueNode, issue: DispatchIssuePayload):
  * status update, another child's adoption) may have already advanced fields a blind replace would
  * roll back. */
 function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effect[] {
-  const issue = dispatchIssuePayload(event.payload);
+  const issue = dispatchIssuePayload(event.payload, event.key);
   if (!issue) return [];
   if (state.issues[issue.key]) return [];
   const node: IssueNode = {
@@ -929,7 +908,7 @@ function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effe
 }
 
 function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effect[] {
-  const issue = dispatchIssuePayload(event.payload);
+  const issue = dispatchIssuePayload(event.payload, event.key);
   const node = issue ? state.issues[issue.key] : undefined;
   if (!issue || !node) return [];
   const statusChanged = node.status !== issue.status;
@@ -944,7 +923,7 @@ function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effe
 }
 
 function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effect[] {
-  const issue = dispatchIssuePayload(event.payload);
+  const issue = dispatchIssuePayload(event.payload, event.key);
   const node = issue ? state.issues[issue.key] : undefined;
   if (!issue || !node) return [];
   const wasOpen = node.state === "open";
@@ -1028,13 +1007,12 @@ function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effec
  * strictly newer than `state.issues[event.key].lastAppliedSeq` is dropped outright — no mutation,
  * no effect, not even a re-derived one — since Dispatch's own `Issue.last_seq` is monotonic per
  * issue and a redelivery or reorder can only repeat or regress it, never legitimately reuse it.
- * After a sub-reducer runs (whether or not it produced an effect — a no-op redelivered again must
- * stay a no-op), `lastAppliedSeq` is stamped to `event.seq` on `state.issues[event.key]` if that
- * node exists. `child.status`/`ask.answered` against a key this daemon has no node for skip the
- * stamp: `reduceChildStatus`/`reduceAskAnswered` each start with an explicit
- * `state.issues[event.key]` existence guard, so a schema-valid but dangling `state.gates[key]` or
- * `state.trees[key]` record — with no corresponding issue node — can never be mutated or routed
- * through by either reducer.
+ * After a recognized sub-reducer runs (whether or not it produced an effect — a no-op redelivered
+ * again must stay a no-op), `lastAppliedSeq` is stamped to `event.seq` on `state.issues[event.key]`
+ * if that node exists. Unknown additive event types return before this stamp: they have no Legion
+ * state meaning and are acknowledged without mutation. `child.status`/`ask.answered` against a key
+ * this daemon has no node for skip the stamp because their reducers begin with an explicit node
+ * existence guard, so a schema-valid but dangling gate or tree record cannot be mutated or routed.
  */
 export function reduceDispatchEvent(
   state: LegionState,
@@ -1062,7 +1040,7 @@ export function reduceDispatchEvent(
       effects = reduceAskAnswered(state, event);
       break;
     default:
-      effects = [];
+      return [];
   }
 
   const node = state.issues[event.key];

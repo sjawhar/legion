@@ -14,7 +14,10 @@ function stateWithTree() {
   state.issues[issue] = {
     key: issue,
     title: "Implement Legion state",
+    state: "open",
     children: [],
+    released: true,
+    labels: ["human-approved"],
     status: "in_progress",
   };
   state.trees[issue] = {
@@ -119,7 +122,6 @@ describe("legion state", () => {
       phases: {},
       controllerPendingNotices: [],
       gates: {},
-      pendingStatusWrites: {},
     });
   });
 
@@ -417,12 +419,7 @@ describe("legion state", () => {
       eventId: "evt-controller",
     };
     current.controllerPendingNotices = [notice];
-    const {
-      controllerPendingNotices: _notices,
-      gates: _gates,
-      pendingStatusWrites: _pendingStatusWrites,
-      ...v16Fields
-    } = current;
+    const { controllerPendingNotices: _notices, gates: _gates, ...v16Fields } = current;
     await writeFile(
       file,
       JSON.stringify({
@@ -447,12 +444,7 @@ describe("legion state", () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
-    const {
-      controllerPendingNotices: _notices,
-      gates: _gates,
-      pendingStatusWrites: _pendingStatusWrites,
-      ...v17State
-    } = current;
+    const { controllerPendingNotices: _notices, gates: _gates, ...v17State } = current;
     await writeFile(file, JSON.stringify({ ...v17State, version: 17 }), "utf8");
 
     const migrated = await loadState(file, initialState);
@@ -466,12 +458,7 @@ describe("legion state", () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v16-malformed-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
-    const {
-      controllerPendingNotices: _notices,
-      gates: _gates,
-      pendingStatusWrites: _pendingStatusWrites,
-      ...v16Fields
-    } = current;
+    const { controllerPendingNotices: _notices, gates: _gates, ...v16Fields } = current;
     await writeFile(
       file,
       JSON.stringify({
@@ -497,12 +484,7 @@ describe("legion state", () => {
     const current = newLegionState(initialState.project, initialState.cap);
     const existing = { payloadJson: '{"text":"already queued"}', eventId: "evt-existing" };
     const duplicate = { payloadJson: '{"text":"first redelivery"}', eventId: "evt-shared" };
-    const {
-      controllerPendingNotices: _notices,
-      gates: _gates,
-      pendingStatusWrites: _pendingStatusWrites,
-      ...v16Fields
-    } = current;
+    const { controllerPendingNotices: _notices, gates: _gates, ...v16Fields } = current;
     current.controllerPendingNotices = [existing, duplicate];
     await writeFile(
       file,
@@ -531,20 +513,6 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("refuses an active v18 state before converting it to the Dispatch lifecycle", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-active-"));
-    const file = path.join(tempDir, "state.json");
-
-    for (const activeState of [
-      { version: 18, trees: { "LEGION-42": {} }, issues: {} },
-      { version: 18, trees: {}, issues: { "LEGION-42": {} } },
-    ]) {
-      await writeFile(file, JSON.stringify(activeState), "utf8");
-      await expect(loadState(file, initialState)).rejects.toThrow(
-        "Cannot migrate a Legion state with active trees to the Dispatch lifecycle"
-      );
-    }
-  });
   it("migrates a controller-held-events-free v17 state through v18 and v19", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");

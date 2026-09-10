@@ -398,6 +398,7 @@ describe("daemon config", () => {
         "envoy_url: http://listener:9020",
         "nats_urls:",
         "  - nats://one:4222",
+        "dispatch_project: LEGION",
         "board_project_ids:",
         "  - PVT_one",
         "repos:",
