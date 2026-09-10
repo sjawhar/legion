@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import { buildIssuePath } from "../refs/routes";
 
-import { canSubmitComposer, composerReferences } from "./Composer";
+import { canSubmitComposer, composerReferences, hasUnsavedInput } from "./Composer";
 
 test("composer turns typed dispatch and pasted same-origin links into reference chips", () => {
   expect(
@@ -34,4 +34,13 @@ test("composer emits canonical browser routes for versioned dispatch references"
 test("composer holds Save until every image upload settles", () => {
   expect(canSubmitComposer("comment", "See image", "", false, 1)).toBe(false);
   expect(canSubmitComposer("comment", "See image", "", false, 0)).toBe(true);
+});
+
+test("hasUnsavedInput counts a suggestion's optional reason even with no replacement typed", () => {
+  expect(hasUnsavedInput("because", "")).toBe(true);
+});
+
+test("hasUnsavedInput is false with every field blank", () => {
+  expect(hasUnsavedInput("", "")).toBe(false);
+  expect(hasUnsavedInput("   ", "  ")).toBe(false);
 });

@@ -31,7 +31,7 @@ test("sidebar ranks pinned, needs you, unread, and remaining issues by activity"
     { count: 1, items: ["CORE-4"], label: "Pinned" },
     { count: 2, items: ["CORE-2"], label: "Needs you" },
     { count: 1, items: ["CORE-3"], label: "Unread" },
-    { count: 0, items: ["CORE-5", "CORE-1"], label: "Everything else" },
+    { count: 2, items: ["CORE-5", "CORE-1"], label: "Everything else" },
   ]);
 });
 
@@ -58,9 +58,13 @@ test("sidebar nests children under a listed parent", () => {
       ],
       label: "Needs you",
     },
-    { count: 0, items: [], label: "Unread" },
-    { count: 0, items: [], label: "Everything else" },
   ]);
+});
+
+test("sidebar hides groups with no issues instead of rendering a dangling header", () => {
+  const issues = [issue({ key: "CORE-1", title: "Only issue" })];
+
+  expect(arrangeIssues(issues, {}, {}).map((group) => group.label)).toEqual(["Everything else"]);
 });
 
 test("sidebar keeps its active issue snapshot while new detail data is pending", () => {

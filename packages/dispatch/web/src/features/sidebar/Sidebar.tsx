@@ -93,12 +93,10 @@ export function arrangeIssues(
           ? issues
               .filter((issue) => rootKeys.has(issue.key))
               .reduce((total, issue) => total + issue.open_asks, 0)
-          : label === "Everything else"
-            ? 0
-            : groupItems[rank].length;
+          : groupItems[rank].length;
       return { count, items: groupItems[rank], label };
     })
-    .filter((group) => group.label !== "Pinned" || group.items.length > 0);
+    .filter((group) => group.items.length > 0);
 }
 
 export interface FrozenSidebar {
@@ -153,16 +151,16 @@ function IssueLink({
         aria-current={isActive ? "page" : undefined}
         className={
           isActive
-            ? "block rounded bg-slate-800 px-2 py-1.5 text-sm font-medium text-sky-300"
-            : "block rounded px-2 py-1.5 text-sm hover:bg-slate-800"
+            ? "flex items-baseline gap-2 rounded bg-slate-800 px-2 py-1.5 text-sm font-medium text-sky-300"
+            : "flex items-baseline gap-2 rounded px-2 py-1.5 text-sm hover:bg-slate-800"
         }
         onClick={onNavigate}
         to={buildIssuePath({ key: issue.key, kind: "issue" })}
       >
-        <span className="font-medium">{issue.key}</span>
-        <span className="ml-2 text-slate-300">{issue.title}</span>
+        <span className="shrink-0 font-medium whitespace-nowrap">{issue.key}</span>
+        <span className="min-w-0 flex-1 text-slate-300">{issue.title}</span>
         {issue.open_asks === 0 ? null : (
-          <span className="ml-2 rounded-full bg-sky-500 px-1.5 py-0.5 text-xs text-slate-950">
+          <span className="shrink-0 rounded-full bg-sky-500 px-1.5 py-0.5 text-xs text-slate-950">
             {issue.open_asks}
           </span>
         )}

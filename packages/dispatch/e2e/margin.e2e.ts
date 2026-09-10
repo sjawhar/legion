@@ -93,6 +93,9 @@ test("margin creates, follows, and preserves anchored review items", async ({
     await expect(
       commentComposer.getByRole("button", { name: `${relatedIssue.key}: Related work` })
     ).toBeVisible();
+    // The picker is a real dismissible dialog now; close it before continuing the draft.
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Reference picker" })).toHaveCount(0);
     await commentComposer.getByLabel("Comment").fill("why?");
     await commentComposer.getByRole("button", { exact: true, name: "Comment" }).click();
     await expect

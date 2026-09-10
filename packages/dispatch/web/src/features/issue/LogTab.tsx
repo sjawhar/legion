@@ -4,7 +4,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api/client";
 import type { Event, UserIssueState, UserState } from "../../api/types";
 import { actorLabel } from "../refs/actor";
-import { buildLogItems, eventItemId, isPinnedEvent } from "./log-model";
+import { buildLogItems, eventDescription, eventItemId, isPinnedEvent } from "./log-model";
 import {
   applyDismissedStateOperation,
   type DismissedStateOperation,
@@ -17,49 +17,6 @@ interface FailedStateOperations {
   authoritativeState: UserIssueState | undefined;
   issueKey: string;
   operations: DismissedStateOperation[];
-}
-
-function eventDescription(event: Event): string {
-  if (event.type === "ask.answered") {
-    const question = event.payload.question;
-    return `Ask answered: ${typeof question === "string" ? question : "ask"}`;
-  }
-  if (event.type === "comment.resolved") {
-    return "Comment resolved";
-  }
-  if (event.type === "message.created") {
-    const body = event.payload.body;
-    return typeof body === "string" ? body : "Message created";
-  }
-  if (event.type === "ask.opened") {
-    const question = event.payload.question;
-    return `Ask opened: ${typeof question === "string" ? question : "ask"}`;
-  }
-  if (event.type === "comment.created") {
-    return "Comment created";
-  }
-  if (event.type === "issue.created") {
-    return "Issue created";
-  }
-  if (event.type === "issue.updated") {
-    return "Issue updated";
-  }
-  if (event.type === "issue.closed") {
-    return "Issue closed";
-  }
-  if (event.type === "artifact.created") {
-    return "Artifact created";
-  }
-  if (event.type === "artifact.version") {
-    return "Artifact version saved";
-  }
-  if (event.type === "suggestion.accepted") {
-    return "Suggestion accepted";
-  }
-  if (event.type === "suggestion.rejected") {
-    return "Suggestion rejected";
-  }
-  return "Child status changed";
 }
 
 function eventItems(data: { pages: Event[][] } | undefined): Event[] {
@@ -317,7 +274,8 @@ export function LogTab({
               key="new-divider"
             >
               <span className="h-px flex-1 bg-sky-200" />
-              New
+              <span aria-hidden="true">↑</span>
+              New since you last read
               <span className="h-px flex-1 bg-sky-200" />
             </div>
           );
