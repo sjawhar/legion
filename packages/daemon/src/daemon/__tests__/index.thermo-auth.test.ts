@@ -32,6 +32,8 @@ function config(): DaemonConfig {
     lingerHours: 1,
     maxFixAttempts: 1,
     resyncIntervalMs: 1,
+    workerStopTimeoutSeconds: 1,
+    treeStopTimeoutSeconds: 1,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir: "/tmp/legion-thermo-auth",

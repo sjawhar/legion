@@ -205,8 +205,13 @@ export async function handleWorkerStarted(
     throw new HttpError(403, "Invalid worker boot token");
   }
   const token = roleToken(ctx.deps.state.project, issue, role);
-  const claim = ctx.deps.state.roles[token];
-  if (!claim || !("issue" in claim) || claim.generation !== boot.generation || !claim.locator) {
+  const fastFailClaim = ctx.deps.state.roles[token];
+  if (
+    !fastFailClaim ||
+    !("issue" in fastFailClaim) ||
+    fastFailClaim.generation !== boot.generation ||
+    !fastFailClaim.locator
+  ) {
     throw new HttpError(409, "Stale worker generation");
   }
   if (boot.expectedSessionId !== undefined && boot.expectedSessionId !== sessionId) {
@@ -214,33 +219,61 @@ export async function handleWorkerStarted(
   }
   const agentId = requiredString(body, "agentId");
   const ompSessionFile = requiredString(body, "ompSessionFile");
-  // Fallible work runs before any mutation: a transient tokenForIssue failure leaves the boot
-  // token and claim untouched, so a retry with the same {bootToken, sessionId} starts clean.
+  // Fallible AND potentially slow work runs before any mutation, and — critically — outside the
+  // per-token lock below: a hung or merely slow GitHub call must never hold that lock, since
+  // `closeTree`'s own stop-then-delete for this exact token needs the SAME lock just to START
+  // its stop timeout (`stopProcessSerialized` -> `workerAdmission.mutateClaim`). Holding it across
+  // this network round trip would let a stuck `tokenForIssue` block a graceful shutdown from ever
+  // timing out for this worker. A transient failure here leaves the boot token and claim
+  // untouched, so a retry with the same {bootToken, sessionId} starts clean.
   const lease = await ctx.github.tokenForIssue(issue, appRoleForLegionRole(role));
   const secret = randomUUID();
 
-  // Build the new claim as a local draft rather than mutating the live one in place, so a save
-  // failure can be rolled back by simply restoring the old reference — leaving the in-memory
-  // claim exactly as durable as what was ever written to disk, and a retry with the same
-  // {bootToken, sessionId} starting where the first attempt did.
-  const priorClaim = claim;
-  const priorPhase = ctx.deps.state.phases[issue];
-  ctx.deps.state.roles[token] = {
-    ...claim,
-    sessionId,
-    agentId,
-    bootTokenHash: secretHash(bootToken).toString("hex"),
-    locator: { ...claim.locator, ompSessionFile },
-  };
-  ctx.deps.state.phases[issue] = { phase: role, sessionId };
-  try {
-    await ctx.save();
-  } catch (error) {
-    ctx.deps.state.roles[token] = priorClaim;
-    if (priorPhase === undefined) delete ctx.deps.state.phases[issue];
-    else ctx.deps.state.phases[issue] = priorPhase;
-    throw error;
-  }
+  // Everything from here on runs inside this token's own critical section (rejecting with
+  // TreeClosingError, mapped to 409 by the caller's error handling, both before entering it and
+  // again immediately inside): a `closeTree` racing this exact request must never have this
+  // handler resurrect a claim it already deleted, or persist a locator for a tree it already
+  // reported closed. The lock now spans only synchronous state plus one disk-persist await, never
+  // the GitHub network round trip above.
+  await ctx.deps.processManager.mutateLiveRoleClaim(tree, issue, token, async () => {
+    // Re-validated here, now holding the per-token lock, not only at entry above: the tree's
+    // closing state and this exact claim's identity can both have moved while the lease request
+    // above was in flight (mutateLiveRoleClaim's own entry check ran before that request even
+    // started), or while a concurrent respawn (itself serialized on this same token) waited its
+    // own turn on this lock.
+    const currentClaim = ctx.deps.state.roles[token];
+    if (
+      !currentClaim ||
+      !("issue" in currentClaim) ||
+      currentClaim.generation !== boot.generation ||
+      !currentClaim.locator
+    ) {
+      throw new HttpError(409, "Stale worker generation");
+    }
+
+    // Build the new claim as a local draft rather than mutating the live one in place, so a
+    // save failure can be rolled back by simply restoring the old reference — leaving the
+    // in-memory claim exactly as durable as what was ever written to disk, and a retry with
+    // the same {bootToken, sessionId} starting where the first attempt did.
+    const priorClaim = currentClaim;
+    const priorPhase = ctx.deps.state.phases[issue];
+    ctx.deps.state.roles[token] = {
+      ...currentClaim,
+      sessionId,
+      agentId,
+      bootTokenHash: secretHash(bootToken).toString("hex"),
+      locator: { ...currentClaim.locator, ompSessionFile },
+    };
+    ctx.deps.state.phases[issue] = { phase: role, sessionId };
+    try {
+      await ctx.save();
+    } catch (error) {
+      ctx.deps.state.roles[token] = priorClaim;
+      if (priorPhase === undefined) delete ctx.deps.state.phases[issue];
+      else ctx.deps.state.phases[issue] = priorPhase;
+      throw error;
+    }
+  });
 
   // Only after the durable state is persisted do we consume the boot token and mint the session
   // capability: both are ephemeral (never part of `ctx.save()`'s payload), so the save-failure

@@ -39,6 +39,13 @@ export interface DaemonConfig {
   lingerHours: number;
   maxFixAttempts: number;
   resyncIntervalMs: number;
+  /** Seconds to wait for a single retiring worker's shim to close its socket gracefully before
+   * its pane is killed directly (a dead-socket respawn, or a boot-time reconnect probe that
+   * found the socket unreachable). */
+  workerStopTimeoutSeconds: number;
+  /** Seconds to wait for every process under a closing/expired tree to close its shim socket
+   * gracefully, each on its own clock, before that one process's pane is killed directly. */
+  treeStopTimeoutSeconds: number;
   gates: { design: "root-issues" | "off"; merge: "human" | "off" };
   githubApps: GitHubAppsConfig;
   stateDir: string;
@@ -85,6 +92,8 @@ const DEFAULT_MAX_RECURSION_DEPTH = 8;
 const DEFAULT_LINGER_HOURS = 72;
 const DEFAULT_MAX_FIX_ATTEMPTS = 3;
 const DEFAULT_RESYNC_INTERVAL_MS = 600_000;
+const DEFAULT_WORKER_STOP_TIMEOUT_SECONDS = 10;
+const DEFAULT_TREE_STOP_TIMEOUT_SECONDS = 60;
 const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp";
 
 const CONFIG_SCHEMA: ConfigSchema = {
@@ -109,6 +118,8 @@ const CONFIG_SCHEMA: ConfigSchema = {
   linger_hours: null,
   max_fix_attempts: null,
   resync_interval_seconds: null,
+  worker_stop_timeout_seconds: null,
+  tree_stop_timeout_seconds: null,
   state_dir: null,
   gates: { design: null, merge: null },
   github_apps: {
@@ -434,6 +445,8 @@ export function loadConfigFromFile(
     ["max_recursion_depth", "maxRecursionDepth"],
     ["linger_hours", "lingerHours"],
     ["max_fix_attempts", "maxFixAttempts"],
+    ["worker_stop_timeout_seconds", "workerStopTimeoutSeconds"],
+    ["tree_stop_timeout_seconds", "treeStopTimeoutSeconds"],
   ] as const) {
     const value = readPositiveInteger(config[fileKey], fileKey);
     if (value !== undefined) fields[configKey] = value;
@@ -594,6 +607,24 @@ export function resolveDaemonConfig(
     parseEnvPositiveInteger(env.LEGION_RESYNC_INTERVAL_SECONDS, "LEGION_RESYNC_INTERVAL_SECONDS"),
     DEFAULT_RESYNC_INTERVAL_MS
   );
+  const workerStopTimeoutSeconds = resolveValue(
+    opts.cliOverrides?.workerStopTimeoutSeconds,
+    fileNumber(fields, "workerStopTimeoutSeconds"),
+    parseEnvPositiveInteger(
+      env.LEGION_WORKER_STOP_TIMEOUT_SECONDS,
+      "LEGION_WORKER_STOP_TIMEOUT_SECONDS"
+    ),
+    DEFAULT_WORKER_STOP_TIMEOUT_SECONDS
+  );
+  const treeStopTimeoutSeconds = resolveValue(
+    opts.cliOverrides?.treeStopTimeoutSeconds,
+    fileNumber(fields, "treeStopTimeoutSeconds"),
+    parseEnvPositiveInteger(
+      env.LEGION_TREE_STOP_TIMEOUT_SECONDS,
+      "LEGION_TREE_STOP_TIMEOUT_SECONDS"
+    ),
+    DEFAULT_TREE_STOP_TIMEOUT_SECONDS
+  );
 
   const lifecycleNumbers: Record<string, number> = {
     admissionCap: admissionCap.value,
@@ -602,6 +633,8 @@ export function resolveDaemonConfig(
     lingerHours: lingerHours.value,
     maxFixAttempts: maxFixAttempts.value,
     resyncIntervalMs: resyncIntervalMs.value,
+    workerStopTimeoutSeconds: workerStopTimeoutSeconds.value,
+    treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
   };
   for (const [field, value] of Object.entries(lifecycleNumbers)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
@@ -652,6 +685,8 @@ export function resolveDaemonConfig(
       lingerHours: lingerHours.value,
       maxFixAttempts: maxFixAttempts.value,
       resyncIntervalMs: resyncIntervalMs.value * (resyncIntervalMs.source === "env" ? 1000 : 1),
+      workerStopTimeoutSeconds: workerStopTimeoutSeconds.value,
+      treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
       gates: parsedGates,
       githubApps: githubApps.value,
       stateDir: stateDir.value,

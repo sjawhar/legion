@@ -1771,7 +1771,6 @@ describe("Legion OMP extension", () => {
         reclaimArchitect: async () => {
           reclaims += 1;
         },
-        requestShutdown: () => fixture.pi.sendMessage({ type: "shutdown-request" }),
         acknowledge: () => {
           acknowledgements += 1;
         },

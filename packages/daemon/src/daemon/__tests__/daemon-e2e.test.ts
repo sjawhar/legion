@@ -227,6 +227,8 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     lingerHours: 72,
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
+    workerStopTimeoutSeconds: 10,
+    treeStopTimeoutSeconds: 60,
     gates: { design: "root-issues", merge: "human" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     stateDir,

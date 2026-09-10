@@ -13,6 +13,7 @@ import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { EnvoyPublishError } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
+import { TreeClosingError } from "../processes";
 import { reduceGithubEvent } from "../reducers";
 
 const root = formatIssueKey("acme", "widgets", 1);
@@ -131,6 +132,8 @@ describe("Legion HTTP API", () => {
     onControllerReady?: () => Promise<void>;
     getToken?: LegionApiDeps["tokenManager"]["getToken"];
     envoyPublish?: LegionApiDeps["envoyPublish"];
+    spawnWorkerImpl?: LegionApiDeps["processManager"]["spawnWorker"];
+    mutateLiveRoleClaimImpl?: LegionApiDeps["processManager"]["mutateLiveRoleClaim"];
   }) {
     const runner =
       options?.runner ??
@@ -220,18 +223,29 @@ describe("Legion HTTP API", () => {
         },
         markTreeReady: () => {},
         markControllerReady: () => {},
-        spawnWorker: async (tree, issue, role, task) => {
-          spawnedWorkers.push({ tree, issue, role, task });
-          return { status: "spawned", roleToken: roleToken(state.project, issue, role) };
-        },
+        spawnWorker:
+          options?.spawnWorkerImpl ??
+          (async (tree, issue, role, task) => {
+            spawnedWorkers.push({ tree, issue, role, task });
+            return { status: "spawned", roleToken: roleToken(state.project, issue, role) };
+          }),
         workerReady: (issue, role, sessionId, generation) => {
           workerReadyCalls.push({ issue, role, sessionId, generation });
         },
+        rejectIfTreeGone: () => {},
+        mutateLiveRoleClaim:
+          options?.mutateLiveRoleClaimImpl ?? (async (_tree, _issue, _token, fn) => fn()),
         beginLinger: (tree) => {
           const treeState = state.trees[tree];
           if (treeState) treeState.status = "lingering";
         },
         markProcessDead: () => {},
+        reportRootExit: (tree) => {
+          releaseSlots.push(tree);
+          closedTrees.push(tree);
+          const treeState = state.trees[tree];
+          if (treeState) treeState.status = "closed";
+        },
         closeTree: (tree) => {
           releaseSlots.push(tree);
           closedTrees.push(tree);
@@ -1899,6 +1913,76 @@ describe("Legion HTTP API", () => {
     expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
   });
 
+  it("rejects worker/started with a fresh 409 when the claim's generation changes while its GitHub lease is in flight", async () => {
+    const reachedLease = Promise.withResolvers<void>();
+    const leaseGate = Promise.withResolvers<void>();
+    await start({
+      getToken: async (role, owner) => {
+        reachedLease.resolve();
+        await leaseGate.promise;
+        return {
+          token: `minted-${role}-${owner}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "42+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    });
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const body = {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    };
+
+    const requestPromise = request("/legion/v1/worker/started", body);
+
+    // Waits for the handler to have actually reached (and blocked inside) the GitHub lease call
+    // -- confirming its own two earlier identity checks (the fast-fail before any lock, and the
+    // re-check just inside the per-token lock) already ran and passed against generation 1 --
+    // before mutating anything. Without this synchronization, mutating state immediately after
+    // firing the request risks the mutation landing before either earlier check even runs,
+    // which would prove nothing about the *post-lease* re-check specifically.
+    await reachedLease.promise;
+
+    // A concurrent respawn bumps this exact claim onto a new generation while the request above
+    // is blocked awaiting its GitHub lease, inside `mutateLiveRoleClaim`'s own per-token critical
+    // section. The re-validation after that lease await must see THIS identity, not the
+    // generation-1 view the two earlier checks already passed.
+    const staleClaim = state.roles[token];
+    if (!staleClaim || !("issue" in staleClaim)) throw new Error("claim missing before lease");
+    staleClaim.generation = 2;
+
+    leaseGate.resolve();
+    const response = await requestPromise;
+    const responseBody = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(409);
+    expect(responseBody.error).toBe("Stale worker generation");
+    // Never wrote its stale (generation-1) view over the fresher generation-2 claim.
+    expect(state.roles[token]).toMatchObject({ generation: 2 });
+    expect(state.phases[root]).toBeUndefined();
+  });
+
   it("rejects a worker boot token that has already been consumed", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
@@ -2378,6 +2462,38 @@ describe("Legion HTTP API", () => {
     });
 
     expect(spawn.response.status).toBe(400);
+    expect(spawnedWorkers).toEqual([]);
+  });
+
+  it("surfaces a closing tree's spawn_worker rejection as HTTP 409", async () => {
+    await start({
+      spawnWorkerImpl: async (tree) => {
+        throw new TreeClosingError(tree);
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const spawn = await json<{ error: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_root",
+      secret: started.body.secret,
+      role: "planner",
+      task: "plan #1",
+    });
+
+    expect(spawn.response.status).toBe(409);
+    expect(spawn.body.error).toContain(root);
     expect(spawnedWorkers).toEqual([]);
   });
 

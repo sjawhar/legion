@@ -29,6 +29,11 @@ export async function handleProcessStarted(
   if (!treeState.locator) {
     throw new Error(`Tree ${tree} is missing its process locator`);
   }
+  // A close racing this exact boot must never have this handler resurrect a tree it already
+  // reported closed, or register an architect claim `closeTreeLocked`'s own cleanup has already
+  // passed over. No lock to acquire here (unlike `/worker/started`): every check below through
+  // the write is synchronous, so there is no awaited gap this check could go stale across.
+  ctx.deps.processManager.rejectIfTreeGone(tree, tree);
   treeState.status = "active";
   treeState.locator = { ...treeState.locator, ompSessionFile };
   const roles: Record<LegionRole, string> = {
@@ -86,7 +91,14 @@ export async function handleProcessExit(
     throw new HttpError(409, "Stale process generation");
   }
   if (ctx.deps.state.issues[tree]?.state === "closed") {
-    await ctx.deps.processManager.closeTree(tree);
+    // Never await/join a `closeTree` here: the caller of this route IS the tree's own root
+    // process, currently blocked on this very HTTP response inside its `session_shutdown`
+    // hook. If a `closeTree` for this tree is already in flight (the common case — a linger
+    // sweep's `closeTree` gracefully asked this exact root to exit, which is why this request
+    // exists at all), awaiting it here would deadlock: that close cannot finish until the root
+    // exits, and the root cannot finish exiting until this response returns. See
+    // `reportRootExit`'s doc comment.
+    await ctx.deps.processManager.reportRootExit(tree);
   } else {
     await ctx.deps.processManager.markProcessDead(tree);
   }

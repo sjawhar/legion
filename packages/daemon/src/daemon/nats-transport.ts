@@ -12,6 +12,7 @@ import {
   nanos,
   StringCodec,
 } from "nats";
+import { createCancellableSleep } from "./cancellable-sleep";
 import type { DaemonConfig } from "./config";
 
 /**
@@ -177,42 +178,6 @@ export async function runWithRestart(
     await sleep(delay);
     delay = Math.min(delay * 2, DURABLE_CONSUMER_RESTART_MAX_DELAY_MS);
   }
-}
-
-export interface CancellableSleep {
-  sleep(delayMs: number): Promise<void>;
-  /** Resolves any in-flight `sleep` immediately and clears its timer; a no-op if none is pending. */
-  cancel(): void;
-}
-
-/**
- * A `setTimeout`-backed sleep whose pending wait can be cut short. Without
- * this, `close()` returning before a `runWithRestart` backoff timer fires
- * would leave that timer (up to `DURABLE_CONSUMER_RESTART_MAX_DELAY_MS`)
- * alive and keeping the process from exiting cleanly.
- */
-export function createCancellableSleep(): CancellableSleep {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let resolvePending: (() => void) | undefined;
-  return {
-    sleep(delayMs: number): Promise<void> {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      resolvePending = resolve;
-      timer = setTimeout(() => {
-        timer = undefined;
-        resolvePending = undefined;
-        resolve();
-      }, delayMs);
-      return promise;
-    },
-    cancel(): void {
-      if (timer === undefined) return;
-      clearTimeout(timer);
-      timer = undefined;
-      resolvePending?.();
-      resolvePending = undefined;
-    },
-  };
 }
 
 /** The minimal JetStream message shape `consumeDurable` reads from a delivered pull message. */
