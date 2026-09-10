@@ -13,6 +13,8 @@ import {
 
 import { ApiError, api } from "../../api/client";
 import type { AskOption, AskUrgency } from "../../api/types";
+import { QueryError } from "../../components/QueryError";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import {
@@ -225,6 +227,7 @@ export function Composer({
     return () => form.removeEventListener("keydown", handleEscape);
   }, [askOptions, body, confirmingDiscard, onClose, pickerOpen, replacement]);
   const references = useMemo(() => composerReferences(body), [body]);
+  const submitGuard = useSubmitGuard();
   const save = useMutation({
     mutationFn: async () => {
       const selection =
@@ -256,6 +259,9 @@ export function Composer({
         suggestion: kind === "suggestion" ? { replace_with: replacement } : undefined,
       });
     },
+    onSettled: () => {
+      submitGuard.release();
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
       void queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
@@ -264,6 +270,7 @@ export function Composer({
       onClose();
     },
   });
+  const uploadRetryGuard = useSubmitGuard();
   const upload = useMutation({
     mutationFn: (file: File) => uploadFile(issueKey, file),
     onMutate: () => {
@@ -281,6 +288,7 @@ export function Composer({
     },
     onSettled: () => {
       setPendingUploads((count) => count - 1);
+      uploadRetryGuard.release();
     },
   });
 
@@ -345,7 +353,7 @@ export function Composer({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (canSubmit) {
-      save.mutate();
+      submitGuard.guard(() => save.mutate());
     }
   };
   const title =
@@ -554,16 +562,24 @@ export function Composer({
         </p>
       ) : null}
       {upload.isError ? (
-        <p className="text-sm text-rose-700">{uploadErrorMessage(upload.error)}</p>
+        <QueryError
+          message={uploadErrorMessage(upload.error)}
+          onRetry={() => uploadRetryGuard.retryLast(upload)}
+          retrying={upload.isPending}
+        />
       ) : null}
       {save.isError ? (
-        <p className="text-sm text-rose-700">
-          {save.error instanceof ApiError &&
-          save.error.status === 409 &&
-          save.error.code === "ANCHOR_STALE"
-            ? save.error.message
-            : "Could not save this item."}
-        </p>
+        <QueryError
+          message={
+            save.error instanceof ApiError &&
+            save.error.status === 409 &&
+            save.error.code === "ANCHOR_STALE"
+              ? save.error.message
+              : "Could not save this item."
+          }
+          onRetry={() => submitGuard.guard(() => save.mutate())}
+          retrying={save.isPending}
+        />
       ) : null}
       <button
         className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white enabled:hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"

@@ -98,6 +98,24 @@ function stubIssueApi() {
   };
 }
 
+async function openTitleEditor(): Promise<HTMLInputElement> {
+  const existing = screen.queryByLabelText("Issue title");
+  if (existing instanceof HTMLInputElement) {
+    return existing;
+  }
+  fireEvent.click(await screen.findByRole("heading", { level: 1 }));
+  return (await screen.findByLabelText("Issue title")) as HTMLInputElement;
+}
+
+async function openRouteEditor(): Promise<HTMLInputElement> {
+  const existing = screen.queryByLabelText("Route");
+  if (existing instanceof HTMLInputElement) {
+    return existing;
+  }
+  fireEvent.click(await screen.findByRole("button", { name: /No route|Messages also reach/ }));
+  return (await screen.findByLabelText("Route")) as HTMLInputElement;
+}
+
 test("IssuePage keeps an unsaved route draft when a stale refetch arrives", async () => {
   const { patchIssue, restore } = stubIssueApi();
   const { unmount } = renderIssuePage();
@@ -106,13 +124,16 @@ test("IssuePage keeps an unsaved route draft when a stale refetch arrives", asyn
 
   try {
     fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
-    const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
-    const saveRoute = screen.getByRole("button", { name: "Save route" });
+    let route = await openRouteEditor();
+    let saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    route = await openRouteEditor();
+    saveRoute = screen.getByRole("button", { name: "Save route" });
 
     fireEvent.change(route, { target: { value: "" } });
+    await waitFor(() => expect(route.value).toBe(""));
     await act(async () => {
       firstSave.resolve(narrowIssue({ ...issue, route: "role:a" }));
     });
@@ -138,11 +159,13 @@ test("IssuePage keeps a route cleared while the previous save was still in fligh
 
   try {
     fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
-    const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
-    const saveRoute = screen.getByRole("button", { name: "Save route" });
+    let route = await openRouteEditor();
+    let saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    route = await openRouteEditor();
+    saveRoute = screen.getByRole("button", { name: "Save route" });
 
     await act(async () => {
       fireEvent.change(route, { target: { value: "" } });
@@ -170,10 +193,11 @@ test("IssuePage keeps the document and a route draft across a save response", as
 
   try {
     fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
-    const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
+    let route = await openRouteEditor();
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(screen.getByRole("button", { name: "Save route" }));
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    route = await openRouteEditor();
     fireEvent.change(route, { target: { value: "" } });
 
     await waitFor(() =>
@@ -197,14 +221,16 @@ test("IssuePage ignores a stale route refetch after a newer successful save", as
 
   try {
     fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
-    const route = (await screen.findByLabelText("Route")) as HTMLInputElement;
-    const saveRoute = screen.getByRole("button", { name: "Save route" });
+    let route = await openRouteEditor();
+    let saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
     await waitFor(() =>
       expect(queryClient.getQueryData<IssueDetails>(["issue", "CORE-1"])?.route).toBe("role:a")
     );
+    route = await openRouteEditor();
+    saveRoute = screen.getByRole("button", { name: "Save route" });
 
     getIssue.mockImplementationOnce(() => staleRefetch.promise);
     act(() => {
@@ -257,6 +283,401 @@ test("IssuePage keeps an unsaved title draft when a stale refetch arrives", asyn
       expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Edited locally" })
     );
     expect(title.value).toBe("Edited locally");
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage ignores a same-task duplicate title save", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const { unmount } = renderIssuePage();
+
+  try {
+    const title = await openTitleEditor();
+    fireEvent.change(title, { target: { value: "Guarded title" } });
+    fireEvent.blur(title);
+    fireEvent.blur(title);
+
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Guarded title" });
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage ignores same-task duplicate route saves", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const { unmount } = renderIssuePage();
+
+  try {
+    const route = await openRouteEditor();
+    const saveRoute = screen.getByRole("button", { name: "Save route" });
+    const routeForm = saveRoute.closest("form");
+    if (routeForm === null) {
+      throw new Error("Save route must be inside a form.");
+    }
+    fireEvent.change(route, { target: { value: "role:guarded" } });
+    fireEvent.submit(routeForm);
+    fireEvent.submit(routeForm);
+
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:guarded" });
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage ignores a same-task duplicate status save", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const { unmount } = renderIssuePage();
+
+  try {
+    const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
+    fireEvent.change(status, { target: { value: "in_progress" } });
+    fireEvent.change(status, { target: { value: "in_progress" } });
+
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" });
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage preserves an edit made after a failed title save and retries that draft", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const failedSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => failedSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    let title = await openTitleEditor();
+    fireEvent.change(title, { target: { value: "a" } });
+    fireEvent.blur(title);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+
+    title = await openTitleEditor();
+    fireEvent.change(title, { target: { value: "ab" } });
+    act(() => {
+      failedSave.reject(new Error("offline"));
+    });
+    await screen.findByRole("alert");
+    expect(title.value).toBe("ab");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "ab" }));
+    expect(title.value).toBe("ab");
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage does not retry an invalid route draft after a failed save", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const failedSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => failedSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    let route = await openRouteEditor();
+    let saveRoute = screen.getByRole("button", { name: "Save route" });
+    let routeForm = saveRoute.closest("form");
+    if (routeForm === null) {
+      throw new Error("Save route must be inside a form.");
+    }
+    fireEvent.change(route, { target: { value: "role:a" } });
+    fireEvent.submit(routeForm);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+
+    act(() => {
+      failedSave.reject(new Error("offline"));
+    });
+    await screen.findByRole("alert");
+    route = await openRouteEditor();
+    fireEvent.change(route, { target: { value: "not-a-route" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    expect(patchIssue).toHaveBeenCalledTimes(1);
+
+    saveRoute = screen.getByRole("button", { name: "Save route" });
+    routeForm = saveRoute.closest("form");
+    if (routeForm === null) {
+      throw new Error("Save route must be inside a form.");
+    }
+    fireEvent.change(route, { target: { value: "role:b" } });
+    fireEvent.submit(routeForm);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:b" }));
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage does not retry an empty title draft after a failed save", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const failedSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => failedSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    let title = await openTitleEditor();
+    fireEvent.change(title, { target: { value: "a" } });
+    fireEvent.blur(title);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+
+    act(() => {
+      failedSave.reject(new Error("offline"));
+    });
+    await screen.findByRole("alert");
+    title = await openTitleEditor();
+    fireEvent.change(title, { target: { value: "" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    expect(patchIssue).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(title, { target: { value: "b" } });
+    fireEvent.blur(title);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "b" }));
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage queues a title draft edited while a save is pending", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const firstSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => firstSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    let title = await openTitleEditor();
+    fireEvent.change(title, { target: { value: "a" } });
+    fireEvent.blur(title);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+
+    title = await openTitleEditor();
+    fireEvent.change(title, { target: { value: "ab" } });
+    await act(async () => {});
+    fireEvent.blur(title);
+    act(() => {
+      firstSave.resolve({ ...issue, title: "a" });
+    });
+
+    await waitFor(() =>
+      expect(patchIssue.mock.calls).toEqual([
+        ["CORE-1", { title: "a" }],
+        ["CORE-1", { title: "ab" }],
+      ])
+    );
+    expect(title.value).toBe("ab");
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage queues a route draft edited while a save is pending", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const firstSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => firstSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    let route = await openRouteEditor();
+    let saveRoute = screen.getByRole("button", { name: "Save route" });
+    let routeForm = saveRoute.closest("form");
+    if (routeForm === null) {
+      throw new Error("Save route must be inside a form.");
+    }
+    fireEvent.change(route, { target: { value: "role:a" } });
+    fireEvent.submit(routeForm);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    route = await openRouteEditor();
+    saveRoute = screen.getByRole("button", { name: "Save route" });
+    routeForm = saveRoute.closest("form");
+    if (routeForm === null) {
+      throw new Error("Save route must be inside a form.");
+    }
+
+    fireEvent.change(route, { target: { value: "role:b" } });
+    await act(async () => {});
+    fireEvent.submit(routeForm);
+    act(() => {
+      firstSave.resolve({ ...issue, route: "role:a" });
+    });
+
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:b" }));
+    expect(route.value).toBe("role:b");
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage drains a title draft after a different issue write settles", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const firstSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => firstSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
+    const title = await openTitleEditor();
+    fireEvent.change(status, { target: { value: "in_progress" } });
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" })
+    );
+
+    fireEvent.change(title, { target: { value: "Queued title" } });
+    fireEvent.blur(title);
+    act(() => {
+      firstSave.resolve({ ...issue, status: "in_progress" });
+    });
+
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Queued title" })
+    );
+    expect(patchIssue).toHaveBeenCalledTimes(2);
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage does not submit a route that was typed but never saved", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const statusSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => statusSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
+    const route = await openRouteEditor();
+    fireEvent.change(status, { target: { value: "in_progress" } });
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" })
+    );
+
+    fireEvent.change(route, { target: { value: "role:legion" } });
+    act(() => {
+      statusSave.resolve({ ...issue, status: "in_progress" });
+    });
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
+    expect(route.value).toBe("role:legion");
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage retries an unchanged failed title draft", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const failedSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => failedSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    fireEvent.click(await screen.findByRole("heading", { level: 1, name: "Review the spec" }));
+    const title = (await screen.findByLabelText("Issue title")) as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "a" } });
+    fireEvent.blur(title);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+
+    act(() => {
+      failedSave.reject(new Error("offline"));
+    });
+    await screen.findByRole("alert");
+    expect(title.value).toBe("a");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+    expect(patchIssue).toHaveBeenCalledTimes(2);
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage retries an unchanged failed route draft", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const failedSave = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => failedSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    const route = await openRouteEditor();
+    const routeForm = screen.getByRole("button", { name: "Save route" }).closest("form");
+    if (routeForm === null) {
+      throw new Error("Save route must be inside a form.");
+    }
+    fireEvent.change(route, { target: { value: "role:a" } });
+    fireEvent.submit(routeForm);
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+
+    act(() => {
+      failedSave.reject(new Error("offline"));
+    });
+    await screen.findByRole("alert");
+    expect(route.value).toBe("role:a");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    expect(patchIssue).toHaveBeenCalledTimes(2);
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage retries a failed drained title before sending the queued route", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const statusSave = Promise.withResolvers<Issue>();
+  const titleSave = Promise.withResolvers<Issue>();
+  patchIssue
+    .mockImplementationOnce(() => statusSave.promise)
+    .mockImplementationOnce(() => titleSave.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
+    fireEvent.change(status, { target: { value: "in_progress" } });
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" })
+    );
+
+    const title = await openTitleEditor();
+    const route = await openRouteEditor();
+    const routeForm = screen.getByRole("button", { name: "Save route" }).closest("form");
+    if (routeForm === null) {
+      throw new Error("Save route must be inside a form.");
+    }
+    fireEvent.change(title, { target: { value: "Queued title" } });
+    fireEvent.blur(title);
+    fireEvent.change(route, { target: { value: "role:queued" } });
+    fireEvent.submit(routeForm);
+
+    act(() => {
+      statusSave.resolve({ ...issue, status: "in_progress" });
+    });
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Queued title" })
+    );
+    titleSave.reject(new Error("offline"));
+    await screen.findByRole("alert");
+    expect(patchIssue).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:queued" })
+    );
+    expect(patchIssue).toHaveBeenCalledTimes(4);
   } finally {
     unmount();
     restore();

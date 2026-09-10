@@ -2,6 +2,7 @@ import type { ReactNode, RefObject } from "react";
 import { Link } from "react-router-dom";
 
 import type { Comment } from "../../api/types";
+import { QueryError } from "../../components/QueryError";
 import { AskCard } from "../inbox/AskCard";
 import { actorLabel } from "../refs/actor";
 import { buildIssuePath } from "../refs/routes";
@@ -16,8 +17,11 @@ export interface MarginComposer {
 }
 
 interface CommentsTabProps {
+  actionErrorId: string | undefined;
+  answeredAsksPending: boolean;
   artifactSlug: string;
   asksPending: boolean;
+  commentsError: boolean;
   commentsPending: boolean;
   composer: MarginComposer | undefined;
   hoveredItemId: string | undefined;
@@ -28,22 +32,32 @@ interface CommentsTabProps {
   onAction: (id: string, action: MarginItemAction) => void;
   onCloseComposer: () => void;
   onReply: (comment: Comment) => void;
+  onRetryAction: () => void;
+  onRetryAnsweredAsk: (() => void) | undefined;
+  onRetryComments: () => void;
+  pendingActionId: string | undefined;
   selectedItemId: string | undefined;
 }
 
 function CommentCard({
+  actionError,
   artifactSlug,
   comment,
   depth,
   onAction,
   onReply,
+  onRetryAction,
+  pendingAction,
   selected,
 }: {
+  actionError: boolean;
   artifactSlug: string;
   comment: Comment;
   depth: number;
   onAction: (id: string, action: MarginItemAction) => void;
   onReply: (comment: Comment) => void;
+  onRetryAction: () => void;
+  pendingAction: boolean;
   selected: boolean;
 }): ReactNode {
   const suggestion = comment.suggestion;
@@ -94,18 +108,20 @@ function CommentCard({
       <p className="mt-2 text-xs text-slate-500">
         {actorLabel(comment.author)} · {new Date(comment.created_at).toLocaleString()}
       </p>
-      <div className="mt-2 flex flex-wrap gap-3 text-sm">
+      <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
         {suggestion !== null && suggestion.accepted === null && !comment.resolved ? (
           <>
             <button
-              className="font-medium text-emerald-700 hover:text-emerald-900"
+              className="font-medium text-emerald-700 hover:text-emerald-900 disabled:cursor-not-allowed disabled:text-slate-400"
+              disabled={pendingAction}
               onClick={() => onAction(comment.id, "accept")}
               type="button"
             >
               Accept
             </button>
             <button
-              className="font-medium text-rose-700 hover:text-rose-900"
+              className="font-medium text-rose-700 hover:text-rose-900 disabled:cursor-not-allowed disabled:text-slate-400"
+              disabled={pendingAction}
               onClick={() => onAction(comment.id, "reject")}
               type="button"
             >
@@ -114,7 +130,8 @@ function CommentCard({
           </>
         ) : suggestion === null && !comment.resolved ? (
           <button
-            className="font-medium text-sky-700 hover:text-sky-900"
+            className="font-medium text-sky-700 hover:text-sky-900 disabled:cursor-not-allowed disabled:text-slate-400"
+            disabled={pendingAction}
             onClick={() => onAction(comment.id, "resolve")}
             type="button"
           >
@@ -129,6 +146,11 @@ function CommentCard({
                 : "Resolved"}
           </span>
         )}
+        {pendingAction ? (
+          <span className="text-xs text-slate-500" role="status">
+            Saving…
+          </span>
+        ) : null}
         {anchor === null ? null : (
           <button
             className="font-medium text-sky-700 hover:text-sky-900"
@@ -139,13 +161,25 @@ function CommentCard({
           </button>
         )}
       </div>
+      {actionError ? (
+        <div className="mt-2">
+          <QueryError
+            message="Could not save this action."
+            onRetry={onRetryAction}
+            retrying={pendingAction}
+          />
+        </div>
+      ) : null}
     </article>
   );
 }
 
 export function CommentsTab({
+  actionErrorId,
+  answeredAsksPending,
   artifactSlug,
   asksPending,
+  commentsError,
   commentsPending,
   composer,
   hoveredItemId,
@@ -156,6 +190,10 @@ export function CommentsTab({
   onAction,
   onCloseComposer,
   onReply,
+  onRetryAction,
+  onRetryAnsweredAsk,
+  onRetryComments,
+  pendingActionId,
   selectedItemId,
 }: CommentsTabProps): ReactNode {
   return (
@@ -170,46 +208,60 @@ export function CommentsTab({
           replyTo={composer.replyTo}
         />
       )}
-      <section
-        aria-label="Margin review items"
-        className="space-y-3 md:max-h-[45dvh] md:overflow-y-auto"
-        ref={list}
-      >
-        {items.map((item) => {
-          const id = marginItemId(item);
-          const active = selectedItemId === id || hoveredItemId === id;
-          return (
-            <div key={id}>
-              {item.kind === "ask" ? (
-                <div
-                  className={active ? "rounded-xl ring-2 ring-sky-400" : undefined}
-                  data-margin-item={id}
-                >
-                  <AskCard ask={item.ask} />
-                  <Unfurl body={item.ask.question} />
-                  <p className="mt-2 text-xs text-slate-500">
-                    {new Date(item.ask.created_at).toLocaleString()}
-                  </p>
-                </div>
-              ) : (
-                <CommentCard
-                  artifactSlug={artifactSlug}
-                  comment={item.comment}
-                  depth={item.depth}
-                  onAction={onAction}
-                  onReply={onReply}
-                  selected={active}
-                />
-              )}
-            </div>
-          );
-        })}
-        {items.length === 0 && !asksPending && !commentsPending ? (
-          <p className="text-sm text-slate-500">
-            No comments, asks, or suggestions on this document.
-          </p>
-        ) : null}
-      </section>
+      {commentsError ? (
+        <QueryError message="Could not load this document's comments." onRetry={onRetryComments} />
+      ) : (
+        <section
+          aria-label="Margin review items"
+          className="space-y-3 md:max-h-[45dvh] md:overflow-y-auto"
+          ref={list}
+        >
+          {onRetryAnsweredAsk === undefined ? null : (
+            <QueryError
+              message="Could not load an answered ask."
+              onRetry={onRetryAnsweredAsk}
+              retrying={answeredAsksPending}
+            />
+          )}
+          {items.map((item) => {
+            const id = marginItemId(item);
+            const active = selectedItemId === id || hoveredItemId === id;
+            return (
+              <div key={id}>
+                {item.kind === "ask" ? (
+                  <div
+                    className={active ? "rounded-xl ring-2 ring-sky-400" : undefined}
+                    data-margin-item={id}
+                  >
+                    <AskCard ask={item.ask} />
+                    <Unfurl body={item.ask.question} />
+                    <p className="mt-2 text-xs text-slate-500">
+                      {new Date(item.ask.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                ) : (
+                  <CommentCard
+                    actionError={actionErrorId === item.comment.id}
+                    artifactSlug={artifactSlug}
+                    comment={item.comment}
+                    depth={item.depth}
+                    onAction={onAction}
+                    onReply={onReply}
+                    onRetryAction={onRetryAction}
+                    pendingAction={pendingActionId === item.comment.id}
+                    selected={active}
+                  />
+                )}
+              </div>
+            );
+          })}
+          {items.length === 0 && !asksPending && !commentsPending && !answeredAsksPending ? (
+            <p className="text-sm text-slate-500">
+              No comments, asks, or suggestions on this document.
+            </p>
+          ) : null}
+        </section>
+      )}
     </div>
   );
 }

@@ -133,6 +133,7 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
     .toMatchObject({
       route: "role:legion-controller-core",
     });
+  await alicePage.getByText("Messages also reach role:legion-controller-core").click();
   const routeInput = alicePage.getByLabel("Route");
   await routeInput.fill("");
   // The field must still read "" when the earlier PATCH's response has been applied;

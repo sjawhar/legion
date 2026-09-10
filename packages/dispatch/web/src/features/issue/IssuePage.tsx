@@ -1,13 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  type FormEvent,
-  type KeyboardEvent,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type FormEvent, type KeyboardEvent, type ReactNode, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -22,6 +14,7 @@ import type {
   UserState,
 } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { DocEditor } from "../doc/DocEditor";
 import { DocView } from "../doc/DocView";
 import { actorLabel } from "../refs/actor";
@@ -33,6 +26,7 @@ import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
 import { type IssueTab, IssueTabs } from "./IssueTabs";
 import { LogTab } from "./LogTab";
+import { useIssueDrafts } from "./useIssueDrafts";
 
 const issueStatuses = [
   "triage",
@@ -45,7 +39,6 @@ const issueStatuses = [
   "retro",
   "done",
 ];
-const routePattern = /^(role:[a-z0-9-]+|session:[0-9a-f-]{16,})$/;
 
 function activeSessions(events: Event[]): Extract<Event["actor"], { kind: "session" }>[] {
   const sessions = new Map<string, Extract<Event["actor"], { kind: "session" }>>();
@@ -178,27 +171,8 @@ function IssueHeader({
   state: UserIssueState;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const [title, setTitle] = useState(issue.title);
-  const [titleDirty, setTitleDirty] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [routeEditing, setRouteEditing] = useState(false);
-  const [route, setRoute] = useState(issue.route ?? "");
-  const [routeDirty, setRouteDirty] = useState(false);
-  // Mirrors of the drafts for mutation callbacks. Every draft write goes through
-  // writeTitle/writeRoute so the ref is updated synchronously with the state, never via
-  // an effect: a passive effect flushes after paint, and a PATCH response landing in that
-  // gap would compare the callback against a stale value and clear the dirty flag for a
-  // draft the user had already changed (the CI route-clear race).
-  const titleRef = useRef(title);
-  const routeRef = useRef(route);
-  const writeTitle = useCallback((next: string) => {
-    titleRef.current = next;
-    setTitle(next);
-  }, []);
-  const writeRoute = useCallback((next: string) => {
-    routeRef.current = next;
-    setRoute(next);
-  }, []);
   const events = useQuery({
     queryKey: ["events", issue.key, "active-sessions"],
     queryFn: () => api.getIssueEvents(issue.key, { limit: 200, order: "desc" }),
@@ -210,95 +184,59 @@ function IssueHeader({
     onMutate: async () => {
       await queryClient.cancelQueries({ queryKey: ["issue", issue.key] });
     },
-    onSuccess: (next) => {
+    onSettled: (_data, error) => {
+      drafts.onIssueSettled(error);
+    },
+    onSuccess: (next, input) => {
       mergeIssue(queryClient, next);
+      drafts.onIssueSuccess(next, input);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
+  const drafts = useIssueDrafts(issue, updateIssue);
+  const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
+  const pinGuard = useSubmitGuard();
   const updateState = useMutation({
     mutationFn: (pinned: boolean) => api.putIssueState(issue.key, { pinned }),
-    onMutate: (pinned) => {
+    onSettled: () => {
+      pinGuard.release();
+      void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+    },
+    onMutate: async (pinned) => {
+      await queryClient.cancelQueries({ queryKey: ["user-state"] });
+      const previous = queryClient.getQueryData<UserState>(["user-state"]);
       queryClient.setQueryData<UserState>(["user-state"], (current) => ({
         ...current,
         [issue.key]: { ...state, pinned },
       }));
+      return { previous };
     },
-    onError: () => {
-      void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+    onError: (_error, _pinned, context) => {
+      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+        ...current,
+        [issue.key]: context?.previous?.[issue.key] ?? {
+          dismissed: [],
+          last_read_seq: 0,
+          pinned: false,
+        },
+      }));
+    },
+    onSuccess: (next) => {
+      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+        ...current,
+        [issue.key]: next,
+      }));
     },
   });
-
-  useEffect(() => {
-    if (!titleDirty && !updateIssue.isPending) {
-      writeTitle(issue.title);
-    }
-  }, [issue.title, titleDirty, updateIssue.isPending, writeTitle]);
-  useEffect(() => {
-    if (!routeDirty && !updateIssue.isPending) {
-      writeRoute(issue.route ?? "");
-    }
-  }, [issue.route, routeDirty, updateIssue.isPending, writeRoute]);
-
-  const saveTitle = () => {
-    const next = title.trim();
-    if (!isClosed && next !== "" && next !== issue.title) {
-      setTitleDirty(true);
-      updateIssue.mutate(
-        { title: next },
-        {
-          onSuccess: () => {
-            if (titleRef.current === next) {
-              setTitleDirty(false);
-            }
-          },
-        }
-      );
-    } else {
-      writeTitle(issue.title);
-      setTitleDirty(false);
-    }
-  };
   const saveTitleOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") {
       event.currentTarget.blur();
     }
   };
-  const routeIsValid = route === "" || routePattern.test(route);
   const saveRoute = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!isClosed && routeIsValid) {
-      const submitted = route;
-      updateIssue.mutate(
-        { route: submitted },
-        {
-          onSuccess: () => {
-            if (routeRef.current === submitted) {
-              setRouteDirty(false);
-            }
-          },
-        }
-      );
-    }
-  };
-  // A failed title/status/route save must not leave the optimistic h1 (or route field)
-  // showing an unsaved value indefinitely — fall back to the last confirmed issue state.
-  useEffect(() => {
-    if (updateIssue.isError) {
-      writeTitle(issue.title);
-      setTitleDirty(false);
-      writeRoute(issue.route ?? "");
-      setRouteDirty(false);
+    if (drafts.requestRouteSubmit()) {
       setRouteEditing(false);
-    }
-  }, [updateIssue.isError, issue.title, issue.route, writeTitle, writeRoute]);
-  const cancelRouteEdit = () => {
-    writeRoute(issue.route ?? "");
-    setRouteDirty(false);
-    setRouteEditing(false);
-  };
-  const routeEditOnKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Escape") {
-      cancelRouteEdit();
     }
   };
 
@@ -309,37 +247,40 @@ function IssueHeader({
         <button
           className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:border-sky-500"
           disabled={updateState.isPending}
-          onClick={() => updateState.mutate(!state.pinned)}
+          onClick={() => pinGuard.guard(() => updateState.mutate(!state.pinned))}
           type="button"
         >
           {state.pinned ? "Unpin issue" : "Pin issue"}
         </button>
       </div>
+      {updateState.isError ? (
+        <QueryError
+          message="Could not save pin status."
+          onRetry={() => pinGuard.retryLast(updateState)}
+          retrying={updateState.isPending}
+        />
+      ) : null}
       {editingTitle ? (
         <input
+          aria-describedby={drafts.titleError === null ? undefined : "issue-title-help"}
           aria-label="Issue title"
           className="mt-2 w-full rounded-lg border border-transparent bg-transparent px-2 py-1 text-2xl font-semibold text-slate-950 outline-none hover:border-slate-300 focus:border-sky-500"
-          disabled={isClosed || updateIssue.isPending}
+          disabled={isClosed}
           onBlur={() => {
-            saveTitle();
+            drafts.requestTitleSubmit();
             setEditingTitle(false);
-            setTitleDirty(false);
           }}
-          onChange={(event) => {
-            writeTitle(event.target.value);
-            setTitleDirty(true);
-          }}
+          onChange={(event) => drafts.writeTitle(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
-              writeTitle(issue.title);
+              drafts.discardTitle();
               setEditingTitle(false);
-              setTitleDirty(false);
               return;
             }
             saveTitleOnEnter(event);
           }}
           ref={(node) => node?.focus()}
-          value={title}
+          value={drafts.title}
         />
       ) : (
         <h1
@@ -365,17 +306,21 @@ function IssueHeader({
           tabIndex={isClosed ? -1 : 0}
           title={issue.title}
         >
-          {/* Optimistic: `title` already reflects the pending edit; it resets to
-              `issue.title` once the server confirms (or the field is reverted). */}
-          {title}
+          {drafts.title}
         </h1>
+      )}
+      {drafts.titleError === null ? null : (
+        <p className="mt-1 text-sm text-rose-700" id="issue-title-help">
+          {drafts.titleError}
+        </p>
       )}
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <label className="text-sm font-medium text-slate-700">
           Status
           <select
-            className="ml-2 rounded border border-slate-300 bg-white px-2 py-1 font-normal"
-            onChange={(event) => updateIssue.mutate({ status: event.target.value })}
+            className="ml-2 rounded border border-slate-300 bg-white px-2 py-1 font-normal disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+            disabled={updateIssue.isPending}
+            onChange={(event) => drafts.requestStatusSubmit(event.target.value)}
             value={issue.status}
           >
             {issueStatuses.map((status) => (
@@ -385,6 +330,11 @@ function IssueHeader({
             ))}
           </select>
         </label>
+        {statusSaving ? (
+          <span className="text-xs text-slate-500" role="status">
+            Saving…
+          </span>
+        ) : null}
         {issue.labels.map((label) => (
           <span
             className="rounded-full bg-slate-200 px-2 py-1 text-xs font-medium text-slate-700"
@@ -411,31 +361,36 @@ function IssueHeader({
             aria-describedby="issue-route-help"
             className="min-w-64 rounded border px-2 py-1 text-sm outline-none focus:border-sky-500"
             id="issue-route"
-            onChange={(event) => {
-              setRouteDirty(true);
-              writeRoute(event.target.value);
+            onChange={(event) => drafts.writeRoute(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                drafts.discardRoute();
+                setRouteEditing(false);
+              }
             }}
-            onKeyDown={routeEditOnKeyDown}
             placeholder="role:legion-controller-core"
             disabled={isClosed}
-            value={route}
+            value={drafts.route}
           />
           <button
             className="rounded border border-slate-300 px-2 py-1 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
-            disabled={isClosed || !routeIsValid || updateIssue.isPending}
+            disabled={isClosed || !drafts.routeIsValid || updateIssue.isPending}
             type="submit"
           >
             Save route
           </button>
           <button
             className="rounded border border-transparent px-2 py-1 text-sm font-medium text-slate-500 hover:text-slate-700"
-            onClick={cancelRouteEdit}
+            onClick={() => {
+              drafts.discardRoute();
+              setRouteEditing(false);
+            }}
             type="button"
           >
             Cancel
           </button>
           <span
-            className={routeIsValid ? "sr-only" : "text-sm text-rose-700"}
+            className={drafts.routeIsValid ? "sr-only" : "text-sm text-rose-700"}
             id="issue-route-help"
           >
             Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
@@ -448,9 +403,9 @@ function IssueHeader({
           onClick={() => setRouteEditing(true)}
           type="button"
         >
-          {issue.route === null
+          {drafts.route === ""
             ? "No route — messages stay on the issue"
-            : `Messages also reach ${issue.route}`}
+            : `Messages also reach ${drafts.route}`}
         </button>
       )}
       {issue.external_links.length === 0 ? null : (
@@ -490,7 +445,11 @@ function IssueHeader({
         </section>
       )}
       {updateIssue.isError ? (
-        <p className="mt-3 text-sm text-rose-700">Could not update this issue.</p>
+        <QueryError
+          message="Could not update this issue."
+          onRetry={drafts.retry}
+          retrying={updateIssue.isPending}
+        />
       ) : null}
     </header>
   );

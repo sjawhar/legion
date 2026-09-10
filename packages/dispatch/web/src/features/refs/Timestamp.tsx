@@ -1,42 +1,78 @@
 import { type ReactNode, useEffect, useState } from "react";
 
-interface TimestampProps {
-  at: string;
-}
+const relativeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
-const relativeUnits: [Intl.RelativeTimeFormatUnit, number][] = [
-  ["year", 1000 * 60 * 60 * 24 * 365],
-  ["month", 1000 * 60 * 60 * 24 * 30],
-  ["week", 1000 * 60 * 60 * 24 * 7],
-  ["day", 1000 * 60 * 60 * 24],
-  ["hour", 1000 * 60 * 60],
-  ["minute", 1000 * 60],
+const RELATIVE_UNITS: Array<{ ms: number; unit: Intl.RelativeTimeFormatUnit }> = [
+  { ms: 365 * 24 * 60 * 60 * 1000, unit: "year" },
+  { ms: 30 * 24 * 60 * 60 * 1000, unit: "month" },
+  { ms: 7 * 24 * 60 * 60 * 1000, unit: "week" },
+  { ms: 24 * 60 * 60 * 1000, unit: "day" },
+  { ms: 60 * 60 * 1000, unit: "hour" },
+  { ms: 60 * 1000, unit: "minute" },
 ];
 
-const relativeTimeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const TICK_INTERVAL_MS = 30_000;
 
-function relativeLabel(at: string): string {
-  const elapsedMs = new Date(at).getTime() - Date.now();
-  for (const [unit, unitMs] of relativeUnits) {
-    if (Math.abs(elapsedMs) >= unitMs) {
-      return relativeTimeFormat.format(Math.round(elapsedMs / unitMs), unit);
+// Every mounted <Timestamp> subscribes to one shared tick instead of running its own
+// setInterval, so a page with hundreds of timestamps (a long log, a comment thread) still
+// pays for exactly one timer.
+const listeners = new Set<() => void>();
+let scheduled = false;
+
+function scheduleTick(): void {
+  scheduled = true;
+  setTimeout(() => {
+    if (listeners.size === 0) {
+      scheduled = false;
+      return;
     }
-  }
-  return relativeTimeFormat.format(Math.round(elapsedMs / 1000), "second");
+    for (const listener of listeners) {
+      listener();
+    }
+    scheduleTick();
+  }, TICK_INTERVAL_MS);
 }
 
-/** Renders a self-updating relative time ("4 minutes ago"), with the absolute time in a
- *  hover `title` and machine-readable in `dateTime` for assistive tech. */
-export function Timestamp({ at }: TimestampProps): ReactNode {
-  const [, retick] = useState(0);
-  useEffect(() => {
-    const interval = setInterval(() => retick((tick) => tick + 1), 60_000);
-    return () => clearInterval(interval);
-  }, []);
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  if (!scheduled) {
+    scheduleTick();
+  }
+  return () => {
+    listeners.delete(listener);
+  };
+}
 
+function relativeTimeLabel(at: Date, now: number) {
+  const deltaMs = at.getTime() - now;
+  if (Math.abs(deltaMs) < 60_000) {
+    return "just now";
+  }
+  for (const { ms, unit } of RELATIVE_UNITS) {
+    if (Math.abs(deltaMs) >= ms) {
+      return relativeFormatter.format(Math.round(deltaMs / ms), unit);
+    }
+  }
+}
+
+export interface TimestampProps {
+  at: string;
+  className?: string;
+}
+
+/** Renders a relative time ("4 minutes ago") that keeps itself current, with the absolute
+ * value available on hover (`title`) and to assistive tech (`datetime`). */
+export function Timestamp({ at, className }: TimestampProps): ReactNode {
+  const [, forceUpdate] = useState(0);
+  useEffect(() => subscribe(() => forceUpdate((count) => count + 1)), []);
+
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) {
+    return <time className={className}>{at}</time>;
+  }
   return (
-    <time dateTime={at} title={new Date(at).toLocaleString()}>
-      {relativeLabel(at)}
+    <time className={className} dateTime={at} title={date.toLocaleString()}>
+      {relativeTimeLabel(date, Date.now())}
     </time>
   );
 }
