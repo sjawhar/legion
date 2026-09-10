@@ -34,11 +34,13 @@ export function LogTab({
   isClosed,
   route,
   state,
+  visible,
 }: {
   issueKey: string;
   isClosed: boolean;
   route: string | null;
   state: UserState | undefined;
+  visible: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
   const [failedOps, setFailedOps] = useState<FailedStateOperations>();
@@ -71,15 +73,15 @@ export function LogTab({
   }, [issueState.last_read_seq]);
 
   useEffect(() => {
-    if (visibleEventCount === 0) {
+    if (!visible || visibleEventCount === 0) {
       return;
     }
-    const visible = new Set<Element>();
+    const visibleEvents = new Set<Element>();
     let active = true;
     const scheduleRead = (target: Element, sequence: number) => {
       if (
         !active ||
-        !visible.has(target) ||
+        !visibleEvents.has(target) ||
         sequence <= lastRead.current ||
         timers.current.has(target)
       ) {
@@ -87,7 +89,7 @@ export function LogTab({
       }
       const timer = window.setTimeout(() => {
         timers.current.delete(target);
-        if (!active || !visible.has(target) || sequence <= lastRead.current) {
+        if (!active || !visibleEvents.has(target) || sequence <= lastRead.current) {
           return;
         }
         lastRead.current = sequence;
@@ -120,7 +122,7 @@ export function LogTab({
             continue;
           }
           if (!entry.isIntersecting) {
-            visible.delete(entry.target);
+            visibleEvents.delete(entry.target);
             const currentTimer = timers.current.get(entry.target);
             if (currentTimer !== undefined) {
               window.clearTimeout(currentTimer);
@@ -128,7 +130,7 @@ export function LogTab({
             }
             continue;
           }
-          visible.add(entry.target);
+          visibleEvents.add(entry.target);
           scheduleRead(entry.target, sequence);
         }
       },
@@ -145,7 +147,7 @@ export function LogTab({
       }
       timers.current.clear();
     };
-  }, [issueKey, queryClient, visibleEventCount]);
+  }, [issueKey, queryClient, visible, visibleEventCount]);
 
   const applyOptimisticOperations = (operations: DismissedStateOperation[]) => {
     queryClient.setQueryData<UserState>(["user-state"], (current) => {

@@ -1,4 +1,5 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
+import { HocuspocusProvider } from "@hocuspocus/provider";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
@@ -6,6 +7,29 @@ import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { api, type ListEventsOptions } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
 import { IssuePage } from "./IssuePage";
+
+class WebSocketStub {
+  binaryType = "arraybuffer";
+  identifier = 0;
+  readyState = 0;
+
+  addEventListener(..._args: unknown[]): void {}
+
+  close(): void {
+    this.readyState = 3;
+  }
+
+  removeEventListener(..._args: unknown[]): void {}
+
+  send(..._args: unknown[]): void {}
+}
+
+const originalWebSocket = globalThis.WebSocket;
+globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+
+afterAll(() => {
+  globalThis.WebSocket = originalWebSocket;
+});
 
 const issue: IssueDetails = {
   artifacts: [
@@ -229,6 +253,55 @@ test("IssuePage renders a not-found view for an unrecognized tab suffix without 
     view.unmount();
     getIssueSpy.mockRestore();
     getMyStateSpy.mockRestore();
+  }
+});
+
+test("IssuePage keeps the document provider alive while switching tabs", async () => {
+  const restore = stubIssuePage(issue);
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
+  const destroyProvider = spyOn(HocuspocusProvider.prototype, "destroy");
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    await waitFor(() => expect(document.querySelector(".cm-editor")).not.toBeNull());
+
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
+    await screen.findByRole("tab", { name: "Log", selected: true });
+    fireEvent.click(screen.getByRole("tab", { name: "Spec" }));
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+
+    expect(destroyProvider).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    destroyProvider.mockRestore();
+    globalThis.WebSocket = originalWebSocket;
+    restore();
+  }
+});
+
+test("IssuePage preserves an in-progress Log composer draft across a tab round-trip", async () => {
+  const restore = stubIssuePage(issue);
+  const view = renderIssuePage("/issues/CORE-1");
+
+  try {
+    await screen.findByRole("tab", { name: "Log", selected: true });
+    const composer = (await screen.findByLabelText("Comment")) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "Draft in progress" } });
+    expect(composer.value).toBe("Draft in progress");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Spec" }));
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
+    await screen.findByRole("tab", { name: "Log", selected: true });
+
+    expect((screen.getByLabelText("Comment") as HTMLTextAreaElement).value).toBe(
+      "Draft in progress"
+    );
+  } finally {
+    view.unmount();
+    restore();
   }
 });
 

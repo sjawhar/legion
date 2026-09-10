@@ -230,7 +230,7 @@ test("live: a forced server disconnect reconnects from the last event id, not fr
 
 test("live: a fresh page load opens the stream at the current head and stays within a bounded request budget", async ({
   browser,
-}) => {
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Budget target" });
   for (let index = 0; index < 5; index += 1) {
@@ -259,13 +259,16 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 9 for this fixture: whoami, issues, me/state, issue detail, inbox
-  // (BoardStrip + Margin's open-ask count, deduped to one request by TanStack
-  // Query), the stream connection, two active-sessions/log event reads, and the
-  // primary artifact's comments. A regression here means a new code path is
-  // issuing its own redundant fetch instead of sharing a query key, or the
-  // stream is replaying history instead of opening at the head.
-  expect(apiRequestUrls.length).toBeLessThanOrEqual(9);
+  // Exactly 9 on desktop (chromium) for this fixture: whoami, issues,
+  // me/state, issue detail, inbox (BoardStrip + Margin's open-ask count,
+  // deduped to one request by TanStack Query), the stream connection, two
+  // active-sessions/log event reads, and the primary artifact's comments.
+  // The phone project (iphone) never fetches the bare `/api/v1/issues` list —
+  // its sidebar sits behind a drawer that starts closed — so its budget is 8.
+  // Asserted exactly (not a ceiling) so a panel that starts eagerly fetching
+  // before its tab is ever opened — e.g. Spec's DocEditor or Children — trips
+  // this immediately instead of only breaking some looser upper bound.
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 8 : 9);
 
   await alice.close();
 });

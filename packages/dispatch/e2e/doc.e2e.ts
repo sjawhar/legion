@@ -1,6 +1,13 @@
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createProject, editArtifact, getArtifact, getArtifactVersion } from "./api";
+import {
+  createIssue,
+  createMessage,
+  createProject,
+  editArtifact,
+  getArtifact,
+  getArtifactVersion,
+} from "./api";
 import { enterEditMode } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -166,6 +173,58 @@ test("a current-spec deep link renders its historical range in preview", async (
       path: testInfo.outputPath("spec-deep-link-highlight.png"),
       fullPage: true,
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("tab round-trips preserve document connection, text, and log scroll position", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "# Keep this document",
+    title: "Mounted panels",
+  });
+  for (let index = 0; index < 30; index += 1) {
+    await createMessage(issue.key, { body: `Existing message ${index}` }, session);
+  }
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  let documentConnections = 0;
+  page.on("websocket", (websocket) => {
+    if (new URL(websocket.url()).pathname.startsWith("/ws/")) {
+      documentConnections += 1;
+    }
+  });
+
+  try {
+    await page.goto(`/issues/${issue.key}/spec`);
+    await enterEditMode(page);
+    const editor = page.getByRole("textbox", { name: "Document editor" });
+    await editor.click();
+    await editor.press("Control+End");
+    await editor.press("Enter");
+    await editor.type("stay mounted");
+    await expect(editor).toContainText("stay mounted");
+    await expect.poll(() => documentConnections).toBe(1);
+
+    await page.getByRole("tab", { name: "Log" }).click();
+    await expect(page.getByRole("tab", { name: "Log" })).toBeFocused();
+    await expect(page.getByText("Existing message 29")).toBeVisible();
+    await page.evaluate(() => window.scrollTo(0, 500));
+    const scrollPosition = await page.evaluate(() => window.scrollY);
+    expect(scrollPosition).toBeGreaterThan(0);
+
+    await page.getByRole("tab", { name: "Log" }).press("ArrowLeft");
+    await expect(editor).toContainText("stay mounted");
+    await page.getByRole("tab", { name: "Spec" }).press("ArrowRight");
+    await expect(page.getByText("Existing message 29")).toBeVisible();
+
+    await expect.poll(() => documentConnections).toBe(1);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollPosition);
   } finally {
     await alice.close();
   }

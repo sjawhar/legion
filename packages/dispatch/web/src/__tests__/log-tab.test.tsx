@@ -29,6 +29,55 @@ function issueState(dismissed: string[] = []): UserIssueState {
   return { dismissed, last_read_seq: 1, pinned: false };
 }
 
+test("LogTab observes read state only while its panel is visible", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalIntersectionObserver = globalThis.IntersectionObserver;
+  const observations: Element[] = [];
+  class IntersectionObserverStub {
+    disconnect(): void {}
+
+    observe(target: Element): void {
+      observations.push(target);
+    }
+
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+
+    unobserve(): void {}
+  }
+
+  globalThis.IntersectionObserver =
+    IntersectionObserverStub as unknown as typeof IntersectionObserver;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [event()];
+    unmount = render(
+      <QueryClientProvider client={queryClient}>
+        <LogTab
+          isClosed={false}
+          issueKey="CORE-1"
+          route={null}
+          state={{ "CORE-1": issueState() }}
+          visible={false}
+        />
+      </QueryClientProvider>
+    ).unmount;
+
+    await screen.findByText("A message");
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    expect(observations).toHaveLength(0);
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    globalThis.IntersectionObserver = originalIntersectionObserver;
+  }
+});
+
 test("retry replays every operation rejected by the state-write queue", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalGetMyState = api.getMyState;
@@ -51,7 +100,6 @@ test("retry replays every operation rejected by the state-write queue", async ()
       }
       return issueState(dismissed);
     };
-    queryClient.setQueryData<UserState>(["user-state"], { "CORE-1": issueState() });
     queryClient.setQueryData(["events", "CORE-1"], {
       pageParams: [null],
       pages: [[event()]],
@@ -64,6 +112,7 @@ test("retry replays every operation rejected by the state-write queue", async ()
           issueKey="CORE-1"
           route={null}
           state={{ "CORE-1": issueState() }}
+          visible={true}
         />
       </QueryClientProvider>
     );
@@ -136,6 +185,7 @@ test("a scroll event measures the reader's position in O(1) rect reads, not a sc
           issueKey="CORE-1"
           route={null}
           state={{ "CORE-1": issueState() }}
+          visible={true}
         />
       </QueryClientProvider>
     );

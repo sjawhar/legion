@@ -21,9 +21,11 @@ const tabs: { id: IssueTab; label: string }[] = [
 export function IssueTabs({
   activeTab,
   issueKey,
+  onBeforeTabChange,
 }: {
   activeTab: IssueTab;
   issueKey: string;
+  onBeforeTabChange: (current: IssueTab) => void;
 }): ReactNode {
   const navigate = useNavigate();
   const tabRefs = useRef<Record<IssueTab, HTMLButtonElement | null>>({
@@ -31,8 +33,13 @@ export function IssueTabs({
     log: null,
     spec: null,
   });
+  const pointerCapturedScroll = useRef(false);
 
   const goToTab = (tab: IssueTab) => {
+    if (!pointerCapturedScroll.current) {
+      onBeforeTabChange(activeTab);
+    }
+    pointerCapturedScroll.current = false;
     navigate(buildIssuePath({ key: issueKey, kind: tab }));
   };
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, current: IssueTab) => {
@@ -56,8 +63,8 @@ export function IssueTabs({
     if (nextTab === undefined) {
       return;
     }
-    tabRefs.current[nextTab]?.focus();
     goToTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
   };
 
   return (
@@ -78,6 +85,10 @@ export function IssueTabs({
           id={`issue-${t.id}-tab`}
           key={t.id}
           onClick={() => goToTab(t.id)}
+          onPointerDown={() => {
+            onBeforeTabChange(activeTab);
+            pointerCapturedScroll.current = true;
+          }}
           onKeyDown={(event) => onTabKeyDown(event, t.id)}
           ref={(node) => {
             tabRefs.current[t.id] = node;

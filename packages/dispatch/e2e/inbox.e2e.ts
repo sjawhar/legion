@@ -169,7 +169,7 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
       closed_at: expect.any(String),
       status: "done",
     });
-  await expect(alicePage.getByText("This issue is closed.")).toBeVisible();
+  await expect(alicePage.getByText("This issue is closed.", { exact: true })).toBeVisible();
   await expect(inboxPage.locator("[data-testid^=ask-]")).toHaveCount(1);
   await expect(inboxPage.getByText("First ask", { exact: true })).toHaveCount(0);
   await inboxContext.close();
