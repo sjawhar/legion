@@ -103,6 +103,7 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   await expect(activeSessions).toContainText("e2e-session-title");
   await expect(activeSessions.getByText("e2e-session", { exact: true })).toHaveCount(0);
   await expect(activeSessions.locator("[title='e2e-session']")).toHaveCount(1);
+  await alicePage.getByRole("heading", { level: 1 }).click();
   const issueTitle = alicePage.getByLabel("Issue title");
   await issueTitle.fill("First decision revised");
   await issueTitle.press("Enter");

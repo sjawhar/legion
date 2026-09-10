@@ -116,6 +116,27 @@ test("IssuePage reads newest events when looking for active sessions", async () 
   }
 });
 
+test("a failed title save reverts the heading to the server value", async () => {
+  const restore = stubIssuePage(issue);
+  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(new Error("offline"));
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByRole("heading", { level: 1, name: issue.title });
+    fireEvent.click(screen.getByRole("heading", { level: 1, name: issue.title }));
+    const input = screen.getByLabelText("Issue title");
+    fireEvent.change(input, { target: { value: "A title that will not save" } });
+    fireEvent.blur(input);
+
+    await waitFor(() => expect(patchIssue).toHaveBeenCalled());
+    await screen.findByRole("heading", { level: 1, name: issue.title });
+  } finally {
+    view.unmount();
+    patchIssue.mockRestore();
+    restore();
+  }
+});
+
 for (const fixture of [
   {
     checkRuns: [{ conclusion: "success", status: "completed" }],
@@ -286,7 +307,7 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
 
       fireEvent.click(screen.getByRole("link", { name: "Go to CORE-2" }));
 
-      await screen.findByDisplayValue("Second issue");
+      await screen.findByRole("heading", { level: 1, name: "Second issue" });
       // The route field marks itself dirty on edit and, absent a remount,
       // skips resyncing to the newly loaded issue's own route — leaking
       // CORE-1's unsaved draft onto CORE-2's page instead of showing CORE-2's

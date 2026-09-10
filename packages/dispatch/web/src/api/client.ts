@@ -51,6 +51,27 @@ export class ApiError extends Error {
   }
 }
 
+// A 401 means "not signed in" and should never be retried or confused with a transient
+// network/5xx failure, which the caller should retry and eventually surface with a Retry
+// affordance instead of bouncing the user to the sign-in page.
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
+}
+
+// A 403 with this code means the signed-in GitHub account is not on the allowlist — a
+// distinct outcome from "not signed in" (401) or a transient failure, and one no amount
+// of retrying resolves.
+export function isForbidden(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 403 && error.code === "LOGIN_NOT_ALLOWED";
+}
+
+// The retry policy every query in the app shares: an auth outcome (401/403) is definitive
+// and retrying it changes nothing; any other failure (dropped connection, 5xx) is worth a
+// couple of automatic attempts before surfacing a Retry affordance to the user.
+export function isRetryableQueryError(error: unknown): boolean {
+  return !isUnauthorized(error) && !isForbidden(error);
+}
+
 export interface ListIssuesOptions {
   project?: string;
   status?: string;

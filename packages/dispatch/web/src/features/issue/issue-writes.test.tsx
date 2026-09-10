@@ -161,11 +161,16 @@ test("IssuePage keeps an unsaved title draft when a stale refetch arrives", asyn
   patchIssue.mockImplementationOnce(() => firstSave.promise);
 
   try {
-    const title = (await screen.findByLabelText("Issue title")) as HTMLInputElement;
+    fireEvent.click(await screen.findByRole("heading", { level: 1, name: "Review the spec" }));
+    let title = (await screen.findByLabelText("Issue title")) as HTMLInputElement;
     fireEvent.change(title, { target: { value: "A" } });
     fireEvent.blur(title);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "A" }));
 
+    // Blur exits click-to-edit mode; re-enter it to start a second, still-unsaved edit
+    // before the first save's response arrives.
+    fireEvent.click(await screen.findByRole("heading", { level: 1, name: "A" }));
+    title = (await screen.findByLabelText("Issue title")) as HTMLInputElement;
     fireEvent.change(title, { target: { value: "Edited locally" } });
     await act(async () => {
       firstSave.resolve({ ...issue, title: "A" });

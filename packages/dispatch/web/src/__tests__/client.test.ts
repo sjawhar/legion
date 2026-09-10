@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 
-import { createApiClient, type FetchImplementation } from "../api/client";
+import {
+  createApiClient,
+  type FetchImplementation,
+  isRetryableQueryError,
+  isUnauthorized,
+} from "../api/client";
 import type { Version } from "../api/types";
 
 interface RecordedRequest {
@@ -160,6 +165,40 @@ test("API client exposes response status and server error code on failure", asyn
     message: "Issue is closed",
     status: 409,
   });
+});
+
+test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async () => {
+  const unauthorized = createApiClient(stubFetch(() => new Response(null, { status: 401 })).fetch);
+  const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
+
+  const [unauthorizedError, serverErrorResult] = await Promise.all([
+    unauthorized.whoAmI().catch((error: unknown) => error),
+    serverError.whoAmI().catch((error: unknown) => error),
+  ]);
+
+  expect(isUnauthorized(unauthorizedError)).toBe(true);
+  expect(isUnauthorized(serverErrorResult)).toBe(false);
+  expect(isUnauthorized(new TypeError("network error"))).toBe(false);
+});
+
+test("isRetryableQueryError exempts auth outcomes (401, 403) but retries a transient 5xx", async () => {
+  const unauthorized = createApiClient(stubFetch(() => new Response(null, { status: 401 })).fetch);
+  const forbidden = createApiClient(
+    stubFetch(() =>
+      Response.json({ error: "login not allowed", code: "LOGIN_NOT_ALLOWED" }, { status: 403 })
+    ).fetch
+  );
+  const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
+
+  const [unauthorizedError, forbiddenError, serverErrorResult] = await Promise.all([
+    unauthorized.whoAmI().catch((error: unknown) => error),
+    forbidden.whoAmI().catch((error: unknown) => error),
+    serverError.whoAmI().catch((error: unknown) => error),
+  ]);
+
+  expect(isRetryableQueryError(unauthorizedError)).toBe(false);
+  expect(isRetryableQueryError(forbiddenError)).toBe(false);
+  expect(isRetryableQueryError(serverErrorResult)).toBe(true);
 });
 
 test("API client reaches every remaining documented endpoint", async () => {
