@@ -46,6 +46,7 @@ const validCalls = {
   dispatch_doc_read: { issue: "DSP-1" },
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
+  dispatch_search: { query: "astrolabe" },
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
@@ -85,6 +86,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_doc_read",
       "dispatch_artifact",
       "dispatch_read",
+      "dispatch_search",
     ]);
 
     for (const [name, args] of Object.entries(validCalls) as Array<
@@ -92,6 +94,26 @@ describe("dispatchToolSpecs", () => {
     >) {
       expect(schemaFor(name).safeParse(args).success, name).toBe(true);
     }
+  });
+
+  test("dispatch_search rejects a one-character query and a limit above 50", () => {
+    const schema = schemaFor("dispatch_search");
+
+    expect(schema.safeParse({ query: "a" }).success).toBe(false);
+    expect(schema.safeParse({ query: "ok", limit: 51 }).success).toBe(false);
+    expect(schema.safeParse({ query: "ok", limit: 50, project: "LEGION" }).success).toBe(true);
+  });
+
+  test("dispatch_issue preserves force", () => {
+    const result = schemaFor("dispatch_issue").safeParse({
+      project: "DSP",
+      title: "Native workspace",
+      force: true,
+    });
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toMatchObject({ force: true });
   });
 
   test("rejects an ask with more than eight options", () => {

@@ -48,13 +48,19 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     description:
-      "Create a native Dispatch issue for newly tracked work. Do not use it when an existing issue " +
-      `already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+      "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
+      `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
       title: z.string().describe("Concise issue title."),
       parent: z.string().describe("Optional parent issue.").optional(),
       external: z.string().describe("Optional external issue reference.").optional(),
+      force: z
+        .boolean()
+        .describe(
+          "Create even though POSSIBLE_DUPLICATE listed similar issues; pass it only after reading them."
+        )
+        .optional(),
       spec: z
         .string()
         .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_GUIDANCE}`)
@@ -233,6 +239,23 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       ref: z.string().describe("Optional dispatch:// issue reference.").optional(),
+    }),
+  },
+  {
+    name: "dispatch_search",
+    description:
+      "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " +
+      "Use it before creating an issue or a design document, and to find where a word was written. " +
+      'Websearch syntax: "quoted phrase", -excluded, OR.',
+    arguments: (z) => ({
+      query: z
+        .string({ min: 2 })
+        .describe("Keyword, phrase, or websearch expression; at least 2 characters."),
+      project: z.string().describe("Optional project key to search within.").optional(),
+      limit: z
+        .number({ int: true, min: 1, max: 50 })
+        .describe("Maximum results, 1-50; default 20.")
+        .optional(),
     }),
   },
 ] as const satisfies readonly DispatchToolSpec[];
