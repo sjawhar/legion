@@ -619,8 +619,8 @@ describe("daemon end-to-end", () => {
         daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), daemonOptions);
         await daemon.ready();
 
-        // `/legion/v1/spawn-token` is dead (no client calls it); `/legion/v1/escalate` is any
-        // other live architect-capability write, used purely as the auth probe this was.
+        // Any write requiring the architect capability works as the auth probe here;
+        // `/legion/v1/escalate` is used purely for that purpose, not for its own effect.
         const staleArchitect = await fetch(`${daemonUrl}/legion/v1/escalate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
