@@ -60,6 +60,19 @@ func TestExtractTrimsParenthesizedDispatchReference(t *testing.T) {
 	}
 }
 
+func TestExtractTerminatesArtifactSlugsAtMarkdownPunctuation(t *testing.T) {
+	body := "`dispatch://CORE-2/artifact/diagram-png`` See dispatch://CORE-2/artifact/design-md. " +
+		`See dispatch://CORE-2/artifact/quoted-md".`
+	want := []Ref{
+		{Kind: "artifact", IssueKey: "CORE-2", ID: "diagram-png"},
+		{Kind: "artifact", IssueKey: "CORE-2", ID: "design-md"},
+		{Kind: "artifact", IssueKey: "CORE-2", ID: "quoted-md"},
+	}
+	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v, want %#v", got, want)
+	}
+}
+
 func TestExtractParsesProjectDocumentReferences(t *testing.T) {
 	body := `dispatch://CORE/artifact/design-notes dispatch://CORE/artifact/design-notes@v2 dispatch://CORE/artifact/design-notes/ask/a1 dispatch://CORE/artifact/design-notes/comment/c1 dispatch://CORE dispatch://CORE/spec https://dispatch.example/projects/CORE/documents/design-notes?version=3 https://dispatch.example/projects/CORE/documents/design-notes?ask=a2`
 	want := []Ref{

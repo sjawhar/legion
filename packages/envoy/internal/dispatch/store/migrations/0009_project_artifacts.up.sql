@@ -1,11 +1,17 @@
 -- 0009_project_artifacts.up.sql
+-- Artifact references are derived from source text. Invalid targets are removed
+-- during migration and re-derived when their source is next written.
 do $$
-declare bad record;
+declare
+  bad record;
+  removed integer;
 begin
-  select from_kind, from_id, to_id into bad from refs
-  where to_kind = 'artifact' and to_id !~ '^[A-Z][A-Z0-9]{1,9}(-[0-9]+)?/.+$' limit 1;
-  if found then
-    raise exception 'refs row (%, %) has malformed artifact target %', bad.from_kind, bad.from_id, bad.to_id;
+  delete from refs
+  where to_kind = 'artifact'
+    and to_id !~ '^[A-Z][A-Z0-9]{1,9}(-[1-9][0-9]*)?/[a-z0-9]+(-[a-z0-9]+)*$';
+  get diagnostics removed = row_count;
+  if removed > 0 then
+    raise notice '0009_project_artifacts removed % malformed artifact reference rows', removed;
   end if;
   select a.id into bad from artifacts a left join issues i on i.key = a.issue_key where i.key is null limit 1;
   if found then

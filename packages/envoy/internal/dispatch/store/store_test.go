@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -384,41 +383,37 @@ func TestMigrate0009BackfillsProjectAndRefKeyFrom0007(t *testing.T) {
 	}
 }
 
-func TestMigrate0009FailsBootOnMalformedArtifactReference(t *testing.T) {
+func TestMigrate0009DropsMalformedArtifactReferences(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 7)
 	commentID := seedGraphAt0007(t, store)
+	const malformed = "CORE-2/diagram-png``"
 	if _, err := store.Pool.Exec(ctx, `
 		insert into refs (from_kind, from_id, to_kind, to_id)
-		values ('comment', $1, 'artifact', 'not-a-ref-key')
-	`, commentID); err != nil {
+		values ('comment', $1, 'artifact', $2)
+	`, commentID, malformed); err != nil {
 		t.Fatalf("seed malformed artifact reference: %v", err)
 	}
 
-	err := store.Migrate(ctx)
-	if err == nil {
-		t.Fatal("migration succeeded with malformed artifact reference")
-	}
-	if !strings.Contains(err.Error(), "not-a-ref-key") || !strings.Contains(err.Error(), commentID) {
-		t.Fatalf("migration error = %q, want malformed reference and source row", err)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate malformed artifact reference: %v", err)
 	}
 	var count int
+	if err := store.Pool.QueryRow(ctx, `
+		select count(*) from refs
+		where from_kind = 'comment' and from_id = $1 and to_kind = 'artifact' and to_id = $2
+	`, commentID, malformed).Scan(&count); err != nil {
+		t.Fatalf("count malformed artifact reference: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("malformed artifact reference rows = %d, want 0", count)
+	}
 	if err := store.Pool.QueryRow(ctx, `select count(*) from schema_migrations where version = 9`).Scan(&count); err != nil {
 		t.Fatalf("count 0009 migration records: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("0009 migration record count = %d, want 0", count)
-	}
-	if err := store.Pool.QueryRow(ctx, `
-		select count(*)
-		from information_schema.columns
-		where table_schema = current_schema() and table_name = 'artifacts' and column_name = 'project_key'
-	`).Scan(&count); err != nil {
-		t.Fatalf("inspect artifact project column: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("artifacts.project_key exists after failed migration")
+	if count != 1 {
+		t.Errorf("0009 migration record count = %d, want 1", count)
 	}
 }
 

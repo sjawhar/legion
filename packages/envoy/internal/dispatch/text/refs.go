@@ -10,6 +10,7 @@ import (
 var referencePattern = regexp.MustCompile(`dispatch://[^\s<>"']+|https?://[^\s<>"']+`)
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$`)
 var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
+var artifactSlugPrefixPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*`)
 
 // Ref is a parsed Dispatch target. ID is the issue key for issue references,
 // an artifact slug for artifacts, and the item identifier for asks and comments.
@@ -132,7 +133,8 @@ func parseArtifactSlug(value string) (string, bool) {
 			return "", false
 		}
 	}
-	if slug == "" || strings.ContainsAny(slug, "/@") {
+	slug = artifactSlugPrefixPattern.FindString(slug)
+	if slug == "" {
 		return "", false
 	}
 	return slug, true
