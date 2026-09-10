@@ -1547,6 +1547,38 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("delivers a Slack mention once the controller claims the role, when no controller held it at publish time", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const controllerRole = controllerToken(state.project);
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        if (!state.roles[controllerRole]) throw { status: 404 };
+        published.push({ topic, payloadJson });
+      })
+    );
+    const payloadJson = JSON.stringify({ text: "@legion please investigate" });
+
+    nats.emit(
+      "notifications.slack.workspace.channel.mention",
+      envelope({ text: "@legion please investigate" }, "mention-1")
+    );
+    await flush();
+
+    // Never delivered, and never dropped either: recorded durably instead.
+    expect(published).toEqual([]);
+    expect(state.controllerPendingNotices).toEqual([{ payloadJson, eventId: "mention-1" }]);
+
+    // The controller claims the role (what a real `/controller/ready` does before draining).
+    state.roles[controllerRole] = { role: "controller", sessionId: "ses-controller" };
+    await pump.drainControllerNotices();
+
+    expect(published).toEqual([{ topic: roleTopic(controllerRole), payloadJson }]);
+    expect(state.controllerPendingNotices).toEqual([]);
+    pump.stop();
+  });
+
   it("does not ack when a GitHub mention's publish rejects", async () => {
     const { state } = stateForIssue();
     const nats = new FakeNats();

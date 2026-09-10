@@ -460,9 +460,14 @@ async function startDaemonLocked(
     envoyPublish: deps.envoyPublish,
     onTreeReady: emitOverseerCatchup,
     // The controller is a role holder like any other: its catch-up on ready is the same
-    // resync triage re-emission for unadmitted tracked roots that already runs periodically —
-    // there is no held-event queue to replay.
-    onControllerReady: emitResync,
+    // resync triage re-emission for unadmitted tracked roots that already runs periodically.
+    // First delivers any Slack mention (or other irreplaceable payload) that arrived while no
+    // controller held the role — the one narrow exception to "no held-event queue to replay"
+    // (see `ControllerPendingNotice`'s doc comment) — then runs the fresh resync.
+    onControllerReady: async () => {
+      await eventPump.drainControllerNotices();
+      await emitResync();
+    },
     onControllerEvent: (payload) =>
       eventPump.publishControllerEvent(payload, {
         event_id: `api-controller:${randomUUID()}`,

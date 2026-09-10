@@ -116,8 +116,20 @@ export interface SpawnCapability {
   role: string;
 }
 
+/** A controller-bound event with no other source of truth to recover it from once the
+ * controller becomes reachable again -- unlike the deleted general held-event queue (every
+ * other durable effect is derivable from state and recovers via its own catch-up: a worker's
+ * `workerCatchup`, the controller's own resync re-emission on `/controller/ready`), a Slack
+ * mention's specific text has no state to re-derive it from. Recorded only by
+ * `publishControllerDirect`'s 404-no-holder path and drained once, in order, by
+ * `/controller/ready` (see `handleControllerReady` and `EventPump.drainControllerNotices`). */
+export interface ControllerPendingNotice {
+  payloadJson: string;
+  eventId: string;
+}
+
 export interface LegionState {
-  version: 17;
+  version: 18;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -140,6 +152,7 @@ export interface LegionState {
     { phase: string; sessionId: string; completed?: { summary: string; at: string } } | undefined
   >;
   controllerCapabilityHash?: string;
+  controllerPendingNotices: ControllerPendingNotice[];
 }
 
 export interface LegionStateInit {
@@ -279,9 +292,15 @@ const PhaseSchema = z
     completed: z.object({ summary: z.string(), at: z.string() }).strict().optional(),
   })
   .strict();
+const ControllerPendingNoticeSchema = z
+  .object({
+    payloadJson: z.string(),
+    eventId: z.string(),
+  })
+  .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(17),
+    version: z.literal(18),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -318,6 +337,7 @@ const LegionStateSchema = z
       .string()
       .regex(/^[a-f0-9]{64}$/)
       .optional(),
+    controllerPendingNotices: z.array(ControllerPendingNoticeSchema).default([]),
   })
   .strict();
 
@@ -329,7 +349,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 17,
+    version: 18,
     project,
     issues: {},
     trees: {},
@@ -341,6 +361,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     admission: { cap, active: [], queue: [] },
     workerAdmission: { queue: [] },
     phases: {},
+    controllerPendingNotices: [],
   };
 }
 
@@ -608,6 +629,13 @@ function migrateV16State(state: unknown): unknown {
     : trees;
   return { ...rest, version: 17, trees: migratedTrees };
 }
+
+/** v17 -> v18: adds `controllerPendingNotices` (see its own doc comment) -- an empty array for
+ * every existing state, since nothing before this version ever recorded one. */
+function migrateV17State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 17) return state;
+  return { ...state, version: 18, controllerPendingNotices: [] };
+}
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -621,11 +649,13 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV16State(
-    migrateV15State(
-      migrateV14State(
-        migrateV13State(
-          migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
+  const state = migrateV17State(
+    migrateV16State(
+      migrateV15State(
+        migrateV14State(
+          migrateV13State(
+            migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
+          )
         )
       )
     )
@@ -634,7 +664,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 17) {
+  if (version !== 18) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

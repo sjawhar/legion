@@ -326,6 +326,15 @@ export interface EventPump {
    */
   runExclusive<T>(fn: () => Promise<T>): Promise<T>;
   publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void>;
+  /**
+   * Delivers every `controllerPendingNotices` entry, in order, to the controller's role topic —
+   * called once the controller has just claimed its role (`/controller/ready`), so the publish
+   * should now succeed. Removes each notice only after Envoy acks its publication (at-most-once,
+   * same discipline the deleted held-event queue once used for its own redelivery). Stops at the
+   * first failure, leaving the remainder queued for the next `/controller/ready` rather than
+   * skipping ahead or dropping any of them.
+   */
+  drainControllerNotices(): Promise<void>;
   stop(): void;
   drain(): Promise<void>;
 }
@@ -452,8 +461,16 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   };
 
   /** Publishes directly to the controller role outside any effect dispatch (a Slack mention, or
-   * `publishControllerEvent`'s resync/API-triggered controller wake): the same no-holder
-   * handling as `publisher`, since the controller is a role holder like any other. */
+   * `publishControllerEvent`'s resync/API-triggered controller wake). Unlike `publisher`'s own
+   * no-holder handling — every one of *its* effects is reducer-derived and fully recoverable
+   * from current state, so nothing needs to survive the 404 itself — a Slack mention's specific
+   * text has no other source of truth (see `ControllerPendingNotice`'s doc comment): it is
+   * recorded into durable state and saved BEFORE `ensureController` even runs, so a crash
+   * between this 404 and the controller's own claim can never lose it. (The resync/API caller's
+   * own payload is redundant with the fresh resync `onControllerReady` already re-emits on
+   * ready, so recording it too is a harmless no-op, not a behavior change worth special-casing
+   * away.) Drained, in order, exactly once each, by `drainControllerNotices` on
+   * `/controller/ready`. */
   const publishControllerDirect = async (
     payloadJson: string,
     envelope: EnvelopeJson
@@ -463,6 +480,11 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       await deps.envoyPublish(roleTopic(role), payloadJson);
     } catch (error) {
       if (isNoHolderError(error)) {
+        deps.state.controllerPendingNotices.push({
+          payloadJson,
+          eventId: envelope.event_id,
+        });
+        await deps.saveState();
         await notifyUndeliverable(
           role,
           envelope.event_id,
@@ -812,6 +834,24 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     runExclusive,
     async publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void> {
       await publishControllerDirect(JSON.stringify(payload), envelope);
+    },
+    async drainControllerNotices(): Promise<void> {
+      const role = controllerToken(deps.state.project);
+      while (deps.state.controllerPendingNotices.length > 0) {
+        const notice = deps.state.controllerPendingNotices[0];
+        if (!notice) break;
+        try {
+          await deps.envoyPublish(roleTopic(role), notice.payloadJson);
+        } catch (error) {
+          console.error(
+            `[legion] failed to deliver pending controller notice ${notice.eventId}, leaving it queued for the next /controller/ready:`,
+            error
+          );
+          return;
+        }
+        deps.state.controllerPendingNotices.shift();
+        await deps.saveState();
+      }
     },
     async drain(): Promise<void> {
       while (pending.size > 0) await Promise.allSettled([...pending]);

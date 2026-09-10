@@ -100,9 +100,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v17 state with a valid project and admission capacity", () => {
+  it("initializes empty v18 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 17,
+      version: 18,
       project: "omp",
       issues: {},
       trees: {},
@@ -114,6 +114,7 @@ describe("legion state", () => {
       admission: { cap: 4, active: [], queue: [] },
       workerAdmission: { queue: [] },
       phases: {},
+      controllerPendingNotices: [],
     });
   });
 
@@ -541,6 +542,20 @@ describe("legion state", () => {
       sessionId: "ses_123",
       completed: { summary: "implemented the thing", at: "2026-09-01T00:00:00.000Z" },
     });
+  });
+
+  it("migrates v17 state to v18 by adding an empty controllerPendingNotices array", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const { controllerPendingNotices: _omit, ...currentWithoutNotices } = current;
+    const v17Input = { ...currentWithoutNotices, version: 17 };
+    await writeFile(file, JSON.stringify(v17Input), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
+    expect(loaded).toEqual(current);
+    expect(loaded.controllerPendingNotices).toEqual([]);
   });
 
   it("rejects removed v6 fields on current-version state", async () => {
