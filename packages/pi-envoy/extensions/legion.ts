@@ -49,8 +49,7 @@ function isNetworkOrTimeoutError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error.name === "NetworkError" || error.name === "TimeoutError") return true;
 
-  const code =
-    "code" in error && typeof error.code === "string" ? error.code : undefined;
+  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
   return (
     code === "ConnectionRefused" ||
     code === "ConnectionTimeout" ||
@@ -69,10 +68,10 @@ function isNetworkOrTimeoutError(error: unknown): boolean {
 /**
  * Calls a role's `/process/ready` or `/worker/ready` daemon request. The daemon acknowledges
  * this request before dialing back into this process's shim socket, so retry only errors that can
- * resolve on their own: daemon 5xx responses and network or timeout failures. A 401/403 or any
- * other 4xx is definitive and propagates immediately. Once a retryable failure exhausts its
- * bounded attempts, it also propagates for the bootstrap flow to finish naturally rather than
- * explicitly terminating its own live process.
+ * resolve on their own: daemon 5xx responses and network or timeout failures, up to a bounded
+ * number of attempts. A definitive 4xx (401/403 or any other) propagates immediately, and an
+ * exhausted retry budget propagates too -- both reach the enclosing bootstrap catch, which exits
+ * the process so the daemon respawns a fresh attempt.
  */
 const callReadyWithRetry = async (label: string, call: () => Promise<void>): Promise<void> => {
   for (let attempt = 1; attempt <= READY_RETRY_ATTEMPTS; attempt++) {
@@ -86,9 +85,7 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
           : isNetworkOrTimeoutError(error);
       if (!retryable) throw error;
       if (attempt === READY_RETRY_ATTEMPTS) {
-        console.error(
-          `[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`
-        );
+        console.error(`[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`);
         throw error;
       }
       console.error(
@@ -341,9 +338,12 @@ export default function legionExtension(pi: PiApi): void {
           console.error(
             `[legion] root bootstrap authorization failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
           );
-          exitProcess(1);
+        } else {
+          console.error(
+            `[legion] root bootstrap failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+          );
         }
-        throw error;
+        exitProcess(1);
       }
     })();
     try {
@@ -432,9 +432,12 @@ export default function legionExtension(pi: PiApi): void {
           console.error(
             `[legion] worker bootstrap authorization failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
           );
-          exitProcess(1);
+        } else {
+          console.error(
+            `[legion] worker bootstrap failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
+          );
         }
-        throw error;
+        exitProcess(1);
       }
     })();
     try {

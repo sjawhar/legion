@@ -1329,7 +1329,7 @@ describe("Legion OMP extension", () => {
     );
     expect(exits).toEqual([1]);
   });
-  test("retries worker/ready three times on a 503 then propagates without exiting", async () => {
+  test("retries worker/ready three times on a 503 then exits once", async () => {
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
       exits.push(code);
@@ -1376,14 +1376,12 @@ describe("Legion OMP extension", () => {
     if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
 
     const context = { ...sessionContext("ses_retries_after_started"), cwd: workspace };
-    await expect(sessionStart({}, context)).rejects.toThrow(
-      "POST /legion/v1/worker/ready failed with 503"
-    );
+    await expect(sessionStart({}, context)).rejects.toThrow("process would exit");
 
     expect(readyAttempts).toBe(3);
-    expect(exits).toEqual([]);
+    expect(exits).toEqual([1]);
   });
-  test("does not retry a worker/ready 404 and propagates without explicitly exiting", async () => {
+  test("does not retry a worker/ready 404 and exits once after propagating", async () => {
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
       exits.push(code);
@@ -1430,12 +1428,10 @@ describe("Legion OMP extension", () => {
     if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
 
     const context = { ...sessionContext("ses_ready_not_found"), cwd: workspace };
-    await expect(sessionStart({}, context)).rejects.toThrow(
-      "POST /legion/v1/worker/ready failed with 404"
-    );
+    await expect(sessionStart({}, context)).rejects.toThrow("process would exit");
 
     expect(readyAttempts).toBe(1);
-    expect(exits).toEqual([]);
+    expect(exits).toEqual([1]);
   });
   test("exits the process when worker/ready is rejected with 403 (auth)", async () => {
     const exits: number[] = [];
