@@ -70,7 +70,8 @@ export interface WorkerAdmissionDeps {
     issue: IssueKey,
     role: LegionRole,
     sessionId: string,
-    task: string
+    task: string,
+    afterPrompt?: () => void
   ): Promise<void>;
   /** Retires a persistently-broken worker's pane and clears its locator — assumes the caller
    * already holds this token's `roleLaunchQueue` critical section (see

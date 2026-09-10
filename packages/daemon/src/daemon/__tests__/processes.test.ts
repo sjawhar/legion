@@ -2863,6 +2863,92 @@ describe("ProcessManager", () => {
     const finalClaim = managedState.roles[token];
     expect(finalClaim && "issue" in finalClaim ? finalClaim.launchFailures : undefined).toBe(0);
   });
+  it("retires a started worker whose ready delivery cannot connect, then delivers its original assignment after the resumed retry confirms ready", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    const stateDir = await temporaryDir();
+    const priorSession = path.join(stateDir, "prior-implementer-session.json");
+    await writeFile(priorSession, "{}", "utf8");
+    let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
+    const readyClient = fakeWorkerRpcClient();
+    const {
+      manager: processes,
+      commands,
+      state: managedState,
+    } = manager(state, {
+      config: config(stateDir, {
+        workerBootTimeoutSeconds: 1,
+        // The first generation is dead, so it retires on its first deadline. The retry's socket
+        // accepts connections while its /worker/started -> /worker/ready handshake runs, so it
+        // must not be treated as a perpetually unregistered boot during this test.
+        workerBootRegistrationDeadlineIntervals: 1_000,
+      }),
+      now: () => currentTime,
+      sleep: async (ms) => {
+        currentTime += ms;
+        await onceEventLoop();
+      },
+      connectWorkerRpc: async () => {
+        const claim = managedState.roles[token];
+        if (!claim || !("issue" in claim) || claim.generation === 1) {
+          throw new Error("first-generation shim cannot connect");
+        }
+        return readyClient;
+      },
+      readProcessCmdline: async () => "bash\0",
+    });
+
+    await processes.spawnWorker(root, child, role, "implement #43");
+    const started = managedState.roles[token];
+    if (!started || !("issue" in started) || !started.locator) {
+      throw new Error("first-generation claim missing");
+    }
+    // Models /worker/started: the session capability must exist before /worker/ready can be
+    // attempted, but this deliberately does not mark the ready delivery as confirmed.
+    started.sessionId = "ses_implementer";
+    started.locator.ompSessionFile = priorSession;
+
+    await expect(processes.workerReady(child, role, "ses_implementer", 1)).rejects.toThrow(
+      "first-generation shim cannot connect"
+    );
+
+    await flushEventLoopUntil(() => {
+      const claim = managedState.roles[token];
+      return (
+        claim !== undefined &&
+        "issue" in claim &&
+        claim.generation === 2 &&
+        claim.launchFailures === 1 &&
+        claim.locator !== undefined
+      );
+    }, 50_000);
+
+    const relaunched = managedState.roles[token];
+    if (!relaunched || !("issue" in relaunched) || !relaunched.locator) {
+      throw new Error("relaunched claim missing");
+    }
+    expect(relaunched.pendingAssignment).toBe("implement #43");
+    expect(relaunched.launchFailures).toBe(1);
+    expect(commands.some((command) => command.join(" ").includes("--resume"))).toBeTrue();
+
+    // Models the relaunched worker's /worker/started transition. It resets launch-failure
+    // accounting but does not complete ready confirmation; the following workerReady call does.
+    relaunched.sessionId = "ses_implementer";
+    delete relaunched.launchFailures;
+    await processes.workerReady(child, role, "ses_implementer", relaunched.generation ?? 0);
+
+    expect(readyClient.prompts).toEqual(["implement #43"]);
+    expect(relaunched.pendingAssignment).toBeUndefined();
+  });
 
   it("retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm, escalating to worker-died at the launch-failure threshold", async () => {
     const state = newLegionState("omp", 1);
@@ -2989,9 +3075,9 @@ describe("ProcessManager", () => {
     expect(stillBooting.launchFailures).toBe(0);
     expect(currentTime - startTime).toBeGreaterThanOrEqual(3_000);
 
-    // /worker/started confirms the boot: cancels the watch outright rather than waiting for it
-    // to notice on its own next wake.
+    // Ready confirmation cancels the watch outright rather than waiting for its next wake.
     stillBooting.sessionId = "ses_implementer";
+    stillBooting.readyConfirmedAt = currentTime;
     processes.cancelBootWatchdog(token, stillBooting.generation);
     const attemptsAtConfirmation = connectAttempts;
     await flushEventLoop(400);
@@ -4815,6 +4901,7 @@ describe("ProcessManager", () => {
       role: "planner",
       generation: 1,
       sessionId: "ses_planner",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -4827,6 +4914,7 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       agentId: "agt_tester",
       locator: {
         tmuxSession: "legion-omp",
@@ -6663,6 +6751,47 @@ describe("ProcessManager", () => {
     // 409s against a phase this delivery path never restored.
     expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
   });
+  it("serializes concurrent worker/ready calls so the pending assignment prompts once", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    const originalPrompt = client.prompt;
+    const promptStarted = Promise.withResolvers<void>();
+    const releasePrompt = Promise.withResolvers<void>();
+    client.prompt = async (task) => {
+      promptStarted.resolve();
+      await releasePrompt.promise;
+      await originalPrompt(task);
+    };
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => client,
+    });
+
+    const first = processes.workerReady(root, "tester", "ses_tester", 1);
+    await promptStarted.promise;
+    const second = processes.workerReady(root, "tester", "ses_tester", 1);
+    releasePrompt.resolve();
+    await Promise.all([first, second]);
+
+    expect(client.prompts).toEqual(["verify #41"]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.readyConfirmedAt).toBeNumber();
+  });
 
   it("ignores worker/ready from a stale generation even when the session id matches, leaving pendingAssignment intact", async () => {
     const state = newLegionState("omp", 1);
@@ -7238,14 +7367,21 @@ describe("ProcessManager", () => {
       },
     };
     const commands: string[][] = [];
-    const {
-      manager: processes,
-      state: managedState,
-      publications,
-    } = manager(state, {
+    const publications: Array<{ subject: string; json: string }> = [];
+    const relaunched = Promise.withResolvers<void>();
+    const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir, { workerCap: 1 }),
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
+      },
+      natsPublish: (subject, json) => {
+        publications.push({ subject, json });
+        if (
+          subject === roleTopic(roleToken("omp", root, "architect")) &&
+          json === JSON.stringify({ type: "worker-started", issue: root, role: "implementer" })
+        ) {
+          relaunched.resolve();
+        }
       },
       run: async (command) => {
         commands.push(command);
@@ -7277,9 +7413,7 @@ describe("ProcessManager", () => {
       processes.reconnectWorkers(),
       processes.spawnWorker(root, root, "implementer", "task2"),
     ]);
-    await flushEventLoopUntil(() =>
-      commands.some((command) => command[1] === "new-window" || command[1] === "split-window")
-    );
+    await relaunched.promise;
 
     const paneOpens = commands.filter(
       (command) => command[1] === "new-window" || command[1] === "split-window"
@@ -7297,7 +7431,7 @@ describe("ProcessManager", () => {
     expect(claim.resumeSessionFile ?? claim.locator?.ompSessionFile).toBe(resumeFile);
   });
 
-  it("a worker/started-style confirmation whose lock acquisition wins a race against a runtime retirement decision keeps the claim confirmed, making the retirement a no-op", async () => {
+  it("a worker-ready confirmation whose lock acquisition wins a race against a runtime retirement decision keeps the claim confirmed, making the retirement a no-op", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
@@ -7333,12 +7467,11 @@ describe("ProcessManager", () => {
     });
     processes.enableWorkerPromotion();
 
-    // Mirrors `handleWorkerStarted`'s exact commit shape: captures generation/pane id before
-    // any lock, then re-validates them inside `mutateLiveRoleClaim` before committing. Called
-    // with no preceding await, its `mutateClaim` registration lands on the per-token queue
-    // essentially immediately — ahead of `reconnectWorkers`' own retirement decision, which
-    // only reaches its `mutateClaim` call after its `workerClient` connect attempt rejects
-    // (several microtask ticks later) — so this wins the race to run first.
+    // Models `workerReady`'s atomic confirmation state change. Called with no preceding await,
+    // its `mutateClaim` registration lands on the per-token queue essentially immediately —
+    // ahead of `reconnectWorkers`' own retirement decision, which only reaches its `mutateClaim`
+    // call after its `workerClient` connect attempt rejects (several microtask ticks later) —
+    // so this wins the race to run first.
     const confirm = () =>
       processes.mutateLiveRoleClaim(root, root, token, async () => {
         const current = managedState.roles[token];
@@ -7351,12 +7484,14 @@ describe("ProcessManager", () => {
         ) {
           throw new Error("Stale worker generation");
         }
-        // Replaces the object (never mutates it in place), exactly like the real
-        // `handleWorkerStarted` does — so `reconnectWorkers`' own claim reference, captured by
-        // value before this confirmation ran, stays stale and this test genuinely exercises
-        // `retireUnconfirmedBoot`'s own fresh re-read rather than `reconnectWorkers`' outer
-        // sessionId check.
-        managedState.roles[token] = { ...current, sessionId: "ses_confirmed" };
+        // Replaces the object (never mutates it in place), exactly like the real ready path
+        // does — so `reconnectWorkers`' claim reference, captured by value before confirmation,
+        // stays stale and this test genuinely exercises `retireUnconfirmedBoot`'s fresh re-read.
+        managedState.roles[token] = {
+          ...current,
+          sessionId: "ses_confirmed",
+          readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+        };
         return "confirmed";
       });
 
@@ -7378,7 +7513,7 @@ describe("ProcessManager", () => {
     expect(commands.some((command) => command[1] === "kill-pane")).toBeFalse();
   });
 
-  it("a runtime retirement decision that wins its lock acquisition before a racing worker/started confirmation's slow GitHub-lease fetch resolves rejects the stale confirmation and leaves the claim retired for retry", async () => {
+  it("a runtime retirement decision that wins its lock acquisition before a racing worker registration's slow GitHub-lease fetch resolves rejects the stale registration and leaves the claim retired for retry", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);

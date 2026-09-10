@@ -112,6 +112,9 @@ export interface WorkerRoleClaim {
   issue: IssueKey;
   role: string;
   sessionId?: string;
+  /** Set only after `/worker/ready` has connected its shim and delivered any pending assignment;
+   * `sessionId` is intentionally established earlier by `/worker/started` for capability auth. */
+  readyConfirmedAt?: number;
   agentId?: string;
   locator?: WorkerLocator;
   generation?: number;
@@ -285,6 +288,7 @@ const WorkerRoleClaimSchema = z
     issue: IssueKeySchema,
     role: z.string(),
     sessionId: z.string().optional(),
+    readyConfirmedAt: z.number().int().nonnegative().optional(),
     agentId: z.string().optional(),
     locator: WorkerLocatorSchema.optional(),
     generation: z.number().int().nonnegative().optional(),

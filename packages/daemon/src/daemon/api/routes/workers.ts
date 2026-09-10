@@ -190,10 +190,10 @@ export async function handleWorkerStarted(
       bootTokenHash: secretHash(bootToken).toString("hex"),
       locator: { ...current.locator, ompSessionFile },
     };
-    // A confirmed boot is the actual recovery signal — never a mere relaunch, which the boot
-    // watchdog's own accounting (`processes.ts`'s `launchWorker`) deliberately carries forward
-    // so a worker that keeps opening a pane but never gets this far still escalates to
-    // worker-died.
+    // A worker registration resets launch-failure accounting — never a mere relaunch, which the
+    // boot watchdog's own accounting (`processes.ts`'s `launchWorker`) deliberately carries
+    // forward so a worker that keeps opening a pane but never reaches this point still escalates
+    // to worker-died.
     delete nextClaim.launchFailures;
     ctx.deps.state.roles[token] = nextClaim;
     ctx.deps.state.phases[issue] = { phase: role, sessionId };
@@ -212,11 +212,6 @@ export async function handleWorkerStarted(
     // that case. `boot` is absent on the persisted-hash fallback path (the in-memory map never
     // had this token to begin with after a restart), so there is nothing to consume there.
     if (boot) boot.sessionId = sessionId;
-    // The boot is confirmed: cancel this generation's armed boot watchdog inside this same
-    // locked transition, not after it settles — a retirement decision queued behind this lock
-    // must see the watch already gone the moment its own turn comes, never a window where the
-    // save landed but the watch could still fire concurrently.
-    ctx.deps.processManager.cancelBootWatchdog(token, capturedGeneration);
     ctx.auth.setCapability(sessionId, { tree, issue, role, secretHash: secretHash(secret) });
     return Response.json(
       validateContractResponse(LegionDaemonApi.WorkerStarted.response, {

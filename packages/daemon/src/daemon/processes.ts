@@ -281,7 +281,7 @@ export class ProcessManager {
       getClaim: (token) => {
         const claim = this.deps.state.roles[token];
         return claim && "issue" in claim
-          ? { generation: claim.generation, sessionId: claim.sessionId }
+          ? { generation: claim.generation, readyConfirmedAt: claim.readyConfirmedAt }
           : undefined;
       },
       retireUnconfirmedBoot: (token, locator, generation, retry) =>
@@ -567,7 +567,8 @@ export class ProcessManager {
     issue: IssueKey,
     role: LegionRole,
     sessionId: string,
-    task: string
+    task: string,
+    afterPrompt?: () => void
   ): Promise<void> {
     await client.prompt(task);
     this.deps.state.phases[issue] = { phase: role, sessionId };
@@ -578,6 +579,7 @@ export class ProcessManager {
       // rejection count from a prior transient failure must never carry into a future one.
       claim.promptFailures = 0;
     }
+    afterPrompt?.();
     try {
       await this.persist();
     } catch (persistError) {
@@ -645,10 +647,22 @@ export class ProcessManager {
       ) {
         return;
       }
+      if (!claim.locator) return;
+      if (claim.readyConfirmedAt !== undefined) {
+        this.cancelBootWatchdog(token, generation);
+        return;
+      }
       const task = claim.pendingAssignment;
-      if (!task || !claim.locator) return;
       const client = await this.workerClient(token, claim.locator.socketPath);
-      await this.promptExistingWorker(client, token, issue, role, sessionId, task);
+      if (task) {
+        await this.promptExistingWorker(client, token, issue, role, sessionId, task, () => {
+          claim.readyConfirmedAt = this.deps.now();
+        });
+      } else {
+        claim.readyConfirmedAt = this.deps.now();
+        await this.persist();
+      }
+      this.cancelBootWatchdog(token, generation);
     });
   }
 
@@ -686,17 +700,16 @@ export class ProcessManager {
   }
 
   /** Reconnects to every live worker's shim socket after a daemon restart, probing liveness. A
-   * connect failure against an already-confirmed claim means the worker is confirmed dead; the
-   * same failure against an unconfirmed boot (never reached `/worker/started`) is routed through
+   * connect failure against a ready-confirmed claim means the worker is confirmed dead; the same
+   * failure against a boot whose ready path is still incomplete is routed through
    * `retireUnconfirmedBoot` instead, so it retries or gives up exactly like the boot watchdog
    * would rather than merely clearing the locator and stranding the claim with nothing left to
    * ever retry it. A connect that succeeds but whose follow-up `get_state` fails (times out,
    * say) means only that the shim is busy answering this one request in time — never a reason
    * to kill a live worker — so the claim is left exactly as is, with its conservative
-   * "unknown"-counts-as-running `runState`. An unconfirmed boot that survives this reconnect
-   * gets its watchdog re-armed: the in-memory `WorkerBootWatchdog` registry does not survive a
-   * restart, so without this a boot still awaiting `/worker/started` would never be probed
-   * again. */
+   * "unknown"-counts-as-running `runState`. A boot that survives this reconnect without its
+   * ready path confirmed gets its watchdog re-armed: the in-memory `WorkerBootWatchdog` registry
+   * does not survive a restart, so without this it would never be probed again. */
   async reconnectWorkers(): Promise<void> {
     const claims = Object.entries(this.deps.state.roles).filter(
       (entry): entry is [string, WorkerRoleClaim & { locator: WorkerLocator }] =>
@@ -725,7 +738,7 @@ export class ProcessManager {
         );
         if (!probe.client) {
           console.error(`[legion] failed to reconnect worker ${token}:`, probe.connectError);
-          if (claim.sessionId) {
+          if (claim.readyConfirmedAt !== undefined) {
             await this.markWorkerDead(token, probedLocator);
           } else {
             await this.retireUnconfirmedBoot(
@@ -750,7 +763,7 @@ export class ProcessManager {
             probe.stateError
           );
         }
-        if (!claim.sessionId && treeKey && role) {
+        if (claim.readyConfirmedAt === undefined && treeKey && role) {
           this.bootWatchdog.arm(
             treeKey,
             claim.issue,
@@ -789,8 +802,8 @@ export class ProcessManager {
   }
 
   /**
-   * Handles a boot confirmed dead — never reached `/worker/started`, and its pane/socket are
-   * both gone: retires whatever is left of the pane, clears the locator (stashing its
+   * Handles a boot confirmed dead before its ready path completed, with its pane/socket both
+   * gone: retires whatever is left of the pane, clears the locator (stashing its
    * `ompSessionFile` into `resumeSessionFile`, mirroring `markWorkerDeadLocked`, so a later
    * `spawnWorker` call — or the retry below — resumes the same agent instead of finding a stale
    * locator and concluding a boot is still in flight forever). The clear always happens, even
@@ -809,14 +822,14 @@ export class ProcessManager {
    * `handleWorkerStarted` via `mutateLiveRoleClaim`) — and re-validates the claim it was handed
    * against the current one before touching anything, since the caller may have captured it,
    * or decided this boot was dead, some time before this actually runs: a claim that has since
-   * been confirmed (`sessionId` now set), superseded by a newer launch (a different generation
-   * or pane), or deleted entirely (`closeTree`) means this retirement is stale and must never
-   * touch what replaced it. Also never fights a `closeTree` already tearing this claim's tree
-   * down: `closeTreeLocked`'s own fixed-point loop already owns stopping (and deleting) every
-   * worker under a closing/closed tree through its own `stopProcessSerialized` call — retiring
-   * this same token again here would either find nothing left to stop or, worse, stop a
-   * respawned generation `closeTree` never asked for, so a tree that `isTreeGone` reports gone
-   * makes this a no-op instead. Shared by the boot watchdog's own dead verdict,
+   * completed its ready path (`readyConfirmedAt` now set), superseded by a newer launch (a
+   * different generation or pane), or deleted entirely (`closeTree`) means this retirement is
+   * stale and must never touch what replaced it. Also never fights a `closeTree` already tearing
+   * this claim's tree down: `closeTreeLocked`'s own fixed-point loop already owns stopping (and
+   * deleting) every worker under a closing/closed tree through its own `stopProcessSerialized`
+   * call — retiring this same token again here would either find nothing left to stop or, worse,
+   * stop a respawned generation `closeTree` never asked for, so a tree that `isTreeGone` reports
+   * gone makes this a no-op instead. Shared by the boot watchdog's own dead verdict,
    * `reconnectWorkers`' restart-time probe, and a pre-confirmation socket close
    * (`onWorkerClientClosed`).
    */
@@ -831,7 +844,7 @@ export class ProcessManager {
       if (
         !claim ||
         !("issue" in claim) ||
-        claim.sessionId !== undefined ||
+        claim.readyConfirmedAt !== undefined ||
         claim.generation !== generation ||
         claim.locator?.tmuxPaneId !== locator.tmuxPaneId
       ) {
@@ -1946,15 +1959,14 @@ export class ProcessManager {
    * instead of chaining into another reconnect attempt, so a flapping socket can never loop
    * forever. A reconnect that *fails to connect* means the worker is confirmed dead; one that
    * connects but whose follow-up `get_state` fails only means the shim is busy — never a reason
-   * to kill a live worker, so the claim is left as is. An unconfirmed claim (never reached
-   * `/worker/started`, `sessionId` still unset) routes its dead verdict through
-   * `retireUnconfirmedBoot` — the same retire/count/enqueue-or-give-up accounting the boot
-   * watchdog and `reconnectWorkers` use — rather than `markWorkerDead`'s confirmed-worker path,
-   * which only clears the locator with no accounting or requeue: without this branch, a socket
-   * that dies before confirmation left its claim locator-less and unqueued, with nothing left
-   * to ever revisit it. A root architect or controller connection has no matching
-   * `WorkerRoleClaim` (they are tracked via `state.trees`/`state.controllerLocator`), so this is
-   * a no-op for them past the cache eviction.
+   * to kill a live worker, so the claim is left as is. A claim whose ready path never completed
+   * (`readyConfirmedAt` still unset) routes its dead verdict through `retireUnconfirmedBoot` —
+   * the same retire/count/enqueue-or-give-up accounting the boot watchdog and `reconnectWorkers`
+   * use — rather than `markWorkerDead`'s confirmed-worker path, which only clears the locator
+   * with no accounting or requeue: without this branch, a socket that dies before ready
+   * confirmation left its claim locator-less and unqueued, with nothing left to ever revisit it.
+   * A root architect or controller connection has no matching `WorkerRoleClaim` (they are tracked
+   * via `state.trees`/`state.controllerLocator`), so this is a no-op for them past cache eviction.
    */
   private async onWorkerClientClosed(token: string, client: WorkerRpcClient): Promise<void> {
     if (this.workerClients.get(token) !== client) return;
@@ -1963,7 +1975,7 @@ export class ProcessManager {
     if (!claim || !("issue" in claim) || claim.locator === undefined) return;
     const locator = claim.locator;
     const generation = claim.generation;
-    const confirmed = claim.sessionId !== undefined;
+    const confirmed = claim.readyConfirmedAt !== undefined;
     const retireDead = async (): Promise<void> => {
       if (confirmed) {
         await this.markWorkerDead(token, locator);
@@ -2146,15 +2158,15 @@ export class ProcessManager {
         issue,
         role,
         // sessionId deliberately not carried over: it stays unset until /worker/started
-        // confirms this generation's boot, so a concurrent spawnWorker call during the boot
-        // window sees an unconfirmed claim rather than racing a stale one (both for a fresh
+        // registers this generation's session, so a concurrent spawnWorker call during the boot
+        // window sees an unregistered claim rather than racing a stale one (both for a fresh
         // spawn and a resume, where OMP reports the same session id it had before).
         ...(claim?.agentId ? { agentId: claim.agentId } : {}),
-        // Carried over, never reset by a mere relaunch: a boot the watchdog never confirms
-        // must accumulate across repeated retries so the threshold below is ever reachable,
-        // even when every retry successfully opens a pane but none ever completes
-        // `/worker/started`. `/worker/started`'s own success path clears it — that is the
-        // actual recovery signal, not merely reopening a pane.
+        // Carried over, never reset by a mere relaunch: a boot the watchdog never sees complete
+        // its ready path must accumulate across repeated retries so the threshold below is ever
+        // reachable, even when every retry successfully opens a pane but none ever completes
+        // `/worker/ready`. `/worker/started`'s own registration success clears it — that is the
+        // recovery signal for launch accounting, not merely reopening a pane.
         launchFailures: claim?.launchFailures ?? 0,
         generation,
         pendingAssignment: task,
