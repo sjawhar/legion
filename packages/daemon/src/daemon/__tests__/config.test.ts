@@ -6,6 +6,7 @@ const requiredEnv = {
   LEGION_ID: "Acme/42",
   ENVOY_NATS_URL: "nats://one:4222, nats://two:4222",
   LEGION_REPOS: "acme/widgets",
+  DISPATCH_PROJECT: "ACME",
 };
 
 describe("daemon config", () => {
@@ -36,6 +37,7 @@ describe("daemon config", () => {
       port: 14000,
       envoyUrl: "http://127.0.0.1:9020",
       natsUrls: ["nats://one:4222", "nats://two:4222"],
+      dispatchProject: "ACME",
       boardProjectIds: ["PVT_alpha", "PVT_beta"],
       repos: ["acme/widgets"],
       appLogins: ["legion-implement[bot]", "legion-review[bot]"],
@@ -227,6 +229,37 @@ describe("daemon config", () => {
     ).toThrow(/DISPATCH_URL must be the dispatch service base URL, not the \/mcp endpoint/);
   });
 
+  it("resolves dispatch_project from the environment", () => {
+    const { config } = resolveDaemonConfig({
+      env: { ...requiredEnv, DISPATCH_PROJECT: "LEGION", LEGION_BOARD_PROJECT_IDS: "PVT_x" },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(config.dispatchProject).toBe("LEGION");
+  });
+
+  it("rejects a missing dispatch_project", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          LEGION_ID: "acme/7",
+          ENVOY_NATS_URL: "nats://one:4222",
+          LEGION_REPOS: "acme/widgets",
+        },
+      })
+    ).toThrow("dispatch_project is required");
+  });
+
+  it("rejects a malformed dispatch_project", () => {
+    expect(() =>
+      resolveDaemonConfig({ env: { ...requiredEnv, DISPATCH_PROJECT: "legion" } })
+    ).toThrow("DISPATCH_PROJECT must match ^[A-Z][A-Z0-9]*$");
+    expect(() =>
+      resolveDaemonConfig({ env: { ...requiredEnv, DISPATCH_PROJECT: "LEGION-1" } })
+    ).toThrow("DISPATCH_PROJECT must match ^[A-Z][A-Z0-9]*$");
+  });
+
   it("accepts dispatch_url from the YAML loader shape without an unknown-key warning", () => {
     const file = loadConfigFromFile(
       [
@@ -252,6 +285,7 @@ describe("daemon config", () => {
         "project: acme/7",
         "port: 14001",
         "envoy_url: http://listener:9020",
+        "dispatch_project: ACME",
         "nats_urls:",
         "  - nats://one:4222",
         "board_project_ids:",
@@ -308,6 +342,7 @@ describe("daemon config", () => {
       [
         "project: acme/7",
         "envoy_url: http://listener:9020",
+        "dispatch_project: ACME",
         "nats_urls:",
         "  - nats://one:4222",
         "board_project_ids:",
@@ -440,6 +475,7 @@ describe("daemon config", () => {
       const file = loadConfigFromFile(
         [
           "project: acme/7",
+          "dispatch_project: ACME",
           "repos:",
           "  - acme/widgets",
           "nats_urls:",

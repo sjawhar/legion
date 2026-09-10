@@ -51,6 +51,7 @@ function startCiPump(state: LegionState) {
     saveState: async () => {},
     onException: async () => {},
     onLinger: async () => {},
+    onAdmit: () => {},
     onProbe: async () => {},
     onApprovalStatus: async () => {},
   });
@@ -136,6 +137,7 @@ it("routes an approved PR's settled checks and ready signal to the tree's archit
     saveState: async () => {},
     onException: async () => {},
     onLinger: async () => {},
+    onAdmit: () => {},
     onProbe: async () => {},
     onApprovalStatus: async () => {},
   });

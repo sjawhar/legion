@@ -23,6 +23,7 @@ function config(): DaemonConfig {
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x omp",
+    dispatchProject: "LEGSMOKE",
     boardProjectIds: [],
     repos: ["acme/widgets"],
     appLogins: [],

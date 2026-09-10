@@ -1,0 +1,17 @@
+{
+  "id": 216,
+  "issue_key": "LEGSMOKE-1",
+  "seq": 7,
+  "type": "child.status",
+  "actor": {
+    "kind": "session",
+    "id": "legion-daemon:LEGSMOKE"
+  },
+  "notify": true,
+  "created_at": "2026-09-10T02:14:03.989223Z",
+  "payload": {
+    "child_key": "LEGSMOKE-2",
+    "from": "triage",
+    "to": "todo"
+  }
+}

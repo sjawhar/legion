@@ -1,6 +1,5 @@
-import type { Issue, IssueDetails, IssueSummary } from "@legion/envoy-client/dispatch-http";
-
-export type IssueStatus = Issue["status"];
+import type { IssueDetails, IssueSummary } from "@legion/contracts";
+import type { IssueStatus } from "./legion-state";
 
 /** A non-2xx response from the Dispatch HTTP API: `status` is the HTTP status code, `message` is
  * the server's `error` field (or its raw body when the response is not the expected JSON shape). */

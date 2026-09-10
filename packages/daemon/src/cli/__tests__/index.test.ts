@@ -162,6 +162,7 @@ describe("legion start --check-config", () => {
       [
         "project: acme/99",
         "envoy_url: http://127.0.0.1:9020",
+        "dispatch_project: ACME",
         "repos:",
         "  - acme/widgets",
         "nats_urls:",
@@ -189,6 +190,7 @@ describe("legion start --check-config", () => {
       [
         "project: acme/99",
         "envoy_url: http://127.0.0.1:9020",
+        "dispatch_project: ACME",
         "repos:",
         "  - acme/widgets",
         "nats_urls:",

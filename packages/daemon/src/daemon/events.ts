@@ -1,6 +1,7 @@
 import {
   controllerToken,
   EnvelopeSchema,
+  type EventType,
   type IssueKey,
   parseRoleToken,
   roleTopic,
@@ -12,10 +13,12 @@ import type { LegionState } from "./legion-state";
 import type { DurableMessageControl, NatsTransport } from "./nats-transport";
 import {
   classifySettlement,
+  type DispatchIssueEvent,
   type Effect,
   type EnvelopeJson,
   effectiveOutcome,
   type LegionEventPayload,
+  reduceDispatchEvent,
   reduceGithubEvent,
   refreshCiIdentity,
   settleCiVerdict,
@@ -25,7 +28,7 @@ import {
 const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
 const EXCEPTION_TOPIC = "notifications.envoy.exceptions.notifications.role.";
 /** JetStream stream carrying durable notifications; mirrors packages/envoy/internal/bus/nats.go:18. */
-const GITHUB_STREAM = "ENVOY_NOTIFICATIONS";
+const NOTIFICATION_STREAM = "ENVOY_NOTIFICATIONS";
 /** Fixed nak delay for a durable delivery that fails for a reason that may be transient (see processDurableMessage). */
 const DURABLE_NAK_DELAY_MS = 30_000;
 
@@ -33,6 +36,26 @@ const DURABLE_NAK_DELAY_MS = 30_000;
 const MAX_TERM_REASON_BYTES = 1_024;
 const TERM_REASON_ELLIPSIS = "…";
 const textEncoder = new TextEncoder();
+
+const DISPATCH_EVENT_TYPES: Record<EventType, true> = {
+  "issue.created": true,
+  "issue.updated": true,
+  "issue.closed": true,
+  "artifact.created": true,
+  "artifact.version": true,
+  "ask.opened": true,
+  "ask.answered": true,
+  "comment.created": true,
+  "comment.resolved": true,
+  "suggestion.accepted": true,
+  "suggestion.rejected": true,
+  "message.created": true,
+  "child.status": true,
+};
+
+function isDispatchEventType(value: unknown): value is EventType {
+  return typeof value === "string" && value in DISPATCH_EVENT_TYPES;
+}
 
 /** Truncates `reason` so its UTF-8 byte length, including the appended ellipsis, never exceeds `MAX_TERM_REASON_BYTES`. */
 export function truncateTermReason(reason: string): string {
@@ -110,6 +133,8 @@ export interface EventPumpDeps {
   onLinger(tree: IssueKey): Promise<void>;
   onProbe(tree: IssueKey): Promise<void>;
   onApprovalStatus(effect: Extract<Effect, { kind: "approval-status" }>): Promise<void>;
+  onAdmit(issue: IssueKey): void;
+
   /**
    * Called when a durable effect's role has no live holder (Envoy 404).
    * State is already durable and correct by this point — the effect is a
@@ -172,6 +197,25 @@ function recordPayload(envelope: EnvelopeJson): JsonRecord | undefined {
   } catch {
     return undefined;
   }
+}
+function dispatchIssueEvent(envelope: EnvelopeJson): DispatchIssueEvent {
+  const event = recordPayload(envelope);
+  const id = event?.id;
+  const key = event?.issue_key;
+  const type = event?.type;
+  const payload = event?.payload;
+  if (
+    typeof id !== "number" ||
+    !Number.isSafeInteger(id) ||
+    id <= 0 ||
+    typeof key !== "string" ||
+    !/^[A-Z][A-Z0-9]*-[0-9]+$/.test(key) ||
+    !isDispatchEventType(type) ||
+    !asRecord(payload)
+  ) {
+    throw new Error("Dispatch durable message payload is not a valid Dispatch event");
+  }
+  return { type, key, payload, eventId: `dispatch-${id}` };
 }
 
 function statusGroup(
@@ -595,6 +639,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         await effectPublisher.publishController(effect.payload);
       else if (effect.kind === "linger") await deps.onLinger(effect.tree);
       else if (effect.kind === "probe") await deps.onProbe(effect.tree);
+      else if (effect.kind === "admit") deps.onAdmit(effect.issue);
       else if (effect.kind === "approval-status") await deps.onApprovalStatus(effect);
       else {
         const unhandled: never = effect;
@@ -750,6 +795,19 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         controllerToken(deps.state.project),
         typeof envelope.payload === "string" ? envelope.payload : "{}"
       );
+    } else if (subject.startsWith("notifications.dispatch.issue.")) {
+      const subjectKey = subject.split(".")[3];
+      if (!subjectKey) throw new Error(`Dispatch durable subject has no issue key: ${subject}`);
+      if (!subjectKey.startsWith(`${deps.config.dispatchProject}-`)) return;
+      await applyDurableEvent(subject, envelope, (state) => {
+        const event = dispatchIssueEvent(envelope);
+        if (event.key !== subjectKey) {
+          throw new Error(
+            `Dispatch durable subject key ${subjectKey} disagrees with payload key ${event.key}`
+          );
+        }
+        return reduceDispatchEvent(state, event, deps.config);
+      });
     } else {
       const rawPayload = recordPayload(envelope);
       if (
@@ -903,9 +961,17 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
 
   const unsubscribers = [
     deps.nats.consumeDurable(
-      GITHUB_STREAM,
+      NOTIFICATION_STREAM,
       githubDurable,
       githubFilterSubjects,
+      (subject, data, control) => {
+        runExclusive(() => processDurableMessage(subject, data, control));
+      }
+    ),
+    deps.nats.consumeDurable(
+      NOTIFICATION_STREAM,
+      `legion-${deps.config.dispatchProject}-dispatch`,
+      ["notifications.dispatch.issue.>"],
       (subject, data, control) => {
         runExclusive(() => processDurableMessage(subject, data, control));
       }

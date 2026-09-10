@@ -160,6 +160,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
+    dispatchProject: "LEGSMOKE",
     boardProjectIds: [],
     repos: ["sjawhar/legion"],
     appLogins: [],
