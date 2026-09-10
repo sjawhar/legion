@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Event } from "../api/types";
-import { buildLogItems, dismissedEventIds } from "../features/issue/log-model";
+import { buildLogItems, dismissedEventIds, eventDescription } from "../features/issue/log-model";
 
 function event(overrides: Partial<Event> = {}): Event {
   return {
@@ -60,4 +60,36 @@ test("log model omits dismissed events and places a new divider at the read boun
 
 test("dismissedEventIds extracts dismissed log events without pinned markers", () => {
   expect(dismissedEventIds(["event:2", "pinned_items:event:5", "event:9"])).toEqual(["2", "9"]);
+});
+
+test("log model labels a resolved ask with the resolution actor and reason", () => {
+  const resolved = event({
+    payload: {
+      anchor: null,
+      answer: null,
+      author: { kind: "session", id: "session-1" },
+      created_at: "2026-09-10T00:00:00Z",
+      id: "ask-1",
+      issue_key: "CORE-1",
+      multiple: false,
+      options: [],
+      question: "Ship the change?",
+      resolution: {
+        actor: { kind: "session", id: "session-1" },
+        at: "2026-09-10T00:00:00Z",
+        kind: "retracted",
+        reason: "A newer question supersedes this one.",
+      },
+      state: "resolved",
+      urgency: "med",
+    },
+    type: "ask.resolved",
+  });
+
+  expect(eventDescription(resolved)).toBe(
+    "Retracted by session-1 - A newer question supersedes this one."
+  );
+  expect(buildLogItems([resolved], [], 1)).toEqual([
+    { event: resolved, folded: true, kind: "event" },
+  ]);
 });

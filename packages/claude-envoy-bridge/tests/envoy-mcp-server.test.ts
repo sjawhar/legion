@@ -30,6 +30,7 @@ const AskPost = z.object({
 const dispatchToolNames = [
   "dispatch_issue",
   "dispatch_ask",
+  "dispatch_resolve_ask",
   "dispatch_comment",
   "dispatch_suggest",
   "dispatch_message",
@@ -42,6 +43,7 @@ const dispatchToolNames = [
 const requiredDispatchFields: Readonly<Record<(typeof dispatchToolNames)[number], readonly string[]>> = {
   dispatch_issue: ["project", "title"],
   dispatch_ask: ["issue", "question"],
+  dispatch_resolve_ask: ["ask", "kind", "reason"],
   dispatch_comment: ["issue", "body"],
   dispatch_suggest: ["issue", "artifact", "quote", "replace_with"],
   dispatch_message: ["issue", "body"],

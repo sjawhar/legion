@@ -117,6 +117,14 @@ export function createAsk(
   return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
 }
 
+export function resolveAsk(
+  id: string,
+  input: { kind: "retracted" | "resolved"; reason: string },
+  options: ApiOptions = {}
+): Promise<Ask> {
+  return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}/resolve`, "POST", input, options);
+}
+
 export function createComment(
   issue: string,
   input: CreateCommentInput,

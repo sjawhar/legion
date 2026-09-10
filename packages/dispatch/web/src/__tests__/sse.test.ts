@@ -180,3 +180,26 @@ test("SSE event prepends a newer event to the loaded log page", () => {
     event("message.created", {}, { id: 7, seq: 7 }),
   ]);
 });
+
+test("a resolved ask refreshes the inbox, issue count, and its reply thread", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
+
+  applyEventInvalidations(queryClient, event("ask.resolved" as Event["type"], { id: "ask-1" }));
+
+  expect(invalidated).toEqual([
+    ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues"],
+    ["user-state"],
+    ["inbox"],
+    ["asks", "CORE-1"],
+    ["ask", "ask-1"],
+    ["ask-thread", "ask-1"],
+  ]);
+});

@@ -24,7 +24,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select a.id::text, a.issue_key, a.author, a.question, a.options, a.multiple, a.urgency,
-		       a.anchor, a.state, a.answer, a.created_at, i.key, i.title
+		       a.anchor, a.state, a.answer, a.resolution, a.created_at, i.key, i.title
 		from asks a
 		join issues i on i.key = a.issue_key
 		where a.state = 'open' and i.closed_at is null and ($1 = '' or i.project_key = $1)
@@ -38,15 +38,15 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	asks := []inboxAsk{}
 	for rows.Next() {
 		var ask inboxAsk
-		var author, options, anchor, answer []byte
+		var author, options, anchor, answer, resolution []byte
 		if err := rows.Scan(
 			&ask.ID, &ask.IssueKey, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
-			&anchor, &ask.State, &answer, &ask.CreatedAt, &ask.Issue.Key, &ask.Issue.Title,
+			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &ask.Issue.Key, &ask.Issue.Title,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := decodeInboxAsk(&ask.Ask, author, options, anchor, answer); err != nil {
+		if err := decodeInboxAsk(&ask.Ask, author, options, anchor, answer, resolution); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -59,7 +59,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, asks)
 }
 
-func decodeInboxAsk(ask *model.Ask, author, options, anchor, answer []byte) error {
+func decodeInboxAsk(ask *model.Ask, author, options, anchor, answer, resolution []byte) error {
 	if err := json.Unmarshal(author, &ask.Author); err != nil {
 		return fmt.Errorf("decode inbox ask author: %w", err)
 	}
@@ -83,6 +83,13 @@ func decodeInboxAsk(ask *model.Ask, author, options, anchor, answer []byte) erro
 			return fmt.Errorf("decode inbox ask answer: %w", err)
 		}
 		ask.Answer = &value
+	}
+	if len(resolution) > 0 {
+		var value model.AskResolution
+		if err := json.Unmarshal(resolution, &value); err != nil {
+			return fmt.Errorf("decode inbox ask resolution: %w", err)
+		}
+		ask.Resolution = &value
 	}
 	return nil
 }

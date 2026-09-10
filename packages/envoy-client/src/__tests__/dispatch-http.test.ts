@@ -307,3 +307,38 @@ describe("DispatchClient", () => {
     ).toEqual(["/api/v1/comments/comment-1"]);
   });
 });
+
+test("maps an ask resolution to the authenticated API", async () => {
+  const { fetchImpl, requests } = fakeFetch([
+    jsonResponse({
+      id: "ask-1",
+      issue_key: "DSP-1",
+      state: "resolved",
+      resolution: {
+        actor,
+        at: "2026-09-10T00:00:00Z",
+        kind: "retracted",
+        reason: "A newer question supersedes this one.",
+      },
+    }),
+  ]);
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+  const resolveAsk = Reflect.get(client, "resolveAsk");
+
+  expect(typeof resolveAsk).toBe("function");
+  if (typeof resolveAsk !== "function") throw new Error("DispatchClient.resolveAsk is missing");
+  await resolveAsk.call(client, "ask-1", {
+    actor,
+    kind: "retracted",
+    reason: "A newer question supersedes this one.",
+  });
+
+  expect(requests.map((request) => [request.init.method, new URL(request.url).pathname])).toEqual([
+    ["POST", "/api/v1/asks/ask-1/resolve"],
+  ]);
+  expect(requestBody(requests[0] as RecordedRequest)).toEqual({
+    actor,
+    kind: "retracted",
+    reason: "A newer question supersedes this one.",
+  });
+});

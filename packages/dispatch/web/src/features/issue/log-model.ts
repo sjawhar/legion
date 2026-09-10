@@ -1,4 +1,5 @@
 import type { Event } from "../../api/types";
+import { describeAskResolution } from "../refs/actor";
 
 export type LogItem = { kind: "event"; event: Event; folded: boolean } | { kind: "new-divider" };
 
@@ -27,6 +28,9 @@ export function dismissedEventIds(dismissed: string[]): string[] {
 }
 
 export function eventDescription(event: Event): string {
+  if (event.type === "ask.resolved") {
+    return describeAskResolution(event.payload.resolution);
+  }
   if (event.type === "ask.answered") {
     const question = event.payload.question;
     return `Ask answered: ${typeof question === "string" ? question : "ask"}`;
@@ -95,6 +99,7 @@ export function buildLogItems(
       event,
       folded:
         event.type === "ask.answered" ||
+        event.type === "ask.resolved" ||
         event.type === "comment.resolved" ||
         event.type === "suggestion.accepted" ||
         event.type === "suggestion.rejected",

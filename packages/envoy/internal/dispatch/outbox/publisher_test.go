@@ -211,6 +211,61 @@ func TestRunRoutesAskReplyToAuthorEvenWhenIssueRoutedElsewhere(t *testing.T) {
 	}
 }
 
+func TestRunRoutesHumanAskResolutionToAuthorOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		actor           model.Actor
+		wantTopics      []string
+		wantRouteNotify bool
+	}{
+		{
+			name:            "human resolution",
+			actor:           model.Actor{Kind: "user", ID: "alice"},
+			wantTopics:      []string{"notifications.dispatch.issue.T-1.ask.resolved", "notifications.role.legion-controller-x", "notifications.agent.session-asker"},
+			wantRouteNotify: true,
+		},
+		{
+			name:            "session resolution",
+			actor:           model.Actor{Kind: "session", ID: "session-closer"},
+			wantTopics:      []string{"notifications.dispatch.issue.T-1.ask.resolved"},
+			wantRouteNotify: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := openTestStore(t)
+			broker := events.NewBroker()
+			route := "role:legion-controller-x"
+			seedIssue(t, database, "T-1", &route)
+			askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
+			event := appendEvent(t, database, broker, model.Event{
+				IssueKey: "T-1",
+				Type:     "ask.resolved",
+				Actor:    tc.actor,
+				Payload:  model.Ask{ID: askID, IssueKey: "T-1", Question: "Ship it?", State: "resolved"},
+			})
+			publisher := &recordingPublisher{}
+			stop := run(t, database, publisher, broker)
+			defer stop()
+
+			waitFor(t, time.Second, "ask resolution publication", func() bool {
+				return len(publisher.all()) == len(tc.wantTopics) && publishedAt(t, database, event.ID) != nil
+			})
+			items := publisher.all()
+			for index, topic := range tc.wantTopics {
+				if items[index].Topic != topic {
+					t.Fatalf("publication %d topic = %q, want %q", index, items[index].Topic, topic)
+				}
+			}
+			if items[0].InReplyTo != askID {
+				t.Fatalf("issue event in_reply_to = %q, want %q", items[0].InReplyTo, askID)
+			}
+			if tc.wantRouteNotify && items[2].InReplyTo != askID {
+				t.Fatalf("author route in_reply_to = %q, want %q", items[2].InReplyTo, askID)
+			}
+		})
+	}
+}
+
 func TestRunAddsBoundRoutePublication(t *testing.T) {
 	for _, tc := range []struct {
 		name, route, wantTopic string

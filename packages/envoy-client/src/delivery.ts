@@ -102,6 +102,7 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "artifact.version": ArtifactVersionPayloadSchema,
   "ask.opened": AskPayloadSchema,
   "ask.answered": AskPayloadSchema,
+  "ask.resolved": AskPayloadSchema,
   "comment.created": CommentPayloadSchema,
   "comment.resolved": CommentPayloadSchema,
   "suggestion.accepted": CommentPayloadSchema,

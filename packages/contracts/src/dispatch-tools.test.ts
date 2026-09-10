@@ -8,6 +8,11 @@ const schemaApi = zodSchemaApi(z);
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_ask: { issue: "DSP-1", question: "Ship this?" },
+  dispatch_resolve_ask: {
+    ask: "ask-1",
+    kind: "retracted",
+    reason: "A newer question supersedes this one.",
+  },
   dispatch_comment: { issue: "DSP-1", body: "Looks good." },
   dispatch_suggest: {
     issue: "DSP-1",
@@ -55,6 +60,7 @@ describe("dispatchToolSpecs", () => {
     expect(dispatchToolSpecs.map((spec) => spec.name)).toEqual([
       "dispatch_issue",
       "dispatch_ask",
+      "dispatch_resolve_ask",
       "dispatch_comment",
       "dispatch_suggest",
       "dispatch_message",
@@ -111,6 +117,16 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ ...shared, path: "spec.md", content: "# Spec\n" }).success).toBe(
       false
     );
+  });
+
+  test("rejects an ask resolution without a reason", () => {
+    expect(
+      schemaFor("dispatch_resolve_ask").safeParse({
+        ask: "ask-1",
+        kind: "resolved",
+        reason: "",
+      }).success
+    ).toBe(false);
   });
   test("leaves Dispatch subscriptions to successful tool results", () => {
     expect(dispatchToolSpecs.every((spec) => !("subscribes" in spec))).toBe(true);

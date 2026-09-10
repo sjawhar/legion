@@ -160,15 +160,20 @@ func publish(ctx context.Context, deps Deps, event model.Event, route *string) e
 	return nil
 }
 
-// publishAskAuthorRoute delivers a human reply on an ask directly to the asking
-// session's own topic, regardless of the issue's route. The issue's route (if
-// any) may point at an entirely different reviewer, so without this the agent
-// that asked the question never learns a human replied.
+// publishAskAuthorRoute delivers a human reply or resolution on an ask directly to the asking
+// session's own topic, regardless of the issue's route. The issue's route (if any) may point at
+// an entirely different reviewer, so without this the agent that asked the question never learns
+// about the human action.
 func publishAskAuthorRoute(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) {
-	if event.Type != "comment.created" {
+	var askID string
+	switch event.Type {
+	case "comment.created":
+		askID = payloadString(event.Payload, "ask_id")
+	case "ask.resolved":
+		askID = payloadString(event.Payload, "id")
+	default:
 		return
 	}
-	askID := payloadString(event.Payload, "ask_id")
 	if askID == "" {
 		return
 	}
@@ -235,7 +240,7 @@ func envelope(event model.Event) (contracts.Envelope, error) {
 	if event.Actor.Kind == "session" {
 		item.SourceSession = event.Actor.ID
 	}
-	if event.Type == "ask.answered" {
+	if event.Type == "ask.answered" || event.Type == "ask.resolved" {
 		item.InReplyTo = payloadString(event.Payload, "id")
 	}
 	if event.Type == "comment.created" {

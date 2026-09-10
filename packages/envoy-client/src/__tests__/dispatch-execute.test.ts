@@ -934,3 +934,63 @@ describe("executeDispatchTool", () => {
     });
   });
 });
+
+test("resolves an ask as the calling session", async () => {
+  const requests: Array<{ readonly pathname: string; readonly body: unknown }> = [];
+  const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const pathname = new URL(String(url)).pathname;
+    requests.push({ pathname, body: JSON.parse(String(init?.body)) });
+    if (pathname !== "/api/v1/asks/ask-42/resolve") {
+      throw new Error(`unexpected request: ${pathname}`);
+    }
+    return response({
+      id: "ask-42",
+      issue_key: "DSP-42",
+      resolution: {
+        actor: { kind: "session", id: "session-42" },
+        at: "2026-09-10T00:00:00Z",
+        kind: "retracted",
+        reason: "A newer question supersedes this one.",
+      },
+      state: "resolved",
+    });
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_resolve_ask",
+    args: {
+      ask: "ask-42",
+      kind: "retracted",
+      reason: "A newer question supersedes this one.",
+    },
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+
+  expect(result).toEqual({
+    text: "Retracted ask ask-42: A newer question supersedes this one.",
+    details: {
+      issue: "DSP-42",
+      topic: dispatchIssueSubject("DSP-42", ">"),
+      ask: "ask-42",
+    },
+  });
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toEqual({
+    pathname: "/api/v1/asks/ask-42/resolve",
+    body: {
+      actor: {
+        kind: "session",
+        id: "session-42",
+        origin: expect.objectContaining({ host: "omp", cwd: "/workspace" }),
+      },
+      kind: "retracted",
+      reason: "A newer question supersedes this one.",
+    },
+  });
+});

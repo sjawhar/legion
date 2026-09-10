@@ -14,6 +14,7 @@ This package exposes:
 - `envoy_sessions`
 - `dispatch_issue`
 - `dispatch_ask`
+- `dispatch_resolve_ask`
 - `dispatch_comment`
 - `dispatch_suggest`
 - `dispatch_message`

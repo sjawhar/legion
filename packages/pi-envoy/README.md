@@ -79,8 +79,8 @@ extension files it does not contain.
 
 ## Native Dispatch tools
 
-The extension registers `dispatch_issue`, `dispatch_ask`, `dispatch_comment`,
-`dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
+The extension registers `dispatch_issue`, `dispatch_ask`, `dispatch_resolve_ask`,
+`dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
 `dispatch_doc_read`, `dispatch_artifact`, and `dispatch_read` when Dispatch
 configuration resolves both a base URL and bearer token.
 

@@ -23,6 +23,7 @@ import type {
   IssueRead,
   IssueSummary,
   Message,
+  ResolveAskInput,
   TargetCandidate,
   Version,
 } from "@legion/contracts";
@@ -104,6 +105,10 @@ export class DispatchClient {
       ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"],
       input
     );
+  }
+
+  async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {
+    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
   }
 
   async comment(issue: string, input: CreateCommentInput): Promise<Comment> {

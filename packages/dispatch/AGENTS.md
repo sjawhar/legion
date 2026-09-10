@@ -14,6 +14,8 @@ production build from `web/dist`.
   Query cache entries for the affected issue.
 - `web/src/main.tsx` installs React Router and the shared Query client.
 
+Resolved asks leave the Inbox and open-ask badges, but their thread and log entry remain available with the actor and reason. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
+
 `AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the GitHub
 sign-in link at `/auth/start`. Authenticated humans can create native projects
 (key + name) and manage external repository-to-project mappings at `/settings`.

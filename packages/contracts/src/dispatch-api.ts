@@ -122,8 +122,9 @@ export interface Ask {
   readonly multiple: boolean;
   readonly urgency: AskUrgency;
   readonly anchor: Anchor | null;
-  readonly state: "open" | "answered";
+  readonly state: "open" | "answered" | "resolved";
   readonly answer: AskAnswer | null;
+  readonly resolution?: AskResolution;
   readonly created_at: string;
   readonly issue?: Pick<Issue, "key" | "title">;
 }
@@ -137,6 +138,13 @@ export interface AskAnswer {
   readonly user: string;
   readonly selected: string[];
   readonly text: string | null;
+  readonly at: string;
+}
+
+export interface AskResolution {
+  readonly kind: "retracted" | "resolved";
+  readonly reason: string;
+  readonly actor: Actor;
   readonly at: string;
 }
 
@@ -219,6 +227,10 @@ export type DispatchEvent =
     })
   | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: Ask })
   | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: Ask })
+  | (DispatchEventBase & {
+      readonly type: "ask.resolved";
+      readonly payload: Ask & { readonly state: "resolved"; readonly resolution: AskResolution };
+    })
   | (DispatchEventBase & {
       readonly type: "comment.created";
       readonly payload: CommentEventPayload;
@@ -303,6 +315,12 @@ export interface CreateAskInput {
 export interface AnswerAskInput {
   readonly selected: string[];
   readonly text?: string;
+}
+
+export interface ResolveAskInput {
+  readonly kind: "retracted" | "resolved";
+  readonly reason: string;
+  readonly actor?: Actor;
 }
 
 export interface CreateCommentInput {
@@ -439,6 +457,17 @@ export const AskEventPayloadSchema = z.object({
   options: z.array(z.object({ label: z.string().optional() })).nullish(),
   answer: z
     .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
+    .nullish(),
+  resolution: z
+    .object({
+      kind: z.enum(["retracted", "resolved"]).optional(),
+      reason: z.string().optional(),
+      actor: z
+        .object({ kind: z.string().optional(), id: z.string().optional() })
+        .passthrough()
+        .optional(),
+      at: z.string().optional(),
+    })
     .nullish(),
 });
 

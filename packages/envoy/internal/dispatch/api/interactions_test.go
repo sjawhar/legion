@@ -1811,3 +1811,137 @@ func waitForDocumentConnectionClose(t *testing.T, connection *gws.Conn) {
 		}
 	}
 }
+
+func TestResolveAskRemovesItFromInboxAndKeepsTheThread(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Retracted decision", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Should this remain open?", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+
+	resolver := map[string]any{"kind": "session", "id": "session-handoff"}
+	resolved := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "A newer question supersedes this one.", "actor": resolver,
+	})
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve ask: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	resolution := decodeBody[struct {
+		State      string `json:"state"`
+		Resolution struct {
+			Kind   string      `json:"kind"`
+			Reason string      `json:"reason"`
+			Actor  model.Actor `json:"actor"`
+		} `json:"resolution"`
+	}](t, resolved)
+	if resolution.State != "resolved" || resolution.Resolution.Kind != "retracted" || resolution.Resolution.Reason != "A newer question supersedes this one." || resolution.Resolution.Actor.Kind != "session" || resolution.Resolution.Actor.ID != "session-handoff" {
+		t.Fatalf("resolved ask = %#v", resolution)
+	}
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK || strings.Contains(inbox.Body.String(), ask.ID) {
+		t.Fatalf("resolved ask remained in inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues", nil, "alice")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"open_asks":0`) {
+		t.Fatalf("resolved ask remained in issue count: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	thread := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if thread.Code != http.StatusOK || !strings.Contains(thread.Body.String(), `"state":"resolved"`) || !strings.Contains(thread.Body.String(), `"reason":"A newer question supersedes this one."`) {
+		t.Fatalf("resolved ask thread = status=%d body=%s", thread.Code, thread.Body.String())
+	}
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if log.Code != http.StatusOK || !strings.Contains(log.Body.String(), `"type":"ask.resolved"`) || !strings.Contains(log.Body.String(), `"notify":false`) {
+		t.Fatalf("resolved ask event = status=%d body=%s", log.Code, log.Body.String())
+	}
+}
+
+func TestResolveAskRejectsAnsweredAsksAndAnswerRejectsResolvedAsks(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Closed decisions", "A spec")
+	answered := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Should this be answered?", "actor": sessionActor(),
+	})
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("create answered ask: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	answeredAsk := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, answered)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+answeredAsk.ID+"/answer", map[string]any{"text": "Already decided."}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("answer ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+answeredAsk.ID+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "No longer relevant.", "actor": sessionActor(),
+	}); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ASK_ANSWERED"`) {
+		t.Fatalf("resolve answered ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+answeredAsk.ID, nil, "alice"); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"answered"`) || !strings.Contains(response.Body.String(), `"text":"Already decided."`) {
+		t.Fatalf("answered ask after failed resolve: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	open := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Should this be retracted?", "actor": sessionActor(),
+	})
+	if open.Code != http.StatusCreated {
+		t.Fatalf("create resolvable ask: status=%d body=%s", open.Code, open.Body.String())
+	}
+	resolvedAsk := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, open)
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+resolvedAsk.ID+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "Found the answer.", "actor": sessionActor(),
+	}); response.Code != http.StatusOK {
+		t.Fatalf("resolve ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+resolvedAsk.ID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "Superseded after all.", "actor": sessionActor(),
+	}); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ASK_RESOLVED"`) {
+		t.Fatalf("resolve resolved ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+resolvedAsk.ID+"/answer", map[string]any{"text": "Too late."}, "alice"); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ASK_RESOLVED"`) {
+		t.Fatalf("answer resolved ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestResolveAskRejectsInvalidInputAndClosedIssues(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/00000000-0000-0000-0000-000000000000/resolve", map[string]any{
+		"kind": "resolved", "reason": "Found the answer.", "actor": sessionActor(),
+	}); response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"NOT_FOUND"`) {
+		t.Fatalf("resolve missing ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	issue := createInteractionIssue(t, handler, "TEST", "Resolution validation", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Can this be resolved?", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, created)
+	for _, input := range []map[string]any{
+		{"kind": "closed", "reason": "No."},
+		{"kind": "resolved", "reason": "   "},
+	} {
+		input["actor"] = sessionActor()
+		if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", input); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_RESOLUTION"`) {
+			t.Fatalf("invalid resolution %#v: status=%d body=%s", input, response.Code, response.Body.String())
+		}
+	}
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "Found the answer.", "actor": sessionActor(),
+	}); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("resolve ask on closed issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+}

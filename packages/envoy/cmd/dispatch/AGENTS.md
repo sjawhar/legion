@@ -74,6 +74,7 @@ the table says human only.
 | `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. |
 | `/api/v1/asks/{id}` | GET | user or bearer | Read an ask. |
 | `/api/v1/asks/{id}/answer` | POST | human only | Answer an open ask. |
+| `/api/v1/asks/{id}/resolve` | POST | user or bearer | Retract or self-resolve an open ask with a recorded reason. |
 | `/api/v1/issues/{key}/comments` | GET, POST | user or bearer | List or create comments and suggestions. |
 | `/api/v1/comments/{id}` | GET | user or bearer | Read a comment and its reply chain. |
 | `/api/v1/comments/{id}/resolve` | POST | user or bearer | Resolve a comment. |

@@ -159,6 +159,42 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  test("renders ask.resolved as a low-key Dispatch update", () => {
+    const resolvedAsk = {
+      ...openAsk,
+      resolution: {
+        actor: { kind: "session", id: "session-1" },
+        at: "2026-09-10T00:01:00Z",
+        kind: "retracted",
+        reason: "A newer question supersedes this one.",
+      },
+      state: "resolved",
+    };
+
+    const decoded = decode(
+      renderInbound(dispatchEvent("ask.resolved", resolvedAsk), reader).content
+    ) as {
+      envoy: { dispatch: Record<string, unknown> };
+    };
+
+    expect(decoded.envoy.dispatch).toEqual({
+      issue_key: "DSP-1",
+      type: "ask.resolved",
+      actor: { kind: "session", id: "session-1" },
+      payload: {
+        question: "Which API?",
+        options: [{ label: "JSON" }, { label: "MCP" }],
+        answer: null,
+        resolution: {
+          actor: { kind: "session", id: "session-1" },
+          at: "2026-09-10T00:01:00Z",
+          kind: "retracted",
+          reason: "A newer question supersedes this one.",
+        },
+      },
+    });
+  });
+
   test("renders a comment.created reply to an ask as 're: <question>', not the raw ask id", () => {
     const askID = "ask-1";
     const raw = JSON.stringify(

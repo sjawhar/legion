@@ -24,9 +24,9 @@ the native Dispatch tool suite:
 
 ## Critical conventions
 
-- `src/dispatch-tools.ts` is the source of the nine native Dispatch tools:
-  `dispatch_issue`, `dispatch_ask`, `dispatch_comment`, `dispatch_suggest`,
-  `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
+- `src/dispatch-tools.ts` is the source of the ten native Dispatch tools:
+  `dispatch_issue`, `dispatch_ask`, `dispatch_resolve_ask`, `dispatch_comment`,
+  `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
   `dispatch_artifact`, and `dispatch_read`. It defines their names, descriptions,
   and field shapes; host adapters consume `dispatchToolSpecs` directly.
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
