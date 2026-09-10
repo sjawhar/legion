@@ -164,8 +164,8 @@ func TestListIssuesFiltersByUpdatedSince(t *testing.T) {
 	}
 	createIssue := func(project string) model.Issue {
 		t.Helper()
-		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-			"project": project, "title": project + " issue",
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": project, "title": project + " issue", "force": true,
 		}, "alice")
 		if response.Code != http.StatusCreated {
 			t.Fatalf("create issue in %s: status=%d body=%s", project, response.Code, response.Body.String())
