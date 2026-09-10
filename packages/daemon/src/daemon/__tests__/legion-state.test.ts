@@ -528,6 +528,40 @@ describe("legion state", () => {
     }
   });
 
+  it("converts a tree-less, issue-less v18 state to v19, preserving its controller notices", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-gates-"));
+    const file = path.join(tempDir, "state.json");
+    const notice = {
+      payloadJson: '{"text":"@legion please investigate"}',
+      eventId: "evt-controller",
+    };
+    const v18State = {
+      version: 18,
+      project: initialState.project,
+      issues: {},
+      trees: {},
+      roles: {},
+      spawnCapabilities: {},
+      prs: {},
+      prByBranch: {},
+      prTombstones: {},
+      admission: { cap: initialState.cap, active: [], queue: [] },
+      workerAdmission: { queue: [] },
+      phases: {},
+      controllerPendingNotices: [notice],
+      // A leftover pre-Dispatch design-gate ledger entry: the guard above must not refuse this
+      // conversion just because `gates` is nonempty (it inspects only `trees`/`issues`).
+      gates: { "sjawhar/legion#42": { designAskId: "ask-1" } },
+    };
+    await writeFile(file, JSON.stringify(v18State), "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    expect(migrated.version).toBe(19);
+    expect(migrated.controllerPendingNotices).toEqual([notice]);
+    expect(migrated.gates).toEqual({});
+  });
+
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-status-"));
     const file = path.join(tempDir, "state.json");

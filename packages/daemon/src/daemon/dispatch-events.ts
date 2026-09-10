@@ -1,25 +1,6 @@
 import type { IssueKey } from "@legion/contracts";
 import { ISSUE_KEY_PATTERN } from "./legion-state";
 
-/** Dispatch event kinds Legion currently derives state from or receives on its issue subject.
- * Unknown future kinds remain valid at the transport boundary and are acknowledged without a
- * reducer effect so an additive Dispatch event cannot poison the durable consumer. */
-export const DISPATCH_EVENT_TYPES = {
-  "issue.created": true,
-  "issue.updated": true,
-  "issue.closed": true,
-  "artifact.created": true,
-  "artifact.version": true,
-  "ask.opened": true,
-  "ask.answered": true,
-  "comment.created": true,
-  "comment.resolved": true,
-  "suggestion.accepted": true,
-  "suggestion.rejected": true,
-  "message.created": true,
-  "child.status": true,
-} as const;
-
 /** A decoded Dispatch Event from the issue durable consumer. `key` is the validated event and
  * reducer identity; issue-event payload keys are checked against it before this value is made. */
 export interface DispatchIssueEvent {

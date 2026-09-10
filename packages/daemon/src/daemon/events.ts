@@ -329,11 +329,12 @@ function exceptionInfo(
 export interface EventPump {
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
   /**
-   * Runs `fn` serialized against every durable GitHub message: enqueued
-   * after every earlier operation on this queue settles, and before any
-   * later one starts. Used to run resync exclusively of the durable lane
-   * (see the queue's doc comment in events.ts) — not for ordinary event
-   * handling, which already goes through the queue internally.
+   * Runs `fn` serialized against the shared durable-mutation lane: enqueued after every earlier
+   * operation on this queue settles, and before any later one starts. Dispatch issue events,
+   * GitHub check settlement, and resync all share this one lane (see the queue's own doc
+   * comment further down in this file) — GitHub mentions are the separate durable exception,
+   * published directly outside it. Used to run resync exclusively of the lane; ordinary event
+   * handling already goes through it internally.
    */
   runExclusive<T>(fn: () => Promise<T>): Promise<T>;
   publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void>;
@@ -442,12 +443,13 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    * died), recovered by that worker's own catch-up on resume, never by holding or retrying the
    * event. Inside one (`recoveries` supplied by `applyDurableEvent`) it only records the info;
    * the recovery itself runs once, best-effort, after that transaction's own save commits (see
-   * `applyDurableEvent`). Anything else propagates: for the durable GitHub lane the caller's
-   * dispatch-then-save transaction treats it as fatal (this effect is not yet durable, and
-   * continuing with a live-state mutation whose full effect set didn't get applied would leave
-   * dirty memory serving other events); for a local caller (resync, or any other effect
-   * dispatched outside the durable lane) it simply fails that caller's own request. Shared by
-   * both lanes - there is no separate held/retry path.
+   * `applyDurableEvent`). Anything else propagates: for a durable transaction (Dispatch issue
+   * events and GitHub check settlement alike) the caller's dispatch-then-save transaction treats
+   * it as fatal (this effect is not yet durable, and continuing with a live-state mutation whose
+   * full effect set didn't get applied would leave dirty memory serving other events); for a
+   * local caller (resync, or any other effect dispatched outside a durable transaction) it
+   * simply fails that caller's own request. Shared by every source - there is no separate
+   * held/retry path.
    */
   const publisher = (
     eventId: string,
@@ -515,9 +517,9 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     }
   };
 
-  // Serializes `drainControllerNotices` the same way `githubQueue` serializes durable GitHub
-  // messages/resync -- a dedicated queue, not that one, since this drain never touches a
-  // `PrState` or anything `githubQueue` protects and chaining onto it would add unrelated
+  // Serializes `drainControllerNotices` the same way `durableQueue` serializes every durable
+  // mutation (Dispatch issue events, GitHub check settlement, resync) -- a dedicated queue, not
+  // that one, since this drain never touches a `PrState` or anything `durableQueue` protects and
   // cross-blocking. Two overlapping `/controller/ready` calls are a real possibility (nothing
   // prevents a second controller-ready delivery while the first drain is still awaiting a
   // publish); without this, interleaved reads of the same head entry would publish it twice, and
@@ -619,7 +621,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   };
 
   /**
-   * Runs a github-sourced reducer once, directly against the live state
+   * Runs a reducer once (Dispatch or GitHub-sourced alike), directly against the live state
    * (mutating it in place, same as always), dispatches every derived
    * effect, then durably saves. This is the whole transaction, and its
    * order is deliberate: dispatching before saving means every effect

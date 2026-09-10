@@ -746,21 +746,23 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV18State(
-    migrateV17State(
-      migrateV16State(
-        migrateV15State(
-          migrateV14State(
-            migrateV13State(
-              migrateV12State(
-                migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))))
-              )
-            )
-          )
-        )
-      )
-    )
-  );
+  // Ordered oldest-to-newest: each migration is a no-op unless `state.version` matches the one
+  // it upgrades from, so this reduce applies exactly the same chain the prior nested-call form
+  // did, just as an auditable list instead of a call pyramid.
+  const migrations: Array<(state: unknown) => unknown> = [
+    migrateV5State,
+    migrateV6State,
+    migrateV7State,
+    migrateV8State,
+    migrateV12State,
+    migrateV13State,
+    migrateV14State,
+    migrateV15State,
+    migrateV16State,
+    migrateV17State,
+    migrateV18State,
+  ];
+  const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;

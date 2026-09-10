@@ -18,7 +18,7 @@ export interface LegionEventPayload {
   [key: string]: unknown;
 }
 
-/** An effect a reducer derives from one event. For a durable GitHub event, every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). */
+/** An effect a reducer derives from one event. For a durable event (Dispatch issue events and GitHub check settlement alike), every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). */
 export type Effect =
   | { kind: "publish"; role: string; payload: LegionEventPayload }
   | { kind: "controller"; payload: LegionEventPayload }
