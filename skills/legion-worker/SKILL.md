@@ -11,6 +11,10 @@ phase gets its own long-lived process against the same jj workspace, run in turn
 the phase assigned to you, report its completion to the architect, and leave the durable
 copy the next phase can trust.
 
+This skill documents the target Dispatch-native contract. `LEGION_ISSUE` as a Dispatch key,
+the `dispatch_ask` tool, and the `Dispatch: <KEY>` PR-body linkage land with PR B (#TBD);
+until that PR merges, this skill's contract is not yet runnable on `main`.
+
 ## Identity, scope, and role
 
 The daemon spawns you as a separate `omp --mode rpc` process (behind `legion worker-shim`,
@@ -21,13 +25,11 @@ completes the boot handshake for you at session start — it registers with the 
 your role, and signals readiness. You never call `envoy_role_set` yourself.
 
 Your role token is not the issue key spelled out literally. The daemon encodes it as
-`legion-<project>-<encoded-owner>__<encoded-repo>-<number>-<role>`, escaping `_`, `.`, and
-`-` within the owner and repo names (`_u`, `_d`, `_h`) so `__` is always the one safe
-separator. For example, project `acme`, issue `sjawhar/legion#41`, role `architect` encodes
-to `legion-acme-sjawhar__legion-41-architect`. Never hand-format one for another role: your
-own role topic and your tree's architect's topic are stated at the end of your system
-prompt (a "Legion addressing" line the daemon appends), a sibling role's topic is yours
-with the trailing `-<role>` replaced, and the `roleToken` helper in `@legion/contracts`
+`legion-<project>-<KEY>-<role>`. For example, project `acme`, issue `LEGION-41`, role
+`architect` encodes to `legion-acme-LEGION-41-architect`. Never hand-format one for another
+role: your own role topic and your tree's architect's topic are stated at the end of your
+system prompt (a "Legion addressing" line the daemon appends), a sibling role's topic is
+yours with the trailing `-<role>` replaced, and the `roleToken` helper in `@legion/contracts`
 computes any other one exactly the way the daemon does — prefer a topic you've already
 been given before recomputing one.
 
@@ -47,7 +49,7 @@ Escalate a product, scope, cross-phase, or lifecycle decision to the owning arch
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents
 inside your own process, not the architect's separate one. For a durable question that needs
-Sami directly, you may use the raw `dispatch` MCP tool yourself; replies return to your own
+Sami directly, you may use `dispatch_ask` yourself; replies return to your own
 session.
 
 Because the same agent is always resumed for its phase, you may receive more than one
@@ -133,11 +135,13 @@ capability it needs; invoke GitHub through the credential helper:
 legion gh -- <gh args…>
 ```
 
-## GitHub comment attribution
+## GitHub PR comment attribution
 
-Append this exact structured footer to **every** GitHub issue comment, pull-request
-comment, and review that this phase posts. It preserves session provenance on the artifact
-itself so work stays attributable to the session that produced it:
+Append this exact structured footer to **every** pull-request comment and review that this
+phase posts on GitHub. It preserves session provenance on the artifact itself so work stays
+attributable to the session that produced it. Dispatch comments carry session provenance
+natively through their own `actor`/`origin` fields; this footer is only for GitHub PR
+artifacts:
 
 ```html
 <!-- legion: {"session":"<session-id>","phase":"<phase>"} -->
@@ -146,7 +150,7 @@ itself so work stays attributable to the session that produced it:
 For example:
 
 ```bash
-legion gh -- issue comment <issue-number> \
+legion gh -- pr comment <pr-number> \
   --body $'Verification complete.\n\n<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->' \
   --repo <owner>/<repo>
 ```
@@ -159,17 +163,19 @@ procedure:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" bookmark set legion/issue-<n> && \
-  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/issue-<n> --allow-new
+  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> && \
+  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 
 The provisioned issue workspace configures `credential.helper` with the daemon's absolute
 credential command, so `jj -R "$LEGION_WORKSPACE" git push` authenticates transparently
 through the same session capability. Never handle a token.
 
-Then open the pull request with `legion gh -- pr create`. The credential helper and
-`legion gh` provide the GitHub identity; never export, fetch, or replace a token. Other
-phases advance the existing branch rather than creating a replacement bookmark or PR.
+Then open the pull request with `legion gh -- pr create`. The PR body **must** contain the
+line `Dispatch: <KEY>` — the daemon's fallback link from a PR to its Dispatch issue when the
+branch name alone is ambiguous. The credential helper and `legion gh` provide the GitHub
+identity; never export, fetch, or replace a token. Other phases advance the existing branch
+rather than creating a replacement bookmark or PR.
 
 ## PR body and merge-queue discipline
 
@@ -243,13 +249,13 @@ cd -- "$LEGION_WORKSPACE" && \
 ```
 
 If the issue bookmark exists locally, advance it and push it with the provisioned
-credential helper. `--allow-new` also publishes the locally provisioned bookmark on its
-first push:
+credential helper. `--bookmark` also publishes the locally provisioned bookmark on its
+first push — a bookmark not yet tracking a remote one is tracked automatically:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" bookmark set legion/issue-<n> && \
-  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/issue-<n> --allow-new
+  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> && \
+  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 
 Do not report phase completion until the write, existence check, and handoff commit
@@ -279,5 +285,5 @@ session, if this phase's work needs to run again.
 
 When blocked on lifecycle, scope, or cross-phase matters, `envoy_publish` the owning
 architect a concise message: issue, phase, verified observation, what you tried, and the
-decision required. Reach for `dispatch` yourself only for a standalone human question
+decision required. Reach for `dispatch_ask` yourself only for a standalone human question
 outside that coordination.

@@ -38,7 +38,7 @@ extension injects the session credential grant for `legion gh --` and `jj git pu
 
 Report the implementation evidence, all files changed, tests and real-surface checks, and any
 deviations or unanswered questions to the architect with `envoy_publish` to its encoded role
-token (never `hub` -- the architect is a separate process). Use `dispatch` yourself only for a
+token (never `hub` -- the architect is a separate process). Use `dispatch_ask` yourself only for a
 standalone human question.
 
 Your last acts before you are done:
@@ -55,6 +55,6 @@ any live role on this issue, including the architect, with `envoy_publish` to `n
 followed by its encoded role token — never hand-format one: your own role topic and your tree's
 architect's are stated at the end of your system prompt, and a sibling role's topic is yours with
 the trailing `-<role>` replaced; or compute one with the `roleToken` helper from `@legion/contracts`
-exactly the way the daemon does (`legion-<project>-<encoded-owner>__<encoded-repo>-<number>-<role>`;
-for example, project `acme`, issue `sjawhar/legion#41`, role `architect` encodes to
-`legion-acme-sjawhar__legion-41-architect`).
+exactly the way the daemon does (`legion-<project>-<KEY>-<role>`;
+for example, project `acme`, issue `LEGION-41`, role `architect` encodes to
+`legion-acme-LEGION-41-architect`).
