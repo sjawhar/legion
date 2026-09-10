@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
 
@@ -23,11 +25,11 @@ const (
 	MarkSuggestion MarkKind = "proofSuggestion"
 )
 
-// MarkSpec identifies a mark and the actor that created it.
 type MarkSpec struct {
-	Kind MarkKind
-	ID   string
-	By   model.Actor
+	Kind  MarkKind
+	ID    string
+	By    model.Actor
+	Attrs pmdoc.Attrs
 }
 
 // MarkReply is a reply projected to Proof's stored-mark format.
@@ -56,12 +58,17 @@ var (
 	ErrAnchorOrphaned = errors.New("anchor mark no longer exists")
 )
 
+type skippedAnchorRefreshKey struct{}
+
 // ActorRef returns the Proof actor reference for an actor.
 func ActorRef(actor model.Actor) string {
 	return actor.Kind + ":" + actor.ID
 }
 
 func (m MarkSpec) pmMark() pmdoc.Mark {
+	if m.Attrs != nil {
+		return pmdoc.Mark{Type: string(m.Kind), Attrs: m.Attrs}
+	}
 	attrs := pmdoc.Attrs{"id": m.ID, "by": ActorRef(m.By)}
 	if m.Kind == MarkSuggestion {
 		attrs["kind"] = "replace"
@@ -81,7 +88,7 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 
 		var markErr error
 		transact(func(txn *crdt.Transaction) {
-			_, markErr = markQuoteInTxn(txn, fragment, tree, quote, occurrence, mark)
+			_, markErr = markQuoteInTxn(txn, fragment, tree, quote, occurrence, nil, mark)
 		})
 		if markErr != nil {
 			return false, markErr
@@ -105,8 +112,8 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 }
 
 // markQuoteInTxn finds quote in doc and writes the supplied mark within txn.
-func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmdoc.Node, quote string, occurrence *int, spec MarkSpec) (pmdoc.Range, error) {
-	range_, err := pmdoc.FindQuote(doc, quote, occurrence, nil)
+func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmdoc.Node, quote string, occurrence, near *int, spec MarkSpec) (pmdoc.Range, error) {
+	range_, err := pmdoc.FindQuote(doc, quote, occurrence, near)
 	if err != nil {
 		return pmdoc.Range{}, err
 	}
@@ -165,12 +172,12 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 
 // AcceptSuggestion applies the replacement for a suggestion mark.
 func (s *Service) AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error {
-	return s.applySuggestion(ctx, artifactID, id, replaceWith, actor, true)
+	return s.applySuggestion(context.WithValue(ctx, skippedAnchorRefreshKey{}, id), artifactID, id, replaceWith, actor, true)
 }
 
 // RejectSuggestion removes a suggestion mark and its inserted text when necessary.
 func (s *Service) RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error {
-	return s.applySuggestion(ctx, artifactID, id, "", actor, false)
+	return s.applySuggestion(context.WithValue(ctx, skippedAnchorRefreshKey{}, id), artifactID, id, "", actor, false)
 }
 
 func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor, accept bool) error {
@@ -274,4 +281,219 @@ func toPlain(record MarkRecord) (map[string]any, error) {
 		return nil, err
 	}
 	return plain, nil
+}
+
+type anchorQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+type anchoredMark struct {
+	id       string
+	markType string
+	anchor   model.Anchor
+}
+
+func (s *Service) openAnchoredMarks(ctx context.Context, artifactID string) ([]anchoredMark, error) {
+	var source anchorQueryer = s.store.Pool
+	if tx, ok := txFromContext(ctx); ok {
+		source = tx
+	}
+	var marks []anchoredMark
+	for _, target := range []struct {
+		table string
+		where string
+	}{
+		{table: "asks", where: "state = 'open'"},
+		{table: "comments", where: "not resolved"},
+	} {
+		rows, err := source.Query(ctx, fmt.Sprintf(`
+			select id::text, anchor, %s
+			from %s
+			where anchor is not null and anchor->>'artifact_id' = $1 and %s
+		`, commentMarkType(target.table), target.table, target.where), artifactID)
+		if err != nil {
+			return nil, fmt.Errorf("list %s anchors: %w", target.table, err)
+		}
+		for rows.Next() {
+			var mark anchoredMark
+			var encoded []byte
+			var typeFromRow string
+			if err := rows.Scan(&mark.id, &encoded, &typeFromRow); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan %s anchor: %w", target.table, err)
+			}
+			if err := json.Unmarshal(encoded, &mark.anchor); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("decode %s anchor: %w", target.table, err)
+			}
+			mark.markType = typeFromRow
+			marks = append(marks, mark)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("list %s anchors: %w", target.table, err)
+		}
+		rows.Close()
+	}
+	return marks, nil
+}
+
+func commentMarkType(table string) string {
+	if table == "comments" {
+		return `case when suggestion is null then 'proofComment' else 'proofSuggestion' end`
+	}
+	return `'dispatchAsk'`
+}
+
+// refreshAnchors updates each open anchor from its current tree mark.
+func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID string, tree *pmdoc.Node) error {
+	anchors, err := s.openAnchoredMarks(WithTx(ctx, tx), artifactID)
+	if err != nil {
+		return err
+	}
+	skippedMarkID, skipping := ctx.Value(skippedAnchorRefreshKey{}).(string)
+	for _, mark := range anchors {
+		if skipping && mark.anchor.MarkID == skippedMarkID {
+			continue
+		}
+		if _, quote, found := pmdoc.FindMark(tree, mark.markType, mark.anchor.MarkID); found {
+			mark.anchor.Quote = quote
+			mark.anchor.Orphaned = false
+		} else {
+			mark.anchor.Orphaned = true
+		}
+		encoded, err := json.Marshal(mark.anchor)
+		if err != nil {
+			return fmt.Errorf("encode anchor: %w", err)
+		}
+		table := "asks"
+		if mark.markType == string(MarkComment) || mark.markType == string(MarkSuggestion) {
+			table = "comments"
+		}
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`update %s set anchor = $2 where id = $1`, table), mark.id, encoded); err != nil {
+			return fmt.Errorf("update %s anchor: %w", table, err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
+	recorded := make(map[pmdoc.MarkRef]struct{})
+	for _, target := range []struct {
+		table string
+	}{
+		{table: "asks"},
+		{table: "comments"},
+	} {
+		rows, err := s.store.Pool.Query(ctx, fmt.Sprintf(`
+			select anchor, %s
+			from %s
+			where anchor is not null and anchor->>'artifact_id' = $1
+		`, commentMarkType(target.table), target.table), artifactID)
+		if err != nil {
+			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
+		}
+		for rows.Next() {
+			var encoded []byte
+			var markType string
+			if err := rows.Scan(&encoded, &markType); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan recorded %s mark: %w", target.table, err)
+			}
+			var anchor model.Anchor
+			if err := json.Unmarshal(encoded, &anchor); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("decode recorded %s mark: %w", target.table, err)
+			}
+			if anchor.MarkID != "" {
+				recorded[pmdoc.MarkRef{Type: markType, ID: anchor.MarkID}] = struct{}{}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
+		}
+		rows.Close()
+	}
+	return recorded, nil
+}
+
+func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
+	recordedRefs, err := s.recordedMarkRefs(context.Background(), room)
+	if err != nil {
+		slog.Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
+		return
+	}
+	now := time.Now()
+	seen := make(map[pmdoc.MarkRef]struct{})
+	var expired []pmdoc.MarkRef
+	var next time.Duration
+	for _, mark := range pmdoc.ListMarks(tree) {
+		if mark.Type != string(MarkAsk) && mark.Type != string(MarkComment) && mark.Type != string(MarkSuggestion) {
+			continue
+		}
+		seen[mark] = struct{}{}
+		if _, found := recordedRefs[mark]; found {
+			state := s.room(room)
+			state.mu.Lock()
+			delete(state.unrecorded, mark)
+			state.mu.Unlock()
+			continue
+		}
+		state := s.room(room)
+		state.mu.Lock()
+		firstSeen, found := state.unrecorded[mark]
+		if !found {
+			firstSeen = now
+			state.unrecorded[mark] = firstSeen
+		}
+		age := now.Sub(firstSeen)
+		if age >= s.unrecordedMarkTTL {
+			expired = append(expired, mark)
+		} else if wait := s.unrecordedMarkTTL - age; next == 0 || wait < next {
+			next = wait
+		}
+		state.mu.Unlock()
+	}
+	state := s.room(room)
+	state.mu.Lock()
+	for mark := range state.unrecorded {
+		if _, found := seen[mark]; !found {
+			delete(state.unrecorded, mark)
+		}
+	}
+	if next > 0 {
+		s.scheduleSettleAfterLocked(room, state, next)
+	}
+	state.mu.Unlock()
+	if len(expired) == 0 {
+		return
+	}
+
+	var sweepErr error
+	err = s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		fresh, readErr := treeOf(doc)
+		if readErr != nil {
+			sweepErr = readErr
+			return
+		}
+		transact(func(txn *crdt.Transaction) {
+			for _, mark := range expired {
+				if _, _, found := pmdoc.FindMark(fresh, mark.Type, mark.ID); !found {
+					continue
+				}
+				if err := pmdoc.Unmark(txn, fragment, mark.Type, mark.ID); err != nil {
+					sweepErr = err
+					return
+				}
+			}
+		})
+	})
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		sweepErr = err
+	}
+	if sweepErr != nil {
+		slog.Error("dispatch: sweep unrecorded marks", "room", room, "error", sweepErr)
+	}
 }

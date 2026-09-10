@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -208,4 +209,168 @@ func browserMarkWithAttrs(t *testing.T, service *Service, artifactID, markType, 
 	if err != nil {
 		t.Errorf("apply browser mark: %v", err)
 	}
+}
+
+func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 20 * time.Millisecond
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	askID := insertAnchoredAsk(t, service, artifactID, "brown")
+
+	editLiveTree(t, service, artifactID, replaceRun("brown", "browner"))
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+	if anchor := loadAskAnchor(t, service, askID); anchor.Quote != "browner" || anchor.Orphaned {
+		t.Fatalf("refreshed anchor = %#v, want browner and not orphaned", anchor)
+	}
+
+	editLiveTree(t, service, artifactID, deleteRun("browner"))
+	waitForDocumentVersion(t, service.store, artifactID, 3)
+	if anchor := loadAskAnchor(t, service, askID); !anchor.Orphaned || anchor.Version != 1 {
+		t.Fatalf("orphaned anchor = %#v, want version-1 orphan", anchor)
+	}
+}
+
+func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "")
+	service := New(Deps{
+		Store:             database,
+		Events:            events.NewBroker(),
+		Settle:            20 * time.Millisecond,
+		UnrecordedMarkTTL: 200 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMark(t, service, artifactID, "proofComment", "dangling", "quick")
+	browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "fox", pmdoc.Attrs{"id": "auth", "by": "user:bob"})
+	resolvedCommentID := insertAnchoredComment(t, service, artifactID, "brown")
+	if _, err := database.Pool.Exec(context.Background(), `update comments set resolved = true where id = $1`, resolvedCommentID); err != nil {
+		t.Fatalf("resolve recorded comment: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling"); !found {
+		t.Fatal("unrecorded mark swept before its TTL")
+	}
+	waitFor(t, time.Second, "unrecorded mark removed", func() bool {
+		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling")
+		return !found
+	})
+	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofAuthored", "auth"); !found {
+		t.Fatal("proof-authored mark was swept")
+	}
+	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", resolvedCommentID); !found {
+		t.Fatal("recorded resolved comment mark was swept")
+	}
+}
+
+func TestReplaceTextReanchorsOpenRows(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 20 * time.Millisecond
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	askID := insertAnchoredAsk(t, service, artifactID, "brown")
+	commentID := insertAnchoredComment(t, service, artifactID, "fox")
+
+	if _, err := service.ReplaceText(context.Background(), artifactID, "A quick brown dog and a slow brown cat", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("replace text: %v", err)
+	}
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+	if anchor := loadAskAnchor(t, service, askID); anchor.Orphaned || anchor.Quote != "brown" {
+		t.Fatalf("ask anchor after replace = %#v, want first brown mark", anchor)
+	}
+	if _, quote, found := pmdoc.FindMark(liveTree(t, service, artifactID), "dispatchAsk", askID); !found || quote != "brown" {
+		t.Fatalf("ask mark after replace = %q found=%t, want brown", quote, found)
+	}
+	if anchor := loadCommentAnchor(t, service, commentID); !anchor.Orphaned {
+		t.Fatalf("comment anchor after replace = %#v, want orphaned", anchor)
+	}
+}
+
+type storedAnchor struct {
+	ArtifactID string `json:"artifact_id"`
+	MarkID     string `json:"mark_id"`
+	Version    int    `json:"version"`
+	Quote      string `json:"quote"`
+	Orphaned   bool   `json:"orphaned"`
+}
+
+func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string) string {
+	t.Helper()
+	const id = "00000000-0000-4000-8000-000000000001"
+	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		Kind: MarkAsk,
+		ID:   id,
+		By:   model.Actor{Kind: "user", ID: "alice"},
+	}, quote, nil); err != nil {
+		t.Fatalf("mark ask: %v", err)
+	}
+	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
+	if err != nil {
+		t.Fatalf("encode ask anchor: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		insert into asks (id, issue_key, author, question, anchor)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored ask', $2)
+	`, id, anchor); err != nil {
+		t.Fatalf("insert anchored ask: %v", err)
+	}
+	return id
+}
+
+func insertAnchoredComment(t *testing.T, service *Service, artifactID, quote string) string {
+	t.Helper()
+	const id = "00000000-0000-4000-8000-000000000002"
+	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		Kind: MarkComment,
+		ID:   id,
+		By:   model.Actor{Kind: "user", ID: "alice"},
+	}, quote, nil); err != nil {
+		t.Fatalf("mark comment: %v", err)
+	}
+	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
+	if err != nil {
+		t.Fatalf("encode comment anchor: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		insert into comments (id, issue_key, author, body, anchor)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored comment', $2)
+	`, id, anchor); err != nil {
+		t.Fatalf("insert anchored comment: %v", err)
+	}
+	return id
+}
+
+func loadAskAnchor(t *testing.T, service *Service, id string) storedAnchor {
+	t.Helper()
+	return loadAnchor(t, service, "asks", id)
+}
+
+func loadCommentAnchor(t *testing.T, service *Service, id string) storedAnchor {
+	t.Helper()
+	return loadAnchor(t, service, "comments", id)
+}
+
+func loadAnchor(t *testing.T, service *Service, table, id string) storedAnchor {
+	t.Helper()
+	var encoded []byte
+	if err := service.store.Pool.QueryRow(context.Background(), "select anchor from "+table+" where id = $1", id).Scan(&encoded); err != nil {
+		t.Fatalf("load %s anchor: %v", table, err)
+	}
+	var anchor storedAnchor
+	if err := json.Unmarshal(encoded, &anchor); err != nil {
+		t.Fatalf("decode %s anchor: %v", table, err)
+	}
+	return anchor
+}
+
+func waitFor(t *testing.T, timeout time.Duration, description string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", description)
 }

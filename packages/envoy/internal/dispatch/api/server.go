@@ -197,15 +197,6 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
 		return
 	}
-	var textAmbiguous *text.ErrTargetAmbiguous
-	if errors.As(err, &textAmbiguous) {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":      textAmbiguous.Error(),
-			"code":       "TARGET_AMBIGUOUS",
-			"candidates": textAmbiguous.Candidates,
-		})
-		return
-	}
 	var ambiguous *pmdoc.ErrTargetAmbiguous
 	if errors.As(err, &ambiguous) {
 		writeJSON(w, http.StatusConflict, map[string]any{
@@ -220,7 +211,15 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_OP", http.StatusBadRequest, invalidOp.Error())
 		return
 	}
-	if errors.Is(err, pmdoc.ErrTargetNotFound) || errors.Is(err, text.ErrTargetNotFound) {
+	if errors.Is(err, docs.ErrAnchorMissing) {
+		writeError(w, "ANCHOR_MISSING", http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, docs.ErrAnchorOrphaned) {
+		writeError(w, "ANCHOR_ORPHANED", http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, pmdoc.ErrTargetNotFound) {
 		writeError(w, "TARGET_NOT_FOUND", http.StatusNotFound, err.Error())
 		return
 	}
@@ -321,6 +320,17 @@ func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Act
 
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 	writeError(w, "CAP_EXCEEDED", http.StatusBadRequest, fmt.Sprintf("%s length %d exceeds limit %d", field, length, limit))
+}
+
+func len16(value string) int {
+	length := 0
+	for _, rune := range value {
+		length++
+		if rune > 0xffff {
+			length++
+		}
+	}
+	return length
 }
 
 func decodeJSON(r *http.Request, value any) error {

@@ -18,7 +18,6 @@ type API interface {
 	CommitVersion(artifactID string, version model.Version)
 	SetIssueClosed(issueKey string, closed bool)
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error)
-	ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, with string, actor model.Actor) error
 	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (string, error)
 	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error)
 	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error

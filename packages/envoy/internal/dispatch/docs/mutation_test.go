@@ -170,24 +170,31 @@ func TestTransactionalApplyDoesNotScheduleSettlement(t *testing.T) {
 	}
 }
 
-func TestTransactionalApplyReresolvesAnchoredComment(t *testing.T) {
+func TestTransactionalApplyRefreshesAnchoredComment(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "target")
+	const commentID = "00000000-0000-4000-8000-000000000003"
+	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		Kind: MarkComment,
+		ID:   commentID,
+		By:   model.Actor{Kind: "user", ID: "alice"},
+	}, "target", nil); err != nil {
+		t.Fatalf("mark anchored comment: %v", err)
+	}
 	anchorJSON, err := json.Marshal(model.Anchor{
 		ArtifactID: artifactID,
+		MarkID:     commentID,
 		Version:    1,
 		Quote:      "target",
-		From:       0,
-		To:         len("target"),
 	})
 	if err != nil {
 		t.Fatalf("encode comment anchor: %v", err)
 	}
 	if _, err := service.store.Pool.Exec(context.Background(), `
-		insert into comments (issue_key, author, body, anchor)
-		values ('DOC-1', '{"kind":"user","id":"alice"}', 'Anchored comment', $1)
-	`, anchorJSON); err != nil {
+		insert into comments (id, issue_key, author, body, anchor)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored comment', $2)
+	`, commentID, anchorJSON); err != nil {
 		t.Fatalf("create anchored comment: %v", err)
 	}
 
@@ -206,19 +213,19 @@ func TestTransactionalApplyReresolvesAnchoredComment(t *testing.T) {
 	}
 
 	var stored []byte
-	if err := service.store.Pool.QueryRow(context.Background(), `select anchor from comments where body = 'Anchored comment'`).Scan(&stored); err != nil {
-		t.Fatalf("load re-resolved comment anchor: %v", err)
+	if err := service.store.Pool.QueryRow(context.Background(), `select anchor from comments where id = $1`, commentID).Scan(&stored); err != nil {
+		t.Fatalf("load refreshed comment anchor: %v", err)
 	}
 	var anchor model.Anchor
 	if err := json.Unmarshal(stored, &anchor); err != nil {
-		t.Fatalf("decode re-resolved comment anchor: %v", err)
+		t.Fatalf("decode refreshed comment anchor: %v", err)
 	}
-	if anchor.From != len("before ") || anchor.To != len("before target") || anchor.Quote != "target" || anchor.Orphaned {
-		t.Fatalf("transactional edit anchor = %#v, want target at [7,13)", anchor)
+	if anchor.MarkID != commentID || anchor.Quote != "target" || anchor.Orphaned {
+		t.Fatalf("transactional edit anchor = %#v, want live target mark", anchor)
 	}
 	var versions int
 	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&versions); err != nil {
-		t.Fatalf("count transactional edit versions: %v", err)
+		t.Fatalf("count document versions: %v", err)
 	}
 	if versions != 1 {
 		t.Fatalf("transactional edit wrote %d versions, want no live-client settle", versions)
@@ -448,37 +455,6 @@ func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 		t.Fatalf("snapshot authors = %#v, want editor and snapshotter", version.Authors)
 	}
 }
-func TestApplyReplaceResolvesAgainstDocumentInsideApply(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "# First")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "base", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("prepare document: %v", err)
-	}
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	service.srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
-		select {
-		case <-entered:
-		default:
-			close(entered)
-			<-release
-		}
-		return service.allowInject(ctx, info)
-	}
-
-	result := make(chan error, 1)
-	go func() {
-		result <- service.ApplyReplace(context.Background(), artifactID, model.Anchor{ArtifactID: artifactID, Quote: "base", To: 4}, "server", model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
-	}()
-	<-entered
-	editLiveTree(t, service, artifactID, replaceRun("base", "base browser"))
-	close(release)
-	if err := <-result; err != nil {
-		t.Fatalf("apply replacement: %v", err)
-	}
-	waitForDocumentText(t, service, artifactID, "server browser\n")
-}
 
 func TestReplaceTextAcceptsUnchangedEmptyDocument(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -488,13 +464,22 @@ func TestReplaceTextAcceptsUnchangedEmptyDocument(t *testing.T) {
 	}
 }
 
-func TestReresolveAnchorsClosesRowsBeforeUpdating(t *testing.T) {
+func TestRefreshAnchorsClosesRowsBeforeUpdating(t *testing.T) {
 	service, artifactID := newTestService(t)
-	askAnchor, err := json.Marshal(model.Anchor{ArtifactID: artifactID, Version: 1, Quote: "after", From: 0, To: len("after")})
+	seedServiceText(t, service, artifactID, "before after")
+	const askID = "00000000-0000-4000-8000-000000000004"
+	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		Kind: MarkAsk,
+		ID:   askID,
+		By:   model.Actor{Kind: "user", ID: "alice"},
+	}, "after", nil); err != nil {
+		t.Fatalf("mark ask: %v", err)
+	}
+	askAnchor, err := json.Marshal(model.Anchor{ArtifactID: artifactID, MarkID: askID, Version: 1, Quote: "after"})
 	if err != nil {
 		t.Fatalf("encode ask anchor: %v", err)
 	}
-	commentAnchor, err := json.Marshal(model.Anchor{ArtifactID: artifactID, Version: 1, Quote: "before", From: 0, To: len("before")})
+	commentAnchor, err := json.Marshal(model.Anchor{ArtifactID: artifactID, MarkID: "missing", Version: 1, Quote: "before"})
 	if err != nil {
 		t.Fatalf("encode comment anchor: %v", err)
 	}
@@ -504,44 +489,44 @@ func TestReresolveAnchorsClosesRowsBeforeUpdating(t *testing.T) {
 	}
 	defer tx.Rollback(context.Background())
 	if _, err := tx.Exec(context.Background(), `
-		insert into asks (issue_key, author, question, anchor)
-		values ('DOC-1', '{"kind":"user","id":"alice"}', 'Moved ask', $1)
-	`, askAnchor); err != nil {
+		insert into asks (id, issue_key, author, question, anchor)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Marked ask', $2)
+	`, askID, askAnchor); err != nil {
 		t.Fatalf("create anchored ask: %v", err)
 	}
 	if _, err := tx.Exec(context.Background(), `
-		insert into comments (issue_key, author, body, anchor)
-		values ('DOC-1', '{"kind":"user","id":"alice"}', 'Orphaned comment', $1)
-	`, commentAnchor); err != nil {
+		insert into comments (id, issue_key, author, body, anchor)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Missing mark comment', $2)
+	`, "00000000-0000-4000-8000-000000000005", commentAnchor); err != nil {
 		t.Fatalf("create anchored comment: %v", err)
 	}
-	if err := service.reresolveAnchors(context.Background(), tx, artifactID, "prefix after\n"); err != nil {
-		t.Fatalf("reresolve anchors after closing rows: %v", err)
+	if err := service.refreshAnchors(context.Background(), tx, artifactID, liveTree(t, service, artifactID)); err != nil {
+		t.Fatalf("refresh anchors after closing rows: %v", err)
 	}
 
 	var encoded []byte
-	if err := tx.QueryRow(context.Background(), `select anchor from asks where question = 'Moved ask'`).Scan(&encoded); err != nil {
-		t.Fatalf("read re-resolved ask: %v", err)
+	if err := tx.QueryRow(context.Background(), `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
+		t.Fatalf("read refreshed ask: %v", err)
 	}
-	var moved model.Anchor
-	if err := json.Unmarshal(encoded, &moved); err != nil {
-		t.Fatalf("decode re-resolved ask: %v", err)
+	var marked model.Anchor
+	if err := json.Unmarshal(encoded, &marked); err != nil {
+		t.Fatalf("decode refreshed ask: %v", err)
 	}
-	if moved.From != len("prefix ") || moved.To != len("prefix after") || moved.Orphaned {
-		t.Fatalf("re-resolved ask = %#v, want after at [7,12)", moved)
+	if marked.Quote != "after" || marked.Orphaned {
+		t.Fatalf("refreshed ask = %#v, want marked after", marked)
 	}
-	if err := tx.QueryRow(context.Background(), `select anchor from comments where body = 'Orphaned comment'`).Scan(&encoded); err != nil {
-		t.Fatalf("read re-resolved comment: %v", err)
+	if err := tx.QueryRow(context.Background(), `select anchor from comments where body = 'Missing mark comment'`).Scan(&encoded); err != nil {
+		t.Fatalf("read orphaned comment: %v", err)
 	}
 	var orphaned model.Anchor
 	if err := json.Unmarshal(encoded, &orphaned); err != nil {
-		t.Fatalf("decode re-resolved comment: %v", err)
+		t.Fatalf("decode orphaned comment: %v", err)
 	}
 	if !orphaned.Orphaned {
-		t.Fatalf("re-resolved comment = %#v, want orphaned", orphaned)
+		t.Fatalf("refreshed comment = %#v, want orphaned", orphaned)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
-		t.Fatalf("commit re-resolved anchors: %v", err)
+		t.Fatalf("commit refreshed anchors: %v", err)
 	}
 }
 func TestNamedVersionIndexesDocumentReferences(t *testing.T) {

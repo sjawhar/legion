@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const maxMessageBody16 = 2000
@@ -28,7 +27,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_MESSAGE", http.StatusBadRequest, "message body is required")
 		return
 	}
-	if length := text.Len16(input.Body); length > maxMessageBody16 {
+	if length := len16(input.Body); length > maxMessageBody16 {
 		capExceeded(w, "body", length, maxMessageBody16)
 		return
 	}

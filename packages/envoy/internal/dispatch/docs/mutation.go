@@ -95,7 +95,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
 	if _, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, nil); err != nil {
-		return fmt.Errorf("reresolve transactional document anchors: %w", err)
+		return fmt.Errorf("refresh transactional document anchors: %w", err)
 	}
 	return nil
 }
@@ -143,9 +143,13 @@ func (s *Service) SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown 
 // ReplaceText replaces the entire live document tree so connected clients
 // receive document uploads as a regular server-side transaction.
 func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
+	anchors, err := s.openAnchoredMarks(ctx, artifactID)
+	if err != nil {
+		return "", err
+	}
 	var canonical string
 	var unchanged bool
-	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err = s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
 		if err != nil {
@@ -167,10 +171,41 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			unchanged = true
 			return false, nil
 		}
+		type reanchor struct {
+			mark   anchoredMark
+			range_ pmdoc.Range
+			attrs  pmdoc.Attrs
+		}
+		reanchors := make([]reanchor, 0, len(anchors))
+		for _, mark := range anchors {
+			range_, _, found := pmdoc.FindMark(current, mark.markType, mark.anchor.MarkID)
+			if !found {
+				continue
+			}
+			attrs, found := pmdoc.MarkAttrs(current, mark.markType, mark.anchor.MarkID)
+			if !found {
+				return false, fmt.Errorf("%w: mark %q is missing attributes", ErrDocSchema, mark.anchor.MarkID)
+			}
+			reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
+		}
 		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
-			updateErr = pmdoc.Update(transaction, fragment, target)
+			if updateErr = pmdoc.Update(transaction, fragment, target); updateErr != nil {
+				return
+			}
+			for _, reanchor := range reanchors {
+				if _, updateErr = markQuoteInTxn(transaction, fragment, target, reanchor.mark.anchor.Quote, nil, &reanchor.range_.From, MarkSpec{
+					Kind:  MarkKind(reanchor.mark.markType),
+					ID:    reanchor.mark.anchor.MarkID,
+					Attrs: reanchor.attrs,
+				}); errors.Is(updateErr, pmdoc.ErrTargetNotFound) {
+					updateErr = nil
+					continue
+				} else if updateErr != nil {
+					return
+				}
+			}
 		})
 		if updateErr != nil {
 			return false, updateErr
@@ -306,53 +341,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	return len(ops), nil
 }
 
-// ApplyReplace resolves a stored markdown anchor against the document locked
-// by Server.Apply and replaces the corresponding ProseMirror range.
-func (s *Service) ApplyReplace(ctx context.Context, artifactID string, anchor model.Anchor, with string, actor model.Actor) error {
-	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
-		fragment := doc.GetXmlFragment(fragmentName)
-		tree, err := treeOf(doc)
-		if err != nil {
-			return false, err
-		}
-		markdown, positions, err := pmdoc.Render(tree)
-		if err != nil {
-			if errors.Is(err, pmdoc.ErrSchema) {
-				return false, fmt.Errorf("%w: %v", ErrDocSchema, err)
-			}
-			return false, err
-		}
-		resolved := text.Reresolve(markdown, anchor)
-		if resolved.Orphaned {
-			return false, text.ErrTargetNotFound
-		}
-		target, err := inlineAware(with)
-		if err != nil {
-			return false, err
-		}
-		next, err := pmdoc.Splice(tree, pmdoc.Range{
-			From: positions.ToPM(resolved.From),
-			To:   positions.ToPM(resolved.To),
-		}, target)
-		if err != nil {
-			return false, err
-		}
-		s.recordActor(artifactID, actor)
-		var updateErr error
-		transact(func(transaction *crdt.Transaction) {
-			updateErr = pmdoc.Update(transaction, fragment, next)
-		})
-		if updateErr != nil {
-			return false, updateErr
-		}
-		return true, nil
-	})
-	if err != nil {
-		return fmt.Errorf("apply live document replacement: %w", err)
-	}
-	return nil
-}
-
 // NamedVersion records the live text as a deliberately named immutable version.
 // NamedVersion records the live document as a deliberately named immutable version.
 func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error) {
@@ -391,56 +379,6 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 		s.CommitVersion(artifactID, version)
 	}
 	return version, nil
-}
-
-func (s *Service) reresolveAnchors(ctx context.Context, tx pgx.Tx, artifactID, markdown string) error {
-	for _, target := range []struct {
-		table string
-		where string
-	}{
-		{table: "asks", where: "state = 'open'"},
-		{table: "comments", where: "not resolved"},
-	} {
-		rows, err := tx.Query(ctx, fmt.Sprintf(`
-			select id::text, anchor from %s
-			where anchor is not null and anchor->>'artifact_id' = $1 and %s
-		`, target.table, target.where), artifactID)
-		if err != nil {
-			return fmt.Errorf("list %s anchors: %w", target.table, err)
-		}
-		type row struct {
-			id      string
-			encoded []byte
-		}
-		var anchored []row
-		for rows.Next() {
-			var anchor row
-			if err := rows.Scan(&anchor.id, &anchor.encoded); err != nil {
-				rows.Close()
-				return fmt.Errorf("scan %s anchor: %w", target.table, err)
-			}
-			anchored = append(anchored, anchor)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("list %s anchors: %w", target.table, err)
-		}
-		rows.Close()
-		for _, row := range anchored {
-			var anchor model.Anchor
-			if err := json.Unmarshal(row.encoded, &anchor); err != nil {
-				return fmt.Errorf("decode %s anchor: %w", target.table, err)
-			}
-			encoded, err := json.Marshal(text.Reresolve(markdown, anchor))
-			if err != nil {
-				return fmt.Errorf("encode %s anchor: %w", target.table, err)
-			}
-			if _, err := tx.Exec(ctx, fmt.Sprintf(`update %s set anchor = $2 where id = $1`, target.table), row.id, encoded); err != nil {
-				return fmt.Errorf("update %s anchor: %w", target.table, err)
-			}
-		}
-	}
-	return nil
 }
 
 func (s *Service) recordActor(room string, actor model.Actor) {
@@ -519,12 +457,12 @@ func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {
 }
 
 // writeVersionTx is the only path that changes the durable version protocol:
-// version writes index references, re-resolve anchors, and retain its author
+// version writes index references, refresh anchors, and retain its author
 // capture until the enclosing transaction commits. A nil write records no
 // version but keeps a transactional tree mutation's anchors in the same path.
 func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, markdown string, tree *pmdoc.Node, write *versionWrite) (model.Version, error) {
 	if write == nil {
-		return model.Version{}, s.reresolveAnchors(ctx, tx, artifactID, markdown)
+		return model.Version{}, s.refreshAnchors(ctx, tx, artifactID, tree)
 	}
 
 	encodedAuthors, err := json.Marshal(write.authors)
@@ -549,7 +487,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if err := s.indexDocumentReferences(ctx, tx, artifactID, markdown); err != nil {
 		return model.Version{}, err
 	}
-	if err := s.reresolveAnchors(ctx, tx, artifactID, markdown); err != nil {
+	if err := s.refreshAnchors(ctx, tx, artifactID, tree); err != nil {
 		return model.Version{}, err
 	}
 	if write.capture != nil {

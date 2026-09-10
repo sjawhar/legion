@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -30,14 +31,15 @@ var (
 
 // Deps configures the live document service.
 type Deps struct {
-	Store       *store.Store
-	Persistence VersionedStore
-	Events      *events.Broker
-	Identity    identity.Identity
-	AgentToken  string
-	ServerURL   string
-	Settle      time.Duration
-	MarkWait    time.Duration
+	Store             *store.Store
+	Persistence       VersionedStore
+	Events            *events.Broker
+	Identity          identity.Identity
+	AgentToken        string
+	ServerURL         string
+	Settle            time.Duration
+	MarkWait          time.Duration
+	UnrecordedMarkTTL time.Duration
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -49,21 +51,22 @@ type VersionedStore interface {
 
 // Service owns live Yjs documents and their durable Dispatch versions.
 type Service struct {
-	srv            *websocket.Server
-	store          *store.Store
-	persistence    VersionedStore
-	events         *events.Broker
-	identity       identity.Identity
-	agentToken     string
-	serverURL      string
-	settle         time.Duration
-	markWait       time.Duration
-	rooms          sync.Map
-	nextConnection atomic.Uint64
-	stopping       atomic.Bool
-	settleWG       sync.WaitGroup
-	suppressMu     sync.Mutex
-	suppressed     map[string][]*suppressSlot
+	srv               *websocket.Server
+	store             *store.Store
+	persistence       VersionedStore
+	events            *events.Broker
+	identity          identity.Identity
+	agentToken        string
+	serverURL         string
+	settle            time.Duration
+	markWait          time.Duration
+	unrecordedMarkTTL time.Duration
+	rooms             sync.Map
+	nextConnection    atomic.Uint64
+	stopping          atomic.Bool
+	settleWG          sync.WaitGroup
+	suppressMu        sync.Mutex
+	suppressed        map[string][]*suppressSlot
 }
 
 type roomState struct {
@@ -71,6 +74,7 @@ type roomState struct {
 	pending         map[string]model.Actor
 	pendingVersions map[int]versionPending
 	settle          *time.Timer
+	unrecorded      map[pmdoc.MarkRef]time.Time
 	gen             uint64
 	suppressSettle  int
 	failed          error
@@ -178,6 +182,10 @@ func New(deps Deps) *Service {
 	if markWait <= 0 {
 		markWait = time.Second
 	}
+	unrecordedMarkTTL := deps.UnrecordedMarkTTL
+	if unrecordedMarkTTL <= 0 {
+		unrecordedMarkTTL = time.Minute
+	}
 	if deps.Events == nil {
 		deps.Events = events.NewBroker()
 	}
@@ -186,15 +194,15 @@ func New(deps Deps) *Service {
 		persist = NewPgVersioned(deps.Store)
 	}
 	service := &Service{
-		store:       deps.Store,
-		persistence: persist,
-		events:      deps.Events,
-		identity:    deps.Identity,
-		agentToken:  deps.AgentToken,
-		serverURL:   strings.TrimSuffix(deps.ServerURL, "/"),
-		settle:      settle,
-		markWait:    markWait,
-		suppressed:  make(map[string][]*suppressSlot),
+		store:             deps.Store,
+		persistence:       persist,
+		events:            deps.Events,
+		identity:          deps.Identity,
+		agentToken:        deps.AgentToken,
+		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
+		settle:            settle,
+		markWait:          markWait,
+		unrecordedMarkTTL: unrecordedMarkTTL,
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
@@ -242,6 +250,10 @@ func (s *Service) scheduleSettle(room string) {
 }
 
 func (s *Service) scheduleSettleLocked(room string, state *roomState) {
+	s.scheduleSettleAfterLocked(room, state, s.settle)
+}
+
+func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay time.Duration) {
 	if s.stopping.Load() || state.closed || state.failed != nil || state.suppressSettle > 0 {
 		return
 	}
@@ -251,7 +263,7 @@ func (s *Service) scheduleSettleLocked(room string, state *roomState) {
 		s.settleWG.Done()
 	}
 	s.settleWG.Add(1)
-	state.settle = time.AfterFunc(s.settle, func() {
+	state.settle = time.AfterFunc(delay, func() {
 		defer s.settleWG.Done()
 		s.settleRoom(room, generation)
 	})
@@ -361,6 +373,11 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	if latest.markdown == markdown {
+		if err := tx.Rollback(ctx); err != nil {
+			s.retrySettle(room, generation, fmt.Errorf("rollback unchanged document transaction: %w", err))
+			return
+		}
+		s.sweepUnrecordedMarks(room, tree)
 		return
 	}
 	authors := actorSlice(pending)
@@ -395,6 +412,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	}
 	state.mu.Unlock()
 	s.events.Publish(event)
+	s.sweepUnrecordedMarks(room, tree)
 }
 
 func (s *Service) waitSettles(ctx context.Context) {
@@ -561,6 +579,7 @@ func (s *Service) room(name string) *roomState {
 		connected:       make(map[uint64]model.Actor),
 		pending:         make(map[string]model.Actor),
 		pendingVersions: make(map[int]versionPending),
+		unrecorded:      make(map[pmdoc.MarkRef]time.Time),
 	})
 	return value.(*roomState)
 }
