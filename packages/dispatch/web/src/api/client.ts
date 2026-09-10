@@ -212,6 +212,16 @@ export class DispatchApiClient {
   }
 
   async uploadArtifact(key: string, input: CreateArtifactInput): Promise<ArtifactUploadResponse> {
+    const path = `/api/v1/issues/${pathSegment(key)}/artifacts`;
+    if ("content" in input) {
+      return this.post<ArtifactUploadResponse>(path, {
+        actor: input.actor,
+        content: input.content,
+        name: input.name,
+        primary: input.primary,
+        summary: input.summary,
+      });
+    }
     const body = new FormData();
     body.set("name", input.name);
     if (input.primary !== undefined) {
@@ -225,7 +235,7 @@ export class DispatchApiClient {
     }
     body.set("file", input.file);
 
-    return this.json<ArtifactUploadResponse>(`/api/v1/issues/${pathSegment(key)}/artifacts`, {
+    return this.json<ArtifactUploadResponse>(path, {
       body,
       method: "POST",
     });

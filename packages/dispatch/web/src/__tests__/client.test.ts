@@ -76,6 +76,28 @@ test("API client preserves the null version returned by a no-op edit", async () 
   expect(result).toEqual({ applied: 0, version: null });
 });
 
+test("API client uploads inline artifact content as JSON and files as multipart", async () => {
+  const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
+  const api = createApiClient(stub.fetch);
+
+  await api.uploadArtifact("CORE-1", { content: "# Spec\n", name: "spec.md", primary: true });
+  await api.uploadArtifact("CORE-1", {
+    file: new File(["spec"], "spec.md", { type: "text/markdown" }),
+    name: "spec.md",
+  });
+
+  const [inline, multipart] = stub.requests;
+  expect(inline?.path).toBe("/api/v1/issues/CORE-1/artifacts");
+  expect(inline?.init?.method).toBe("POST");
+  expect(JSON.parse(String(inline?.init?.body))).toEqual({
+    content: "# Spec\n",
+    name: "spec.md",
+    primary: true,
+  });
+  expect(multipart?.init?.body).toBeInstanceOf(FormData);
+  expect((multipart?.init?.body as FormData).get("name")).toBe("spec.md");
+});
+
 test("API client sends the documented method and JSON body for mutations", async () => {
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
