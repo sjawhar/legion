@@ -105,15 +105,22 @@ invalid actor, route, or primary artifact.
 
 ## Artifacts
 
-Attach an image, diagram, or file with:
+Attach an image, diagram, or local file with:
 
 ```ts
 dispatch_artifact({ issue, name, path, primary?, summary? })
 ```
 
-It returns `details` `{ issue, topic, artifact, version }`. `path` is the local file to upload.
-Uploading the same `name` creates its next version. Set `primary: true` only for a markdown file
-to make it the issue's spec.
+Or, when the text is already in the call, post a Markdown document directly:
+
+```ts
+dispatch_artifact({ issue, name: "spec.md", content: "# Design\n...", primary: true })
+```
+
+Exactly one of `path` and `content` is required. The inline form sends JSON with
+`Content-Type: application/json`. It returns `details` `{ issue, topic, artifact, version }`.
+Uploading the same `name` creates its next version. Use `content` for an architect's primary spec;
+set `primary: true` only for Markdown documents.
 
 ## Messages
 

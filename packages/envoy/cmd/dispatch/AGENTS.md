@@ -75,7 +75,7 @@ the table says human only.
 | `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. |
 | `/api/v1/comments/{id}/reject` | POST | human only | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | user or bearer | Post a short issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List or upload artifact versions. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. |
 | `/api/v1/artifacts/{id}/primary` | POST | human only | Make a document the issue primary artifact. |
 | `/api/v1/artifacts/{id}` | GET | user or bearer | Read an artifact, versions, and references. |
 | `/api/v1/artifacts/{id}/text` | GET | user or bearer | Read a live document's markdown. |

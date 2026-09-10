@@ -35,53 +35,151 @@ func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, artifacts)
 }
 
+type artifactUploadInput struct {
+	name        string
+	content     []byte
+	contentType string
+	primary     bool
+	summary     string
+	supplied    *model.Actor
+	inline      bool
+	blank       bool
+}
+
+type jsonArtifactUpload struct {
+	Name    string       `json:"name"`
+	Content *string      `json:"content"`
+	Primary bool         `json:"primary"`
+	Summary string       `json:"summary"`
+	Actor   *model.Actor `json:"actor"`
+}
+
 func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "invalid artifact input type")
+		return
+	}
+
+	var input artifactUploadInput
+	var ok bool
+	switch requestType {
+	case "application/json":
+		input, ok = s.jsonArtifactUpload(w, r)
+	case "multipart/form-data":
+		input, ok = s.multipartArtifactUpload(w, r)
+	default:
+		writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "artifact input must be JSON or multipart")
+		return
+	}
+	if !ok {
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.supplied)
+	if !ok {
+		return
+	}
+	if input.name == "" {
+		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "artifact name is required")
+		return
+	}
+	if input.inline && input.blank {
+		writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "inline artifact content is required")
+		return
+	}
+	if len(input.content) > maxArtifactBlobSize {
 		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
 		return
+	}
+	mediaType, _, err := mime.ParseMediaType(input.contentType)
+	if err != nil {
+		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
+		return
+	}
+	kind := artifactKind(mediaType)
+	if input.primary && kind != "doc" {
+		writeError(w, "PRIMARY_NOT_DOC", http.StatusBadRequest, "only documents can be primary")
+		return
+	}
+	s.storeArtifact(w, r, input, actor, kind)
+}
+
+func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
+	var body jsonArtifactUpload
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		} else {
+			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid JSON body")
+		}
+		return artifactUploadInput{}, false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeError(w, "INVALID_JSON", http.StatusBadRequest, "request body must contain one JSON value")
+		return artifactUploadInput{}, false
+	}
+	blank := body.Content == nil || strings.TrimSpace(*body.Content) == ""
+	var content []byte
+	if body.Content != nil {
+		content = []byte(*body.Content)
+	}
+	return artifactUploadInput{
+		name:        strings.TrimSpace(body.Name),
+		content:     content,
+		contentType: "text/markdown; charset=utf-8",
+		primary:     body.Primary,
+		summary:     strings.TrimSpace(body.Summary),
+		supplied:    body.Actor,
+		inline:      true,
+		blank:       blank,
+	}, true
+}
+
+func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		return artifactUploadInput{}, false
 	}
 	var supplied *model.Actor
 	if raw := r.FormValue("actor"); raw != "" {
 		var actor model.Actor
 		if err := json.Unmarshal([]byte(raw), &actor); err != nil {
 			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid multipart actor")
-			return
+			return artifactUploadInput{}, false
 		}
 		supplied = &actor
-	}
-	actor, ok := s.requireActor(w, r, supplied)
-	if !ok {
-		return
-	}
-	name := strings.TrimSpace(r.FormValue("name"))
-	if name == "" {
-		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "artifact name is required")
-		return
 	}
 	primary := false
 	if raw := r.FormValue("primary"); raw != "" {
 		parsed, err := strconv.ParseBool(raw)
 		if err != nil {
 			writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "primary must be true or false")
-			return
+			return artifactUploadInput{}, false
 		}
 		primary = parsed
 	}
+	name := strings.TrimSpace(r.FormValue("name"))
 	file, header, err := r.FormFile("file")
+	if len(r.MultipartForm.Value["content"]) > 0 {
+		if err == nil {
+			_ = file.Close()
+		}
+		writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "provide either a file or inline JSON content")
+		return artifactUploadInput{}, false
+	}
 	if err != nil {
 		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "artifact file is required")
-		return
+		return artifactUploadInput{}, false
 	}
 	defer file.Close()
 	content, err := io.ReadAll(io.LimitReader(file, maxArtifactBlobSize+1))
 	if err != nil {
 		s.writeHandlerError(w, err)
-		return
-	}
-	if len(content) > maxArtifactBlobSize {
-		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
-		return
+		return artifactUploadInput{}, false
 	}
 	contentType := header.Header.Get("Content-Type")
 	if contentType == "" {
@@ -90,18 +188,23 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
-		return
-	}
-	kind := artifactKind(mediaType)
-	if primary && kind != "doc" {
-		writeError(w, "PRIMARY_NOT_DOC", http.StatusBadRequest, "only documents can be primary")
-		return
-	}
-	summary := strings.TrimSpace(r.FormValue("summary"))
+	return artifactUploadInput{
+		name:        name,
+		content:     content,
+		contentType: contentType,
+		primary:     primary,
+		summary:     strings.TrimSpace(r.FormValue("summary")),
+		supplied:    supplied,
+	}, true
+}
 
+func (s *server) storeArtifact(
+	w http.ResponseWriter,
+	r *http.Request,
+	input artifactUploadInput,
+	actor model.Actor,
+	kind string,
+) {
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -125,15 +228,15 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var artifact model.Artifact
 	var created bool
-	artifact, err = s.findArtifactByName(r.Context(), tx, issueKey, name)
+	artifact, err = s.findArtifactByName(r.Context(), tx, issueKey, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
-		slug, err := s.nextArtifactSlug(r.Context(), tx, issueKey, name)
+		slug, err := s.nextArtifactSlug(r.Context(), tx, issueKey, input.name)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if primary {
+		if input.primary {
 			if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = false where issue_key = $1 and is_primary`, issueKey); err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -148,7 +251,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 			insert into artifacts (issue_key, slug, name, kind, is_primary, created_by)
 			values ($1, $2, $3, $4, $5, $6)
 			returning id::text, issue_key, slug, name, kind, is_primary, created_by, created_at
-		`, issueKey, slug, name, kind, primary, actorJSON).Scan(
+		`, issueKey, slug, input.name, kind, input.primary, actorJSON).Scan(
 			&artifact.ID, &artifact.IssueKey, &artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &actorJSON, &artifact.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, err)
@@ -166,7 +269,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
 			return
 		}
-		if primary && !artifact.Primary {
+		if input.primary && !artifact.Primary {
 			if _, err := tx.Exec(r.Context(), `update artifacts set is_primary = false where issue_key = $1 and is_primary`, issueKey); err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -191,18 +294,18 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var version model.Version
 	var versionAuthors []byte
-	checksum := sha256.Sum256(content)
+	checksum := sha256.Sum256(input.content)
 	sha := hex.EncodeToString(checksum[:])
 	var summaryValue any
-	if summary != "" {
-		summaryValue = summary
+	if input.summary != "" {
+		summaryValue = input.summary
 	}
 	if kind == "doc" {
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary)
 			values ($1, $2, $3, $4, $5, $6)
 			returning number, named, summary, authors, created_at
-		`, artifact.ID, nextNumber, string(content), authors, summary != "", summaryValue).Scan(
+		`, artifact.ID, nextNumber, string(input.content), authors, input.summary != "", summaryValue).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, err)
@@ -210,27 +313,27 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx := docs.WithTx(r.Context(), tx)
 		if created {
-			err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(content))
+			err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content))
 		} else {
 			evictArtifactID = artifact.ID
 			evictOnFailure = true
-			err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(content), actor)
+			err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(input.content), actor)
 		}
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := s.replaceRefs(r.Context(), tx, "artifact", artifact.ID, string(content)); err != nil {
+		if err := s.replaceRefs(r.Context(), tx, "artifact", artifact.ID, string(input.content)); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 	} else {
-		size := len(content)
+		size := len(input.content)
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
 			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			returning number, named, summary, authors, created_at, size, mime, sha256
-		`, artifact.ID, nextNumber, content, contentType, size, sha, authors, summary != "", summaryValue).Scan(
+		`, artifact.ID, nextNumber, input.content, input.contentType, size, sha, authors, input.summary != "", summaryValue).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
 			&version.Size, &version.MIME, &version.SHA256,
 		); err != nil {

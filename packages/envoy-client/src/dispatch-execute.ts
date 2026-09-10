@@ -11,7 +11,12 @@ import type {
   Event,
   IssueDetails,
 } from "@legion/contracts";
-import { ASK_URGENCIES, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
+import {
+  ASK_URGENCIES,
+  dispatchToolSchema,
+  dispatchToolSpecs,
+  zodSchemaApi,
+} from "@legion/contracts";
 import { z } from "zod";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import {
@@ -131,10 +136,10 @@ function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   return { issue, kind: "issue", id: issue };
 }
 
-function toolSchema(tool: string): z.ZodObject<z.ZodRawShape> {
+function toolSchema(tool: string): z.ZodType {
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
   if (!spec) throw new Error(`Unknown Dispatch tool: ${tool}`);
-  return z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape).strict();
+  return dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
 }
 
 async function resolveIssueArguments(
@@ -498,13 +503,26 @@ export async function executeDispatchTool(
     case "dispatch_artifact": {
       const primary = optionalBoolean(args, "primary");
       const summary = optionalString(args, "summary");
-      const result = await client.artifact(issue(), {
-        name: stringArg(args, "name"),
-        file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
-        ...(primary === undefined ? {} : { primary }),
-        ...(summary === undefined ? {} : { summary }),
-        actor,
-      });
+      const name = stringArg(args, "name");
+      const content = optionalString(args, "content");
+      const result = await client.artifact(
+        issue(),
+        content === undefined
+          ? {
+              name,
+              file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
+              ...(primary === undefined ? {} : { primary }),
+              ...(summary === undefined ? {} : { summary }),
+              actor,
+            }
+          : {
+              name,
+              content,
+              ...(primary === undefined ? {} : { primary }),
+              ...(summary === undefined ? {} : { summary }),
+              actor,
+            }
+      );
       return {
         text: `Uploaded ${result.artifact.name} as version ${result.version.number}`,
         details: {

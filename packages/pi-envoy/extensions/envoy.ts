@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   agentSubject,
+  dispatchToolSchema,
   dispatchToolSpecs,
   ROLE_TOPIC_PREFIX,
   zodSchemaApi,
@@ -676,7 +677,7 @@ export default function envoyExtension(pi: PiApi): void {
         name: spec.name,
         label: spec.name,
         description: spec.description,
-        parameters: pi.zod.object(spec.arguments(zodSchemaApi(pi.zod))),
+        parameters: dispatchToolSchema(spec, zodSchemaApi(pi.zod)),
         execute: async (_id, params, _signal, _onUpdate, context) => {
           try {
             const result = await executeDispatchTool({

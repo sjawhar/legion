@@ -406,6 +406,61 @@ describe("executeDispatchTool", () => {
     }
   });
 
+  test("uploads inline artifact content as JSON", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = { url: String(url), init: init ?? {} };
+      requests.push(request);
+      return response({
+        artifact: { id: "artifact-42", issue_key: "DSP-42", name: "spec.md" },
+        version: { number: 1 },
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_artifact",
+      args: { issue: "DSP-42", name: "spec.md", content: "# Spec\n", primary: true },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 1 });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.init.headers).toMatchObject({ "Content-Type": "application/json" });
+    expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({
+      name: "spec.md",
+      content: "# Spec\n",
+      primary: true,
+      actor: { kind: "session", id: "session-42" },
+    });
+  });
+
+  test.each([
+    ["neither path nor content", { issue: "DSP-42", name: "spec.md" }],
+    [
+      "both path and content",
+      { issue: "DSP-42", name: "spec.md", path: "spec.md", content: "# Spec\n" },
+    ],
+  ])("rejects an artifact call with %s", async (_name, args) => {
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_artifact",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async () => response({})) as unknown as typeof fetch,
+      })
+    ).rejects.toThrow("Exactly one of path or content is required.");
+  });
+
   test("creates an unlinked external issue once, then resolves it for later tool calls", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     let resolves = 0;

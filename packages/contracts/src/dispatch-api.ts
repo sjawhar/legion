@@ -303,13 +303,15 @@ export interface CreateMessageInput {
   readonly actor?: Actor;
 }
 
-export interface CreateArtifactInput {
+interface CreateArtifactOptions {
   readonly name: string;
   readonly primary?: boolean;
   readonly summary?: string;
   readonly actor?: Actor;
-  readonly file: Blob;
 }
+
+export type CreateArtifactInput = CreateArtifactOptions &
+  ({ readonly file: Blob } | { readonly content: string });
 
 export interface CreateVersionInput {
   readonly summary: string;

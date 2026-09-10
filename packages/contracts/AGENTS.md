@@ -28,9 +28,10 @@ the native Dispatch tool suite:
   `dispatch_issue`, `dispatch_ask`, `dispatch_comment`, `dispatch_suggest`,
   `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
   `dispatch_artifact`, and `dispatch_read`. It defines their names, descriptions,
-  and schemas; host adapters consume `dispatchToolSpecs` directly.
-- Build Dispatch tool shapes through `zodSchemaApi(hostZod)` so option bags
-  apply to the host's Zod.
+  and field shapes; host adapters consume `dispatchToolSpecs` directly.
+- Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
+  host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the
+  host validates a call so tool-level cross-field validation also applies.
 - Do not hand-edit `packages/envoy/internal/contracts/generated.go`.
 - If the envelope or subject shape changes, update its schema and regenerate the
   applicable Go output.

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { dispatchToolSpecs } from "./dispatch-tools";
+import { dispatchToolSchema, dispatchToolSpecs } from "./dispatch-tools";
 import { zodSchemaApi } from "./tool-schema";
 
 const schemaApi = zodSchemaApi(z);
@@ -29,7 +29,7 @@ const validCalls = {
 function schemaFor(name: keyof typeof validCalls) {
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
   if (!spec) throw new Error(`missing ${name}`);
-  return z.object(spec.arguments(schemaApi) as z.ZodRawShape);
+  return dispatchToolSchema(spec, schemaApi);
 }
 
 describe("zodSchemaApi", () => {
@@ -99,6 +99,18 @@ describe("dispatchToolSpecs", () => {
         ops: [{ op: "bogus" }],
       }).success
     ).toBe(false);
+  });
+
+  test("requires exactly one artifact upload source", () => {
+    const schema = schemaFor("dispatch_artifact");
+    const shared = { issue: "DSP-1", name: "spec.md" };
+
+    expect(schema.safeParse({ ...shared, path: "spec.md" }).success).toBe(true);
+    expect(schema.safeParse({ ...shared, content: "# Spec\n" }).success).toBe(true);
+    expect(schema.safeParse(shared).success).toBe(false);
+    expect(schema.safeParse({ ...shared, path: "spec.md", content: "# Spec\n" }).success).toBe(
+      false
+    );
   });
   test("leaves Dispatch subscriptions to successful tool results", () => {
     expect(dispatchToolSpecs.every((spec) => !("subscribes" in spec))).toBe(true);

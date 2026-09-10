@@ -11,7 +11,13 @@ export interface SchemaApi<E extends SchemaNode<E>> {
   boolean(): E;
   enum(values: readonly [string, ...string[]]): E;
   array(item: E, opts?: { min?: number; max?: number }): E;
-  object(shape: Record<string, E>): E;
+  object(shape: Record<string, E>, opts?: { strict?: boolean }): E;
+  refineObject(
+    shape: Record<string, E>,
+    check: (value: unknown) => boolean,
+    message: string,
+    opts?: { strict?: boolean }
+  ): E;
 }
 
 export type ToolArgumentsShape = Readonly<Record<string, unknown>>;
@@ -22,13 +28,18 @@ type ZodNode = z.ZodType & {
   int(): ZodNode;
 };
 
+interface ZodObjectNode {
+  refine(check: (value: unknown) => unknown, params?: unknown): ZodNode;
+  strict(): ZodObjectNode;
+}
+
 interface ZodApi {
   string(): ZodNode;
   number(): ZodNode;
   boolean(): ZodNode;
   enum(values: readonly [string, ...string[]]): ZodNode;
   array(item: ZodNode): ZodNode;
-  object(shape: Record<string, ZodNode>): ZodNode;
+  object(shape: Record<string, ZodNode>): ZodObjectNode;
 }
 
 export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
@@ -56,6 +67,15 @@ export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
       if (opts.max !== undefined) schema = schema.max(opts.max);
       return schema;
     },
-    object: (shape) => api.object(shape as unknown as Record<string, ZodNode>),
+    object: (shape, opts = {}) => {
+      let schema = api.object(shape as unknown as Record<string, ZodNode>);
+      if (opts.strict) schema = schema.strict();
+      return schema as unknown as z.ZodType;
+    },
+    refineObject: (shape, check, message, opts = {}) => {
+      let schema = api.object(shape as unknown as Record<string, ZodNode>);
+      if (opts.strict) schema = schema.strict();
+      return schema.refine(check, message) as z.ZodType;
+    },
   };
 }

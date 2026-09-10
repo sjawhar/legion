@@ -203,7 +203,9 @@ func multipartRequest(t *testing.T, handler http.Handler, target string, fields 
 	}
 	header := textproto.MIMEHeader{}
 	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
-	header.Set("Content-Type", contentType)
+	if contentType != "" {
+		header.Set("Content-Type", contentType)
+	}
 	part, err := writer.CreatePart(header)
 	if err != nil {
 		t.Fatalf("create multipart file part: %v", err)

@@ -19,6 +19,7 @@ integration to deliver Envoy traffic into a live session, including idle session
   and `DISPATCH_TOKEN` provide them. Each call fills the target repo from the session's working
   directory, stamps it with the Claude session id, and subscribes each successful mutation's
   `details.topic` so its Dispatch events arrive back through Envoy.
+
 - The MCP server is also the session's topic consumer. Envoy pushes nothing to a session that
   consumes NATS itself, and the monitor listens only on `notifications.agent.<session-id>`, so
   for every topic the session follows — a Dispatch mutation or anything passed to
@@ -29,6 +30,10 @@ integration to deliver Envoy traffic into a live session, including idle session
   Dispatch auto-subscription remains best-effort and reports the gap on stderr.
 - `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
   `dispatch` skill (when to raise a question) alongside the tools.
+
+`dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
+An architect can post a primary specification directly with
+`{ issue, name: "spec.md", content: "# Design", primary: true }`.
 
 ## Inbound rendering
 

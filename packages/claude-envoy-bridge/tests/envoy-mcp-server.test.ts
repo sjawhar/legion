@@ -47,7 +47,7 @@ const requiredDispatchFields: Readonly<Record<(typeof dispatchToolNames)[number]
   dispatch_message: ["issue", "body"],
   dispatch_doc_edit: ["issue", "artifact", "ops"],
   dispatch_doc_read: [],
-  dispatch_artifact: ["issue", "name", "path"],
+  dispatch_artifact: ["issue", "name"],
   dispatch_read: [],
 }
 

@@ -1,4 +1,4 @@
-import { dispatchToolSpecs, zodSchemaApi } from "@legion/contracts"
+import { dispatchToolSchema, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts"
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
@@ -52,7 +52,7 @@ if (!dispatchConfig.enabled) {
 const dispatchToolDefinitions = dispatchToolSpecs.map((spec) => ({
   name: spec.name,
   description: spec.description,
-  inputSchema: z.toJSONSchema(z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape)),
+  inputSchema: z.toJSONSchema(dispatchToolSchema(spec, zodSchemaApi(z))),
 }))
 
 export const envoyMcpToolDefinitions = [
