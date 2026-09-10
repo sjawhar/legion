@@ -117,6 +117,15 @@ function dispatchPayload(event: DispatchEvent): unknown {
   return parsed.success ? parsed.data : event.payload;
 }
 
+// A comment.created reply to an ask carries the question text (ask_question)
+// alongside the id-shaped in_reply_to, so the TOON's "re:" line reads as a
+// question, not an opaque UUID.
+function dispatchAskQuestion(event: DispatchEvent): string | undefined {
+  if (event.type !== "comment.created") return undefined;
+  const parsed = CommentPayloadSchema.safeParse(event.payload);
+  return parsed.success && parsed.data.ask_question !== "" ? parsed.data.ask_question : undefined;
+}
+
 // A Dispatch bus frame's JSON payload either matches the wire contract documented
 // above (`event`) or it doesn't — invalid JSON, or a JSON value that disagrees with
 // `DispatchEventSchema` — in which case the raw parsed value (object or string) is
@@ -182,6 +191,7 @@ export function renderInbound(
   }
   let dispatchEvent: unknown;
   let dispatchIssue: string | undefined;
+  let askQuestion: string | undefined;
   const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
   if (envelope.source === "dispatch") {
     if (envelope.payload === undefined) {
@@ -198,6 +208,7 @@ export function renderInbound(
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
           return { skip: true, content: "", envelope };
         }
+        askQuestion = dispatchAskQuestion(frame.event);
         dispatchEvent = {
           issue_key: frame.event.issue_key,
           type: frame.event.type,
@@ -268,7 +279,7 @@ export function renderInbound(
     ...(envelope.expires_at === undefined ? {} : { by: inboundTimestamp(envelope.expires_at) }),
     ...(envelope.urgency === undefined ? {} : { urgency: envelope.urgency }),
     ...(envelope.expects_reply === undefined ? {} : { expects_reply: envelope.expects_reply }),
-    ...(envelope.in_reply_to === undefined ? {} : { re: envelope.in_reply_to }),
+    ...(envelope.in_reply_to === undefined ? {} : { re: askQuestion ?? envelope.in_reply_to }),
     ...(envelope.supersedes === undefined ? {} : { supersedes: envelope.supersedes }),
     ...(reply === undefined ? {} : { reply_with: reply }),
     ...(role === undefined

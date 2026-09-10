@@ -109,8 +109,16 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     return keys;
   }
 
-  if (event.type.startsWith("comment.") || event.type.startsWith("suggestion.")) {
+  if (
+    event.type === "comment.created" ||
+    event.type === "comment.resolved" ||
+    event.type === "suggestion.accepted" ||
+    event.type === "suggestion.rejected"
+  ) {
     keys.push(["comments", event.issue_key], ["artifact"]);
+    if (typeof event.payload.ask_id === "string") {
+      keys.push(["ask-thread", event.payload.ask_id]);
+    }
     return keys;
   }
 

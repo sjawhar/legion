@@ -7,6 +7,7 @@ import type {
   ArtifactVersionContent,
   ArtifactVersionText,
   Ask,
+  AskRead,
   AuthenticatedUser,
   Comment,
   CreateArtifactInput,
@@ -215,8 +216,9 @@ export class DispatchApiClient {
     return normalizeAsk(await this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input));
   }
 
-  async getAsk(id: string): Promise<Ask> {
-    return normalizeAsk(await this.json<Ask>(`/api/v1/asks/${pathSegment(id)}`));
+  async getAsk(id: string): Promise<AskRead> {
+    const read = await this.json<AskRead>(`/api/v1/asks/${pathSegment(id)}`);
+    return { ...read, ask: normalizeAsk(read.ask) };
   }
 
   listComments(key: string, artifact?: string): Promise<Comment[]> {

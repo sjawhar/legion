@@ -159,6 +159,36 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  test("renders a comment.created reply to an ask as 're: <question>', not the raw ask id", () => {
+    const askID = "ask-1";
+    const raw = JSON.stringify(
+      envelope({
+        event_id: "dispatch-2",
+        source: "dispatch",
+        source_event_id: "2",
+        topic: "notifications.agent.session-asker",
+        payload_summary: "DSP-1 comment created",
+        in_reply_to: askID,
+        payload: JSON.stringify({
+          id: 2,
+          issue_key: "DSP-1",
+          seq: 8,
+          type: "comment.created",
+          actor: { kind: "user", id: "alice" },
+          notify: true,
+          created_at: "2026-09-09T00:00:00Z",
+          payload: { ...comment, ask_id: askID, ask_question: "Which API should we ship?" },
+        }),
+      })
+    );
+
+    const decoded = decode(renderInbound(raw, reader).content) as {
+      envoy: Record<string, unknown>;
+    };
+
+    expect(decoded.envoy.re).toBe("Which API should we ship?");
+  });
+
   test("types each Dispatch event's nested payload by its wire-contract schema", () => {
     const cases: Array<{ type: string; payload: object; expectedPayload: unknown }> = [
       { type: "issue.updated", payload: issue, expectedPayload: issue },

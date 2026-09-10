@@ -2,7 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
   Artifact,
-  Ask,
+  AskRead,
   AskUrgency,
   Comment,
   CommentRead,
@@ -281,8 +281,12 @@ function childrenSummary(issue: IssueDetails): string {
   ].join("\n");
 }
 
-function askSummary(ask: Ask): string {
+function askSummary({ ask, replies }: AskRead): string {
   const answer = ask.answer;
+  const chain = replies.flatMap((reply) => [
+    `${reply.id} · ${reply.author.kind} ${reply.author.id}`,
+    `Body: ${reply.body}`,
+  ]);
   return [
     `Question: ${ask.question}`,
     "Options:",
@@ -300,6 +304,8 @@ function askSummary(ask: Ask): string {
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
         ]),
+    "Replies:",
+    ...(chain.length === 0 ? ["- none"] : chain),
   ].join("\n");
 }
 
@@ -424,10 +430,15 @@ export async function executeDispatchTool(
         : undefined;
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
       const replyTo = optionalString(args, "reply_to");
+      const replyToAsk = optionalString(args, "reply_to_ask");
+      if (replyTo !== undefined && replyToAsk !== undefined) {
+        throw new Error("reply_to and reply_to_ask cannot both be set");
+      }
       const comment = await client.comment(issue(), {
         body: stringArg(args, "body"),
         ...(anchored === undefined ? {} : { anchor: anchored }),
         ...(replyTo === undefined ? {} : { reply_to: replyTo }),
+        ...(replyToAsk === undefined ? {} : { ask_id: replyToAsk }),
         actor,
       });
       return {
@@ -548,10 +559,13 @@ export async function executeDispatchTool(
     }
     case "dispatch_read": {
       if (issueArguments.ref?.kind === "ask") {
-        const ask = await client.getAsk(issueArguments.ref.id);
+        const askRead = await client.getAsk(issueArguments.ref.id);
         return {
-          text: askSummary(ask),
-          details: { issue: ask.issue_key, topic: dispatchIssueSubject(ask.issue_key, ">") },
+          text: askSummary(askRead),
+          details: {
+            issue: askRead.ask.issue_key,
+            topic: dispatchIssueSubject(askRead.ask.issue_key, ">"),
+          },
         };
       }
       if (issueArguments.ref?.kind === "comment") {

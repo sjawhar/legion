@@ -107,8 +107,7 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   await expect
     .poll(() => getAsk(newestAsk.id))
     .toMatchObject({
-      answer: { selected: ["Ship"], user: "alice" },
-      state: "answered",
+      ask: { answer: { selected: ["Ship"], user: "alice" }, state: "answered" },
     });
 
   await alicePage.goto(`/issues/${firstIssue.key}`);
@@ -207,12 +206,14 @@ test("inbox answers asks inline and keeps issue state per user", async ({ browse
   await expect
     .poll(() => getAsk(textOnlyAsk.id))
     .toMatchObject({
-      answer: {
-        selected: [],
-        text: "Neither option fits; going with a third path.",
-        user: "alice",
+      ask: {
+        answer: {
+          selected: [],
+          text: "Neither option fits; going with a third path.",
+          user: "alice",
+        },
+        state: "answered",
       },
-      state: "answered",
     });
 
   await bob.close();

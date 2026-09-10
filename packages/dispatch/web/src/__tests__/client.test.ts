@@ -241,9 +241,31 @@ test("isRetryableQueryError exempts auth outcomes (401, 403) but retries a trans
   expect(isRetryableQueryError(serverErrorResult)).toBe(true);
 });
 test("API client reaches every remaining documented endpoint", async () => {
-  const stub = stubFetch((request) =>
-    request.path.startsWith("/api/v1/inbox") ? Response.json([]) : Response.json({})
-  );
+  const stub = stubFetch((request) => {
+    if (request.path.startsWith("/api/v1/inbox")) {
+      return Response.json([]);
+    }
+    if (request.path === "/api/v1/asks/ask-1") {
+      return Response.json({
+        ask: {
+          anchor: null,
+          answer: null,
+          author: { id: "session-1", kind: "session" },
+          created_at: "2026-09-09T00:00:00Z",
+          custom: false,
+          id: "ask-1",
+          issue_key: "CORE-1",
+          multiple: false,
+          options: [],
+          question: "Ship?",
+          state: "open",
+          urgency: "med",
+        },
+        replies: [],
+      });
+    }
+    return Response.json({});
+  });
   const api = createApiClient(stub.fetch);
 
   await api.getProjects();

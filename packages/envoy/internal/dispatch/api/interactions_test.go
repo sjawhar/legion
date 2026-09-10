@@ -995,6 +995,133 @@ func TestCommentReplyMustBelongToItsIssue(t *testing.T) {
 	}
 }
 
+func TestAskThreadRepliesStoredAndReturnedInOrder(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask thread", "before")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which approach?", "actor": sessionActor(),
+	})
+	if askResponse.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", askResponse.Code, askResponse.Body.String())
+	}
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, askResponse)
+
+	reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "I think option A.", "ask_id": ask.ID,
+	}, "alice")
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("reply to ask: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+	firstReply := decodeBody[model.Comment](t, reply)
+	if firstReply.AskID == nil || *firstReply.AskID != ask.ID {
+		t.Fatalf("reply ask_id = %#v, want %q", firstReply.AskID, ask.ID)
+	}
+
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if !strings.Contains(log.Body.String(), `"ask_question":"Which approach?"`) {
+		t.Fatalf("comment.created event log = %s, want ask_question in the payload", log.Body.String())
+	}
+
+	nested := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Why option A?", "reply_to": firstReply.ID, "actor": sessionActor(),
+	})
+	if nested.Code != http.StatusCreated {
+		t.Fatalf("nested reply: status=%d body=%s", nested.Code, nested.Body.String())
+	}
+	nestedReply := decodeBody[model.Comment](t, nested)
+
+	second := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Because it's simpler.", "ask_id": ask.ID,
+	}, "alice")
+	if second.Code != http.StatusCreated {
+		t.Fatalf("second reply to ask: status=%d body=%s", second.Code, second.Body.String())
+	}
+	secondReply := decodeBody[model.Comment](t, second)
+
+	base := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
+	for index, comment := range []model.Comment{firstReply, nestedReply, secondReply} {
+		if _, err := database.Pool.Exec(context.Background(), `
+			update comments set created_at = $2 where id = $1
+		`, comment.ID, base.Add(time.Duration(index)*time.Second)); err != nil {
+			t.Fatalf("set reply timestamp: %v", err)
+		}
+	}
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read ask thread: status=%d body=%s", read.Code, read.Body.String())
+	}
+	thread := decodeBody[struct {
+		Ask     model.Ask       `json:"ask"`
+		Replies []model.Comment `json:"replies"`
+	}](t, read)
+	if thread.Ask.ID != ask.ID {
+		t.Fatalf("thread ask = %q, want %q", thread.Ask.ID, ask.ID)
+	}
+	if len(thread.Replies) != 3 {
+		t.Fatalf("thread replies = %#v, want three replies", thread.Replies)
+	}
+	for index, want := range []string{firstReply.ID, nestedReply.ID, secondReply.ID} {
+		if thread.Replies[index].ID != want {
+			t.Fatalf("thread reply %d = %q, want %q", index, thread.Replies[index].ID, want)
+		}
+	}
+}
+
+func TestAskReplyMustBelongToItsIssue(t *testing.T) {
+	handler := newTestHandler(t)
+	first := createInteractionIssue(t, handler, "TEST", "First", "first")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/asks", map[string]any{
+		"question": "Ship it?", "actor": sessionActor(),
+	})
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, askResponse)
+	second := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Second", "spec": "second",
+	}, "alice")
+	secondIssue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, second)
+
+	invalid := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+secondIssue.Key+"/comments", map[string]string{
+		"body": "Wrong issue", "ask_id": ask.ID,
+	}, "alice")
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_COMMENT"`) {
+		t.Fatalf("cross-issue ask reply: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+
+	both := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/comments", map[string]any{
+		"body": "Ambiguous parent", "ask_id": ask.ID, "reply_to": ask.ID,
+	}, "alice")
+	if both.Code != http.StatusBadRequest || !strings.Contains(both.Body.String(), `"code":"INVALID_COMMENT"`) {
+		t.Fatalf("reply_to and ask_id together: status=%d body=%s", both.Code, both.Body.String())
+	}
+}
+
+func TestAskReplyOnClosedIssueIsRefused(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Closing soon", "before")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Ship it?", "actor": sessionActor(),
+	})
+	ask := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, askResponse)
+	closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Too late?", "ask_id": ask.ID,
+	}, "alice")
+	if reply.Code != http.StatusConflict || !strings.Contains(reply.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("reply on closed issue: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+}
+
 func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Done issue", "before")

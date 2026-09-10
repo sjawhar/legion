@@ -49,8 +49,10 @@ export function useAnsweredAsks(
   );
   const missingAskQueries = useQueries({
     queries: missingAskIds.map((id) => ({
+      // GET /asks/:id returns {ask, replies} (AskCard renders the reply thread too);
+      // this hook only needs the ask itself.
+      queryFn: async () => (await api.getAsk(id)).ask,
       queryKey: ["ask", id],
-      queryFn: () => api.getAsk(id),
     })),
   });
   // useQueries returns a fresh array identity every render even when nothing changed; key the

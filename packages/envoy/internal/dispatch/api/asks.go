@@ -251,7 +251,15 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ask)
+	replies, err := s.loadReplyChain(r.Context(), s.deps.Store.Pool, "ask_id", ask.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Ask     model.Ask       `json:"ask"`
+		Replies []model.Comment `json:"replies"`
+	}{Ask: ask, Replies: replies})
 }
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {

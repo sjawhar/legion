@@ -46,6 +46,12 @@ Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occ
 zero-based and selects a repeated quote. An anchor whose quote disappears becomes orphaned but
 remains readable against its original document version. An ask stays open until a human answers;
 you cannot withdraw it. Ask once and well. The host steers you when a human answers.
+
+An ask is a thread, not a dead end: a human can reply to it before or after answering, and you
+(the asker) can reply too — e.g. acknowledging a clarifying question, or following up after the
+answer. Use `reply_to_ask` on `dispatch_comment` to reply under your own ask; it is mutually
+exclusive with `reply_to`.
+
 ## The spec is where narrative goes
 
 Read the current document before changing it:
@@ -85,11 +91,12 @@ message.
 Add feedback with:
 
 ```ts
-dispatch_comment({ issue, artifact?, quote?, occurrence?, body, reply_to? })
+dispatch_comment({ issue, artifact?, quote?, occurrence?, body, reply_to?, reply_to_ask? })
 ```
 
 It returns `details` `{ issue, topic, comment }`. `quote` requires `artifact`; omit both for a
-floating issue comment. Use `reply_to` to continue a comment.
+floating issue comment. Use `reply_to` to continue a comment thread; use `reply_to_ask` to reply
+directly under a question asked with `dispatch_ask`. The two are mutually exclusive.
 
 Propose an exact replacement instead of describing it:
 
@@ -149,9 +156,9 @@ dispatch_read({ issue?, ref? })
 ```
 
 With an issue ref, it returns the issue summary, open asks, and recent events with `details`
-`{ issue }`. With an ask ref, it returns that ask's question, options, state, and answer. With a
-comment ref, it returns that comment and its quoted reply chain. Use `dispatch_doc_read` for
-document contents.
+`{ issue }`. With an ask ref, it returns that ask's question, options, state, answer, and its
+reply thread. With a comment ref, it returns that comment and its quoted reply chain. Use
+`dispatch_doc_read` for document contents.
 
 ## References
 

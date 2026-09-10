@@ -152,6 +152,20 @@ test("every event type refreshes user state so unread badges stay live across ta
   }
 });
 
+test("a comment reply to an ask refreshes that ask's thread", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
+
+  applyEventInvalidations(queryClient, event("comment.created", { ask_id: "ask-1" }));
+
+  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
+});
+
 test("SSE event prepends a newer event to the loaded log page", () => {
   const queryClient = new QueryClient();
   queryClient.setQueryData(["events", "CORE-1"], {

@@ -81,7 +81,8 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     description:
-      "Add review feedback to an issue or document quote. Do not use it for an exact replacement; use " +
+      "Add review feedback to an issue or document quote, or reply to a question asked with dispatch_ask. " +
+      "Do not use it for an exact replacement; use " +
       `dispatch_suggest instead. Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -93,6 +94,13 @@ export const dispatchToolSpecs = [
         .optional(),
       body: z.string({ max: 2000 }).describe("Review comment, at most 2,000 characters."),
       reply_to: z.string().describe("Optional comment id to reply to.").optional(),
+      reply_to_ask: z
+        .string()
+        .describe(
+          "Optional ask id to reply to, threading this comment under that question. Mutually " +
+            "exclusive with reply_to."
+        )
+        .optional(),
     }),
   },
   {
