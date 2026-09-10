@@ -227,6 +227,23 @@ export class ProcessManager {
     locator: NonNullable<LegionState["controllerLocator"]>;
     cancel: () => void;
   };
+  /** Bounded per-tree wait for a freshly-spawned root to reach `/process/ready`, mirroring
+   * `controllerRegistrationWait` above -- see `armRootRegistrationDeadline`'s doc comment for
+   * the shared design. Keyed by tree, unlike the singleton controller wait, since multiple
+   * trees can each have their own root registration wait in flight at once. Bound to the exact
+   * generation armed for: a stale timer that fires after a newer spawn superseded it (a fresh
+   * arm replaces the entry) or a confirmed `/process/ready` cancelled it (`confirmRootReady`)
+   * is recognized as such by generation mismatch and never acts. */
+  private readonly rootRegistrationWaits = new Map<
+    IssueKey,
+    { generation: number; cancel: () => void }
+  >();
+  /** Set once by `dispose()`, never cleared: a `retireUnconfirmedRoot` expiry already in flight
+   * (blocked on its own `probe`/`stopProcessSerialized` await) has no map entry left for
+   * `dispose()`'s own `cancelAllRootRegistrationDeadlines` to clear, since it never deletes its
+   * entry until it is actually ready to act -- this flag is what stops that in-flight expiry
+   * from retiring or resurrecting a root after shutdown has begun draining. */
+  private disposed = false;
   private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
@@ -324,8 +341,10 @@ export class ProcessManager {
    * and this is the only guaranteed-safe way to catch that: no background timer may outlive the
    * ProcessManager. Idempotent. */
   dispose(): void {
+    this.disposed = true;
     this.bootWatchdog.cancelAll();
     this.cancelControllerRegistrationDeadline();
+    this.cancelAllRootRegistrationDeadlines();
   }
 
   private serialize<T>(
@@ -801,6 +820,26 @@ export class ProcessManager {
     );
   }
 
+  /** Re-arms the root registration deadline for every active tree with a recorded locator that
+   * never reached `/process/ready` before a restart (`readyConfirmedAt` unset) -- the
+   * `rootRegistrationWaits` map is purely in-memory, so a daemon restart between `spawnTree`
+   * recording a locator and a confirmed ready discards whatever deadline was armed for it,
+   * exactly like `reconnectWorkers` re-arms the boot watchdog for a worker whose
+   * `/worker/started` never confirmed. Never probes liveness itself here: arming simply gives
+   * the tree a full fresh observation window, and `retireUnconfirmedRoot`'s own probe at that
+   * deadline's expiry is what actually decides dead-vs-alive-but-unconfirmed, exactly as it does
+   * for a tree that armed normally through `spawnTree`. An already-confirmed active tree (or one
+   * with no locator at all -- nothing was ever launched, or `reconcileAdmission`'s own orphan
+   * check already demoted it) is left untouched. */
+  reconnectRoots(): void {
+    for (const tree of Object.values(this.deps.state.trees)) {
+      if (tree.status !== "active" || !tree.locator || tree.readyConfirmedAt !== undefined) {
+        continue;
+      }
+      this.armRootRegistrationDeadline(tree.root, tree.generation);
+    }
+  }
+
   /**
    * Shared by `markProcessDead` and `reportRootExit`: the root architect's own self-report of
    * its exit, always still-alive-and-blocked on this very HTTP response inside its
@@ -995,6 +1034,7 @@ export class ProcessManager {
     options?: { stopRoot?: boolean }
   ): Promise<void> {
     const tree = this.requireTree(treeKey);
+    this.cancelRootRegistrationDeadline(treeKey);
     if (tree.status !== "lingering") {
       tree.status = "lingering";
       tree.lingerUntil = new Date(this.deps.now()).toISOString();
@@ -1223,13 +1263,24 @@ export class ProcessManager {
     const tree = this.ensureTree(issue);
     const priorGeneration = tree.generation;
     const priorLocator = tree.locator;
+    const priorReadyConfirmedAt = tree.readyConfirmedAt;
     tree.generation += 1;
     try {
       await this.spawnTree(tree, resume, resumeSessionFile);
     } catch (error) {
+      // `spawnTree` clears `readyConfirmedAt` before the pane ever opens (see its doc comment)
+      // and only arms the registration deadline once a locator actually exists -- a throw here
+      // can land either before that clear (nothing to cancel) or after a locator was recorded
+      // and armed but a later step in the happy path failed (e.g. `writeStatus`), so cancel
+      // unconditionally; canceling an unarmed generation is a no-op. Restore both fields the
+      // clear may have touched, mirroring the locator rollback below, so a rolled-back prior
+      // generation that was already confirmed does not look unconfirmed again.
+      this.cancelRootRegistrationDeadline(issue, tree.generation);
       tree.generation = priorGeneration;
       if (priorLocator) tree.locator = priorLocator;
       else delete tree.locator;
+      if (priorReadyConfirmedAt !== undefined) tree.readyConfirmedAt = priorReadyConfirmedAt;
+      else delete tree.readyConfirmedAt;
       tree.launchFailures += 1;
       const activeIndex = this.deps.state.admission.active.indexOf(issue);
       if (activeIndex !== -1) this.deps.state.admission.active.splice(activeIndex, 1);
@@ -1257,13 +1308,18 @@ export class ProcessManager {
 
     // The spawn itself succeeded — a real tmux window is running. A save
     // failure past this point is not a launch failure: rolling back
-    // generation/status/launchFailures here would make the daemon retry a
-    // tree that already has a live window. Kill that window first instead
-    // — every spawn is either persisted or reaped, never left running
-    // unrecorded — then propagate the failure distinctly (see
-    // `SpawnPersistenceFailure`) so this goes fatal like every other
-    // durable effect whose post-mutation save fails.
-    tree.launchFailures = 0;
+    // generation/status here would make the daemon retry a tree that
+    // already has a live window. Kill that window first instead — every
+    // spawn is either persisted or reaped, never left running unrecorded —
+    // then propagate the failure distinctly (see `SpawnPersistenceFailure`)
+    // so this goes fatal like every other durable effect whose
+    // post-mutation save fails. `launchFailures` is deliberately left
+    // untouched here rather than reset: only a confirmed `/process/ready`
+    // resets it (`confirmRootReady`), so a pane that opens but never gets
+    // there keeps its accumulated count across the retry
+    // `retireUnconfirmedRoot` drives instead of resetting to 0 on every
+    // successful pane-open, letting repeated never-confirmed cycles still
+    // escalate to `MAX_LAUNCH_FAILURES`.
     this.settlePromotionSpawn(issue);
     if (this.promotionSweep?.inFlight === 0) this.promotionSweep = undefined;
     try {
@@ -1340,6 +1396,190 @@ export class ProcessManager {
   private cancelControllerRegistrationDeadline(): void {
     this.controllerRegistrationWait?.cancel();
     this.controllerRegistrationWait = undefined;
+  }
+
+  /** Arms a bounded wait for `treeKey`'s just-recorded `generation` to reach `/process/ready` --
+   * `spawnTree`'s own happy path is the only caller, right after recording a fresh locator, so
+   * only a generation that actually got a live pane ever gets one. Uses the same budget the
+   * controller's own registration wait and a worker's boot watchdog use
+   * (`workerBootTimeoutSeconds * workerBootRegistrationDeadlineIntervals`). Unlike the
+   * controller's single in-flight wait, this is tracked per tree -- replaces whatever was
+   * already armed for this exact tree unconditionally, since the only way to reach this twice
+   * for the same tree is a newer generation superseding an older, still-unconfirmed one. */
+  private armRootRegistrationDeadline(treeKey: IssueKey, generation: number): void {
+    this.rootRegistrationWaits.get(treeKey)?.cancel();
+    const deadlineMs =
+      this.deps.config.workerBootTimeoutSeconds *
+      1_000 *
+      this.deps.config.workerBootRegistrationDeadlineIntervals;
+    const { timedOut, cancel } = this.stopTimeout(deadlineMs);
+    this.rootRegistrationWaits.set(treeKey, { generation, cancel });
+    void timedOut.then(() =>
+      this.retireUnconfirmedRoot(treeKey, generation).catch((error) => {
+        console.error(
+          `[legion] failed to retire and resurrect an unconfirmed root for ${treeKey}:`,
+          error
+        );
+      })
+    );
+  }
+
+  /** Cancels the armed root-registration wait for `treeKey`, if any -- a no-op if none is
+   * armed, or if `generation` is given and does not match the armed wait's (a stale caller must
+   * never cancel a newer wait it was never meant to touch). */
+  private cancelRootRegistrationDeadline(treeKey: IssueKey, generation?: number): void {
+    const current = this.rootRegistrationWaits.get(treeKey);
+    if (!current) return;
+    if (generation !== undefined && current.generation !== generation) return;
+    current.cancel();
+    this.rootRegistrationWaits.delete(treeKey);
+  }
+
+  /** Cancels every armed root-registration wait, for every tree. Called alongside `dispose()`'s
+   * other watchdog teardown so no background timer outlives the ProcessManager. */
+  private cancelAllRootRegistrationDeadlines(): void {
+    for (const { cancel } of this.rootRegistrationWaits.values()) cancel();
+    this.rootRegistrationWaits.clear();
+  }
+
+  /** Confirms `treeKey` reached `/process/ready` for `generation`: cancels its root-registration
+   * deadline (a no-op if this generation's wait was never armed or was already superseded),
+   * persists `readyConfirmedAt` -- the durable marker `retireUnconfirmedRoot`'s own race-safe
+   * re-checks and `reconnectRoots`'s boot-time re-arm decision both read, so a restart or an
+   * in-flight expiry can never observe a stale "unconfirmed" the way the in-memory wait map
+   * alone could -- and resets `launchFailures`. Ready, not `/process/started`, is the
+   * confirmation this counter waits for -- `spawnRoot`'s own success path no longer resets it on
+   * a mere pane-open, so a root that keeps opening panes but never reaching `ready` still
+   * escalates to `MAX_LAUNCH_FAILURES` instead of looping forever. */
+  confirmRootReady(treeKey: IssueKey, generation: number): void {
+    this.cancelRootRegistrationDeadline(treeKey, generation);
+    const tree = this.deps.state.trees[treeKey];
+    if (!tree || tree.generation !== generation) return;
+    tree.readyConfirmedAt = this.deps.now();
+    tree.launchFailures = 0;
+  }
+
+  /** Shared unconfirmed-root failure accounting for `retireUnconfirmedRoot`'s two branches (a
+   * dead pane, or an alive-but-unconfirmed pane already retired) -- cancels whatever remains of
+   * this generation's registration wait (a fresh spawn arms its own if `onRetry` succeeds; a
+   * `launch-failed` tree needs none left dangling), increments `launchFailures`, and at
+   * `MAX_LAUNCH_FAILURES` marks the tree `launch-failed`, revokes its architect capability
+   * (nothing is left to trust once this daemon gives up on it), and releases its admission slot
+   * through `releaseSlot` -- not a direct `admission.active` splice -- so a queued root waiting
+   * behind this failed one is promoted immediately instead of stranded until some unrelated
+   * `admit()`/`reconcileAdmission()` call happens to notice the freed slot; `releaseSlot`'s own
+   * promotion sweep persists the full state, this tree's own mutations included, so no separate
+   * persist is needed on that branch. Below the threshold, persists the incremented count and
+   * re-checks the daemon is not disposed and the tree is still this same, still-`"active"`
+   * object before running `onRetry` (the resurrect attempt) -- a `dispose()`, `closeTree`, or
+   * `beginLinger` landing during that persist's own await must still win over this retry
+   * decision, never be raced into resurrecting a root after shutdown or into a closed/lingering
+   * tree. Either branch counts toward the same threshold, dead or merely unconfirmed, so
+   * repeated never-confirmed cycles always escalate instead of looping forever. */
+  private async escalateOrRetryUnconfirmedRoot(
+    treeKey: IssueKey,
+    tree: TreeState,
+    onRetry: () => Promise<void>
+  ): Promise<void> {
+    this.cancelRootRegistrationDeadline(treeKey, tree.generation);
+    tree.launchFailures += 1;
+    if (tree.launchFailures >= MAX_LAUNCH_FAILURES) {
+      tree.status = "launch-failed";
+      delete tree.locator;
+      const architectToken = roleToken(this.deps.state.project, treeKey, "architect");
+      const architectClaim = this.deps.state.roles[architectToken];
+      this.revokeRoleClaim(
+        architectClaim && "issue" in architectClaim ? architectClaim : undefined
+      );
+      const queueIndex = this.deps.state.admission.queue.indexOf(treeKey);
+      if (queueIndex !== -1) this.deps.state.admission.queue.splice(queueIndex, 1);
+      this.publishController({
+        type: "launch-failed",
+        issue: treeKey,
+        failures: tree.launchFailures,
+      });
+      await this.releaseSlot(treeKey);
+      return;
+    }
+    await this.persist();
+    // Re-check after the persist's own await: see this method's own doc comment.
+    if (this.disposed || this.deps.state.trees[treeKey] !== tree || tree.status !== "active") {
+      return;
+    }
+    await onRetry();
+  }
+
+  /**
+   * Runs once the registration deadline `armRootRegistrationDeadline` set for `treeKey`'s
+   * `generation` elapses. `stillUnconfirmed` is re-checked after every await -- never trusted
+   * only once at entry -- so a `/process/ready` landing, a `dispose()`, or a newer generation's
+   * own spawn arriving mid-probe or mid-stop always wins over this stale-timeout decision: it
+   * checks the daemon is not disposed, the wait entry armed for `treeKey` is still this exact
+   * `generation` (a fresh spawn replaces it outright; `confirmRootReady` cancels it), and the
+   * tree itself is still on `generation`, still `"active"`, and still missing
+   * `readyConfirmedAt` (the durable marker `confirmRootReady` sets -- checked here, not just the
+   * in-memory wait, so this decision never depends on the wait map surviving a restart the way
+   * `reconnectRoots`'s own re-arm does not need to either). Otherwise re-probes the pane fresh --
+   * never trusts anything observed before the deadline elapsed: a dead pane resurrects directly,
+   * exactly like any other exception-driven recovery. A pane that is still alive but never
+   * reached `/process/ready` is retired first -- `stopProcessSerialized` on the recorded
+   * locator, mirroring `spawnTree`'s own stale-generation retire path, without clearing
+   * `tree.locator` here so the `resurrectDeadTree` call that follows still captures
+   * `resumeSessionFile` from it -- so its own liveness probe finds the pane dead and proceeds. A
+   * stop failure re-arms the same generation's deadline (provided the tree is still exactly as
+   * this attempt found it) rather than stranding an unconfirmed root with no timer left to retry
+   * it. Either a dead pane or a retired alive-but-unconfirmed one counts toward `launchFailures`
+   * via the shared `escalateOrRetryUnconfirmedRoot` helper, so repeated never-confirmed cycles
+   * still escalate to `MAX_LAUNCH_FAILURES` instead of looping forever, exactly like
+   * `spawnRoot`'s own throw-driven escalation.
+   */
+  private async retireUnconfirmedRoot(treeKey: IssueKey, generation: number): Promise<void> {
+    const stillUnconfirmed = (): TreeState | undefined => {
+      if (this.disposed) return undefined;
+      const wait = this.rootRegistrationWaits.get(treeKey);
+      if (!wait || wait.generation !== generation) return undefined;
+      const tree = this.deps.state.trees[treeKey];
+      if (
+        !tree ||
+        tree.generation !== generation ||
+        tree.status !== "active" ||
+        tree.readyConfirmedAt !== undefined
+      ) {
+        return undefined;
+      }
+      return tree;
+    };
+
+    if (!stillUnconfirmed()) return;
+    const alive = (await this.probe(treeKey)) === "alive";
+    // Re-check after the probe's own await: see this method's doc comment.
+    let tree = stillUnconfirmed();
+    if (!tree) return;
+
+    if (!alive) {
+      await this.escalateOrRetryUnconfirmedRoot(treeKey, tree, () => this.resurrect(treeKey));
+      return;
+    }
+
+    const locator = tree.locator;
+    if (!locator) return;
+    const token = roleToken(this.deps.state.project, treeKey, "architect");
+    try {
+      await this.stopProcessSerialized(token, locator, this.workerStopTimeoutMs);
+    } catch (error) {
+      console.error(
+        `[legion] failed to retire an alive-but-unconfirmed root pane for ${treeKey}; leaving it in place rather than orphaning it:`,
+        error
+      );
+      // Re-arm the same generation's deadline so a transient stop failure is retried later,
+      // provided the tree is still exactly as this attempt found it.
+      if (stillUnconfirmed()) this.armRootRegistrationDeadline(treeKey, generation);
+      return;
+    }
+    // Re-check again after the stop's own await, for the same reason as above.
+    tree = stillUnconfirmed();
+    if (!tree) return;
+    await this.escalateOrRetryUnconfirmedRoot(treeKey, tree, () => this.resurrect(treeKey));
   }
 
   /**
@@ -1473,6 +1713,7 @@ export class ProcessManager {
    */
   async beginLinger(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
+    this.cancelRootRegistrationDeadline(treeKey);
     tree.status = "lingering";
     tree.lingerUntil = new Date(
       this.deps.now() + this.deps.config.lingerHours * HOUR_MS
@@ -1775,6 +2016,17 @@ export class ProcessManager {
       tree.root,
       "architect"
     );
+    // Cleared before the pane opens, not after `launchShimmedProcess` resolves: the pane is a
+    // real tmux/OMP process outside this event loop, so a fast root's own `/process/started` +
+    // `/process/ready` can land before this continuation even runs again (interleaved with the
+    // daemon's own HTTP handling while this async chain merely awaits the tmux call). Clearing
+    // here, before any confirmation for this generation could possibly land, means a
+    // confirmation that beats this code back is never silently wiped by a `delete` that runs
+    // after it — the deadline itself still arms below only once the launch actually produces a
+    // locator (arming this early would let it fire and probe a tree with no pane yet). A launch
+    // failure below (this call throwing) restores whatever this tree read before this attempt,
+    // via `spawnRoot`'s own catch.
+    delete tree.readyConfirmedAt;
     const locator = await this.launchShimmedProcess(
       tree.root,
       "architect",
@@ -1861,6 +2113,11 @@ export class ProcessManager {
     }
     tree.locator = locator;
     tree.status = "active";
+    // Armed only once a real locator exists to probe against -- `readyConfirmedAt` was already
+    // cleared before the pane opened (see above), so a confirmation that raced ahead of this
+    // continuation is preserved and this call is a harmless no-op wait: `stillUnconfirmed`
+    // checks `readyConfirmedAt` itself before ever probing.
+    this.armRootRegistrationDeadline(tree.root, generation);
     await writeStatus(this.deps.state, this.deps.dispatchClient, tree.root, "in_progress");
   }
 

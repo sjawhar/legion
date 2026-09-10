@@ -864,6 +864,49 @@ describe("ProcessManager", () => {
     expect(commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
   });
 
+  it("preserves a /process/ready confirmation that lands while the launch is still opening its pane", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Fast root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.admission.active.push(root);
+    const launchStarted = Promise.withResolvers<void>();
+    const launchGate = Promise.withResolvers<void>();
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          launchStarted.resolve();
+          await launchGate.promise;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const spawning = processes.spawnRoot(root);
+    await launchStarted.promise;
+    // The real root process outside this event loop calls /process/started then /process/ready
+    // for its own generation before this continuation ever resumes from `launchShimmedProcess`
+    // -- `readyConfirmedAt` must already be clear by now (spawnTree's own pre-launch clear) so
+    // this confirmation is recorded, not lost to a race with that clear.
+    processes.confirmRootReady(root, 1);
+    expect(managedState.trees[root]?.readyConfirmedAt).toBeDefined();
+    launchGate.resolve();
+
+    await spawning;
+
+    // spawnTree's own happy-path continuation never wipes the confirmation that beat it back,
+    // and arming the deadline afterward against an already-confirmed tree is a harmless no-op.
+    expect(managedState.trees[root]?.readyConfirmedAt).toBeDefined();
+    expect(managedState.trees[root]).toMatchObject({ status: "active" });
+    expect(managedState.trees[root]?.locator).toBeDefined();
+  });
+
   it("retires an older generation's launch as stale when a park-then-re-admit starts a newer one first", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
@@ -3713,6 +3756,998 @@ describe("ProcessManager", () => {
     expect(commands.some((command) => command[1] === "kill-pane")).toBe(false);
     expect(commands.some((command) => command[1] === "new-window")).toBe(false);
     expect(managedState.controllerLocator).toEqual(locator);
+  });
+
+  it("a confirmed /process/ready before the root registration deadline elapses cancels it, resets launchFailures, and takes no retire/resurrect action", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 2 };
+    const sleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(managedState.trees[root]?.generation).toBe(1);
+    // `spawnRoot`'s own success path no longer resets `launchFailures` on a mere pane-open --
+    // only a confirmed `/process/ready` does (`confirmRootReady`).
+    expect(managedState.trees[root]?.launchFailures).toBe(2);
+
+    processes.confirmRootReady(root, 1);
+    expect(managedState.trees[root]?.launchFailures).toBe(0);
+
+    sleepGate.resolve();
+    await flushEventLoop();
+
+    // The deadline was cancelled by the confirmation above: its stale fire takes no action.
+    expect(windowCount).toBe(1);
+    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+      false
+    );
+    expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
+  });
+
+  it("resurrects directly, once, when the root registration deadline elapses on a dead pane", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    let sleepCalls = 0;
+    const firstGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let paneAlive = true;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      // Only the first armed deadline (this test's own, generation 1) is under this test's
+      // control; the resurrect's own fresh spawn arms a second deadline (generation 2), which
+      // must stay pending here so this test's own assertions see a stable result after exactly
+      // one retry cycle.
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await firstGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    // The pane dies on its own before the deadline elapses.
+    paneAlive = false;
+    firstGate.resolve();
+    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+
+    expect(windowCount).toBe(2);
+    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+  });
+
+  it("retires an alive-but-unconfirmed root pane and resurrects once when its registration deadline elapses, counting the retirement toward launchFailures", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    let sleepCalls = 0;
+    const firstGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let paneAlive = true;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await firstGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          // A real kill-pane actually kills the pane -- the resurrect that follows must see it
+          // dead now, exactly as it would against a real tmux server.
+          paneAlive = false;
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    // The pane never confirms via `/process/ready` and is still alive when the deadline elapses.
+    firstGate.resolve();
+    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+
+    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+      true
+    );
+    expect(windowCount).toBe(2);
+    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+    // The retirement counts toward `launchFailures` itself -- `spawnRoot`'s own success path no
+    // longer resets it on a mere pane-open, only a confirmed `/process/ready` does
+    // (`confirmRootReady`), so repeated never-confirmed cycles still escalate to
+    // `MAX_LAUNCH_FAILURES` instead of looping forever.
+    expect(managedState.trees[root]?.launchFailures).toBe(1);
+  });
+
+  it("a stale root-registration-deadline expiry no-ops once a newer generation has superseded it", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    let sleepCalls = 0;
+    const staleGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let paneAlive = true;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      // Only the first armed wait (this test's stale one, generation 1) is under this test's
+      // control; the independent resurrect below arms its own separate wait (generation 2),
+      // which must stay pending here -- a shared gate would resolve both, making the stale
+      // callback's own no-op indistinguishable from a legitimate one.
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await staleGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Arms the stale wait for generation 1.
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    // The pane dies on its own, independent of the registration deadline: an unrelated
+    // exception-driven resurrect observes this directly, bumping to generation 2 and arming a
+    // fresh, separately-tracked wait for it.
+    paneAlive = false;
+    await processes.resurrect(root);
+    expect(windowCount).toBe(2);
+    expect(managedState.trees[root]?.generation).toBe(2);
+    const commandsBeforeStaleFire = commands.length;
+
+    // The stale wait's own timer finally fires, late -- it must recognize itself as superseded
+    // (generation 1 no longer matches the currently-armed generation 2) and touch nothing.
+    paneAlive = true;
+    staleGate.resolve();
+    await flushEventLoop();
+
+    expect(commands.length).toBe(commandsBeforeStaleFire);
+    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+  });
+
+  it("closeTree cancels a pending root-registration deadline so its stale expiry never retires or resurrects", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const sleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    await processes.closeTree(root);
+    expect(managedState.trees[root]?.status).toBe("closed");
+    const commandsAfterClose = commands.length;
+
+    // The registration deadline armed by the spawn above must have been cancelled by
+    // `closeTree`: its stale fire takes no action on the now-closed tree.
+    sleepGate.resolve();
+    await flushEventLoop();
+
+    expect(commands.length).toBe(commandsAfterClose);
+    expect(managedState.trees[root]?.status).toBe("closed");
+  });
+
+  it("a /process/ready landing during the post-deadline liveness probe wins over the stale-timeout decision, leaving the pane untouched", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const sleepGate = Promise.withResolvers<void>();
+    const probeGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let listPanesCalls = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          listPanesCalls += 1;
+          // Blocks the deadline's own post-expiry probe exactly once, so a `/process/ready`
+          // landing in the middle of it can be observed by the re-check that follows.
+          if (listPanesCalls === 1) await probeGate.promise;
+          return { stdout: "12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    sleepGate.resolve();
+    await flushEventLoopUntil(() => listPanesCalls >= 1, 20_000);
+
+    // `/process/ready` confirms this exact generation while the deadline's own probe is still
+    // pending.
+    processes.confirmRootReady(root, 1);
+    expect(managedState.trees[root]?.readyConfirmedAt).toBeDefined();
+
+    probeGate.resolve();
+    await flushEventLoop();
+
+    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+      false
+    );
+    expect(windowCount).toBe(1);
+    expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
+    expect(managedState.trees[root]?.launchFailures).toBe(0);
+  });
+
+  it("dispose() during the post-deadline liveness probe prevents any retire or resurrect once the probe resolves", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const sleepGate = Promise.withResolvers<void>();
+    const probeGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let listPanesCalls = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          listPanesCalls += 1;
+          if (listPanesCalls === 1) await probeGate.promise;
+          return { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    sleepGate.resolve();
+    await flushEventLoopUntil(() => listPanesCalls >= 1, 20_000);
+
+    // Daemon shutdown begins while the deadline's own probe is still in flight -- unlike
+    // cancelling the wait map entry (already gone by construction here: the probe already ran),
+    // only the disposed flag can stop this in-flight expiry from acting once its probe resolves.
+    processes.dispose();
+    const commandsBeforeProbeResolves = commands.length;
+
+    probeGate.resolve();
+    await flushEventLoop();
+
+    expect(commands.length).toBe(commandsBeforeProbeResolves);
+    expect(windowCount).toBe(1);
+    expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
+  });
+
+  it("repeated dead-before-ready cycles escalate to launch-failed instead of resurrecting forever", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const gates = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    let sleepCalls = 0;
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let paneAlive = true;
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, {
+      config: config(stateDir),
+      // Only the first three armed deadlines (one per resurrect cycle) are under this test's
+      // control; a fourth would only ever be armed by a resurrect this test does not expect.
+      sleep: async () => {
+        const index = sleepCalls;
+        sleepCalls += 1;
+        const gate = gates[index];
+        if (gate) {
+          await gate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    // The pane never confirms and dies before every one of the first two deadlines: each one
+    // resurrects (a fresh generation, its own fresh deadline) and counts a failure.
+    paneAlive = false;
+    gates[0].resolve();
+    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+    expect(managedState.trees[root]?.launchFailures).toBe(1);
+
+    gates[1].resolve();
+    await flushEventLoopUntil(() => windowCount >= 3, 20_000);
+    expect(managedState.trees[root]).toMatchObject({ generation: 3, status: "active" });
+    expect(managedState.trees[root]?.launchFailures).toBe(2);
+
+    // The third dead-before-ready cycle reaches MAX_LAUNCH_FAILURES: it escalates instead of
+    // resurrecting a fourth time.
+    gates[2].resolve();
+    await flushEventLoopUntil(() => managedState.trees[root]?.status === "launch-failed", 20_000);
+
+    expect(windowCount).toBe(3);
+    expect(managedState.trees[root]?.launchFailures).toBe(3);
+    expect(managedState.trees[root]?.locator).toBeUndefined();
+    expect(managedState.admission.active).toEqual([]);
+    expect(publications.some((publication) => publication.json.includes('"launch-failed"'))).toBe(
+      true
+    );
+  });
+
+  it("dispose() landing during the pre-resurrect persist prevents the retry from resurrecting a root after shutdown", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const sleepGate = Promise.withResolvers<void>();
+    const saveGate = Promise.withResolvers<void>();
+    let saveStateCalls = 0;
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let paneAlive = true;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      saveState: async () => {
+        saveStateCalls += 1;
+        // The 1st save is spawnRoot's own happy-path save for the initial spawn; the 2nd is
+        // escalateOrRetryUnconfirmedRoot's own pre-resurrect persist -- the one this test gates.
+        if (saveStateCalls === 2) await saveGate.promise;
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    paneAlive = false;
+    sleepGate.resolve();
+    await flushEventLoopUntil(() => saveStateCalls >= 2, 20_000);
+
+    // Daemon shutdown begins while the retry's own pre-resurrect persist is still in flight.
+    processes.dispose();
+    saveGate.resolve();
+    await flushEventLoop();
+
+    expect(windowCount).toBe(1);
+    expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
+    // The failure was still counted and persisted; only the resurrect that would have followed
+    // it was suppressed.
+    expect(managedState.trees[root]?.launchFailures).toBe(1);
+  });
+
+  it("closeTree landing during the pre-resurrect persist prevents the retry from resurrecting into a closed tree", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const sleepGate = Promise.withResolvers<void>();
+    const saveGate = Promise.withResolvers<void>();
+    let saveStateCalls = 0;
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let paneAlive = true;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      saveState: async () => {
+        saveStateCalls += 1;
+        if (saveStateCalls === 2) await saveGate.promise;
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    paneAlive = false;
+    sleepGate.resolve();
+    await flushEventLoopUntil(() => saveStateCalls >= 2, 20_000);
+
+    // closeTree runs to completion on its own (its own saves are never gated) while the retry's
+    // pre-resurrect persist is still pending.
+    await processes.closeTree(root);
+    expect(managedState.trees[root]?.status).toBe("closed");
+
+    saveGate.resolve();
+    await flushEventLoop();
+
+    expect(windowCount).toBe(1);
+    expect(managedState.trees[root]?.status).toBe("closed");
+  });
+
+  it("promotes a queued tree waiting behind a slot the terminal launch-failed escalation frees", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.issues[child] = { key: child, title: "Child", status: "todo", children: [] };
+    state.admission = { cap: 1, active: [root], queue: [child] };
+    // A fake, already-running root (no real spawn in this test -- only the queued child's own
+    // promotion needs a real spawn attempt) with `launchFailures` one below the threshold: the
+    // single dead-before-ready cycle this test drives crosses it.
+    state.trees[root] = {
+      root,
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@41",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/architect.sock",
+      },
+      status: "active",
+      launchFailures: 2,
+    };
+    state.trees[child] = { root: child, generation: 0, status: "queued", launchFailures: 0 };
+    const sleepGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    let windowCount = 0;
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await sleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@5${windowCount} %${windowCount} 2000${windowCount}\n`, exitCode: 0 };
+        }
+        // root's own recorded pane always reads dead -- the only real spawn this test drives is
+        // the queued child's promotion.
+        if (command[1] === "list-panes") return { stdout: "", exitCode: 1 };
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Arms root's deadline exactly as a boot-time `reconnectRoots` would for an active,
+    // never-confirmed tree -- see that method's own doc comment.
+    processes.reconnectRoots();
+    expect(sleepCalls).toBe(1);
+
+    // The deadline elapses against a dead pane, reaching MAX_LAUNCH_FAILURES: escalates instead
+    // of resurrecting, and the queued child must be promoted into the slot this frees.
+    sleepGate.resolve();
+    await flushEventLoopUntil(
+      () => managedState.trees[root]?.status === "launch-failed" && windowCount >= 1,
+      20_000
+    );
+
+    expect(managedState.trees[root]).toMatchObject({
+      status: "launch-failed",
+      launchFailures: 3,
+    });
+    expect(managedState.admission.active).toEqual([child]);
+    expect(managedState.admission.queue).toEqual([]);
+    expect(managedState.trees[child]?.locator).toBeDefined();
+    expect(publications.some((publication) => publication.json.includes('"launch-failed"'))).toBe(
+      true
+    );
+  });
+
+  it("re-arms the same generation's deadline when the alive-but-unconfirmed pane's stop fails, instead of stranding it with no retry", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    let sleepCalls = 0;
+    const firstGate = Promise.withResolvers<void>();
+    const secondGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    let killPaneShouldFail = true;
+    let killPaneSucceeded = false;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await firstGate.promise;
+          return;
+        }
+        if (sleepCalls === 2) {
+          await secondGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") {
+          return killPaneSucceeded
+            ? { stdout: "", exitCode: 1 }
+            : { stdout: "12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          if (killPaneShouldFail) {
+            return { stdout: "", stderr: "tmux: unable to kill pane", exitCode: 1 };
+          }
+          killPaneSucceeded = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    // The first deadline elapses against an alive-but-unconfirmed pane whose kill-pane fails --
+    // it re-arms the same generation's deadline instead of stranding it with nothing left to
+    // retry it.
+    firstGate.resolve();
+    await flushEventLoopUntil(() => sleepCalls >= 2, 20_000);
+
+    expect(windowCount).toBe(1);
+    expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
+    expect(managedState.trees[root]?.launchFailures).toBe(0);
+
+    // The re-armed deadline elapses; this time the stop succeeds, so it retires and resurrects.
+    killPaneShouldFail = false;
+    secondGate.resolve();
+    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+
+    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+    expect(managedState.trees[root]?.launchFailures).toBe(1);
+  });
+
+  it("reconnectRoots re-arms the registration deadline for an active tree with a locator that never confirmed before a restart", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = {
+      root,
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@41",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/architect.sock",
+      },
+      status: "active",
+      launchFailures: 0,
+      // No readyConfirmedAt: this tree never reached /process/ready before the restart this
+      // test simulates -- reconnectRoots is what must re-arm its deadline, since the in-memory
+      // rootRegistrationWaits map itself never survives a restart.
+    };
+    const sleepGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    const commands: string[][] = [];
+    let windowCount = 0;
+    let paneAlive = true;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await sleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-panes") {
+          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@5${windowCount} %${windowCount} 2000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    processes.reconnectRoots();
+
+    // The pane died sometime during the restart; the re-armed deadline's own expiry probe
+    // discovers it dead and resurrects, exactly as it would have if the deadline had survived
+    // the restart intact.
+    paneAlive = false;
+    sleepGate.resolve();
+    await flushEventLoopUntil(() => windowCount >= 1, 20_000);
+
+    expect(windowCount).toBe(1);
+    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+    expect(managedState.trees[root]?.launchFailures).toBe(1);
+  });
+
+  it("reconnectRoots leaves an already-confirmed active tree, a locator-less tree, and a non-active tree untouched", async () => {
+    const state = newLegionState("omp", 1);
+    const confirmedIssue = "LEGION-43";
+    const noLocatorIssue = "LEGION-44";
+    const queuedIssue = "LEGION-45";
+    for (const issue of [confirmedIssue, noLocatorIssue, queuedIssue]) {
+      state.issues[issue] = { key: issue, title: issue, status: "todo", children: [] };
+    }
+    const locator = { tmuxSession: "legion-omp", tmuxWindowId: "@41", tmuxPaneId: "%1" };
+    state.trees[confirmedIssue] = {
+      root: confirmedIssue,
+      generation: 1,
+      locator,
+      status: "active",
+      launchFailures: 0,
+      readyConfirmedAt: 1_700_000_000_000,
+    };
+    state.trees[noLocatorIssue] = {
+      root: noLocatorIssue,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+    };
+    state.trees[queuedIssue] = {
+      root: queuedIssue,
+      generation: 0,
+      locator,
+      status: "queued",
+      launchFailures: 0,
+    };
+    let sleepCalls = 0;
+    const { manager: processes } = manager(state, {
+      sleep: async () => {
+        sleepCalls += 1;
+        await new Promise<void>(() => {});
+      },
+    });
+
+    processes.reconnectRoots();
+
+    // None of the three trees ever arms a deadline: the confirmed one is already confirmed, the
+    // locator-less one has nothing worth protecting, and the queued one is not active.
+    expect(sleepCalls).toBe(0);
+  });
+
+  it("beginLinger cancels a pending root-registration deadline so its stale expiry never retires or resurrects", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    const sleepGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    let sessionExists = false;
+    let windowCount = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        await sleepGate.promise;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[1] === "new-window") {
+          windowCount += 1;
+          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+        }
+        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[1] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    expect(windowCount).toBe(1);
+
+    await processes.beginLinger(root);
+    expect(managedState.trees[root]?.status).toBe("lingering");
+    const commandsAfterLinger = commands.length;
+
+    // The registration deadline armed by the spawn above must have been cancelled by
+    // `beginLinger`: its stale fire takes no action on the now-lingering tree.
+    sleepGate.resolve();
+    await flushEventLoop();
+
+    expect(commands.length).toBe(commandsAfterLinger);
+    expect(managedState.trees[root]?.status).toBe("lingering");
   });
 
   it("leaves the stale locator in place when the stop/kill attempt fails, instead of orphaning a still-live pane with no controller ever spawned onto it", async () => {

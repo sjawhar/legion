@@ -572,6 +572,7 @@ async function startDaemonLocked(
   // see `WorkerAdmission.workerPromotionEnabled`'s doc comment.
   processManager.enableWorkerPromotion();
   await processManager.reconcileAdmission();
+  processManager.reconnectRoots();
   await processManager.reconcileWorkerAdmission();
   const ready = nats.ready();
 
