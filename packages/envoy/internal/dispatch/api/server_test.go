@@ -400,6 +400,8 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "session message", event: model.Event{Type: "message.created", Actor: session}, want: false},
 		{name: "user title change", event: model.Event{Type: "issue.updated", Actor: user}, want: true},
 		{name: "session ask", event: model.Event{Type: "ask.opened", Actor: session}, want: false},
+		{name: "session resolve", event: model.Event{Type: "ask.resolved", Actor: session}, want: false},
+		{name: "user resolve", event: model.Event{Type: "ask.resolved", Actor: user}, want: true},
 		{name: "user named version", event: model.Event{Type: "artifact.version", Actor: user, Payload: map[string]any{"version": model.Version{Named: true}}}, want: true},
 		{name: "session named version", event: model.Event{Type: "artifact.version", Actor: session, Payload: map[string]any{"version": model.Version{Named: true}}}, want: false},
 		{name: "child status", event: model.Event{Type: "child.status", Actor: session}, want: true},

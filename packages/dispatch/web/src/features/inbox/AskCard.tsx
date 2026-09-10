@@ -102,6 +102,10 @@ export function AskCard({
     submitGuard.guard(() => mutation.mutate(text === "" ? { selected } : { selected, text }));
   };
   const canSubmit = selected.length > 0 || answerText.trim() !== "";
+  if (ask.state === "resolved") {
+    return <AskThread ask={ask} createReply={reply} getAskThread={getThread} />;
+  }
+
   const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
   const answered = justAnswered ?? (ask.state === "answered" ? ask : null);
 

@@ -4,7 +4,7 @@ import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { api } from "../../api/client";
 import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
-import { actorLabel } from "../refs/actor";
+import { actorLabel, describeAskResolution } from "../refs/actor";
 import { Timestamp } from "../refs/Timestamp";
 
 const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
@@ -13,6 +13,12 @@ const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comme
 
 function replyAuthorLabel(comment: Comment): string {
   return actorLabel(comment.author);
+}
+
+function resolutionLine(ask: Ask): string | null {
+  if (ask.state !== "resolved") return null;
+  if (ask.resolution === undefined) throw new Error("resolved ask is missing its resolution");
+  return describeAskResolution(ask.resolution);
 }
 
 interface UseAskThreadResult {
@@ -73,7 +79,6 @@ function useAskThread(
     },
   };
 }
-
 export interface AskThreadProps {
   ask: Ask;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
@@ -82,12 +87,9 @@ export interface AskThreadProps {
 
 /**
  * The reply thread under a question: every comment that replies directly to
- * the ask (Comment.ask_id) plus their own reply chains, oldest first, and a
- * composer to add another. Renders for both an open and an answered ask —
- * answering closes the decision, not the conversation (Composer.tsx assumes a
- * document anchor and the Margin's selection/picker chrome, so it does not fit
- * this anchor-less, always-open reply box without contortion; a minimal
- * inline form is the direct fit).
+ * the ask (Comment.ask_id) plus their own reply chains, oldest first. Open
+ * and answered asks keep an inline reply form; a resolved ask keeps its
+ * history and recorded resolution without a composer.
  */
 export function AskThread({
   ask,
@@ -104,6 +106,7 @@ export function AskThread({
     reply,
     getThread
   );
+  const resolution = resolutionLine(ask);
 
   return (
     <section
@@ -111,6 +114,11 @@ export function AskThread({
       className="mt-4 space-y-3 border-t border-slate-200 pt-4 dark:border-slate-800"
       data-testid={`thread-${ask.id}`}
     >
+      {resolution === null ? null : (
+        <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+          {resolution}
+        </p>
+      )}
       {replies.length === 0 ? null : (
         <ul className="space-y-2">
           {replies.map((comment) => (
@@ -125,31 +133,33 @@ export function AskThread({
           ))}
         </ul>
       )}
-      <form className="flex flex-col gap-2" onSubmit={submitReply}>
-        <label
-          className="block text-sm font-medium text-slate-700 dark:text-slate-300"
-          htmlFor={replyFieldId}
-        >
-          Reply
-          <textarea
-            className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950"
-            disabled={isPending}
-            id={replyFieldId}
-            onChange={(event) => setBody(event.target.value)}
-            value={body}
-          />
-        </label>
-        <button
-          className="self-start rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 enabled:hover:border-sky-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
-          disabled={body.trim() === "" || isPending}
-          type="submit"
-        >
-          {isPending ? "Replying…" : "Reply"}
-        </button>
-        {isError ? (
-          <QueryError message="Could not post your reply." onRetry={retry} retrying={isPending} />
-        ) : null}
-      </form>
+      {resolution === null ? (
+        <form className="flex flex-col gap-2" onSubmit={submitReply}>
+          <label
+            className="block text-sm font-medium text-slate-700 dark:text-slate-300"
+            htmlFor={replyFieldId}
+          >
+            Reply
+            <textarea
+              className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950"
+              disabled={isPending}
+              id={replyFieldId}
+              onChange={(event) => setBody(event.target.value)}
+              value={body}
+            />
+          </label>
+          <button
+            className="self-start rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 enabled:hover:border-sky-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+            disabled={body.trim() === "" || isPending}
+            type="submit"
+          >
+            {isPending ? "Replying…" : "Reply"}
+          </button>
+          {isError ? (
+            <QueryError message="Could not post your reply." onRetry={retry} retrying={isPending} />
+          ) : null}
+        </form>
+      ) : null}
     </section>
   );
 }

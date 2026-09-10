@@ -329,6 +329,11 @@ function responseWithRegistration(
 
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
+test("declares all ten native Dispatch tools", () => {
+  expect(dispatchToolNames).toHaveLength(10);
+  expect(dispatchToolNames).toContain("dispatch_resolve_ask");
+});
+
 describe("envoy OMP extension", () => {
   test("discovers the bundled envoy skill from the repository root", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?resources-discover");

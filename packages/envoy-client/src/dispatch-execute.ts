@@ -151,7 +151,7 @@ async function resolveIssueArguments(
   env: ExecutorEnvironment,
   exec: ExecFn
 ): Promise<{ args: ToolArguments; ref: ParsedDispatchRef | null }> {
-  if (tool === "dispatch_issue") return { args, ref: null };
+  if (tool === "dispatch_issue" || tool === "dispatch_resolve_ask") return { args, ref: null };
   const refArgument = args.ref;
   const ref =
     typeof refArgument === "string"
@@ -304,6 +304,14 @@ function askSummary({ ask, replies }: AskRead): string {
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
         ]),
+    ...(ask.resolution === undefined
+      ? []
+      : [
+          "Resolution:",
+          `- By: ${ask.resolution.actor.id}`,
+          `- Kind: ${ask.resolution.kind}`,
+          `- Reason: ${ask.resolution.reason}`,
+        ]),
     "Replies:",
     ...(chain.length === 0 ? ["- none"] : chain),
   ].join("\n");
@@ -366,7 +374,7 @@ export async function executeDispatchTool(
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = new DispatchClient(input.config.url, input.config.token, input.fetchImpl);
   const issueKey =
-    input.tool === "dispatch_issue"
+    input.tool === "dispatch_issue" || input.tool === "dispatch_resolve_ask"
       ? null
       : await ensureIssue(client, stringArg(args, "issue"), actor);
   const issue = () => {
@@ -390,6 +398,25 @@ export async function executeDispatchTool(
       return {
         text: `Created ${created.key}: ${created.title}`,
         details: { issue: created.key, topic: dispatchIssueSubject(created.key, ">") },
+      };
+    }
+    case "dispatch_resolve_ask": {
+      const kind = stringArg(args, "kind");
+      if (kind !== "retracted" && kind !== "resolved")
+        throw new Error("kind must be retracted or resolved");
+      const ask = await client.resolveAsk(stringArg(args, "ask"), {
+        kind,
+        reason: stringArg(args, "reason"),
+        actor,
+      });
+      if (ask.resolution === undefined) throw new Error("resolved ask is missing its resolution");
+      return {
+        text: `${kind === "retracted" ? "Retracted" : "Resolved"} ask ${ask.id}: ${ask.resolution.reason}`,
+        details: {
+          issue: ask.issue_key,
+          topic: dispatchIssueSubject(ask.issue_key, ">"),
+          ask: ask.id,
+        },
       };
     }
     case "dispatch_ask": {

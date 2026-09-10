@@ -125,19 +125,20 @@ type Version struct {
 	SHA256    *string   `json:"sha256,omitempty"`
 }
 
-// Ask is a question awaiting a human answer.
+// Ask is a question with either a human answer or a recorded closure reason.
 type Ask struct {
-	ID        string      `json:"id"`
-	IssueKey  string      `json:"issue_key"`
-	Author    Actor       `json:"author"`
-	Question  string      `json:"question"`
-	Options   []AskOption `json:"options"`
-	Multiple  bool        `json:"multiple"`
-	Urgency   string      `json:"urgency"`
-	Anchor    *Anchor     `json:"anchor"`
-	State     string      `json:"state"`
-	Answer    *AskAnswer  `json:"answer"`
-	CreatedAt time.Time   `json:"created_at"`
+	ID         string         `json:"id"`
+	IssueKey   string         `json:"issue_key"`
+	Author     Actor          `json:"author"`
+	Question   string         `json:"question"`
+	Options    []AskOption    `json:"options"`
+	Multiple   bool           `json:"multiple"`
+	Urgency    string         `json:"urgency"`
+	Anchor     *Anchor        `json:"anchor"`
+	State      string         `json:"state"`
+	Answer     *AskAnswer     `json:"answer"`
+	Resolution *AskResolution `json:"resolution,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
 }
 
 // AskOption is an answer choice.
@@ -152,6 +153,14 @@ type AskAnswer struct {
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+}
+
+// AskResolution records why a question no longer needs a human answer.
+type AskResolution struct {
+	Kind   string    `json:"kind"`
+	Reason string    `json:"reason"`
+	Actor  Actor     `json:"actor"`
+	At     time.Time `json:"at"`
 }
 
 // Comment is an issue comment, optionally with an edit suggestion. A comment

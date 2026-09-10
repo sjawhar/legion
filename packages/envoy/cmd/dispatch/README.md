@@ -111,6 +111,7 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |
+| `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
 | `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, reply, or suggestion. |
 | `/api/v1/comments/{id}` | GET | cookie, trusted header, or bearer | Read a comment and its reply chain. |

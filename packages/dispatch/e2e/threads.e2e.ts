@@ -1,6 +1,13 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { createAsk, createComment, createIssue, createProject, getIssueEvents } from "./api";
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createProject,
+  getIssueEvents,
+  resolveAsk,
+} from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -102,6 +109,86 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await expect(threadAfterAnswer.getByText("Thanks, merging.")).toBeVisible();
   await expect(replies).toHaveCount(3);
   await expect(replies.nth(2)).toContainText("Thanks, merging.");
+
+  await alice.close();
+});
+
+test("a session retraction leaves its reason in the thread and removes the human's live inbox item", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Ship the change to production",
+    title: "Retracted decision",
+  });
+  const ask = await createAsk(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "production" },
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Ship the change?",
+    },
+    bobSession
+  );
+
+  const alice = await asUser(browser, "alice");
+  const inboxPage = await alice.newPage();
+  await inboxPage.goto("/");
+  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
+  await inboxPage.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("inbox-before-ask-retraction.png"),
+  });
+
+  const issuePage = await alice.newPage();
+  await issuePage.goto(`/issues/${issue.key}`);
+  await issuePage.getByRole("tab", { name: "Spec" }).click();
+  if (testInfo.project.name === "iphone") {
+    await issuePage.getByRole("button", { name: "Open navigation" }).click();
+  }
+  await expect(issuePage.getByRole("heading", { name: "Needs you (1)" })).toBeVisible();
+  if (testInfo.project.name === "iphone") {
+    await issuePage.getByRole("button", { name: "Close navigation" }).click();
+  }
+  await setSheet(issuePage, testInfo.project.name, true);
+  const margin = issuePage.getByTestId("margin-sheet");
+  await expect(margin.getByTestId(`ask-${ask.id}`)).toBeVisible();
+
+  await resolveAsk(
+    ask.id,
+    { kind: "retracted", reason: "A newer question supersedes this one." },
+    bobSession
+  );
+
+  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  await inboxPage.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("inbox-after-ask-retraction.png"),
+  });
+  await expect(margin.getByTestId(`thread-${ask.id}`)).toContainText(
+    "Retracted by e2e-session-bob - A newer question supersedes this one."
+  );
+  await expect(margin.getByRole("button", { name: "Reply" })).toHaveCount(0);
+  await issuePage.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("ask-retraction-thread.png"),
+  });
+  if (testInfo.project.name === "iphone") {
+    await issuePage.getByRole("button", { name: "Close review panel" }).click();
+    await issuePage.getByRole("button", { name: "Open navigation" }).click();
+  }
+  await expect(issuePage.getByRole("heading", { exact: true, name: "Needs you" })).toHaveCount(0);
+  if (testInfo.project.name === "iphone") {
+    await issuePage.getByRole("button", { name: "Close navigation" }).click();
+  }
+
+  await issuePage.getByRole("tab", { name: "Log" }).click();
+  await expect(
+    issuePage
+      .getByRole("region", { name: "Issue log" })
+      .getByText("Retracted by e2e-session-bob - A newer question supersedes this one.")
+  ).toBeVisible();
 
   await alice.close();
 });

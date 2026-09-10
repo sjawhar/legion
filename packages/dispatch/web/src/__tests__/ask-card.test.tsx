@@ -359,3 +359,29 @@ test("AskCard surfaces a retryable error when posting a reply fails", async () =
     view.unmount();
   }
 });
+
+test("AskCard collapses a retracted ask into its resolution line", async () => {
+  const input = {
+    ...ask(),
+    resolution: {
+      actor: { kind: "session", id: "session-1" },
+      at: "2026-09-10T00:01:00Z",
+      kind: "retracted",
+      reason: "A newer question supersedes this one.",
+    },
+    state: "resolved",
+  } as unknown as Ask;
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    await waitFor(() =>
+      expect(
+        view.getByText("Retracted by session-1 - A newer question supersedes this one.")
+      ).toBeTruthy()
+    );
+    expect(view.queryByRole("button", { name: "Submit answer" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Reply" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});

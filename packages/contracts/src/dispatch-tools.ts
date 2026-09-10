@@ -79,6 +79,18 @@ export const dispatchToolSpecs = [
     }),
   },
   {
+    name: "dispatch_resolve_ask",
+    description:
+      "Retract an open question that is moot or resolve one after finding the answer. This closes the question without answering it.",
+    arguments: (z) => ({
+      ask: z.string().describe("Ask id to close."),
+      kind: z
+        .enum(["retracted", "resolved"])
+        .describe("Whether the ask is retracted or self-resolved."),
+      reason: z.string({ min: 1 }).describe("Why the open ask no longer needs a human answer."),
+    }),
+  },
+  {
     name: "dispatch_comment",
     description:
       "Add review feedback to an issue or document quote, or reply to a question asked with dispatch_ask. " +

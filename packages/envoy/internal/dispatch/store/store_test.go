@@ -150,6 +150,9 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"doc_checkpoints_artifact_id_fkey",
 		"asks_pkey",
 		"asks_issue_key_fkey",
+		"asks_state_check",
+		"asks_resolution_state_check",
+		"asks_answer_state_check",
 		"comments_pkey",
 		"comments_issue_key_fkey",
 		"comments_reply_to_fkey",
@@ -173,8 +176,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 6 {
-		t.Errorf("recorded migrations: got %d, want 6", migrations)
+	if migrations != 7 {
+		t.Errorf("recorded migrations: got %d, want 7", migrations)
 	}
 }
 

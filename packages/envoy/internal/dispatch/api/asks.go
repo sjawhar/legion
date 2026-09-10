@@ -165,6 +165,11 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, ask)
 }
 
+type askTransition struct {
+	EventType string
+	Apply     func(context.Context, pgx.Tx, model.Ask) (model.Ask, error)
+}
+
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Selected []string     `json:"selected"`
@@ -179,67 +184,124 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, askTransition{
+		EventType: "ask.answered",
+		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
+			hasText := input.Text != nil && strings.TrimSpace(*input.Text) != ""
+			if !ask.Multiple && len(input.Selected) > 1 {
+				return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "single-select asks accept at most one selected answer")
+			}
+			if len(input.Selected) > 0 && !selectedOptions(ask.Options, input.Selected) {
+				return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "selected answers must be ask option labels")
+			}
+			if len(input.Selected) == 0 && !hasText {
+				return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "answer requires a selected option or free-text answer")
+			}
+			answer := model.AskAnswer{User: actor.ID, Selected: input.Selected, Text: input.Text, At: time.Now().UTC()}
+			answerJSON, err := encodeJSON(answer)
+			if err != nil {
+				return model.Ask{}, err
+			}
+			if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, ask.ID, answerJSON); err != nil {
+				return model.Ask{}, err
+			}
+			ask.State = "answered"
+			ask.Answer = &answer
+			return ask, nil
+		},
+	})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ask)
+}
 
-	tx, err := s.begin(r.Context())
+func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Kind   string       `json:"kind"`
+		Reason string       `json:"reason"`
+		Actor  *model.Actor `json:"actor"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
+		return
+	}
+	kind := strings.TrimSpace(input.Kind)
+	reason := strings.TrimSpace(input.Reason)
+	if (kind != "retracted" && kind != "resolved") || reason == "" {
+		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest, "resolution requires a kind and reason")
+		return
+	}
+	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, askTransition{
+		EventType: "ask.resolved",
+		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
+			resolution := model.AskResolution{Kind: kind, Reason: reason, Actor: actor, At: time.Now().UTC()}
+			resolutionJSON, err := encodeJSON(resolution)
+			if err != nil {
+				return model.Ask{}, err
+			}
+			if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, resolutionJSON); err != nil {
+				return model.Ask{}, err
+			}
+			ask.State = "resolved"
+			ask.Resolution = &resolution
+			return ask, nil
+		},
+	})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	defer tx.Rollback(r.Context())
-	unlockedAsk, err := s.loadAsk(r.Context(), tx, r.PathValue("id"))
+	writeJSON(w, http.StatusOK, ask)
+}
+
+func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, transition askTransition) (model.Ask, error) {
+	tx, err := s.begin(ctx)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.Ask{}, err
 	}
-	if err := s.requireOpenIssue(r.Context(), tx, unlockedAsk.IssueKey); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	ask, err := s.loadAskForUpdate(r.Context(), tx, r.PathValue("id"))
+	defer tx.Rollback(ctx)
+	unlockedAsk, err := s.loadAsk(ctx, tx, id)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.Ask{}, err
 	}
-	if ask.State != "open" {
-		writeError(w, "ASK_CLOSED", http.StatusConflict, "ask is already answered")
-		return
+	if err := s.requireOpenIssue(ctx, tx, unlockedAsk.IssueKey); err != nil {
+		return model.Ask{}, err
 	}
-	hasText := input.Text != nil && strings.TrimSpace(*input.Text) != ""
-	if !ask.Multiple && len(input.Selected) > 1 {
-		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "single-select asks accept at most one selected answer")
-		return
-	}
-	if len(input.Selected) > 0 && !selectedOptions(ask.Options, input.Selected) {
-		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "selected answers must be ask option labels")
-		return
-	}
-	if len(input.Selected) == 0 && !hasText {
-		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "answer requires a selected option or free-text answer")
-		return
-	}
-	answer := model.AskAnswer{User: actor.ID, Selected: input.Selected, Text: input.Text, At: time.Now().UTC()}
-	answerJSON, err := encodeJSON(answer)
+	ask, err := s.loadAskForUpdate(ctx, tx, id)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.Ask{}, err
 	}
-	if _, err := tx.Exec(r.Context(), `update asks set state = 'answered', answer = $2 where id = $1`, ask.ID, answerJSON); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	switch ask.State {
+	case "open":
+	case "answered":
+		if transition.EventType == "ask.answered" {
+			return model.Ask{}, errorf(http.StatusConflict, "ASK_CLOSED", "ask is already answered")
+		}
+		return model.Ask{}, errorf(http.StatusConflict, "ASK_ANSWERED", "ask is already answered")
+	case "resolved":
+		return model.Ask{}, errorf(http.StatusConflict, "ASK_RESOLVED", "ask is already resolved")
+	default:
+		return model.Ask{}, errorf(http.StatusInternalServerError, "ASK_STATE_INVALID", "ask has an invalid state")
 	}
-	ask.State = "answered"
-	ask.Answer = &answer
-	event, err := s.appendEvent(r.Context(), tx, model.Event{IssueKey: ask.IssueKey, Type: "ask.answered", Actor: actor, Payload: ask})
+	ask, err = transition.Apply(ctx, tx, ask)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.Ask{}, err
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	event, err := s.appendEvent(ctx, tx, model.Event{IssueKey: ask.IssueKey, Type: transition.EventType, Actor: actor, Payload: ask})
+	if err != nil {
+		return model.Ask{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.Ask{}, err
 	}
 	s.publish(event)
-	writeJSON(w, http.StatusOK, ask)
+	return ask, nil
 }
 
 func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
@@ -264,23 +326,23 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
 	return scanAsk(q.QueryRow(ctx, `
-		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, created_at
+		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
 		from asks where id = $1
 	`, id))
 }
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
 	return scanAsk(tx.QueryRow(ctx, `
-		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, created_at
+		select id::text, issue_key, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
 		from asks where id = $1 for update
 	`, id))
 }
 
 func scanAsk(row pgx.Row) (model.Ask, error) {
 	var ask model.Ask
-	var author, options, anchor, answer []byte
+	var author, options, anchor, answer, resolution []byte
 	if err := row.Scan(
-		&ask.ID, &ask.IssueKey, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency, &anchor, &ask.State, &answer, &ask.CreatedAt,
+		&ask.ID, &ask.IssueKey, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency, &anchor, &ask.State, &answer, &resolution, &ask.CreatedAt,
 	); err != nil {
 		return model.Ask{}, err
 	}
@@ -307,6 +369,13 @@ func scanAsk(row pgx.Row) (model.Ask, error) {
 			return model.Ask{}, fmt.Errorf("decode ask answer: %w", err)
 		}
 		ask.Answer = &value
+	}
+	if len(resolution) > 0 {
+		var value model.AskResolution
+		if err := json.Unmarshal(resolution, &value); err != nil {
+			return model.Ask{}, fmt.Errorf("decode ask resolution: %w", err)
+		}
+		ask.Resolution = &value
 	}
 	return ask, nil
 }

@@ -44,8 +44,20 @@ It returns `details` `{ issue, topic, ask }`. Options are buttons: never enumera
 prose. Put the recommendation in `question`, and put each selectable choice in `options`.
 Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence` is
 zero-based and selects a repeated quote. An anchor whose quote disappears becomes orphaned but
-remains readable against its original document version. An ask stays open until a human answers;
-you cannot withdraw it. Ask once and well. The host steers you when a human answers.
+remains readable against its original document version.
+
+An ask stays open until a human answers, unless its question no longer needs that answer. Retract a
+moot or superseded question, or self-resolve one after finding the answer:
+```ts
+dispatch_resolve_ask({
+  ask,
+  kind: "retracted",
+  reason: "A newer ask supersedes this question.",
+})
+```
+Use `retracted` when the question is obsolete and `resolved` when you found the answer. Include the
+reason because the question remains in its issue log and reply thread. Resolution is not an answer:
+it never records a human decision, and an answered ask cannot be resolved.
 
 An ask is a thread, not a dead end: a human can reply to it before or after answering, and you
 (the asker) can reply too — e.g. acknowledging a clarifying question, or following up after the

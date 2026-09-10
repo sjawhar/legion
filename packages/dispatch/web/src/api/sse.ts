@@ -26,6 +26,7 @@ const knownEventTypes: Record<EventType, true> = {
   "artifact.version": true,
   "ask.opened": true,
   "ask.answered": true,
+  "ask.resolved": true,
   "comment.created": true,
   "comment.resolved": true,
   "suggestion.accepted": true,
@@ -101,10 +102,15 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     return keys;
   }
 
-  if (event.type === "ask.opened" || event.type === "ask.answered") {
+  if (
+    event.type === "ask.opened" ||
+    event.type === "ask.answered" ||
+    event.type === "ask.resolved"
+  ) {
     keys.push(["asks", event.issue_key]);
     if (typeof event.payload.id === "string") {
       keys.push(["ask", event.payload.id]);
+      if (event.type === "ask.resolved") keys.push(["ask-thread", event.payload.id]);
     }
     return keys;
   }
