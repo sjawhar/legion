@@ -3,8 +3,12 @@ import type { RouteContext } from "../context";
 import { issueUrl } from "../github";
 import { HttpError, issueKey, requiredString, validateContractResponse } from "../http";
 
-// Controller sessions POST their Envoy session ID immediately after boot so
-// held events are redelivered before any work endpoint.
+// Controller sessions POST their Envoy session ID immediately after boot. The controller is a
+// role holder like any other: its catch-up on ready is the existing resync triage re-emission
+// for unadmitted tracked roots (see index.ts's onControllerReady wiring), which also drains any
+// Slack mention (or other irreplaceable payload) recorded while no controller held the role —
+// the one narrow exception to "no held events", since a mention's text has no other source of
+// truth to recover it from.
 export async function handleControllerReady(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -17,7 +21,7 @@ export async function handleControllerReady(
   };
   await ctx.save();
   await ctx.deps.processManager.markControllerReady();
-  await ctx.controllerGate.ensureReady(ctx.deps.onControllerReady);
+  await ctx.deps.onControllerReady();
   return Response.json(validateContractResponse(LegionDaemonApi.ControllerReady.response, {}));
 }
 

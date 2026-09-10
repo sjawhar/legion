@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Stands in for the real root architect's OMP process for the round-5 self-report-deadlock E2E:
+ * Stands in for the real root architect's OMP process for the self-report-deadlock E2E:
  * negotiates the RPC protocol like the real thing, then on stdin EOF (the shim's graceful
  * shutdown signal) mirrors pi-envoy's actual `session_shutdown` hook by POSTing
  * `/legion/v1/process/exit` to the real daemon and AWAITING its response before exiting --

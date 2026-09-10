@@ -212,6 +212,7 @@ function config(stateDir: string): DaemonConfig {
     resyncIntervalMs: 600_000,
     workerStopTimeoutSeconds: 10,
     treeStopTimeoutSeconds: 60,
+    workerBootTimeoutSeconds: 120,
     gates: { design: "root-issues", merge: "human" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     stateDir,
@@ -377,7 +378,6 @@ describe("startDaemon", () => {
       generation: 1,
       status: "active",
       launchFailures: 0,
-      heldEvents: [],
     };
     state.roles[architect] = { issue: approvalIssue, role: "architect" };
     const published: Array<{ topic: string; payload: unknown }> = [];
@@ -523,7 +523,6 @@ describe("startDaemon", () => {
       generation: 0,
       status: "queued",
       launchFailures: 0,
-      heldEvents: [],
     };
     state.admission.queue.push(issue);
     await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
@@ -708,7 +707,7 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("persists a controller delivery exception across restart and redelivers it once when ready", async () => {
+  it("spins up the controller from a delivery exception, and its capability survives a restart", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const firstNats = new FakeNats();
@@ -731,10 +730,15 @@ describe("startDaemon", () => {
         controllerException(daemonConfig.project)
       );
       await first.drain();
+      // No raw event is ever held or replayed: the exception's only durable effect is spinning
+      // up the controller (see processes.ts's handleException, "controller" branch).
       expect(controllerSecret).toBeString();
+      expect(publications).toEqual([]);
       await first.stop();
       first = undefined;
 
+      // The minted controllerCapabilityHash is durable state, so the same secret still
+      // authenticates a fresh daemon process after a restart.
       second = await startDaemon(
         daemonConfig,
         daemonTestDependencies(secondNats, publications, () => {})
@@ -753,19 +757,7 @@ describe("startDaemon", () => {
           }),
         });
       expect((await ready()).status).toBe(200);
-      expect(publications).toEqual([
-        {
-          topic: roleTopic(controller),
-          payload: {
-            type: "triage",
-            issue: formatIssueKey("acme", "widgets", 42),
-            preexistingChildren: [],
-          },
-        },
-      ]);
-
       expect((await ready()).status).toBe(200);
-      expect(publications).toHaveLength(1);
       const afterReady = await fetch(`http://127.0.0.1:${second.server.port}/legion/v1/state`);
       expect(await afterReady.json()).toEqual({ project: daemonConfig.project });
     } finally {
@@ -774,7 +766,7 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("accepts controller/ready and still redelivers held events when the controller's shim socket is unreachable", async () => {
+  it("accepts controller/ready even when the controller's shim socket is unreachable", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const firstNats = new FakeNats();
@@ -823,20 +815,9 @@ describe("startDaemon", () => {
         }
       );
 
-      // A shim connect failure must never block /controller/ready from accepting the role and
-      // running its held-event redelivery: the response is 2xx and the persisted exception is
-      // still redelivered exactly as it is when the shim socket connects cleanly.
+      // A shim connect failure must never block /controller/ready from accepting the role: the
+      // socket connect is best-effort (see markControllerReady's doc comment).
       expect(ready.status).toBe(200);
-      expect(publications).toEqual([
-        {
-          topic: roleTopic(controller),
-          payload: {
-            type: "triage",
-            issue: formatIssueKey("acme", "widgets", 42),
-            preexistingChildren: [],
-          },
-        },
-      ]);
     } finally {
       await first?.stop();
       await second?.stop();

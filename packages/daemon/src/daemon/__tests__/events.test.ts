@@ -63,7 +63,10 @@ function deps(
 }
 
 async function flush(): Promise<void> {
-  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+  // `applyDurableEvent` now runs a 404 recovery (`onUndeliverable`) as a separate step after
+  // `saveState`, not inline during dispatch (see events.ts's doc comment) - a few extra
+  // microtask hops past dispatch+save, so this needs headroom beyond the bare minimum.
+  for (let index = 0; index < 24; index += 1) await Promise.resolve();
 }
 
 function issueComment(): Record<string, unknown> {
@@ -307,6 +310,54 @@ describe("core-NATS event pump", () => {
         kind: "publish",
       });
     } finally {
+      pump.stop();
+    }
+  });
+
+  it("runs onUndeliverable only after saveState commits, and a throw from it never fails the already-durable message", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const order: string[] = [];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        const error = new Error("Envoy publish failed with status 404") as Error & {
+          status?: number;
+        };
+        error.status = 404;
+        throw error;
+      }),
+      saveState: async () => {
+        order.push("save");
+      },
+      onUndeliverable: async () => {
+        order.push("recover");
+        throw new Error("resumeWorker blew up");
+      },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.issue.1.comment",
+        envelope(issueComment(), "comment-1"),
+        {},
+        calls
+      );
+      await flush();
+
+      // The recovery (which itself resumes a worker and saves state) only ever runs once this
+      // transaction's own save has already committed - never interleaved mid-dispatch.
+      expect(order).toEqual(["save", "recover"]);
+      // A recovery failing is caught and logged, not surfaced as a nak/term: the event is
+      // already durable and correctly applied by the time the recovery even starts.
+      expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("onUndeliverable recovery failed"),
+        expect.any(Error)
+      );
+    } finally {
+      errorLog.mockRestore();
       pump.stop();
     }
   });
@@ -675,7 +726,6 @@ describe("core-NATS event pump", () => {
 
       expect(published).toEqual([roleTopic(architect)]);
       expect(acks).toEqual([status]);
-      expect(state.trees[issue].heldEvents).toEqual([]);
       pump.stop();
     }
   });
@@ -1223,8 +1273,8 @@ describe("core-NATS event pump", () => {
     });
     pump.stop();
   });
-  it("calls fatal and adds nothing to heldEvents when a durable GitHub event's publish effect rejects (non-404)", async () => {
-    const { state, issue } = stateForIssue();
+  it("calls fatal when a durable GitHub event's publish effect rejects (non-404)", async () => {
+    const { state } = stateForIssue();
     const nats = new FakeNats();
     const fatalCalls: unknown[] = [];
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1249,16 +1299,12 @@ describe("core-NATS event pump", () => {
 
       expect(calls).toEqual({ acks: 0, naks: [], terms: [] });
       expect(fatalCalls).toHaveLength(1);
-      // The durable lane never holds effects out-of-band (that mechanism
-      // is for the mention/exception/resync held lane only): a lost
-      // publish here goes fatal, never into heldEvents.
-      expect(state.trees[issue].heldEvents).toEqual([]);
     } finally {
       errorLog.mockRestore();
       pump.stop();
     }
   });
-  it("calls fatal and adds nothing to controllerHeldEvents when a durable GitHub event's controller effect rejects (non-404)", async () => {
+  it("calls fatal when a durable GitHub event's controller effect rejects (non-404)", async () => {
     const { state, issue } = stateForIssue();
     state.trees[issue].status = "closed";
     const nats = new FakeNats();
@@ -1289,7 +1335,6 @@ describe("core-NATS event pump", () => {
 
       expect(calls).toEqual({ acks: 0, naks: [], terms: [] });
       expect(fatalCalls).toHaveLength(1);
-      expect(state.controllerHeldEvents).toEqual([]);
     } finally {
       errorLog.mockRestore();
       pump.stop();
@@ -1502,7 +1547,97 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
-  it("does not ack, and adds nothing to controllerHeldEvents, when a GitHub mention's publish rejects", async () => {
+  it("delivers a Slack mention once the controller claims the role, when no controller held it at publish time", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const controllerRole = controllerToken(state.project);
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        if (!state.roles[controllerRole]) throw { status: 404 };
+        published.push({ topic, payloadJson });
+      })
+    );
+    const payloadJson = JSON.stringify({ text: "@legion please investigate" });
+
+    nats.emit(
+      "notifications.slack.workspace.channel.mention",
+      envelope({ text: "@legion please investigate" }, "mention-1")
+    );
+    await flush();
+
+    // Never delivered, and never dropped either: recorded durably instead.
+    expect(published).toEqual([]);
+    expect(state.controllerPendingNotices).toEqual([{ payloadJson, eventId: "mention-1" }]);
+
+    // The controller claims the role (what a real `/controller/ready` does before draining).
+    state.roles[controllerRole] = { role: "controller", sessionId: "ses-controller" };
+    await pump.drainControllerNotices();
+
+    expect(published).toEqual([{ topic: roleTopic(controllerRole), payloadJson }]);
+    expect(state.controllerPendingNotices).toEqual([]);
+    pump.stop();
+  });
+
+  it("serializes overlapping /controller/ready drains: each queued notice publishes exactly once, none dropped", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const controllerRole = controllerToken(state.project);
+    const firstPublishGate = Promise.withResolvers<void>();
+    let gateArmed = false;
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        if (!state.roles[controllerRole]) throw { status: 404 };
+        if (!gateArmed) {
+          // Holds only the very first publish attempt open, so a second, overlapping
+          // `drainControllerNotices()` call has a real chance to start racing the first
+          // before either has removed anything from the queue.
+          gateArmed = true;
+          await firstPublishGate.promise;
+        }
+        published.push(payloadJson);
+      })
+    );
+
+    // Two notices queued before the controller claims the role.
+    nats.emit(
+      "notifications.slack.workspace.channel.mention",
+      envelope({ text: "first" }, "mention-1")
+    );
+    await flush();
+    nats.emit(
+      "notifications.slack.workspace.channel.mention",
+      envelope({ text: "second" }, "mention-2")
+    );
+    await flush();
+    expect(state.controllerPendingNotices).toEqual([
+      { payloadJson: JSON.stringify({ text: "first" }), eventId: "mention-1" },
+      { payloadJson: JSON.stringify({ text: "second" }), eventId: "mention-2" },
+    ]);
+
+    // The controller claims the role (what a real `/controller/ready` does before draining),
+    // then two overlapping `/controller/ready` deliveries both start draining without either
+    // awaiting the other first.
+    state.roles[controllerRole] = { role: "controller", sessionId: "ses-controller" };
+    const drain1 = pump.drainControllerNotices();
+    const drain2 = pump.drainControllerNotices();
+    await Promise.resolve();
+    await Promise.resolve();
+    firstPublishGate.resolve();
+    await Promise.all([drain1, drain2]);
+
+    // Each notice published exactly once, in order, and the queue is fully drained —
+    // never a duplicate publish and never a notice dropped by a racing removal.
+    expect(published).toEqual([
+      JSON.stringify({ text: "first" }),
+      JSON.stringify({ text: "second" }),
+    ]);
+    expect(state.controllerPendingNotices).toEqual([]);
+    pump.stop();
+  });
+
+  it("does not ack when a GitHub mention's publish rejects", async () => {
     const { state } = stateForIssue();
     const nats = new FakeNats();
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1522,7 +1657,6 @@ describe("core-NATS event pump", () => {
 
       await expect(pump.drain()).rejects.toThrow();
       expect(acks).toEqual([]);
-      expect(state.controllerHeldEvents).toEqual([]);
       // Only `processDurableMessage`'s catch logs a durable-lane rejection;
       // it fires once for this one underlying failure.
       expect(errorLog).toHaveBeenCalledTimes(1);

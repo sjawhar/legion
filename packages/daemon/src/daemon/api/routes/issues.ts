@@ -6,7 +6,7 @@ import {
   LegionDaemonApi,
   parseIssueKey,
 } from "@legion/contracts";
-import { matchingHeldEvent, type RouteContext, treeContains } from "../context";
+import { type RouteContext, treeContains } from "../context";
 import { issueUrl } from "../github";
 import {
   asRecord,
@@ -234,32 +234,19 @@ export async function handleWaveRelease(
       throw new HttpError(403, "Issue is outside tree");
     }
   }
-  const treeState = ctx.deps.state.trees[tree];
-  if (!treeState) {
+  if (!ctx.deps.state.trees[tree]) {
     throw new HttpError(404, "Unknown tree");
   }
+  // No events accumulate for an unreleased child: its role has no live holder (nothing was ever
+  // spawned for it), so nothing was ever published or held. Marking it released just lifts that
+  // 404-until-spawned state; the eventual `spawn_worker` for it delivers a state-derived
+  // catch-up, never a replay of anything queued here.
   for (const child of children) {
     const node = ctx.deps.state.issues[child];
     if (node) {
       node.released = true;
     }
   }
-  const retained = [];
-  for (const held of treeState.heldEvents) {
-    const matchingChild = children.find((child) =>
-      matchingHeldEvent(ctx.deps.state, child, held.role)
-    );
-    if (!matchingChild) {
-      retained.push(held);
-      continue;
-    }
-    try {
-      await ctx.deps.envoyPublish(`notifications.role.${held.role}`, held.payloadJson);
-    } catch {
-      retained.push(held);
-    }
-  }
-  treeState.heldEvents = retained;
   await ctx.save();
   return Response.json(
     validateContractResponse(LegionDaemonApi.WaveRelease.response, {

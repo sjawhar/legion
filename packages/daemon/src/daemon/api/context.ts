@@ -1,10 +1,10 @@
-import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
+import { type IssueKey, roleToken } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import type { LegionApiConfig, LegionApiDeps } from "../api";
 import type { LegionState } from "../legion-state";
-import type { CapabilityService, ControllerGate } from "./auth";
+import type { CapabilityService } from "./auth";
 import type { GitHubService } from "./github";
-import { HttpError, issueKey, legionRole } from "./http";
+import { HttpError, issueKey } from "./http";
 
 export function treeContains(state: LegionState, tree: IssueKey, candidate: IssueKey): boolean {
   const pending = [tree];
@@ -34,37 +34,6 @@ export function rootForIssue(state: LegionState, issue: IssueKey): IssueKey | un
     current = state.issues[current]?.parent;
   }
   return undefined;
-}
-
-export function matchingHeldEvent(state: LegionState, issue: IssueKey, role: string): boolean {
-  const claim = state.roles[role];
-  if (claim && "issue" in claim && claim.issue === issue) {
-    return true;
-  }
-  return LEGION_ROLES.some(
-    (candidateRole) => role === roleToken(state.project, issue, candidateRole)
-  );
-}
-
-export function roleForSession(
-  state: LegionState,
-  issue: IssueKey,
-  sessionId: string,
-  phase: string
-): LegionRole {
-  const claim = Object.values(state.roles).find(
-    (candidate) =>
-      "issue" in candidate && candidate.issue === issue && candidate.sessionId === sessionId
-  );
-  if (!claim) {
-    throw new HttpError(403, "Session is not registered for this issue");
-  }
-  const role = legionRole(claim.role);
-  const declaredPhaseRole = LEGION_ROLES.find((candidate) => candidate === phase);
-  if (declaredPhaseRole && declaredPhaseRole !== role) {
-    throw new HttpError(403, "Session role does not match phase");
-  }
-  return role;
 }
 
 export function requireTree(state: LegionState, body: Record<string, unknown>): IssueKey {
@@ -109,7 +78,6 @@ export interface RouteContext {
   runner: CommandRunner;
   grantTtlMs: number;
   auth: CapabilityService;
-  controllerGate: ControllerGate;
   github: GitHubService;
   requireTree(body: Record<string, unknown>): IssueKey;
   requireTreeIssue(body: Record<string, unknown>): { tree: IssueKey; issue: IssueKey };

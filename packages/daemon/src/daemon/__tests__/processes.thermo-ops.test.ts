@@ -27,6 +27,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
     resyncIntervalMs: 600_000,
     workerStopTimeoutSeconds: 10,
     treeStopTimeoutSeconds: 60,
+    workerBootTimeoutSeconds: 120,
     gates: { design: "root-issues", merge: "human" },
     githubApps: {},
     stateDir,
@@ -62,6 +63,7 @@ function manager(
     connectWorkerRpc: async () => {
       throw new Error("connectWorkerRpc is not exercised by this fixture");
     },
+    revokeSessionCapability: () => {},
     provisioningToken: async () => "installation-token",
     statPrompt: async () => {},
     workerCatchup: {

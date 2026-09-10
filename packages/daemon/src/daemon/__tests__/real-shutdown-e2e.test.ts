@@ -166,6 +166,7 @@ function config(
     resyncIntervalMs: 600_000,
     workerStopTimeoutSeconds: 1,
     treeStopTimeoutSeconds: 1,
+    workerBootTimeoutSeconds: 120,
     gates: { design: "off", merge: "off" },
     githubApps: {},
     stateDir,
@@ -213,6 +214,7 @@ function processManagerDeps(
       },
     },
     now: () => Date.now(),
+    revokeSessionCapability: () => {},
   };
 }
 
@@ -243,7 +245,6 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       generation: 1,
       status: "active",
       launchFailures: 0,
-      heldEvents: [],
     };
     const token = roleToken("realshutdown", root, "tester");
     state.roles[token] = {
@@ -336,10 +337,10 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
 
       // Gives closeTree every real chance to finish its stop-then-delete for this exact token
       // while the /worker/started request above is still blocked on its GitHub lease -- proving
-      // that lease is held OUTSIDE the per-token lock (round 8's fix), not across it (the round
-      // 7 shape this test would have caught: the lease there ran INSIDE mutateLiveRoleClaim's
-      // callback, so closeTree's own attempt to acquire that same token's lock for its stop
-      // would still be waiting, and this assertion would see `closeSettled === false`).
+      // that lease is held OUTSIDE the per-token lock, not across it: if the lease instead ran
+      // INSIDE mutateLiveRoleClaim's own callback, closeTree's attempt to acquire that same
+      // token's lock for its stop would still be waiting, and this assertion would see
+      // `closeSettled === false`.
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(closeSettled).toBe(true);
       expect(state.trees[root]?.status).toBe("closed");
@@ -374,7 +375,6 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         generation: 1,
         status: "active",
         launchFailures: 0,
-        heldEvents: [],
       };
       const token = roleToken("realshutdown", root, "tester");
       state.roles[token] = {
@@ -438,7 +438,6 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         generation: 1,
         status: "active",
         launchFailures: 0,
-        heldEvents: [],
       };
 
       let daemon: LegionApi | undefined;

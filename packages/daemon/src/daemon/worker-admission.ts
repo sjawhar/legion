@@ -301,18 +301,52 @@ export class WorkerAdmission {
     return { status: "spawned", roleToken: token };
   }
 
+  /** Pure in-memory queue-push mutation only — no persist, no drain trigger — locking the
+   * shared admission queue against a concurrent decision for a different role. Exposed
+   * separately from `enqueueForRetry` so a caller that must fold this push into a *larger*
+   * durable transition of its own (`ProcessManager.retireUnconfirmedBoot`, whose locator-clear
+   * and queue-push must land in the very same save — two separate saves would let a crash, or
+   * a persist failure, between them strand the claim: locator-less, unqueued, and invisible to
+   * `reconnectWorkers`' locator-only filter, with nothing left to ever retry it) can push
+   * without triggering a save of its own. */
+  async enqueueForRetryPending(token: string): Promise<void> {
+    await this.withAdmissionLock(async () => {
+      const queue = this.deps.state.workerAdmission.queue;
+      if (!queue.includes(token)) queue.push(token);
+    });
+  }
+
   /**
-   * Decides whether an already-connected, already-live client below the running-worker cap
-   * should be prompted immediately in place, or — at cap — queued via `enqueueIdleWorker`
-   * instead (persisted and `worker-queued`-published before this resolves). A client whose
-   * `runState` is already non-idle (`"running"`/`"unknown"`) already occupies its own slot, so
-   * prompting it is not a new admission at all and always proceeds straight through regardless
-   * of the cap. Below cap, reserves the token via `reserve` for the gap between this decision
-   * and `client.prompt()` actually flipping `runState` away from `"idle"`, then — exactly like
-   * `launchOrQueue` owns its own `launchWorker` call — runs the actual
-   * `deps.promptExistingWorker` call itself and releases the reservation (and re-checks the
-   * queue) the instant it settles, so the caller (`ProcessManager.spawnWorker`) never has to
-   * remember admission bookkeeping around its own prompt call.
+   * Enqueues an already-cleared claim — its locator already gone, its `pendingAssignment`
+   * already the task to retry — into the FIFO running-worker queue, persists it, then triggers
+   * the normal cap-aware, role-locked drain to relaunch it. Never launches directly itself: a
+   * boot the watchdog (or a restart-time reconnect probe) confirmed dead must go through the
+   * exact same admission decision as any other launch, not bypass it (over-admission past the
+   * cap, or a second pane racing a concurrent same-role spawn, are exactly what that decision
+   * exists to prevent). Safe to call before `enableWorkerPromotion()` — the queue push always
+   * lands; `promoteWorkerQueue()` itself no-ops (logging) until promotion is enabled, so a
+   * restart-time caller (`reconnectWorkers`, run before `api` exists) leaves the token for the
+   * boot sequence's own `reconcileWorkerAdmission()` to promote once ready.
+   */
+  async enqueueForRetry(token: string): Promise<void> {
+    await this.enqueueForRetryPending(token);
+    await this.deps.persist();
+    this.promoteWorkerQueue();
+  }
+
+  /**
+   * Decides whether an already-connected, already-idle client below the running-worker cap
+   * should be prompted immediately in place, or queued via `enqueueIdleWorker` instead — either
+   * because it is at cap (persisted and `worker-queued`-published before this resolves) or
+   * because it is not currently idle at all (`"running"`/`"unknown"`): injecting a prompt into a
+   * client mid-turn is never safe, so that case is queued exactly like the at-cap one, and
+   * delivered once the client's own idle transition (`onIdle` -> `promoteWorkerQueue`) re-drains
+   * the queue and finds it genuinely idle. Below cap and idle, reserves the token via `reserve`
+   * for the gap between this decision and `client.prompt()` actually flipping `runState` away
+   * from `"idle"`, then — exactly like `launchOrQueue` owns its own `launchWorker` call — runs
+   * the actual `deps.promptExistingWorker` call itself and releases the reservation (and
+   * re-checks the queue) the instant it settles, so the caller (`ProcessManager.spawnWorker`)
+   * never has to remember admission bookkeeping around its own prompt call.
    */
   async resumeOrQueueExisting(
     token: string,
@@ -325,8 +359,7 @@ export class WorkerAdmission {
     client: WorkerRpcClient
   ): Promise<{ kind: "queued" } | { kind: "resumed" }> {
     const shouldPrompt = await this.withAdmissionLock(async () => {
-      if (client.runState !== "idle") return true;
-      if (this.runningWorkerCount() >= this.deps.config.workerCap) {
+      if (client.runState !== "idle" || this.runningWorkerCount() >= this.deps.config.workerCap) {
         this.enqueueIdleWorker(token, claim, task);
         return false;
       }
@@ -590,16 +623,15 @@ export class WorkerAdmission {
       // so bumping that counter or rotating the token to the tail would be wrong for both. They
       // still need different queue treatment, though.
       if (error instanceof TreeClosingError) {
-        // This token's tree is confirmed gone. Unlike round 7's fix (leave it for
-        // `closeTreeLocked`'s own `pruneQueueForTree` to remove during that tree's teardown),
-        // reaching this case now means the tree was ALREADY closed with nothing left to prune it
-        // — `spawnWorker`'s own entry check rejects a fresh enqueue against an already-closed
-        // tree before this point (see `isTreeGone`), so this is now only reachable via the
-        // narrower "closed mid-decision" race, but a dead entry here would otherwise wedge every
-        // worker queued behind it forever, since no `closeTreeLocked` call is left running to
-        // prune it. Drops the token and clears whatever locator-less claim `launchWorker`'s
-        // entry-check check left untouched (its own post-open branch, if that is the leg that
-        // fired instead, has already deleted its fresh claim itself before throwing).
+        // This token's tree is confirmed gone. `spawnWorker`'s own entry check already rejects a
+        // fresh enqueue against an already-closed tree before this point (see `isTreeGone`), so
+        // reaching this case now only happens via the narrower "closed mid-decision" race, with
+        // no `closeTreeLocked` call left running to prune this entry via its own
+        // `pruneQueueForTree` -- a dead entry here would otherwise wedge every worker queued
+        // behind it forever. Drops the token and clears whatever locator-less claim
+        // `launchWorker`'s entry-check check left untouched (its own post-open branch, if that
+        // is the leg that fired instead, has already deleted its fresh claim itself before
+        // throwing).
         await this.withAdmissionLock(async () => {
           const queue = this.deps.state.workerAdmission.queue;
           const index = queue.indexOf(token);

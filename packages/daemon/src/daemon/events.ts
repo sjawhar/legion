@@ -7,7 +7,7 @@ import {
 } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { DaemonConfig } from "./config";
-import type { HeldEvent, LegionState, TreeState } from "./legion-state";
+import type { LegionState } from "./legion-state";
 import type { DurableMessageControl, NatsTransport } from "./nats-transport";
 import {
   classifySettlement,
@@ -23,8 +23,6 @@ import {
 
 const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
 const EXCEPTION_TOPIC = "notifications.envoy.exceptions.notifications.role.";
-const MAX_RETRY_DELAY_MS = 30_000;
-const INITIAL_RETRY_DELAY_MS = 1_000;
 /** JetStream stream carrying durable notifications; mirrors packages/envoy/internal/bus/nats.go:18. */
 const GITHUB_STREAM = "ENVOY_NOTIFICATIONS";
 /** Fixed nak delay for a durable delivery that fails for a reason that may be transient (see processDurableMessage). */
@@ -139,11 +137,6 @@ export interface ExceptionInfo {
   reason: "no_holder" | "delivery_failed";
   original: { topic: string; payload: string; eventId: string };
   controller?: true;
-}
-
-interface HeldTarget {
-  heldEvents: HeldEvent[];
-  isActive(): boolean;
 }
 
 interface ChecksInput {
@@ -278,56 +271,6 @@ function attemptSet(value: unknown): CheckRunRef[] | undefined {
   return sortedCheckRunRefs(runs);
 }
 
-function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {
-  let current = issue;
-  const visited = new Set<IssueKey>();
-  while (!visited.has(current)) {
-    visited.add(current);
-    const tree = state.trees[current];
-    if (tree) return tree;
-    const parent = state.issues[current]?.parent;
-    if (!parent) return undefined;
-    current = parent;
-  }
-  return undefined;
-}
-
-function heldTarget(state: LegionState, token: string): HeldTarget | undefined {
-  const parsed = parseRoleToken(state.project, token);
-  if (!parsed || "controller" in parsed) return undefined;
-  const tree = treeFor(state, parsed.issue);
-  if (!tree) return undefined;
-  return {
-    heldEvents: tree.heldEvents,
-    isActive: () => state.issues[parsed.issue]?.released === true && tree.status === "active",
-  };
-}
-
-function addHeld(
-  target: HeldTarget,
-  role: string,
-  payloadJson: string,
-  envelope: EnvelopeJson
-): HeldEvent {
-  const existing = target.heldEvents.find(
-    (held) => held.role === role && held.eventId === envelope.event_id
-  );
-  if (existing) return existing;
-  const held: HeldEvent = {
-    role,
-    payloadJson,
-    heldAt: new Date(envelope.issued_at).toISOString(),
-    eventId: envelope.event_id,
-  };
-  target.heldEvents.push(held);
-  return held;
-}
-
-function removeHeld(target: HeldTarget, held: HeldEvent): void {
-  const index = target.heldEvents.indexOf(held);
-  if (index >= 0) target.heldEvents.splice(index, 1);
-}
-
 interface EffectPublisher {
   publishRole(role: string, payload: LegionEventPayload): Promise<void>;
   publishController(payload: LegionEventPayload): Promise<void>;
@@ -382,21 +325,26 @@ export interface EventPump {
    * handling, which already goes through the queue internally.
    */
   runExclusive<T>(fn: () => Promise<T>): Promise<T>;
-  redeliverControllerEvents(): Promise<void>;
   publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void>;
+  /**
+   * Delivers every `controllerPendingNotices` entry, in order, to the controller's role topic —
+   * called once the controller has just claimed its role (`/controller/ready`), so the publish
+   * should now succeed. Removes each notice, by identity, only after Envoy acks its publication
+   * (at-most-once, same discipline the deleted held-event queue once used for its own
+   * redelivery). Stops at the first failure, leaving the remainder queued for the next
+   * `/controller/ready` rather than skipping ahead or dropping any of them. Serialized: two
+   * overlapping calls (a second `/controller/ready` arriving while the first drain is still
+   * awaiting a publish) run one at a time, never interleaved, so neither double-publishes an
+   * entry nor drops one to a race against the other's removal.
+   */
+  drainControllerNotices(): Promise<void>;
   stop(): void;
   drain(): Promise<void>;
 }
 
 export function startEventPump(deps: EventPumpDeps): EventPump {
-  let stopped = false;
-  const retryTimers = new Set<unknown>();
   const pending = new Set<Promise<void>>();
   const failures: unknown[] = [];
-  const controllerTarget: HeldTarget = {
-    heldEvents: deps.state.controllerHeldEvents,
-    isActive: () => true,
-  };
 
   const track = (operation: Promise<void>): void => {
     pending.add(operation);
@@ -409,69 +357,6 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         failures.push(error);
       }
     );
-  };
-
-  const scheduleRetry = (
-    role: string,
-    payloadJson: string,
-    envelope: EnvelopeJson,
-    target: HeldTarget | undefined,
-    held: HeldEvent | undefined,
-    attempt: number
-  ): void => {
-    if (stopped) return;
-    const delay = Math.min(INITIAL_RETRY_DELAY_MS * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS);
-    const timer = setTimeout(() => {
-      retryTimers.delete(timer);
-      void publishRole(role, payloadJson, envelope, target, held, attempt);
-    }, delay);
-    retryTimers.add(timer);
-  };
-
-  const publishRole = async (
-    role: string,
-    payloadJson: string,
-    envelope: EnvelopeJson,
-    target: HeldTarget | undefined,
-    held: HeldEvent | undefined,
-    attempt: number
-  ): Promise<void> => {
-    if (stopped || (target && !target.isActive())) return;
-    try {
-      await deps.envoyPublish(roleTopic(role), payloadJson);
-    } catch {
-      const persisted = target ? (held ?? addHeld(target, role, payloadJson, envelope)) : undefined;
-      await deps.saveState();
-      scheduleRetry(role, payloadJson, envelope, target, persisted, attempt + 1);
-      return;
-    }
-
-    if (target && held) removeHeld(target, held);
-    await deps.saveState();
-  };
-
-  const publishEffect = async (
-    role: string,
-    payload: LegionEventPayload,
-    envelope: EnvelopeJson
-  ): Promise<void> => {
-    const payloadJson = JSON.stringify(payload);
-    const target = heldTarget(deps.state, role);
-    if (target && !target.isActive()) {
-      addHeld(target, role, payloadJson, envelope);
-      return;
-    }
-    await publishRole(role, payloadJson, envelope, target, undefined, 0);
-  };
-
-  const publishController = async (payloadJson: string, envelope: EnvelopeJson): Promise<void> => {
-    const role = controllerToken(deps.state.project);
-    if (!controllerTarget.isActive()) {
-      addHeld(controllerTarget, role, payloadJson, envelope);
-      await deps.saveState();
-      return;
-    }
-    await publishRole(role, payloadJson, envelope, controllerTarget, undefined, 0);
   };
 
   /** True for the "no holder for role X" 404 Envoy's publish endpoint returns before a session claims the role — the normal state before one exists, never a broken publish path. */
@@ -496,43 +381,65 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   const publishRoleDirect = (role: string, payloadJson: string): Promise<void> =>
     deps.envoyPublish(roleTopic(role), payloadJson);
 
+  const runRecovery = async (info: UndeliverableInfo): Promise<void> => {
+    if (deps.onUndeliverable) {
+      await deps.onUndeliverable(info);
+      return;
+    }
+    console.error(
+      `legion: no holder for ${info.role}, event ${info.eventId} undelivered (subject=${info.subject}${info.envelope.payload_summary ? ` summary=${info.envelope.payload_summary}` : ""} effect=${info.kind}); recovered via the worker's own catch-up on resume`
+    );
+  };
+
+  /**
+   * Records (or immediately fires) a 404 no-holder notice. `recoveries`, supplied only by
+   * `applyDurableEvent`, defers the call: pushing the info instead of running it keeps the
+   * durable transaction's dispatch-then-save a single state mutation, since `onUndeliverable`
+   * itself resumes a worker and saves state. Every other caller (the local lane, direct
+   * controller publishes) has no such transaction to protect and runs it inline.
+   */
   const notifyUndeliverable = async (
     role: string,
     eventId: string,
     envelope: EnvelopeJson,
     subject: string,
-    kind: "publish" | "controller"
+    kind: "publish" | "controller",
+    recoveries?: UndeliverableInfo[]
   ): Promise<void> => {
-    if (deps.onUndeliverable) {
-      await deps.onUndeliverable({
-        role,
-        eventId,
-        envelope,
-        subject,
-        summary: envelope.payload_summary,
-        kind,
-      });
+    const info: UndeliverableInfo = {
+      role,
+      eventId,
+      envelope,
+      subject,
+      summary: envelope.payload_summary,
+      kind,
+    };
+    if (recoveries) {
+      recoveries.push(info);
       return;
     }
-    console.error(
-      `legion: no holder for ${role}, event ${eventId} undelivered (subject=${subject}${envelope.payload_summary ? ` summary=${envelope.payload_summary}` : ""} effect=${kind}); recovered via the worker's own catch-up on resume`
-    );
+    await runRecovery(info);
   };
 
   /**
-   * Publishes a durable-GitHub-derived effect. A 404 "no holder" is
-   * handled: it calls `deps.onUndeliverable` and returns normally — the
-   * normal state before a session claims the role, recovered by that
-   * role's own catch-up on resume, not by retrying this event. Anything
-   * else propagates, so the caller's dispatch-then-save transaction
-   * (applyDurableEvent) treats it as fatal: this effect is not yet
-   * durable, and continuing with a live-state mutation whose full effect
-   * set didn't get applied would leave dirty memory serving other events.
+   * Publishes an effect's role/controller payload through Envoy. A 404 "no holder" is handled:
+   * outside a durable transaction (`recoveries` omitted) it calls `deps.onUndeliverable`
+   * immediately - the everyday state before a role's session claims it (or after its worker
+   * died), recovered by that worker's own catch-up on resume, never by holding or retrying the
+   * event. Inside one (`recoveries` supplied by `applyDurableEvent`) it only records the info;
+   * the recovery itself runs once, best-effort, after that transaction's own save commits (see
+   * `applyDurableEvent`). Anything else propagates: for the durable GitHub lane the caller's
+   * dispatch-then-save transaction treats it as fatal (this effect is not yet durable, and
+   * continuing with a live-state mutation whose full effect set didn't get applied would leave
+   * dirty memory serving other events); for a local caller (resync, or any other effect
+   * dispatched outside the durable lane) it simply fails that caller's own request. Shared by
+   * both lanes - there is no separate held/retry path.
    */
-  const durablePublisher = (
+  const publisher = (
     eventId: string,
     envelope: EnvelopeJson,
-    subject: string
+    subject: string,
+    recoveries?: UndeliverableInfo[]
   ): EffectPublisher => {
     const publishOrThrow = async (
       role: string,
@@ -543,7 +450,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         await deps.envoyPublish(roleTopic(role), payloadJson);
       } catch (error) {
         if (isNoHolderError(error)) {
-          await notifyUndeliverable(role, eventId, envelope, subject, kind);
+          await notifyUndeliverable(role, eventId, envelope, subject, kind, recoveries);
           return;
         }
         throw error;
@@ -556,16 +463,86 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     };
   };
 
-  const heldPublisher = (envelope: EnvelopeJson): EffectPublisher => ({
-    publishRole: (role, payload) => publishEffect(role, payload, envelope),
-    publishController: (payload) => publishController(JSON.stringify(payload), envelope),
-  });
+  /** Publishes directly to the controller role outside any effect dispatch (a Slack mention, or
+   * `publishControllerEvent`'s resync/API-triggered controller wake). Unlike `publisher`'s own
+   * no-holder handling — every one of *its* effects is reducer-derived and fully recoverable
+   * from current state, so nothing needs to survive the 404 itself — a Slack mention's specific
+   * text has no other source of truth (see `ControllerPendingNotice`'s doc comment): it is
+   * recorded into durable state and saved BEFORE `ensureController` even runs, so a crash
+   * between this 404 and the controller's own claim can never lose it. (The resync/API caller's
+   * own payload is redundant with the fresh resync `onControllerReady` already re-emits on
+   * ready, so recording it too is a harmless no-op, not a behavior change worth special-casing
+   * away.) Drained, in order, exactly once each, by `drainControllerNotices` on
+   * `/controller/ready`. */
+  const publishControllerDirect = async (
+    payloadJson: string,
+    envelope: EnvelopeJson
+  ): Promise<void> => {
+    const role = controllerToken(deps.state.project);
+    try {
+      await deps.envoyPublish(roleTopic(role), payloadJson);
+    } catch (error) {
+      if (isNoHolderError(error)) {
+        deps.state.controllerPendingNotices.push({
+          payloadJson,
+          eventId: envelope.event_id,
+        });
+        await deps.saveState();
+        await notifyUndeliverable(
+          role,
+          envelope.event_id,
+          envelope,
+          "controller-event",
+          "controller"
+        );
+        return;
+      }
+      throw error;
+    }
+  };
+
+  // Serializes `drainControllerNotices` the same way `githubQueue` serializes durable GitHub
+  // messages/resync -- a dedicated queue, not that one, since this drain never touches a
+  // `PrState` or anything `githubQueue` protects and chaining onto it would add unrelated
+  // cross-blocking. Two overlapping `/controller/ready` calls are a real possibility (nothing
+  // prevents a second controller-ready delivery while the first drain is still awaiting a
+  // publish); without this, interleaved reads of the same head entry would publish it twice, and
+  // removing by position rather than identity would then let a second entry queued mid-drain
+  // lose its own publish to whatever `shift()` happens to remove by the time each call gets
+  // there. `.then(() => {}, () => {})` (mirroring `runExclusive`) keeps the queue itself always
+  // resolving so one caller's failure never wedges every later drain behind a permanently
+  // rejected chain link.
+  let controllerNoticeQueue: Promise<void> = Promise.resolve();
+
+  const drainControllerNoticesLocked = async (): Promise<void> => {
+    const role = controllerToken(deps.state.project);
+    while (deps.state.controllerPendingNotices.length > 0) {
+      const notice = deps.state.controllerPendingNotices[0];
+      if (!notice) break;
+      try {
+        await deps.envoyPublish(roleTopic(role), notice.payloadJson);
+      } catch (error) {
+        console.error(
+          `[legion] failed to deliver pending controller notice ${notice.eventId}, leaving it queued for the next /controller/ready:`,
+          error
+        );
+        return;
+      }
+      // By identity, not position: the entry just published is exactly this `notice` object,
+      // wherever it now sits in the array (an unrelated append while this publish was in flight
+      // would otherwise make a positional `shift()` remove the wrong entry).
+      const index = deps.state.controllerPendingNotices.indexOf(notice);
+      if (index !== -1) deps.state.controllerPendingNotices.splice(index, 1);
+      await deps.saveState();
+    }
+  };
 
   /** The single effect-application switch, shared by every lane; an unrecognized kind crashes loud instead of silently doing nothing. */
-  const dispatch = async (effects: Effect[], publisher: EffectPublisher): Promise<void> => {
+  const dispatch = async (effects: Effect[], effectPublisher: EffectPublisher): Promise<void> => {
     for (const effect of effects) {
-      if (effect.kind === "publish") await publisher.publishRole(effect.role, effect.payload);
-      else if (effect.kind === "controller") await publisher.publishController(effect.payload);
+      if (effect.kind === "publish") await effectPublisher.publishRole(effect.role, effect.payload);
+      else if (effect.kind === "controller")
+        await effectPublisher.publishController(effect.payload);
       else if (effect.kind === "linger") await deps.onLinger(effect.tree);
       else if (effect.kind === "probe") await deps.onProbe(effect.tree);
       else if (effect.kind === "approval-status") await deps.onApprovalStatus(effect);
@@ -579,7 +556,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   };
 
   const applyEffectsAndSave = async (effects: Effect[], envelope: EnvelopeJson): Promise<void> => {
-    await dispatch(effects, heldPublisher(envelope));
+    await dispatch(effects, publisher(envelope.event_id, envelope, "local"));
     await deps.saveState();
   };
 
@@ -605,6 +582,14 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    *   `deps.fatal` to exit the process, so the supervisor restarts it,
    *   state reloads from the last successful save, and JetStream
    *   redelivers this still-unacked message against that clean state.
+   * - A 404 no-holder effect never reaches the catch above: `publisher`
+   *   (given `recoveries` here) only records it. Those recoveries run
+   *   after `saveState` succeeds, one call each, best-effort - a
+   *   recovery itself resumes a worker and saves state, and running it
+   *   before this transaction's own save would let a second, unrelated
+   *   save land mid-transaction (see `notifyUndeliverable`'s doc
+   *   comment); a recovery failing here must not undo or fail an
+   *   already-durable event.
    */
   const applyDurableEvent = async (
     subject: string,
@@ -617,11 +602,19 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     } catch (error) {
       throw new DurableReducerFailure(error);
     }
+    const recoveries: UndeliverableInfo[] = [];
     try {
-      await dispatch(effects, durablePublisher(envelope.event_id, envelope, subject));
+      await dispatch(effects, publisher(envelope.event_id, envelope, subject, recoveries));
       await deps.saveState();
     } catch (error) {
       throw new DurableFatalFailure(error);
+    }
+    for (const info of recoveries) {
+      try {
+        await runRecovery(info);
+      } catch (error) {
+        console.error(`[legion] onUndeliverable recovery failed for ${info.role}:`, error);
+      }
     }
   };
 
@@ -694,7 +687,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     if (CHECKS_TOPIC.test(subject)) {
       await handleChecks(subject, envelope);
     } else if (isSlackMention(subject)) {
-      await publishController(
+      await publishControllerDirect(
         typeof envelope.payload === "string" ? envelope.payload : "{}",
         envelope
       );
@@ -723,13 +716,6 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       } else {
         const exception = exceptionInfo(deps.state, subject, envelope);
         if (exception) {
-          if (exception.controller) {
-            addHeld(controllerTarget, exception.roleToken, exception.original.payload, {
-              ...envelope,
-              event_id: exception.original.eventId,
-            });
-            await deps.saveState();
-          }
           await deps.onException(exception);
         } else {
           await applyDurableEvent(subject, envelope, (state) =>
@@ -848,12 +834,11 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   // fields (durable checks via writeCiFence/settleCiVerdict, resync via
   // reconcilePrs's GitHub read), so interleaving them could publish an
   // older resync-derived verdict after a newer durable settlement, or vice
-  // versa. The core-NATS lanes below (mention/exception) and the held-lane
-  // publisher's own retry/backoff stay concurrent with this queue and with
-  // each other: they only ever touch `controllerHeldEvents` and tree
-  // status/locators, never a `PrState`, and no writer ever replaces or
-  // restores another writer's in-flight object, so that remaining overlap
-  // is safe without serialization.
+  // versa. The core-NATS lanes below (mention/exception) stay concurrent
+  // with this queue and with each other: they only ever touch role claims
+  // and tree status/locators (via `onException`), never a `PrState`, and
+  // no writer ever replaces or restores another writer's in-flight object,
+  // so that remaining overlap is safe without serialization.
   let githubQueue: Promise<void> = Promise.resolve();
 
   const runExclusive = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -887,33 +872,22 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     applyEffects: applyEffectsAndSave,
     runExclusive,
     async publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void> {
-      await publishController(JSON.stringify(payload), envelope);
+      await publishControllerDirect(JSON.stringify(payload), envelope);
     },
-    async redeliverControllerEvents(): Promise<void> {
-      for (const held of [...deps.state.controllerHeldEvents]) {
-        const heldAt = Date.parse(held.heldAt);
-        await publishRole(
-          controllerToken(deps.state.project),
-          held.payloadJson,
-          {
-            event_id: held.eventId,
-            issued_at: Number.isNaN(heldAt) ? Date.now() : heldAt,
-          },
-          controllerTarget,
-          held,
-          0
-        );
-      }
+    drainControllerNotices(): Promise<void> {
+      const result = controllerNoticeQueue.then(() => drainControllerNoticesLocked());
+      controllerNoticeQueue = result.then(
+        () => {},
+        () => {}
+      );
+      return result;
     },
     async drain(): Promise<void> {
       while (pending.size > 0) await Promise.allSettled([...pending]);
       if (failures.length > 0) throw new AggregateError(failures, "Event pump processing failed");
     },
     stop(): void {
-      stopped = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
-      for (const timer of retryTimers) clearTimeout(timer as never);
-      retryTimers.clear();
     },
   };
 }

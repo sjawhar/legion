@@ -215,3 +215,52 @@ export async function connectWorkerRpc(socketPath: string): Promise<WorkerRpcCli
     },
   };
 }
+
+/** The shared connect-then-probe facts a `WorkerRpcClient`-reaching caller needs to decide
+ * liveness — one of `client`/`connectError` is always set, never both. `stateAnswered` is only
+ * meaningful when `client` is set: a connected socket whose `get_state` call itself rejects
+ * (`stateError` set) still reached the shim — only a caller that requires an *answering* shim
+ * (as opposed to a merely-reachable one) should treat `stateAnswered === false` as not alive. */
+export interface SocketProbeResult {
+  client: WorkerRpcClient | undefined;
+  connectError: unknown;
+  stateAnswered: boolean;
+  stateError: unknown;
+}
+
+/** Connects to `socketPath` (via the caller's own connect-and-cache `connect` function — every
+ * caller in this daemon reuses `ProcessManager.workerClient`'s per-token cache/negotiate) and
+ * probes `get_state`, gathering the raw facts every liveness dialect in this package needs
+ * (`reconnectWorkers`, `onWorkerClientClosed`, `spawnWorker`'s resume check, and the boot
+ * watchdog's own alive probe) instead of each duplicating this same connect-then-getState
+ * sequence. Deliberately does not itself decide or log anything: a connect failure means
+ * different things for a boot watchdog (still slow, re-arm) versus a confirmed worker
+ * (unambiguously dead), and a `get_state` failure means "busy, not dead" everywhere except
+ * `spawnWorker`'s own resume decision (which requires an answering shim before prompting it
+ * directly rather than relaunching) — every caller keeps its own verdict and its own logging
+ * around these facts. */
+export async function probeWorkerSocket(
+  connect: (socketPath: string) => Promise<WorkerRpcClient>,
+  socketPath: string,
+  timeoutMs = DEFAULT_RPC_TIMEOUT_MS
+): Promise<SocketProbeResult> {
+  let client: WorkerRpcClient | undefined;
+  let connectError: unknown;
+  try {
+    client = await connect(socketPath);
+  } catch (error) {
+    connectError = error;
+  }
+  if (!client) {
+    return { client: undefined, connectError, stateAnswered: false, stateError: undefined };
+  }
+  let stateAnswered = true;
+  let stateError: unknown;
+  try {
+    await client.getState(timeoutMs);
+  } catch (error) {
+    stateAnswered = false;
+    stateError = error;
+  }
+  return { client, connectError: undefined, stateAnswered, stateError };
+}

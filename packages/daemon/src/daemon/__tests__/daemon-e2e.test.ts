@@ -229,6 +229,7 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     resyncIntervalMs: 600_000,
     workerStopTimeoutSeconds: 10,
     treeStopTimeoutSeconds: 60,
+    workerBootTimeoutSeconds: 120,
     gates: { design: "root-issues", merge: "human" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     stateDir,
@@ -269,16 +270,15 @@ describe("daemon end-to-end", () => {
       const controllerSpawn = Promise.withResolvers<string[]>();
       const rootSpawn = Promise.withResolvers<string[]>();
       const rootRespawn = Promise.withResolvers<string[]>();
+      const workerSpawnWindow = Promise.withResolvers<string[]>();
       let rootSpawnCount = 0;
       const controllerTriage = Promise.withResolvers<NatsEvent>();
       const firstWorkerPublication = Promise.withResolvers<NatsEvent>();
       const secondWorkerPublication = Promise.withResolvers<NatsEvent>();
       const workerPublications: NatsEvent[] = [];
-      const workerDirective = Promise.withResolvers<NatsEvent>();
+      const workerPrompts: string[] = [];
       let roleSubscription: Subscription | undefined;
-      let controlSubscription: Subscription | undefined;
       let rolePump: Promise<void> | undefined;
-      let controlPump: Promise<void> | undefined;
       const configuredCredentialHelpers: string[][] = [];
 
       const runner = async (command: string[]): Promise<CommandResult> => {
@@ -342,6 +342,7 @@ describe("daemon end-to-end", () => {
             if (rootSpawnCount === 1) rootSpawn.resolve([...command]);
             else rootRespawn.resolve([...command]);
           }
+          if (window === "acme__widgets-2") workerSpawnWindow.resolve([...command]);
           if (command[1] === "new-session")
             return { stdout: `${windowId}\n`, stderr: "", exitCode: 0 };
           const paneId = `%${nextWindowId}`;
@@ -393,9 +394,7 @@ describe("daemon end-to-end", () => {
         });
         const codec = StringCodec();
         const role = broker.subscribe("notifications.role.>");
-        const control = broker.subscribe("legion.ctl.>");
         roleSubscription = role;
-        controlSubscription = control;
         rolePump = (async () => {
           for await (const message of role) {
             const event = {
@@ -407,26 +406,6 @@ describe("daemon end-to-end", () => {
               workerPublications.push(event);
               if (workerPublications.length === 1) firstWorkerPublication.resolve(event);
               if (workerPublications.length === 2) secondWorkerPublication.resolve(event);
-            }
-          }
-        })();
-        controlPump = (async () => {
-          for await (const message of control) {
-            const event = {
-              subject: message.subject,
-              payload: JSON.parse(codec.decode(message.data)),
-            };
-            if (
-              event.subject.startsWith("legion.ctl.") &&
-              typeof event.payload === "object" &&
-              event.payload !== null &&
-              "type" in event.payload &&
-              event.payload.type === "revive-worker"
-            ) {
-              workerDirective.resolve(event);
-              if (message.reply) {
-                message.respond(codec.encode(JSON.stringify({ type: "ack" })));
-              }
             }
           }
         })();
@@ -456,7 +435,18 @@ describe("daemon end-to-end", () => {
               }),
             },
             onSignal: () => {},
-            connectWorkerRpc: async () => fakeWorkerRpcClient(),
+            // Records every prompt delivered over a worker's shim socket, so an exception's
+            // direct-resume path (the socket answers, so spawnWorker prompts it live rather
+            // than relaunching) is observable without a real socket.
+            connectWorkerRpc: async () => {
+              const client = fakeWorkerRpcClient();
+              return {
+                ...client,
+                prompt: async (message: string) => {
+                  workerPrompts.push(message);
+                },
+              };
+            },
           },
         };
         daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), daemonOptions);
@@ -570,57 +560,52 @@ describe("daemon end-to-end", () => {
           ...architect,
         });
 
-        const architectSpawn = await post(`${daemonUrl}/legion/v1/spawn-token`, {
-          tree: root,
-          issue: child,
-          role: "architect",
-          ...architect,
-        });
-        const { spawnToken: architectSpawnToken } = (await architectSpawn.json()) as {
-          spawnToken: string;
-        };
-        await post(`${daemonUrl}/legion/v1/role-backing`, {
-          tree: root,
-          issue: child,
-          role: "architect",
-          agentId: "child-architect",
-          sessionId: "child-architect-session",
-          spawnToken: architectSpawnToken,
-        });
-        const workerSpawn = await post(`${daemonUrl}/legion/v1/spawn-token`, {
+        const workerSpawnResult = await post(`${daemonUrl}/legion/v1/worker/spawn`, {
           tree: root,
           issue: child,
           role: "implementer",
+          task: "Implement the child issue",
           ...architect,
         });
-        const { spawnToken: workerSpawnToken } = (await workerSpawn.json()) as {
-          spawnToken: string;
-        };
-        await post(`${daemonUrl}/legion/v1/role-backing`, {
+        expect((await workerSpawnResult.json()) as unknown).toMatchObject({ status: "spawned" });
+        const workerSpawnArgv = await workerSpawnWindow.promise;
+        const workerBootToken = workerSpawnArgv
+          .find((argument) => argument.startsWith("LEGION_BOOT_TOKEN="))
+          ?.slice("LEGION_BOOT_TOKEN=".length);
+        if (!workerBootToken) throw new Error("Worker tmux spawn did not include its boot token");
+        const workerSessionFile = path.join(stateDir, "worker-implementer-session.json");
+        await writeFile(workerSessionFile, "{}\n", "utf8");
+        const workerStarted = await post(`${daemonUrl}/legion/v1/worker/started`, {
           tree: root,
           issue: child,
           role: "implementer",
+          bootToken: workerBootToken,
+          sessionId: "child-worker-session",
           agentId: "child-worker",
-          sessionId: "child-worker-session",
-          spawnToken: workerSpawnToken,
+          ompSessionFile: workerSessionFile,
         });
-        const phase = await post(`${daemonUrl}/legion/v1/phase`, {
-          tree: root,
-          issue: child,
-          phase: "implementer",
-          sessionId: "child-worker-session",
-          spawnToken: workerSpawnToken,
-        });
-        const workerPhase = (await phase.json()) as {
+        const workerPhase = (await workerStarted.json()) as {
+          roleToken: string;
           secret: string;
           gitName: string;
           gitEmail: string;
         };
         expect(workerPhase).toEqual({
+          roleToken: worker,
           secret: expect.any(String),
           gitName: "legion-implementer[bot]",
           gitEmail: "271566630+legion-implementer[bot]@users.noreply.github.com",
         });
+        const workerReady = await post(`${daemonUrl}/legion/v1/worker/ready`, {
+          tree: root,
+          issue: child,
+          role: "implementer",
+          sessionId: "child-worker-session",
+          generation: 1,
+          secret: workerPhase.secret,
+        });
+        expect(workerReady.status).toBe(200);
+        expect(workerPrompts).toEqual(["Implement the child issue"]);
         const grant = await post(`${daemonUrl}/legion/v1/grants`, {
           tree: root,
           issue: child,
@@ -634,13 +619,15 @@ describe("daemon end-to-end", () => {
         daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), daemonOptions);
         await daemon.ready();
 
-        const staleArchitect = await fetch(`${daemonUrl}/legion/v1/spawn-token`, {
+        // Any write requiring the architect capability works as the auth probe here;
+        // `/legion/v1/escalate` is used purely for that purpose, not for its own effect.
+        const staleArchitect = await fetch(`${daemonUrl}/legion/v1/escalate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             tree: root,
-            issue: child,
-            role: "reviewer",
+            kind: "capacity",
+            context: { blocked: true },
             ...architect,
           }),
         });
@@ -662,13 +649,13 @@ describe("daemon end-to-end", () => {
           secret: expect.any(String),
         });
         architect.secret = recoveredRoot.secret;
-        const reauthorizedArchitect = await post(`${daemonUrl}/legion/v1/spawn-token`, {
+        const reauthorizedArchitect = await post(`${daemonUrl}/legion/v1/escalate`, {
           tree: root,
-          issue: child,
-          role: "reviewer",
+          kind: "capacity",
+          context: { blocked: true },
           ...architect,
         });
-        expect(await reauthorizedArchitect.json()).toEqual({ spawnToken: expect.any(String) });
+        expect(await reauthorizedArchitect.json()).toEqual({});
 
         const staleWorker = await fetch(`${daemonUrl}/legion/v1/grants`, {
           method: "POST",
@@ -681,9 +668,12 @@ describe("daemon end-to-end", () => {
           }),
         });
         expect(staleWorker.status).toBe(403);
+        // The in-memory boot-token map is gone after this restart; recovery falls back to the
+        // hash persisted on the claim at launch time (see legion-state.ts's WorkerRoleClaim
+        // .bootTokenHash), so the worker's own copy of LEGION_BOOT_TOKEN is still accepted.
         const workerRecovery = await post(`${daemonUrl}/legion/v1/worker-session`, {
           sessionId: "child-worker-session",
-          recoveryToken: workerSpawnToken,
+          recoveryToken: workerBootToken,
         });
         const recoveredWorker = (await workerRecovery.json()) as {
           tree: string;
@@ -734,9 +724,9 @@ describe("daemon end-to-end", () => {
         );
         await broker.flush();
 
-        // The child issue has an active implementer phase (set via the
-        // /legion/v1/phase call above), so routeActive delivers this comment
-        // to the implementer, not a fixed architect role.
+        // The child issue has an active implementer phase (set when /legion/v1/worker/started
+        // confirmed the boot above), so routeActive delivers this comment to the implementer,
+        // not a fixed architect role.
         const routedComment = await firstWorkerPublication.promise;
         expect(routedComment.payload).toMatchObject({
           type: "issue-comment",
@@ -754,42 +744,43 @@ describe("daemon end-to-end", () => {
         });
 
         const workerExceptionTopic = `notifications.envoy.exceptions.notifications.role.${worker}`;
-        broker.publish(
-          workerExceptionTopic,
-          codec.encode(
-            JSON.stringify(
-              envelope("worker-unclaimed", "envoy", workerExceptionTopic, {
-                original_topic: roleTopic(worker),
-                event_id: "worker-work",
-                payload: workerPayload,
-                reason: "no_holder",
-              })
+        const publishWorkerException = (): void => {
+          broker?.publish(
+            workerExceptionTopic,
+            codec.encode(
+              JSON.stringify(
+                envelope("worker-unclaimed", "envoy", workerExceptionTopic, {
+                  original_topic: roleTopic(worker),
+                  event_id: "worker-work",
+                  payload: workerPayload,
+                  reason: "no_holder",
+                })
+              )
             )
-          )
-        );
-        await broker.flush();
+          );
+        };
 
-        const directive = await workerDirective.promise;
-        expect(directive.subject).toBe(`legion.ctl.${sanitizeToken(root)}.1`);
-        expect(directive.payload).toEqual({
-          type: "revive-worker",
-          issue: child,
-          role: "implementer",
-          agentId: "child-worker",
-          parentSessionFile: rootSessionFile,
-          redeliver: {
-            topic: roleTopic(worker),
-            payload: workerPayload,
-            eventId: "worker-work",
-          },
-        });
-        await daemon.drain();
+        // The exception probes the worker's own locator directly (never the root's, and never
+        // the raw missed event): its shim socket still answers here, so it is resumed with a
+        // state-derived catch-up delivered straight over that socket instead of a fresh spawn
+        // or a replay of the missed `workerPayload`. `drain()` awaits every tracked role-lane
+        // operation, including this exception's handling, before the assertion below. Retried a
+        // few times against a real broker: core NATS is at-most-once, and this daemon's role-lane
+        // subscription was only just re-established by the restart above — a genuine
+        // subscription-registration race a real NATS round trip is needed to settle, not
+        // something a fake clock can simulate.
+        workerPrompts.length = 0;
+        for (let attempt = 0; attempt < 5 && workerPrompts.length === 0; attempt += 1) {
+          publishWorkerException();
+          await broker.flush();
+          await daemon.drain();
+          if (workerPrompts.length === 0) await Bun.sleep(100);
+        }
+        expect(workerPrompts).toEqual([JSON.stringify({ type: "catchup-worker", unhandled: [] })]);
       } finally {
         await daemon?.stop();
         roleSubscription?.unsubscribe();
-        controlSubscription?.unsubscribe();
         if (rolePump) await rolePump;
-        if (controlPump) await controlPump;
         await broker?.drain();
         if (nats) await stopNats(nats.name);
         await removePromptFixtures();

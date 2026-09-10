@@ -73,7 +73,6 @@ function trackIssue(state: LegionState): void {
     generation: 1,
     status: "active",
     launchFailures: 0,
-    heldEvents: [],
   };
   state.phases[issue] = { phase: "implementer", sessionId: "resync-test-worker" };
 }
@@ -148,7 +147,6 @@ describe("runResync", () => {
       generation: 1,
       status: "active",
       launchFailures: 0,
-      heldEvents: [],
     };
     dispatched.length = 0;
 
@@ -242,7 +240,6 @@ describe("runResync", () => {
       root: issue,
       generation: 1,
       status: "active",
-      heldEvents: [],
       launchFailures: 0,
     };
     const architect = roleToken(state.project, issue, "architect");
@@ -359,7 +356,6 @@ describe("runResync", () => {
       generation: 7,
       status: "launch-failed",
       launchFailures: 3,
-      heldEvents: [],
     };
 
     const event = await runResync(resyncDeps(state, []));
@@ -389,7 +385,6 @@ describe("runResync", () => {
       generation: 7,
       status: "launch-failed",
       launchFailures: 3,
-      heldEvents: [],
     };
 
     expect(await runResync(resyncDeps(state, []))).toEqual({
@@ -437,7 +432,6 @@ describe("runResync", () => {
       generation: 1,
       status: "active",
       launchFailures: 0,
-      heldEvents: [],
     };
     state.roles[roleToken("omp", issue, "architect")] = { issue, role: "architect" };
     state.prs["sjawhar/legion#7"] = checkPr(issue, {
@@ -639,7 +633,6 @@ describe("runResync", () => {
       generation: 1,
       status: "active",
       launchFailures: 0,
-      heldEvents: [],
     };
     state.phases[issue] = { phase: "implementer", sessionId: "resync-test-worker" };
     const pr: PrState = {

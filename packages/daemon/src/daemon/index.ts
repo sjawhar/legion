@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type IssueKey, roleToken, roleTopic } from "@legion/contracts";
+import { type IssueKey, parseRoleToken, roleToken, roleTopic } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import {
   type CiFetchResult,
@@ -13,6 +13,7 @@ import {
 import { fetchGitHubProjectItems, type GitHubProjectItemsResult } from "../state/github-fetch";
 import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
+import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
 import { setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
@@ -23,7 +24,12 @@ import {
   type ResolveDaemonEnvironmentDeps,
   resolveDaemonEnvironment,
 } from "./environment";
-import { type EventPump, type EventPumpDeps, startEventPump } from "./events";
+import {
+  type EventPump,
+  type EventPumpDeps,
+  startEventPump,
+  type UndeliverableInfo,
+} from "./events";
 import { buildRoleEnv, TokenManager } from "./github-apps";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock";
 import { loadState, saveState } from "./legion-state";
@@ -346,6 +352,7 @@ async function startDaemonLocked(
     mintBootToken: (tree, generation) => api.mintBootToken(tree, generation),
     mintWorkerBootToken: (tree, issue, role, generation, expectedSessionId) =>
       api.mintWorkerBootToken(tree, issue, role, generation, expectedSessionId),
+    revokeSessionCapability: (sessionId) => api.revokeSessionCapability(sessionId),
     connectWorkerRpc: deps.connectWorkerRpc,
     provisioningToken: async (owner) =>
       (await deps.tokenManager.getToken("implement", owner)).token,
@@ -376,6 +383,22 @@ async function startDaemonLocked(
     );
   };
 
+  const onUndeliverable = async (info: UndeliverableInfo): Promise<void> => {
+    try {
+      if (info.kind === "controller") {
+        await processManager.ensureController();
+        return;
+      }
+      const parsed = parseRoleToken(state.project, info.role);
+      if (!parsed || "controller" in parsed) return;
+      const root = rootForIssue(state, parsed.issue);
+      if (!root) return;
+      await processManager.resumeWorker(root, parsed.issue, parsed.role);
+    } catch (error) {
+      console.error(`[legion] onUndeliverable recovery failed for ${info.role}:`, error);
+    }
+  };
+
   const eventDeps: EventPumpDeps = {
     nats,
     envoyPublish: deps.envoyPublish,
@@ -393,9 +416,41 @@ async function startDaemonLocked(
         appLogins: config.appLogins,
         gatesMerge: config.gates.merge,
       }),
+    onUndeliverable,
     config,
   };
   const eventPump: EventPump = startEventPump(eventDeps);
+  const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
+
+  const emitResync = async (): Promise<void> => {
+    // Serialized against durable GitHub messages: resync reads/writes the
+    // same PrState CI fields a durable checks settlement does, so the two
+    // must not interleave (see events.ts's queue doc comment).
+    const payload = await eventPump.runExclusive(() =>
+      runResync({
+        state,
+        config,
+        fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
+        fetchCiStatusBatch,
+        applyEffects: eventPump.applyEffects,
+        now: deps.now,
+      })
+    );
+    console.log(
+      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems} ciFetchFailures=${payload.ciFetchFailures}${
+        payload.ciFetchFailureDetails.length === 0
+          ? ""
+          : ` ciFetchFailureDetails=${payload.ciFetchFailureDetails
+              .map(({ owner, error }) => `owner=${owner} error=${error}`)
+              .join(" ")}`
+      }`
+    );
+    await eventPump.publishControllerEvent(payload, {
+      event_id: `resync:${randomUUID()}`,
+      issued_at: deps.now(),
+    });
+  };
+
   const apiDeps: LegionApiDeps = {
     state,
     saveState: save,
@@ -404,7 +459,15 @@ async function startDaemonLocked(
     processManager,
     envoyPublish: deps.envoyPublish,
     onTreeReady: emitOverseerCatchup,
-    onControllerReady: () => eventPump.redeliverControllerEvents(),
+    // The controller is a role holder like any other: its catch-up on ready is the same
+    // resync triage re-emission for unadmitted tracked roots that already runs periodically.
+    // First delivers any Slack mention (or other irreplaceable payload) that arrived while no
+    // controller held the role — the one narrow exception to "no held-event queue to replay"
+    // (see `ControllerPendingNotice`'s doc comment) — then runs the fresh resync.
+    onControllerReady: async () => {
+      await eventPump.drainControllerNotices();
+      await emitResync();
+    },
     onControllerEvent: (payload) =>
       eventPump.publishControllerEvent(payload, {
         event_id: `api-controller:${randomUUID()}`,
@@ -436,36 +499,6 @@ async function startDaemonLocked(
   await processManager.reconcileAdmission();
   await processManager.reconcileWorkerAdmission();
   const ready = nats.ready();
-  const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
-
-  const emitResync = async (): Promise<void> => {
-    // Serialized against durable GitHub messages: resync reads/writes the
-    // same PrState CI fields a durable checks settlement does, so the two
-    // must not interleave (see events.ts's queue doc comment).
-    const payload = await eventPump.runExclusive(() =>
-      runResync({
-        state,
-        config,
-        fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
-        fetchCiStatusBatch,
-        applyEffects: eventPump.applyEffects,
-        now: deps.now,
-      })
-    );
-    console.log(
-      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems} ciFetchFailures=${payload.ciFetchFailures}${
-        payload.ciFetchFailureDetails.length === 0
-          ? ""
-          : ` ciFetchFailureDetails=${payload.ciFetchFailureDetails
-              .map(({ owner, error }) => `owner=${owner} error=${error}`)
-              .join(" ")}`
-      }`
-    );
-    await eventPump.publishControllerEvent(payload, {
-      event_id: `resync:${randomUUID()}`,
-      issued_at: deps.now(),
-    });
-  };
 
   let stopped = false;
   let resyncTimer: unknown;
@@ -521,6 +554,7 @@ async function startDaemonLocked(
     if (resyncTimer !== undefined) deps.clearTimeout(resyncTimer);
     deps.clearInterval(lingerTimer);
     eventPump.stop();
+    processManager.dispose();
     let failure: unknown;
     try {
       await drain();
@@ -530,6 +564,10 @@ async function startDaemonLocked(
         `[legion] event drain failed: ${error instanceof Error ? error.message : String(error)}`
       );
     } finally {
+      // Cancels any watchdog an in-flight handler armed *during* drain (the pre-drain call
+      // above only catches what was already armed before this) - dispose() is idempotent, so
+      // calling it again here is always safe.
+      processManager.dispose();
       try {
         await save();
       } catch (error) {

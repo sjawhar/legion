@@ -1,0 +1,222 @@
+// Direct unit tests for WorkerBootWatchdog's real-timer cleanup, isolated from ProcessManager:
+// every path a watch can exit through (a worker's socket closing, the observation interval
+// timing out, an explicit cancel, and a confirmed-dead retirement) must clear every timer it
+// armed along the way, never leaving one live in the background — see `cancelableSleep`'s own
+// doc comment for why an uncleared one would otherwise accumulate without bound across a
+// long-lived daemon watching a persistently borderline-slow worker.
+import { describe, expect, it } from "bun:test";
+import type { IssueKey, LegionRole } from "@legion/contracts";
+import type { WorkerLocator } from "../legion-state";
+import {
+  type WatchedClaim,
+  WorkerBootWatchdog,
+  type WorkerBootWatchdogDeps,
+} from "../worker-boot-watchdog";
+import type { WorkerRpcClient } from "../worker-rpc";
+
+const root = "sjawhar/legion#1" as IssueKey;
+const child = "sjawhar/legion#2" as IssueKey;
+const role: LegionRole = "implementer";
+const token = "legion-omp-sjawhar__legion-2-implementer";
+const locator: WorkerLocator = {
+  tmuxSession: "legion-omp",
+  tmuxWindowId: "@42",
+  tmuxPaneId: "%7",
+  socketPath: "/state/workers/child-implementer.sock",
+};
+
+/** Tracks every real `setTimeout` this process schedules for the duration of one test,
+ * removing an id the moment it fires or is cleared — so `activeCount()` reflects genuinely
+ * pending timers, never ones that already settled on their own. */
+function trackRealTimers(): { activeCount: () => number; restore: () => void } {
+  const active = new Set<ReturnType<typeof setTimeout>>();
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  // biome-ignore lint/suspicious/noExplicitAny: matching setTimeout's own permissive overload set
+  (globalThis as any).setTimeout = (
+    fn: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    const id = realSetTimeout(() => {
+      active.delete(id);
+      fn(...args);
+    }, ms);
+    active.add(id);
+    return id;
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: matching clearTimeout's own permissive overload set
+  (globalThis as any).clearTimeout = (id: any) => {
+    active.delete(id);
+    return realClearTimeout(id);
+  };
+  return {
+    activeCount: () => active.size,
+    restore: () => {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    },
+  };
+}
+
+function fakeClient(): WorkerRpcClient & { resolveClosed: () => void } {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  return {
+    closed: promise,
+    runState: "unknown",
+    negotiate: async () => {},
+    prompt: async () => {},
+    getState: async () => ({}),
+    shutdown: () => {},
+    close: () => resolve(),
+    onIdle: () => {},
+    resolveClosed: resolve,
+  };
+}
+
+function baseDeps(overrides: Partial<WorkerBootWatchdogDeps> = {}): WorkerBootWatchdogDeps {
+  return {
+    // A short real interval (well above BOOT_WATCHDOG_POLL_INTERVAL_MS's 100ms) so the
+    // connect-retry loop and the interval-remainder wait both genuinely exercise the real
+    // setTimeout branch (no `sleep` override) without a slow test.
+    workerBootTimeoutSeconds: () => 0.3,
+    now: () => Date.now(),
+    run: async () => ({ stdout: "", exitCode: 1 }),
+    isOmpPane: async () => false,
+    workerClient: async () => {
+      throw new Error("no client configured for this test");
+    },
+    getClaim: (): WatchedClaim | undefined => ({ generation: 1 }),
+    retireUnconfirmedBoot: async () => {},
+    ...overrides,
+  };
+}
+
+describe("WorkerBootWatchdog real-timer cleanup", () => {
+  it("clears the interval's own timer when a closed-winning race beats it, instead of leaving it live", async () => {
+    const timers = trackRealTimers();
+    try {
+      const client = fakeClient();
+      const retired: string[] = [];
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerClient: (() => {
+            let calls = 0;
+            return async () => {
+              calls += 1;
+              if (calls === 1) return client;
+              throw new Error("shim gone after close");
+            };
+          })(),
+          // Confirmed dead on the very next probe after the socket closes, so the watch
+          // retires in one step rather than re-arming (isolating this test to the
+          // closed-wins-the-race cleanup, not a second interval's own timers).
+          isOmpPane: async () => false,
+          retireUnconfirmedBoot: async () => {
+            retired.push(token);
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      // Lets the connect-retry loop's first attempt succeed and the race against `closed`
+      // begin (its own real setTimeout for the ~300ms interval remainder now pending).
+      await Promise.resolve();
+      await Promise.resolve();
+      client.resolveClosed();
+      // Drains the microtask queue so the race settles and `sleep.cancel()` runs.
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+      expect(retired).toEqual([token]);
+      expect(timers.activeCount()).toBe(0);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("clears its timer once the observation interval itself times out and retires the boot", async () => {
+    const timers = trackRealTimers();
+    try {
+      const retired: string[] = [];
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          // Never connects: the interval's own deadline is what ends `watchOneInterval`.
+          workerClient: async () => {
+            throw new Error("shim not listening");
+          },
+          isOmpPane: async () => false,
+          retireUnconfirmedBoot: async () => {
+            retired.push(token);
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(retired).toEqual([token]);
+      expect(timers.activeCount()).toBe(0);
+    } finally {
+      timers.restore();
+    }
+  }, 2_000);
+
+  it("clears every outstanding timer the instant cancel() runs, mid-wait", async () => {
+    const timers = trackRealTimers();
+    try {
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerClient: async () => {
+            throw new Error("shim not listening");
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(timers.activeCount()).toBeGreaterThan(0);
+
+      watchdog.cancel(token, 1);
+      // A cancelled watch's own in-flight sleep resolves via the abort listener on its next
+      // microtask, not synchronously.
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+      expect(timers.activeCount()).toBe(0);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("never accumulates a listener per re-arm: many slow-but-alive cycles followed by cancel still clear every timer", async () => {
+    const timers = trackRealTimers();
+    try {
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerClient: async () => {
+            throw new Error("shim not listening");
+          },
+          // Reports the pane alive on every probe: the watch re-arms indefinitely instead of
+          // ever retiring, so the only way this test settles is via the explicit cancel below
+          // — proving several full re-arm cycles worth of connect-retry timers were each
+          // cleaned up along the way, not merely the last one.
+          isOmpPane: async () => true,
+          run: async (cmd) => {
+            if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+            return { stdout: "", exitCode: 0 };
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      // Several full ~300ms observation intervals' worth of real wall time.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+
+      watchdog.cancel(token, 1);
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+      expect(timers.activeCount()).toBe(0);
+    } finally {
+      timers.restore();
+    }
+  }, 2_000);
+});

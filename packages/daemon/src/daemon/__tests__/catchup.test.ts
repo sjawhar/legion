@@ -38,7 +38,6 @@ function stateForTree(): {
     generation: 1,
     status: "active",
     launchFailures: 0,
-    heldEvents: [],
   };
   return { state, root, child };
 }
@@ -98,15 +97,9 @@ function timelineRunner(timeline: {
 }
 
 describe("derived catch-up", () => {
-  it("derives an overseer snapshot from tree state without replaying stored events", async () => {
+  it("derives an overseer snapshot from tree state", async () => {
     const { state, root, child } = stateForTree();
     state.prs["acme/widgets#7"] = prState(root);
-    state.trees[root].heldEvents.push({
-      role: "ignored",
-      payloadJson: JSON.stringify({ type: "old-event" }),
-      heldAt: "2026-08-24T00:00:00.000Z",
-      eventId: "old-event",
-    });
 
     expect(await overseerCatchup(state, root)).toEqual({
       type: "catchup-overseer",

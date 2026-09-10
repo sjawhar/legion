@@ -113,24 +113,9 @@ export const LegionDaemonApi = {
     request: architectCapability.extend({ issue: nonEmptyString, comment: z.string().optional() }),
     response: z.object({}),
   },
-  SpawnToken: {
-    request: architectCapability.extend({ issue: nonEmptyString, role: legionRole }),
-    response: z.object({ spawnToken: nonEmptyString }),
-  },
   ProvisioningCredential: {
     request: architectCapability.extend({ issue: nonEmptyString }),
     response: z.object({ token: nonEmptyString }),
-  },
-  RoleBacking: {
-    request: z.strictObject({
-      tree: nonEmptyString,
-      issue: nonEmptyString,
-      role: legionRole,
-      sessionId: nonEmptyString,
-      agentId: nonEmptyString,
-      spawnToken: nonEmptyString,
-    }),
-    response: z.object({}),
   },
   WorkerStarted: {
     request: z.strictObject({
@@ -176,20 +161,6 @@ export const LegionDaemonApi = {
     response: z.object({
       status: z.enum(["spawned", "resumed", "queued"]),
       roleToken: nonEmptyString,
-    }),
-  },
-  Phase: {
-    request: z.strictObject({
-      tree: nonEmptyString,
-      issue: nonEmptyString,
-      phase: nonEmptyString,
-      sessionId: nonEmptyString,
-      spawnToken: nonEmptyString,
-    }),
-    response: z.object({
-      secret: nonEmptyString,
-      gitName: nonEmptyString,
-      gitEmail: nonEmptyString,
     }),
   },
   WorkerSession: {
@@ -253,17 +224,12 @@ export type LabelsInput = InputOf<typeof LegionDaemonApi.Labels.request>;
 export type LabelsResponse = OutputOf<typeof LegionDaemonApi.Labels.response>;
 export type EscalateInput = InputOf<typeof LegionDaemonApi.Escalate.request>;
 export type IssueCloseInput = InputOf<typeof LegionDaemonApi.IssueClose.request>;
-export type SpawnTokenInput = InputOf<typeof LegionDaemonApi.SpawnToken.request>;
-export type SpawnTokenResponse = OutputOf<typeof LegionDaemonApi.SpawnToken.response>;
-export type RoleBackingInput = InputOf<typeof LegionDaemonApi.RoleBacking.request>;
 export type WorkerStartedInput = InputOf<typeof LegionDaemonApi.WorkerStarted.request>;
 export type WorkerStartedResponse = OutputOf<typeof LegionDaemonApi.WorkerStarted.response>;
 export type WorkerReadyInput = InputOf<typeof LegionDaemonApi.WorkerReady.request>;
 export type PhaseCompleteInput = InputOf<typeof LegionDaemonApi.PhaseComplete.request>;
 export type SpawnWorkerInput = InputOf<typeof LegionDaemonApi.SpawnWorker.request>;
 export type SpawnWorkerResponse = OutputOf<typeof LegionDaemonApi.SpawnWorker.response>;
-export type PhaseInput = InputOf<typeof LegionDaemonApi.Phase.request>;
-export type PhaseResponse = OutputOf<typeof LegionDaemonApi.Phase.response>;
 export type WorkerSessionInput = InputOf<typeof LegionDaemonApi.WorkerSession.request>;
 export type WorkerSessionResponse = OutputOf<typeof LegionDaemonApi.WorkerSession.response>;
 export type ControllerIssueInput = InputOf<typeof LegionDaemonApi.GatesApprove.request>;

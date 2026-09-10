@@ -55,6 +55,12 @@ export interface DaemonConfig {
   /** Seconds to wait for every process under a closing/expired tree to close its shim socket
    * gracefully, each on its own clock, before that one process's pane is killed directly. */
   treeStopTimeoutSeconds: number;
+  /** An observation interval, never a hard deadline: at each interval, a spawned worker with no
+   * `/worker/started` confirmation yet is probed (its tmux pane, or a reachable/answering shim
+   * socket) before anything happens — a live pane or socket just re-arms the watch for another
+   * interval. Only a boot whose pane is gone *and* whose socket refuses a connection is retired,
+   * launch-failure counted, and retried (or escalated to `worker-died` at the threshold). */
+  workerBootTimeoutSeconds: number;
   gates: { design: "root-issues" | "off"; merge: "human" | "off" };
   githubApps: GitHubAppsConfig;
   stateDir: string;
@@ -103,6 +109,7 @@ const DEFAULT_MAX_FIX_ATTEMPTS = 3;
 const DEFAULT_RESYNC_INTERVAL_MS = 600_000;
 const DEFAULT_WORKER_STOP_TIMEOUT_SECONDS = 10;
 const DEFAULT_TREE_STOP_TIMEOUT_SECONDS = 60;
+const DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS = 120;
 const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp";
 
 const CONFIG_SCHEMA: ConfigSchema = {
@@ -129,6 +136,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   resync_interval_seconds: null,
   worker_stop_timeout_seconds: null,
   tree_stop_timeout_seconds: null,
+  worker_boot_timeout_seconds: null,
   state_dir: null,
   gates: { design: null, merge: null },
   github_apps: {
@@ -459,6 +467,7 @@ export function loadConfigFromFile(
     ["max_fix_attempts", "maxFixAttempts"],
     ["worker_stop_timeout_seconds", "workerStopTimeoutSeconds"],
     ["tree_stop_timeout_seconds", "treeStopTimeoutSeconds"],
+    ["worker_boot_timeout_seconds", "workerBootTimeoutSeconds"],
   ] as const) {
     const value = readPositiveInteger(config[fileKey], fileKey);
     if (value !== undefined) fields[configKey] = value;
@@ -635,6 +644,15 @@ export function resolveDaemonConfig(
     ),
     DEFAULT_TREE_STOP_TIMEOUT_SECONDS
   );
+  const workerBootTimeoutSeconds = resolveValue(
+    opts.cliOverrides?.workerBootTimeoutSeconds,
+    fileNumber(fields, "workerBootTimeoutSeconds"),
+    parseEnvPositiveInteger(
+      env.LEGION_WORKER_BOOT_TIMEOUT_SECONDS,
+      "LEGION_WORKER_BOOT_TIMEOUT_SECONDS"
+    ),
+    DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS
+  );
 
   const lifecycleNumbers: Record<string, number> = {
     admissionCap: admissionCap.value,
@@ -645,6 +663,7 @@ export function resolveDaemonConfig(
     resyncIntervalMs: resyncIntervalMs.value,
     workerStopTimeoutSeconds: workerStopTimeoutSeconds.value,
     treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
+    workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
   };
   for (const [field, value] of Object.entries(lifecycleNumbers)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
@@ -698,6 +717,7 @@ export function resolveDaemonConfig(
       resyncIntervalMs: resyncIntervalMs.value * (resyncIntervalMs.source === "env" ? 1000 : 1),
       workerStopTimeoutSeconds: workerStopTimeoutSeconds.value,
       treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
+      workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
       gates: parsedGates,
       githubApps: githubApps.value,
       stateDir: stateDir.value,

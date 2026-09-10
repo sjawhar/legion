@@ -5,7 +5,6 @@ import {
   formatIssueKey,
   type IssueKey,
   isLegionProjectToken,
-  type LegionRole,
 } from "@legion/contracts";
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
@@ -29,18 +28,6 @@ export interface IssueNode {
   updatedAtSource?: UpdateSource;
 }
 
-export interface HeldEvent {
-  role: string;
-  payloadJson: string;
-  heldAt: string;
-  eventId: string;
-}
-export interface RecoveryEvent {
-  issue: IssueKey;
-  role: LegionRole;
-  original: { topic: string; payload: string; eventId: string };
-}
-
 export interface TmuxWindowLocator {
   tmuxSession: string;
   tmuxWindowId: string;
@@ -56,8 +43,6 @@ export interface TreeState {
   status: "queued" | "active" | "lingering" | "dead" | "launch-failed" | "closed";
   lingerUntil?: string;
   launchFailures: number;
-  heldEvents: HeldEvent[];
-  recoveryEvents?: RecoveryEvent[];
 }
 
 export interface PrState {
@@ -113,6 +98,10 @@ export interface WorkerRoleClaim {
    * found dead on reconnect) so a later promoted/resumed launch still resumes the same agent via
    * `--resume` instead of starting fresh. Cleared once a launch records a fresh locator. */
   resumeSessionFile?: string;
+  /** The session id `spawnWorker`/`launchWorker` expected this generation to resume, persisted
+   * alongside `bootTokenHash` so a daemon restart before `/worker/started` still enforces the
+   * same-agent invariant that the in-memory boot token's `expectedSessionId` otherwise carries. */
+  expectedSessionId?: string;
 }
 
 export interface ControllerRoleClaim {
@@ -127,8 +116,20 @@ export interface SpawnCapability {
   role: string;
 }
 
+/** A controller-bound event with no other source of truth to recover it from once the
+ * controller becomes reachable again -- unlike the deleted general held-event queue (every
+ * other durable effect is derivable from state and recovers via its own catch-up: a worker's
+ * `workerCatchup`, the controller's own resync re-emission on `/controller/ready`), a Slack
+ * mention's specific text has no state to re-derive it from. Recorded only by
+ * `publishControllerDirect`'s 404-no-holder path and drained once, in order, by
+ * `/controller/ready` (see `handleControllerReady` and `EventPump.drainControllerNotices`). */
+export interface ControllerPendingNotice {
+  payloadJson: string;
+  eventId: string;
+}
+
 export interface LegionState {
-  version: 16;
+  version: 18;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -150,8 +151,8 @@ export interface LegionState {
     IssueKey,
     { phase: string; sessionId: string; completed?: { summary: string; at: string } } | undefined
   >;
-  controllerHeldEvents: HeldEvent[];
   controllerCapabilityHash?: string;
+  controllerPendingNotices: ControllerPendingNotice[];
 }
 
 export interface LegionStateInit {
@@ -192,27 +193,6 @@ const IssueNodeSchema = z
     updatedAtSource: z.enum(["webhook", "resync"]).optional(),
   })
   .strict();
-const HeldEventSchema = z
-  .object({
-    role: z.string(),
-    payloadJson: z.string(),
-    heldAt: z.string(),
-    eventId: z.string(),
-  })
-  .strict();
-const RecoveryEventSchema = z
-  .object({
-    issue: IssueKeySchema,
-    role: z.enum(["architect", "planner", "implementer", "tester", "reviewer", "merger"]),
-    original: z
-      .object({
-        topic: z.string(),
-        payload: z.string(),
-        eventId: z.string(),
-      })
-      .strict(),
-  })
-  .strict();
 
 const TreeStateSchema = z
   .object({
@@ -231,8 +211,6 @@ const TreeStateSchema = z
     status: z.enum(["queued", "active", "lingering", "dead", "launch-failed", "closed"]),
     lingerUntil: z.string().optional(),
     launchFailures: z.number().int().nonnegative(),
-    heldEvents: z.array(HeldEventSchema),
-    recoveryEvents: z.array(RecoveryEventSchema).optional(),
   })
   .strict();
 const CheckRunRefSchema = z
@@ -290,6 +268,7 @@ const WorkerRoleClaimSchema = z
     promptFailures: z.number().int().nonnegative().optional(),
     bootTokenHash: z.string().optional(),
     resumeSessionFile: z.string().optional(),
+    expectedSessionId: z.string().optional(),
   })
   .strict();
 const ControllerRoleClaimSchema = z
@@ -313,9 +292,15 @@ const PhaseSchema = z
     completed: z.object({ summary: z.string(), at: z.string() }).strict().optional(),
   })
   .strict();
+const ControllerPendingNoticeSchema = z
+  .object({
+    payloadJson: z.string(),
+    eventId: z.string(),
+  })
+  .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(16),
+    version: z.literal(18),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -348,11 +333,11 @@ const LegionStateSchema = z
       })
       .strict(),
     phases: z.record(IssueKeySchema, PhaseSchema),
-    controllerHeldEvents: z.array(HeldEventSchema).default([]),
     controllerCapabilityHash: z
       .string()
       .regex(/^[a-f0-9]{64}$/)
       .optional(),
+    controllerPendingNotices: z.array(ControllerPendingNoticeSchema).default([]),
   })
   .strict();
 
@@ -364,7 +349,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 16,
+    version: 18,
     project,
     issues: {},
     trees: {},
@@ -376,7 +361,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     admission: { cap, active: [], queue: [] },
     workerAdmission: { queue: [] },
     phases: {},
-    controllerHeldEvents: [],
+    controllerPendingNotices: [],
   };
 }
 
@@ -620,6 +605,37 @@ function migrateV15State(state: unknown): unknown {
   return { ...state, version: 16, workerAdmission: { queue: [] } };
 }
 
+/** v16 -> v17: drops the held-event plumbing entirely — `tree.heldEvents`, top-level
+ * `controllerHeldEvents`, and `tree.recoveryEvents` (a dead-architect exception's queued
+ * redelivery — held-event replay under another name) — now that a missed wake is recovered by
+ * resuming the worker/controller/root and delivering a state-derived catch-up, never by
+ * replaying a queued raw event. Never touches `workerAdmission`, added by the v15->v16 step
+ * immediately above. */
+function migrateV16State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 16) return state;
+  const { controllerHeldEvents: _droppedControllerHeldEvents, trees, ...rest } = state;
+  const migratedTrees = recordValue(trees)
+    ? Object.fromEntries(
+        Object.entries(trees).map(([key, tree]) => {
+          if (!recordValue(tree)) return [key, tree];
+          const {
+            heldEvents: _droppedHeldEvents,
+            recoveryEvents: _droppedRecoveryEvents,
+            ...withoutHeldEvents
+          } = tree;
+          return [key, withoutHeldEvents];
+        })
+      )
+    : trees;
+  return { ...rest, version: 17, trees: migratedTrees };
+}
+
+/** v17 -> v18: adds `controllerPendingNotices` (see its own doc comment) -- an empty array for
+ * every existing state, since nothing before this version ever recorded one. */
+function migrateV17State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 17) return state;
+  return { ...state, version: 18, controllerPendingNotices: [] };
+}
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -633,10 +649,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  const state = migrateV15State(
-    migrateV14State(
-      migrateV13State(
-        migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
+  const state = migrateV17State(
+    migrateV16State(
+      migrateV15State(
+        migrateV14State(
+          migrateV13State(
+            migrateV12State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(source)))))
+          )
+        )
       )
     )
   );
@@ -644,7 +664,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 16) {
+  if (version !== 18) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 
