@@ -158,7 +158,7 @@ export interface ControllerPendingNotice {
 }
 
 export interface LegionState {
-  version: 19;
+  version: 20;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -329,7 +329,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(19),
+    version: z.literal(20),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -397,7 +397,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 19,
+    version: 20,
     project,
     issues: {},
     trees: {},
@@ -743,6 +743,38 @@ function migrateV18State(state: unknown): unknown {
   return { ...state, version: 19, gates: {}, pendingStatusWrites: {} };
 }
 
+/** v19 -> v20: `readyConfirmedAt` was added to `WorkerRoleClaim` without a version bump, so a
+ * state persisted before that change has already-confirmed worker claims (`sessionId` and a
+ * resumable `locator` both present -- the pre-upgrade meaning of "confirmed") with no
+ * `readyConfirmedAt` at all. Left alone, `reconnectWorkers` would re-arm the boot watchdog for
+ * every one of those healthy workers on the first restart after upgrade and retire them at the
+ * registration deadline, since a worker that already finished `/worker/ready` in a prior process
+ * lifetime never repeats it. Backfills `readyConfirmedAt` with this migration's own timestamp
+ * for exactly those claims; a claim missing either field (never confirmed, or never even
+ * started) is left untouched, and a claim that already carries `readyConfirmedAt` (persisted by
+ * an already-patched daemon) is never overwritten. */
+function migrateV19State(state: unknown, migratedAt: number): unknown {
+  if (!recordValue(state) || state.version !== 19) return state;
+  const { roles, ...rest } = state;
+  const migratedRoles = recordValue(roles)
+    ? Object.fromEntries(
+        Object.entries(roles).map(([key, claim]) => {
+          if (
+            !recordValue(claim) ||
+            !("issue" in claim) ||
+            claim.readyConfirmedAt !== undefined ||
+            claim.sessionId === undefined ||
+            claim.locator === undefined
+          ) {
+            return [key, claim];
+          }
+          return [key, { ...claim, readyConfirmedAt: migratedAt }];
+        })
+      )
+    : roles;
+  return { ...rest, version: 20, roles: migratedRoles };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -756,6 +788,9 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
+  // A single timestamp for this whole load, used only by migrateV19State's readyConfirmedAt
+  // backfill -- every claim it touches in this one load gets the same migration instant.
+  const migratedAt = Date.now();
   // Ordered oldest-to-newest: each migration is a no-op unless `state.version` matches the one
   // it upgrades from, so this reduce applies exactly the same chain the prior nested-call form
   // did, just as an auditable list instead of a call pyramid.
@@ -771,13 +806,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV16State,
     migrateV17State,
     migrateV18State,
+    (state) => migrateV19State(state, migratedAt),
   ];
   const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 19) {
+  if (version !== 20) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 
