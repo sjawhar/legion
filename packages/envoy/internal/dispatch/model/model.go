@@ -176,6 +176,9 @@ type Comment struct {
 	ReplyTo    *string     `json:"reply_to"`
 	AskID      *string     `json:"ask_id"`
 	Resolved   bool        `json:"resolved"`
+	ResolvedBy *Actor      `json:"resolved_by"`
+	ResolvedAt *string     `json:"resolved_at"`
+	EditedAt   *string     `json:"edited_at"`
 	Suggestion *Suggestion `json:"suggestion"`
 	CreatedAt  time.Time   `json:"created_at"`
 }

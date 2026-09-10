@@ -426,6 +426,9 @@ test("IssuePage highlights a historical quote from its comment deep link", async
       issue_key: issue.key,
       reply_to: null,
       resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
       suggestion: null,
     },
   ]);
@@ -489,6 +492,9 @@ test("IssuePage reports an ambiguous historical quote as changed text", async ()
       issue_key: issue.key,
       reply_to: null,
       resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
       suggestion: null,
     },
   ]);

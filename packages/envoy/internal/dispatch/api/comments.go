@@ -23,7 +23,7 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 	}
 	artifactID := strings.TrimSpace(r.URL.Query().Get("artifact"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
+		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 		from comments
 		where issue_key = $1 and ($2 = '' or anchor->>'artifact_id' = $2)
 		order by created_at, id
@@ -78,13 +78,13 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seedValue string) ([]model.Comment, error) {
 	rows, err := q.Query(ctx, fmt.Sprintf(`
 		with recursive replies as (
-			select id, issue_key, author, body, anchor, reply_to, ask_id, resolved, suggestion, created_at
+			select id, issue_key, author, body, anchor, reply_to, ask_id, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 			from comments where %s = $1
 			union all
-			select c.id, c.issue_key, c.author, c.body, c.anchor, c.reply_to, c.ask_id, c.resolved, c.suggestion, c.created_at
+			select c.id, c.issue_key, c.author, c.body, c.anchor, c.reply_to, c.ask_id, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at
 			from comments c join replies r on c.reply_to = r.id
 		)
-		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
+		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 		from replies
 		order by created_at, id
 	`, seedColumn), seedValue)
@@ -157,20 +157,26 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "replies cannot carry anchors")
 		return
 	}
+	var replyRoot *model.Comment
 	if input.ReplyTo != nil {
 		if strings.TrimSpace(*input.ReplyTo) == "" {
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this issue")
 			return
 		}
-		var sameIssue bool
-		if err := tx.QueryRow(r.Context(), `select exists(select 1 from comments where id = $1 and issue_key = $2)`, *input.ReplyTo, issueKey).Scan(&sameIssue); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if !sameIssue {
+		root, err := s.loadCommentForUpdate(r.Context(), tx, *input.ReplyTo)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && root.IssueKey != issueKey) {
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this issue")
 			return
 		}
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if root.ReplyTo != nil || root.AskID != nil {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must be a thread root")
+			return
+		}
+		replyRoot = &root
 	}
 	var askQuestion string
 	if input.AskID != nil {
@@ -262,11 +268,28 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if comment.ReplyTo != nil {
-		root, err := s.commentThreadRoot(r.Context(), tx, comment)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+	var reopenedRoot *model.Comment
+	var reopenedArtifactName string
+	if replyRoot != nil {
+		root := *replyRoot
+		if root.Resolved {
+			if _, err := tx.Exec(r.Context(), `
+				update comments
+				set resolved = false, resolved_by = null, resolved_at = null
+				where id = $1
+			`, root.ID); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			root.Resolved = false
+			root.ResolvedBy = nil
+			root.ResolvedAt = nil
+			reopenedRoot = &root
+			reopenedArtifactName, err = s.commentArtifactName(r.Context(), tx, root)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
 		}
 		if root.Anchor != nil {
 			replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", root.ID)
@@ -305,6 +328,19 @@ func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 		}
 		events = append(events, snapshotEvent)
 	}
+	if reopenedRoot != nil {
+		event, err := s.appendEvent(r.Context(), tx, model.Event{
+			IssueKey: issueKey,
+			Type:     "comment.reopened",
+			Actor:    actor,
+			Payload:  commentEventPayload(*reopenedRoot, reopenedArtifactName, ""),
+		})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		events = append(events, event)
+	}
 	event, err := s.appendEvent(r.Context(), tx, model.Event{
 		IssueKey: issueKey,
 		Type:     "comment.created",
@@ -338,6 +374,204 @@ func (s *server) acceptComment(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) rejectComment(w http.ResponseWriter, r *http.Request) {
 	s.commentAction(w, r, "reject")
+}
+
+func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	evictOnFailure := false
+	evictArtifactID := ""
+	defer func() {
+		if evictOnFailure {
+			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
+		}
+	}()
+	defer tx.Rollback(r.Context())
+	unlockedComment, err := s.loadComment(r.Context(), tx, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.requireOpenIssue(r.Context(), tx, unlockedComment.IssueKey); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if comment.ReplyTo != nil || comment.AskID != nil {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reopen the thread root")
+		return
+	}
+	artifactName, err := s.commentArtifactName(r.Context(), tx, comment)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if _, err := tx.Exec(r.Context(), `
+		update comments
+		set resolved = false, resolved_by = null, resolved_at = null
+		where id = $1
+	`, comment.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	comment.Resolved = false
+	comment.ResolvedBy = nil
+	comment.ResolvedAt = nil
+	if comment.Anchor != nil {
+		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		projectionKind, err := s.commentProjectionKind(r.Context(), comment)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		evictArtifactID = comment.Anchor.ArtifactID
+		evictOnFailure = true
+		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	event, err := s.appendEvent(r.Context(), tx, model.Event{
+		IssueKey: comment.IssueKey,
+		Type:     "comment.reopened",
+		Actor:    actor,
+		Payload:  commentEventPayload(comment, artifactName, ""),
+	})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	evictOnFailure = false
+	s.publish(event)
+	writeJSON(w, http.StatusOK, comment)
+}
+
+func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Body string `json:"body"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if strings.TrimSpace(input.Body) == "" {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
+		return
+	}
+	if length := len16(input.Body); length > maxCommentBody16 {
+		capExceeded(w, "body", length, maxCommentBody16)
+		return
+	}
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	evictOnFailure := false
+	evictArtifactID := ""
+	defer func() {
+		if evictOnFailure {
+			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
+		}
+	}()
+	defer tx.Rollback(r.Context())
+	unlockedComment, err := s.loadComment(r.Context(), tx, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.requireOpenIssue(r.Context(), tx, unlockedComment.IssueKey); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if comment.Author != actor {
+		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the comment author may edit it")
+		return
+	}
+	artifactName, err := s.commentArtifactName(r.Context(), tx, comment)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	var editedAt time.Time
+	if err := tx.QueryRow(r.Context(), `
+		update comments
+		set body = $2, edited_at = now()
+		where id = $1
+		returning edited_at
+	`, comment.ID, input.Body).Scan(&editedAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	comment.Body = input.Body
+	comment.EditedAt = commentTimestamp(editedAt)
+	if comment.Anchor != nil {
+		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		projectionKind, err := s.commentProjectionKind(r.Context(), comment)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		evictArtifactID = comment.Anchor.ArtifactID
+		evictOnFailure = true
+		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if err := s.replaceRefs(r.Context(), tx, "comment", comment.ID, comment.Body); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, model.Event{
+		IssueKey: comment.IssueKey,
+		Type:     "comment.edited",
+		Actor:    actor,
+		Payload:  commentEventPayload(comment, artifactName, ""),
+	})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	evictOnFailure = false
+	s.publish(event)
+	writeJSON(w, http.StatusOK, comment)
 }
 
 func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action string) {
@@ -396,6 +630,11 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	}
 	projectionKind := ""
 	eventType := "comment.resolved"
+	resolvedBy, err := encodeJSON(actor)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	switch action {
 	case "resolve":
 		projectionKind, err = s.commentProjectionKind(r.Context(), comment)
@@ -403,11 +642,19 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		if _, err := tx.Exec(r.Context(), `update comments set resolved = true where id = $1`, comment.ID); err != nil {
+		var resolvedAt time.Time
+		if err := tx.QueryRow(r.Context(), `
+			update comments
+			set resolved = true, resolved_by = $2, resolved_at = now()
+			where id = $1
+			returning resolved_at
+		`, comment.ID, resolvedBy).Scan(&resolvedAt); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		comment.Resolved = true
+		comment.ResolvedBy = &actor
+		comment.ResolvedAt = commentTimestamp(resolvedAt)
 	case "accept", "reject":
 		if comment.Suggestion == nil {
 			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept and reject require a suggestion")
@@ -475,19 +722,22 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		result, err := tx.Exec(r.Context(), `
+		var resolvedAt time.Time
+		if err := tx.QueryRow(r.Context(), `
 			update comments
-			set resolved = true, suggestion = $2
+			set resolved = true, resolved_by = $2, resolved_at = now(), suggestion = $3
 			where id = $1 and suggestion->>'accepted' is null
-		`, comment.ID, suggestion)
-		if err != nil {
+			returning resolved_at
+		`, comment.ID, resolvedBy, suggestion).Scan(&resolvedAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
+				return
+			}
 			s.writeHandlerError(w, err)
 			return
 		}
-		if result.RowsAffected() != 1 {
-			writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
-			return
-		}
+		comment.ResolvedBy = &actor
+		comment.ResolvedAt = commentTimestamp(resolvedAt)
 	}
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
@@ -559,20 +809,9 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 
 func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.Comment, error) {
 	return scanComment(q.QueryRow(ctx, `
-		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
+		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 		from comments where id = $1
 	`, id))
-}
-
-func (s *server) commentThreadRoot(ctx context.Context, q queryer, comment model.Comment) (model.Comment, error) {
-	for comment.ReplyTo != nil {
-		root, err := s.loadComment(ctx, q, *comment.ReplyTo)
-		if err != nil {
-			return model.Comment{}, err
-		}
-		comment = root
-	}
-	return comment, nil
 }
 
 func (s *server) commentProjectionKind(ctx context.Context, comment model.Comment) (string, error) {
@@ -615,16 +854,18 @@ func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestio
 
 func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
 	return scanComment(tx.QueryRow(ctx, `
-		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, suggestion, created_at
+		select id::text, issue_key, author, body, anchor, reply_to::text, ask_id::text, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
 		from comments where id = $1 for update
 	`, id))
 }
 
 func scanComment(row pgx.Row) (model.Comment, error) {
 	var comment model.Comment
-	var author, anchor, suggestion []byte
+	var author, anchor, resolvedBy, suggestion []byte
+	var resolvedAt, editedAt *time.Time
 	if err := row.Scan(
-		&comment.ID, &comment.IssueKey, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.AskID, &comment.Resolved, &suggestion, &comment.CreatedAt,
+		&comment.ID, &comment.IssueKey, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.AskID, &comment.Resolved,
+		&resolvedBy, &resolvedAt, &editedAt, &suggestion, &comment.CreatedAt,
 	); err != nil {
 		return model.Comment{}, err
 	}
@@ -638,6 +879,15 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 		}
 		comment.Anchor = &value
 	}
+	if len(resolvedBy) > 0 {
+		var value model.Actor
+		if err := json.Unmarshal(resolvedBy, &value); err != nil {
+			return model.Comment{}, fmt.Errorf("decode comment resolved_by: %w", err)
+		}
+		comment.ResolvedBy = &value
+	}
+	comment.ResolvedAt = commentTimestampPtr(resolvedAt)
+	comment.EditedAt = commentTimestampPtr(editedAt)
 	if len(suggestion) > 0 {
 		var value model.Suggestion
 		if err := json.Unmarshal(suggestion, &value); err != nil {
@@ -646,6 +896,18 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 		comment.Suggestion = &value
 	}
 	return comment, nil
+}
+
+func commentTimestampPtr(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	return commentTimestamp(*value)
+}
+
+func commentTimestamp(value time.Time) *string {
+	text := value.UTC().Format(time.RFC3339Nano)
+	return &text
 }
 
 func commentEventPayload(comment model.Comment, artifactName, askQuestion string) model.CommentEventPayload {

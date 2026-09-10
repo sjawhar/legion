@@ -1201,13 +1201,23 @@ func TestAskThreadRepliesStoredAndReturnedInOrder(t *testing.T) {
 		t.Fatalf("comment.created event log = %s, want ask_question in the payload", log.Body.String())
 	}
 
-	nested := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "Why option A?", "reply_to": firstReply.ID, "actor": sessionActor(),
-	})
-	if nested.Code != http.StatusCreated {
-		t.Fatalf("nested reply: status=%d body=%s", nested.Code, nested.Body.String())
+	nestedReply := model.Comment{
+		IssueKey: issue.Key,
+		Author:   model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
+		Body:     "Why option A?",
+		ReplyTo:  &firstReply.ID,
 	}
-	nestedReply := decodeBody[model.Comment](t, nested)
+	author, err := json.Marshal(nestedReply.Author)
+	if err != nil {
+		t.Fatalf("encode nested ask reply author: %v", err)
+	}
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body, reply_to)
+		values ($1, $2, $3, $4)
+		returning id::text, created_at
+	`, nestedReply.IssueKey, author, nestedReply.Body, nestedReply.ReplyTo).Scan(&nestedReply.ID, &nestedReply.CreatedAt); err != nil {
+		t.Fatalf("seed nested ask reply: %v", err)
+	}
 
 	second := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": "Because it's simpler.", "ask_id": ask.ID,
@@ -1560,7 +1570,23 @@ func TestGetCommentReturnsReplyChain(t *testing.T) {
 	}
 	root := createComment("root", nil)
 	first := createComment("first reply", &root.ID)
-	nested := createComment("nested reply", &first.ID)
+	nested := model.Comment{
+		IssueKey: issue.Key,
+		Author:   model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
+		Body:     "nested reply",
+		ReplyTo:  &first.ID,
+	}
+	author, err := json.Marshal(nested.Author)
+	if err != nil {
+		t.Fatalf("encode nested reply author: %v", err)
+	}
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body, reply_to)
+		values ($1, $2, $3, $4)
+		returning id::text, created_at
+	`, nested.IssueKey, author, nested.Body, nested.ReplyTo).Scan(&nested.ID, &nested.CreatedAt); err != nil {
+		t.Fatalf("seed nested reply: %v", err)
+	}
 	second := createComment("second reply", &root.ID)
 	base := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
 	for index, comment := range []model.Comment{root, first, nested, second} {

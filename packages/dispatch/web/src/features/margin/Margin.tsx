@@ -14,8 +14,13 @@ import type { Artifact, Ask, Comment, Event } from "../../api/types";
 import type { MarginComposer } from "./CommentsTab";
 import type { ComposerAnchor, ComposerKind } from "./Composer";
 import { MarginSheet } from "./MarginSheet";
-import type { MarginItem, MarginItemAction, MarginTab } from "./useMarginItems";
-import { useMarginItems } from "./useMarginItems";
+import {
+  type MarginItem,
+  type MarginItemAction,
+  type MarginTab,
+  threadRootId,
+  useMarginItems,
+} from "./useMarginItems";
 import { useMarginListeners } from "./useMarginListeners";
 
 export interface MarginSelection extends ComposerAnchor {
@@ -139,6 +144,7 @@ function useMarginSheet(): MarginSheetModel {
     asksPending,
     commentsError,
     commentsPending,
+    commentRecords,
     isClosed,
     issueError,
     issueKey,
@@ -215,9 +221,9 @@ function useMarginSheet(): MarginSheetModel {
   );
   const onReply = useCallback(
     (comment: Comment) => {
-      openComposer("comment", undefined, comment.id);
+      openComposer("comment", undefined, threadRootId(commentRecords, comment));
     },
-    [openComposer]
+    [commentRecords, openComposer]
   );
   const closeComposer = useCallback(() => {
     setComposer(undefined);

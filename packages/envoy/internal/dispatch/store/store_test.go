@@ -176,8 +176,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 7 {
-		t.Errorf("recorded migrations: got %d, want 7", migrations)
+	if migrations != 8 {
+		t.Errorf("recorded migrations: got %d, want 8", migrations)
 	}
 }
 

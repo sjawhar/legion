@@ -144,8 +144,10 @@ dispatch_comment({ issue, artifact?, quote?, occurrence?, body, reply_to?, reply
 
 It returns `details` `{ issue, topic, comment }`. `quote` requires `artifact`; omit both for a
 floating issue comment. A reply (`reply_to`/`reply_to_ask`) takes no `quote`; it belongs to its
-parent's anchor. Use `reply_to` to continue a comment thread; use `reply_to_ask` to reply
-directly under a question asked with `dispatch_ask`. The two are mutually exclusive.
+parent's anchor. Use `reply_to` to continue a comment thread at its root; a reply to a resolved
+thread reopens it. Use `reply_to_ask` to reply directly under a question asked with
+`dispatch_ask`. The two are mutually exclusive. Comments are edited only by their author from the
+dashboard.
 
 Propose an exact replacement instead of describing it:
 

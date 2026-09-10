@@ -33,6 +33,7 @@ export type {
   DocEditOp,
   EditArtifactInput,
   EditArtifactResponse,
+  EditCommentInput,
   EditOp,
   Event,
   EventType,

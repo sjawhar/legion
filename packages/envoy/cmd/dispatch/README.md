@@ -133,9 +133,11 @@ legacy document. Normal server boot performs the one-shot conversion from legacy
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |
 | `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
-| `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, reply, or suggestion. An anchored comment uses the same quote-or-mark-ID shape as an ask; replies have their parent's anchor and send none. |
+| `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, root-level reply, or suggestion. An anchored comment uses the same quote-or-mark-ID shape as an ask; replies inherit their root's anchor and send none. |
 | `/api/v1/comments/{id}` | GET | cookie, trusted header, or bearer | Read a comment and its reply chain. |
+| `/api/v1/comments/{id}` | PATCH | cookie or trusted header | Edit a comment body. Human authors only. |
 | `/api/v1/comments/{id}/resolve` | POST | cookie, trusted header, or bearer | Resolve a comment. |
+| `/api/v1/comments/{id}/reopen` | POST | cookie or trusted header | Reopen a resolved thread-root comment. |
 | `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
@@ -166,6 +168,13 @@ A caller resolved by header identity without a stored GitHub token receives
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
 | `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema. Malformed edit replacements report `INVALID_OP`. |
 | `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely. |
+
+## Comment errors
+
+| Status / code | Meaning |
+| --- | --- |
+| `400 INVALID_COMMENT` | A reply must target a thread-root comment. |
+| `403 NOT_AUTHOR` | Only a comment's author may edit it. |
 
 ## Tests
 

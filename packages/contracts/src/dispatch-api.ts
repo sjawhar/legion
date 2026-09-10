@@ -154,6 +154,9 @@ export interface Comment {
   readonly reply_to: string | null;
   readonly ask_id: string | null;
   readonly resolved: boolean;
+  readonly resolved_by: Actor | null;
+  readonly resolved_at: string | null;
+  readonly edited_at: string | null;
   readonly suggestion: Suggestion | null;
   readonly created_at: string;
 }
@@ -234,6 +237,14 @@ export type DispatchEvent =
     })
   | (DispatchEventBase & {
       readonly type: "comment.resolved";
+      readonly payload: CommentEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "comment.reopened";
+      readonly payload: CommentEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "comment.edited";
       readonly payload: CommentEventPayload;
     })
   | (DispatchEventBase & {
@@ -327,6 +338,10 @@ export interface CreateCommentInput {
   readonly ask_id?: string;
   readonly suggestion?: { readonly replace_with: string };
   readonly actor?: Actor;
+}
+
+export interface EditCommentInput {
+  readonly body: string;
 }
 
 export interface CreateMessageInput {

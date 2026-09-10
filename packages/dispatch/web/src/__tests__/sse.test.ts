@@ -110,20 +110,28 @@ test("message events refresh the affected issue messages, artifact references, a
   ]);
 });
 
-test("comment events refresh artifact references and the inbox", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
+test("comment thread events refresh artifact references and the inbox", () => {
+  for (const type of [
+    "comment.created",
+    "comment.resolved",
+    "comment.reopened",
+    "comment.edited",
+  ] as const) {
+    const invalidated: unknown[][] = [];
+    const queryClient = {
+      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+        invalidated.push([...queryKey]);
+        return Promise.resolve();
+      },
+    };
 
-  applyEventInvalidations(queryClient, event("comment.created"));
+    applyEventInvalidations(queryClient, event(type));
 
-  expect(invalidated).toContainEqual(["artifact"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-  expect(invalidated).toContainEqual(["user-state"]);
+    expect(invalidated).toContainEqual(["comments", "CORE-1"]);
+    expect(invalidated).toContainEqual(["artifact"]);
+    expect(invalidated).toContainEqual(["inbox"]);
+    expect(invalidated).toContainEqual(["user-state"]);
+  }
 });
 
 test("every event type refreshes user state so unread badges stay live across tabs", () => {

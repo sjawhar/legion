@@ -59,6 +59,21 @@ function withoutAskThreadReplies(comments: Comment[]): Comment[] {
   return comments.filter((comment) => !askThreadIds.has(comment.id));
 }
 
+export function threadRootId(comments: readonly Comment[], comment: Comment): string {
+  const byID = new Map(comments.map((candidate) => [candidate.id, candidate]));
+  const visited = new Set<string>();
+  let root = comment;
+  while (root.reply_to !== null && !visited.has(root.id)) {
+    visited.add(root.id);
+    const parent = byID.get(root.reply_to);
+    if (parent === undefined) {
+      break;
+    }
+    root = parent;
+  }
+  return root.id;
+}
+
 function commentThreads(comments: Comment[]): Array<Array<{ comment: Comment; depth: number }>> {
   const byParent = new Map<string, Comment[]>();
   const roots: Comment[] = [];
@@ -260,6 +275,7 @@ export function useMarginItems(tab: MarginTab, documentText: string) {
     asksPending: asks.isPending,
     commentsError: comments.isError,
     commentsPending: comments.isPending,
+    commentRecords: comments.data ?? [],
     isClosed: issue.data !== undefined && issue.data.closed_at !== null,
     issueError: issue.isError,
     issueKey,
