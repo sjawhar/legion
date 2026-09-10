@@ -1757,6 +1757,45 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("never schedules a retry sleep after stop() while a no-holder recovery call is still in flight", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const recoveryGate = Promise.withResolvers<void>();
+    const pump = startEventPump({
+      ...deps(state, nats, async () => {
+        const error = new Error("no holder") as Error & { status?: number };
+        error.status = 404;
+        throw error;
+      }),
+      // A large delay: if the retry loop ever schedules a real sleep after stop() runs, this
+      // test would take the full 5s instead of resolving promptly -- mirrors the earlier
+      // "never schedules a retry sleep after stop()" test, but for the recovery-call await
+      // specifically (the loop's *other* await before a sleep can be armed).
+      controllerNoticeRetryDelayMs: () => 5_000,
+      onUndeliverable: async () => {
+        await recoveryGate.promise;
+      },
+    });
+    state.controllerPendingNotices.push({
+      payloadJson: JSON.stringify({ text: "first" }),
+      eventId: "mention-1",
+    });
+
+    const drainPromise = pump.drainControllerNotices();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    pump.stop();
+    recoveryGate.resolve();
+
+    const start = Date.now();
+    await drainPromise;
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(1_000);
+    expect(state.controllerPendingNotices).toHaveLength(1);
+  });
+
   it("drain() waits for an in-flight controller-notice publish that succeeds during shutdown, so its removal is saved before drain() resolves", async () => {
     const { state } = stateForIssue();
     const nats = new FakeNats();

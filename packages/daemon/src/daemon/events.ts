@@ -563,6 +563,10 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
             "controller-notice-drain",
             "controller"
           );
+          // Re-checked: `stop()` racing this exact recovery call (already in flight when it
+          // ran) must not arm a sleep afterward either -- the same rule as the check just above,
+          // applied again after this await, the loop's only other one before the sleep.
+          if (controllerDrainDisposed) return;
         }
         const delayMs = retryDelayMs(attempt);
         console.error(
