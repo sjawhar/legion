@@ -36,23 +36,33 @@ export async function handleGrants(
   );
 }
 
+/** Re-resolves the grant after the GitHub lease await, not merely once before it: `resolveGrant`
+ * is a pure, side-effect-free lookup (see its own doc comment), so calling it twice is safe and
+ * — because `deleteCapability` deletes the grant entry outright, not just the capability that
+ * minted it — actually detects a session revoked while this request's own GitHub call was in
+ * flight (mirrors `handleWorkerStarted`'s re-check of the live claim after its own slow GitHub
+ * await). A revoked-mid-await grant 403s here instead of handing back a credential for a
+ * session that no longer holds it. */
 export async function handleGitCredential(
   ctx: RouteContext,
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
   const lease = await ctx.github.tokenForIssue(grant.issue, appRoleForLegionRole(grant.role));
+  ctx.auth.resolveGrant(body);
   return new Response(`username=x-access-token\npassword=${lease.token}`, {
     headers: { "content-type": "text/plain; charset=utf-8" },
   });
 }
 
+/** See `handleGitCredential`'s doc comment: the same post-await recheck applies here. */
 export async function handleGhToken(
   ctx: RouteContext,
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
   const lease = await ctx.github.tokenForIssue(grant.issue, appRoleForLegionRole(grant.role));
+  ctx.auth.resolveGrant(body);
   return Response.json(
     validateContractResponse(LegionDaemonApi.GitHubToken.response, {
       token: lease.token,

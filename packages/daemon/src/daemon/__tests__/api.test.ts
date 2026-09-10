@@ -1538,6 +1538,100 @@ describe("Legion HTTP API", () => {
     });
     expect(token.response.status).toBe(403);
   });
+  it("rejects gh-token/git-credential with 403 when the minting session's capability is revoked while the GitHub lease is in flight", async () => {
+    const reachedLease = Promise.withResolvers<void>();
+    const leaseGate = Promise.withResolvers<void>();
+    await start({
+      getToken: async (role, owner) => {
+        reachedLease.resolve();
+        await leaseGate.promise;
+        return {
+          token: `minted-${role}-${owner}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "42+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const grant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+    expect(grant.status).toBe(200);
+
+    const tokenRequest = json("/legion/v1/gh-token", { grantId: grant.body.grantId });
+    await reachedLease.promise;
+
+    // Revoked while the GitHub lease call above is still in flight -- the grant was valid when
+    // this request started, but must not be honored once its minting session's capability (and
+    // every grant it minted) is gone.
+    api?.revokeSessionCapability("ses_architect");
+    leaseGate.resolve();
+
+    const token = await tokenRequest;
+    expect(token.response.status).toBe(403);
+
+    // Same race, same outcome, for the other grant-authenticated route.
+    const reachedLease2 = Promise.withResolvers<void>();
+    const leaseGate2 = Promise.withResolvers<void>();
+    api?.stop();
+    await start({
+      getToken: async (role, owner) => {
+        reachedLease2.resolve();
+        await leaseGate2.promise;
+        return {
+          token: `minted-${role}-${owner}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "42+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    });
+    const bootToken2 = await api?.mintBootToken(root, 3);
+    if (!bootToken2) throw new Error("boot nonce was not minted");
+    const started2 = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken: bootToken2,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started2.response.status).toBe(200);
+    const grant2 = await curlJson<GrantResponse>("/legion/v1/grants", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_architect",
+      secret: started2.body.secret,
+    });
+    expect(grant2.status).toBe(200);
+
+    const credentialRequest = json("/legion/v1/git-credential", { grantId: grant2.body.grantId });
+    await reachedLease2.promise;
+    api?.revokeSessionCapability("ses_architect");
+    leaseGate2.resolve();
+
+    const credential = await credentialRequest;
+    expect(credential.response.status).toBe(403);
+  });
   it("resolves worker/started against a persisted boot-token hash after a restart, rejecting a session that does not match the resumed agent", async () => {
     await start();
     const testerToken = roleToken(state.project, root, "tester");
