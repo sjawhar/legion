@@ -93,3 +93,29 @@ test("issue tabs are URL-driven and keyboard-navigable, the sidebar marks the cu
 
   await context.close();
 });
+
+test("inbox sidebar makes no per-issue requests for twenty listed issues", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  for (let number = 1; number <= 20; number++) {
+    await createIssue({ project: "CORE", title: `Issue ${number}` });
+  }
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const issueDetailRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname.startsWith("/api/v1/issues/")) {
+      issueDetailRequests.push(url.pathname);
+    }
+  });
+  await page.goto("/");
+  if (testInfo.project.name === "iphone") {
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  }
+  await expect(page.getByRole("link", { name: /CORE-20.*Issue 20/ })).toBeVisible();
+  expect(issueDetailRequests).toHaveLength(0);
+  await context.close();
+});

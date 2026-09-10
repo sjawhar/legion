@@ -81,6 +81,7 @@ type IssueSummary struct {
 	Status    string    `json:"status"`
 	Parent    *string   `json:"parent"`
 	UpdatedAt time.Time `json:"updated_at"`
+	LastSeq   int       `json:"last_seq"`
 	OpenAsks  int       `json:"open_asks"`
 }
 

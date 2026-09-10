@@ -1,6 +1,12 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import { createElement } from "react";
+import { MemoryRouter } from "react-router-dom";
+
+import { api } from "../api/client";
 import type { IssueSummary, UserState } from "../api/types";
-import { arrangeIssues, selectSidebarView } from "../features/sidebar/Sidebar";
+import { arrangeIssues, Sidebar } from "../features/sidebar/Sidebar";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
@@ -8,6 +14,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     open_asks: 0,
     parent: null,
     status: "todo",
+    last_seq: 0,
     title: "Core work",
     updated_at: "2026-09-09T00:00:00Z",
     ...overrides,
@@ -67,18 +74,28 @@ test("sidebar hides groups with no issues instead of rendering a dangling header
   expect(arrangeIssues(issues, {}, {}).map((group) => group.label)).toEqual(["Everything else"]);
 });
 
-test("sidebar keeps its active issue snapshot while new detail data is pending", () => {
-  const frozen = [{ count: 1, items: ["CORE-1"], label: "Pinned" as const }];
-  const latest = [{ count: 0, items: ["CORE-2"], label: "Everything else" as const }];
-
-  const view = selectSidebarView("CORE-1", { groups: frozen, issueKey: "CORE-1" }, latest, true);
-
-  expect(view.displayed).toBe(frozen);
-  const afterLeaving = selectSidebarView(
-    undefined,
-    { groups: frozen, issueKey: "CORE-1" },
-    latest,
-    true
+test("sidebar renders listed issues without fetching individual issue details", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(undefined as never);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([issue()]);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const view = render(
+    createElement(
+      MemoryRouter,
+      { initialEntries: ["/"] },
+      createElement(QueryClientProvider, { client: queryClient }, createElement(Sidebar))
+    )
   );
-  expect(afterLeaving.frozen).toBeUndefined();
+
+  try {
+    await screen.findByRole("link", { name: /CORE-1.*Core work/ });
+    expect(getIssue).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+  }
 });
