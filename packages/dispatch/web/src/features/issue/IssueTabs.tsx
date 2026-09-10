@@ -1,6 +1,11 @@
 import { type KeyboardEvent, type ReactNode, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-
+import {
+  activeTabIndicatorBorder,
+  activeTabIndicatorText,
+  borderDefault,
+  textSecondaryOnCanvas,
+} from "../../theme/classes";
 import { buildIssuePath } from "../refs/routes";
 
 export type IssueTab = "spec" | "log" | "children";
@@ -70,7 +75,7 @@ export function IssueTabs({
   return (
     <div
       aria-label="Issue detail"
-      className="mb-4 flex gap-2 border-b border-slate-200"
+      className={`mb-4 flex gap-2 border-b ${borderDefault}`}
       role="tablist"
     >
       {tabs.map((t) => (
@@ -79,8 +84,8 @@ export function IssueTabs({
           aria-selected={activeTab === t.id}
           className={
             activeTab === t.id
-              ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
-              : "px-3 py-2 text-sm text-slate-600"
+              ? `border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+              : `px-3 py-2 text-sm ${textSecondaryOnCanvas}`
           }
           id={`issue-${t.id}-tab`}
           key={t.id}

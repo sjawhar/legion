@@ -22,6 +22,33 @@ import type {
 } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import {
+  badgeLow,
+  bgTransparent,
+  borderDefault,
+  borderStrongHover,
+  borderTransparent,
+  calloutWarningBg,
+  calloutWarningBorder,
+  calloutWarningText,
+  dangerText,
+  focusBorder,
+  focusVisibleRing,
+  inputClasses,
+  linkHoverText,
+  linkText,
+  secondaryButtonBorder,
+  secondaryButtonDisabledText,
+  secondaryButtonHoverBorder,
+  secondaryButtonText,
+  surfaceMutedDisabledBg,
+  surfaceMutedStrongBg,
+  textMutedHoverToSecondary,
+  textMutedOnCanvas,
+  textPrimaryOnCanvas,
+  textSecondaryHoverToPrimary,
+  textSecondaryOnCanvas,
+} from "../../theme/classes";
 import { DocEditor } from "../doc/DocEditor";
 import { DocView } from "../doc/DocView";
 import { actorLabel } from "../refs/actor";
@@ -123,7 +150,7 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
 
   if (href === undefined) {
     return (
-      <span className="text-sm text-slate-600" title="Unsafe external link">
+      <span className={`text-sm ${textMutedOnCanvas}`} title="Unsafe external link">
         {link.url}
       </span>
     );
@@ -135,7 +162,7 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       (checks.error instanceof ApiError && checks.error.code === "GITHUB_TOKEN_UNAVAILABLE");
     return (
       <a
-        className="text-sm text-sky-700 underline hover:text-sky-900"
+        className={`text-sm underline ${linkText} ${linkHoverText}`}
         href={href}
         title={unavailable ? "GitHub details are unavailable for this sign-in." : undefined}
       >
@@ -145,7 +172,7 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   }
   if (githubReference.data === undefined) {
     return (
-      <a className="text-sm text-sky-700 underline" href={href}>
+      <a className={`text-sm underline ${linkText}`} href={href}>
         {link.url}
       </a>
     );
@@ -154,13 +181,15 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
     isPullRequest && githubReference.data.merged ? "merged" : githubReference.data.state;
   return (
     <a
-      className="inline-flex items-center gap-2 text-sm text-sky-700 underline hover:text-sky-900"
+      className={`inline-flex items-center gap-2 text-sm underline ${linkText} ${linkHoverText}`}
       href={href}
     >
       <span>{githubReference.data.title}</span>
-      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">{state}</span>
+      <span className={`rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}>
+        {state}
+      </span>
       {isPullRequest && checks.data !== undefined ? (
-        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+        <span className={`rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}>
           checks: {checks.data}
         </span>
       ) : null}
@@ -248,11 +277,11 @@ function IssueHeader({
   };
 
   return (
-    <header className="mb-6 border-b border-slate-200 pb-6">
+    <header className={`mb-6 border-b pb-6 ${borderDefault}`}>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-sky-700">{issue.key}</p>
+        <p className={`text-sm font-semibold ${linkText}`}>{issue.key}</p>
         <button
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:border-sky-500"
+          className={`rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
           disabled={updateState.isPending}
           onClick={() => pinGuard.guard(() => updateState.mutate(!state.pinned))}
           type="button"
@@ -271,7 +300,7 @@ function IssueHeader({
         <input
           aria-describedby={drafts.titleError === null ? undefined : "issue-title-help"}
           aria-label="Issue title"
-          className="mt-2 w-full rounded-lg border border-transparent bg-transparent px-2 py-1 text-2xl font-semibold text-slate-950 outline-none hover:border-slate-300 focus:border-sky-500"
+          className={`mt-2 w-full rounded-lg border px-2 py-1 text-2xl font-semibold outline-none ${borderTransparent} ${bgTransparent} ${textPrimaryOnCanvas} ${borderStrongHover} ${focusBorder}`}
           disabled={isClosed}
           onBlur={() => {
             drafts.requestTitleSubmit();
@@ -291,8 +320,8 @@ function IssueHeader({
         />
       ) : (
         <h1
-          className={`mt-2 w-full rounded-lg border border-transparent px-2 py-1 text-2xl font-semibold break-words text-slate-950 dark:text-slate-100 ${
-            isClosed ? "" : "cursor-text hover:border-slate-300"
+          className={`mt-2 w-full rounded-lg border px-2 py-1 text-2xl font-semibold break-words ${borderTransparent} ${textPrimaryOnCanvas} ${
+            isClosed ? "" : `cursor-text ${borderStrongHover}`
           }`}
           onClick={() => {
             if (!isClosed) {
@@ -317,15 +346,15 @@ function IssueHeader({
         </h1>
       )}
       {drafts.titleError === null ? null : (
-        <p className="mt-1 text-sm text-rose-700" id="issue-title-help">
+        <p className={`mt-1 text-sm ${dangerText}`} id="issue-title-help">
           {drafts.titleError}
         </p>
       )}
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        <label className="text-sm font-medium text-slate-700">
+        <label className={`text-sm font-medium ${textSecondaryOnCanvas}`}>
           Status
           <select
-            className="ml-2 rounded border border-slate-300 bg-white px-2 py-1 font-normal disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+            className={`ml-2 rounded px-2 py-1 font-normal disabled:cursor-not-allowed ${inputClasses(false)} ${surfaceMutedDisabledBg} ${secondaryButtonDisabledText}`}
             disabled={updateIssue.isPending}
             onChange={(event) => drafts.requestStatusSubmit(event.target.value)}
             value={issue.status}
@@ -338,13 +367,13 @@ function IssueHeader({
           </select>
         </label>
         {statusSaving ? (
-          <span className="text-xs text-slate-500" role="status">
+          <span className={`text-xs ${textMutedOnCanvas}`} role="status">
             Saving…
           </span>
         ) : null}
         {issue.labels.map((label) => (
           <span
-            className="rounded-full bg-slate-200 px-2 py-1 text-xs font-medium text-slate-700"
+            className={`rounded-full px-2 py-1 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}
             key={label}
           >
             {label}
@@ -352,7 +381,7 @@ function IssueHeader({
         ))}
         {issue.parent === null ? null : (
           <Link
-            className="text-sm text-sky-700 underline hover:text-sky-900"
+            className={`text-sm underline ${linkText} ${linkHoverText}`}
             to={buildIssuePath({ key: issue.parent, kind: "issue" })}
           >
             Parent: {issue.parent}
@@ -361,12 +390,12 @@ function IssueHeader({
       </div>
       {routeEditing ? (
         <form className="mt-4 flex flex-wrap items-start gap-2" onSubmit={saveRoute}>
-          <label className="text-sm font-medium text-slate-700" htmlFor="issue-route">
+          <label className={`text-sm font-medium ${textSecondaryOnCanvas}`} htmlFor="issue-route">
             Route
           </label>
           <input
             aria-describedby="issue-route-help"
-            className="min-w-64 rounded border px-2 py-1 text-sm outline-none focus:border-sky-500"
+            className={`min-w-64 rounded border px-2 py-1 text-sm outline-none ${focusBorder}`}
             id="issue-route"
             onChange={(event) => drafts.writeRoute(event.target.value)}
             onKeyDown={(event) => {
@@ -380,14 +409,14 @@ function IssueHeader({
             value={drafts.route}
           />
           <button
-            className="rounded border border-slate-300 px-2 py-1 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
+            className={`rounded px-2 py-1 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonDisabledText}`}
             disabled={isClosed || !drafts.routeIsValid || updateIssue.isPending}
             type="submit"
           >
             Save route
           </button>
           <button
-            className="rounded border border-transparent px-2 py-1 text-sm font-medium text-slate-500 hover:text-slate-700"
+            className={`rounded border px-2 py-1 text-sm font-medium ${borderTransparent} ${textMutedHoverToSecondary}`}
             onClick={() => {
               drafts.discardRoute();
               setRouteEditing(false);
@@ -397,7 +426,7 @@ function IssueHeader({
             Cancel
           </button>
           <span
-            className={drafts.routeIsValid ? "sr-only" : "text-sm text-rose-700"}
+            className={drafts.routeIsValid ? "sr-only" : `text-sm ${dangerText}`}
             id="issue-route-help"
           >
             Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
@@ -405,7 +434,7 @@ function IssueHeader({
         </form>
       ) : (
         <button
-          className="mt-4 block rounded text-left text-sm text-slate-600 outline-none hover:text-slate-900 focus-visible:ring-2 focus-visible:ring-sky-500"
+          className={`mt-4 block rounded text-left text-sm outline-none focus-visible:ring-2 ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
           disabled={isClosed}
           onClick={() => setRouteEditing(true)}
           type="button"
@@ -424,19 +453,19 @@ function IssueHeader({
       )}
       {sessions.length === 0 ? null : (
         <section aria-label="Active sessions" className="mt-4">
-          <h2 className="text-sm font-semibold text-slate-700">Active sessions</h2>
+          <h2 className={`text-sm font-semibold ${textSecondaryOnCanvas}`}>Active sessions</h2>
           <ul className="mt-2 flex flex-wrap gap-2">
             {sessions.map((session) => {
               const tmuxTarget = session.origin?.tmux;
               return (
                 <li
-                  className="flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700"
+                  className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm ${badgeLow.bg} ${badgeLow.text}`}
                   key={session.id}
                 >
                   <span title={session.id}>{actorLabel(session)}</span>
                   {tmuxTarget === undefined ? null : (
                     <button
-                      className="font-medium text-sky-700 hover:text-sky-900"
+                      className={`font-medium ${linkText} ${linkHoverText}`}
                       onClick={() => {
                         void navigator.clipboard?.writeText(tmuxTarget);
                       }}
@@ -504,10 +533,10 @@ function ArtifactVersionView({
   });
 
   if (content.isPending) {
-    return <p className="text-slate-500">Loading version…</p>;
+    return <p className={textMutedOnCanvas}>Loading version…</p>;
   }
   if (content.isError || content.data === undefined || !("markdown" in content.data)) {
-    return <p className="text-rose-700">Could not load this document version.</p>;
+    return <p className={dangerText}>Could not load this document version.</p>;
   }
   const anchor = comments.data?.find(
     (comment) =>
@@ -523,10 +552,10 @@ function ArtifactVersionView({
   );
   return (
     <section aria-label={`Document version ${version}`} className="space-y-3">
-      <h2 className="text-lg font-semibold text-slate-900">
+      <h2 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>
         Version {version}
         {createdAt === undefined ? null : (
-          <span className="ml-2 text-sm font-normal text-slate-500">
+          <span className={`ml-2 text-sm font-normal ${textMutedOnCanvas}`}>
             <Timestamp at={createdAt} />
           </span>
         )}
@@ -617,17 +646,17 @@ function IssueDetail({
   );
 
   if (issue.isPending || state.isPending) {
-    return <p className="text-slate-500">Loading issue…</p>;
+    return <p className={textMutedOnCanvas}>Loading issue…</p>;
   }
   if (issue.isError || state.isError) {
     const notFound = issue.error instanceof ApiError && issue.error.status === 404;
     return (
       <section>
-        <h1 className="text-xl font-semibold text-slate-950">
+        <h1 className={`text-xl font-semibold ${textPrimaryOnCanvas}`}>
           {notFound ? "Issue not found" : "Couldn't load this issue"}
         </h1>
         {notFound ? (
-          <p className="mt-2 text-sm text-slate-600">
+          <p className={`mt-2 text-sm ${textSecondaryOnCanvas}`}>
             {route.key} doesn&apos;t exist, or you don&apos;t have access to it.
           </p>
         ) : (
@@ -642,7 +671,7 @@ function IssueDetail({
           </div>
         )}
         <Link
-          className="mt-4 inline-block text-sm font-medium text-sky-700 underline hover:text-sky-900"
+          className={`mt-4 inline-block text-sm font-medium underline ${linkText} ${linkHoverText}`}
           to="/"
         >
           Back to inbox
@@ -651,14 +680,14 @@ function IssueDetail({
     );
   }
   if (issue.data === undefined) {
-    return <p className="text-rose-700">Could not load this issue.</p>;
+    return <p className={dangerText}>Could not load this issue.</p>;
   }
 
   if (primaryArtifact === undefined) {
-    return <p className="text-rose-700">Could not load this issue&apos;s primary document.</p>;
+    return <p className={dangerText}>Could not load this issue&apos;s primary document.</p>;
   }
   if (selectedArtifact === undefined) {
-    return <p className="text-rose-700">Could not load this document artifact.</p>;
+    return <p className={dangerText}>Could not load this document artifact.</p>;
   }
 
   const issueState = stateForIssue(state.data, issue.data.key);
@@ -668,7 +697,9 @@ function IssueDetail({
   return (
     <section>
       {isClosed ? (
-        <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+        <p
+          className={`mb-4 rounded-lg p-3 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
+        >
           This issue is closed.
         </p>
       ) : null}

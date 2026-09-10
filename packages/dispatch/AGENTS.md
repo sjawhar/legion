@@ -22,6 +22,38 @@ sign-in link at `/auth/start`. Authenticated humans can create native projects
 All application requests use the same origin so the browser sends the
 signed-in cookie.
 
+## Dark mode
+
+Dispatch has no theme toggle: every surface follows the OS `prefers-color-scheme`, which is
+Tailwind v4's default `dark:` variant (a `@media (prefers-color-scheme: dark)` query, already
+active via `@import "tailwindcss"` in `web/src/styles.css` — there is no `@custom-variant`
+override). Components never write a Tailwind color utility literal directly; each imports a
+named composite (e.g. `card`, `textPrimaryOnSurface`, `dangerText`) from `web/src/theme/classes.ts`
+and interpolates it into `className`. `classes.ts` is the only module where a `dark:`-paired
+className string gets built — every export is a static string literal, since Tailwind's
+build-time scanner reads source files as plain text and cannot see a class name assembled at
+runtime. `web/src/theme/palette.ts` holds the raw OKLCH swatch values (copied from
+`tailwindcss`'s own theme, since Tailwind v4 recomputed several hues from their Tailwind v3 hex
+constants) and `contrast.ts` is a pure OKLCH→sRGB→WCAG implementation; `classes.ts` is the only
+file besides tests allowed to import either. Five tests enforce this: `palette.test.ts` asserts
+every registered foreground/background pair meets WCAG AA (4.5:1 text, 3:1 for the focus-ring
+UI-component boundary); `no-raw-colors.test.ts` greps every `.ts`/`.tsx` file outside `theme/`
+(including `e2e/`) for a raw Tailwind color utility (numbered shades and the `white`/`black`/
+`transparent` keywords) or a runtime-concatenated class-name pattern; `classes-in-build-css.test.ts`
+builds the app and confirms every token `classes.ts` can produce has a matching rule in the real
+output CSS, catching the scanner-blind-spot case those checks exist to prevent;
+`text-on-background.test.ts` statically resolves each text composite's nearest enclosing
+background composite in its own file and asserts that pairing is registered, since a component
+can compose a text role onto a background role its own registration never checked;
+`styles-css-pin.test.ts` asserts the hand-written hex/`rgb()` literals in `styles.css` (the
+pre-hydration `:root` fallback and the CodeMirror anchor overlays, both outside the `dark:`
+className mechanism) equal the exact OKLCH-computed value of the palette swatch their trailing
+`/* swatch-name */` comment names. Adding a new color pairing means adding a registered
+composite to `classes.ts`, not inventing a shade inline. The document editor (`DocEditor.tsx`)
+additionally opts a CodeMirror `Compartment` into `{ dark: true }` when the media query matches,
+since CodeMirror's own base theme otherwise hardcodes a light caret and selection color
+regardless of the page's color scheme.
+
 ## Commands
 
 Run these from this package:

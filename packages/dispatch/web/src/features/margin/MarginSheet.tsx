@@ -1,6 +1,17 @@
 import { type ReactNode, useRef } from "react";
 
 import { QueryError } from "../../components/QueryError";
+import {
+  activeTabIndicatorBorder,
+  activeTabIndicatorText,
+  backdrop50,
+  borderDefault,
+  card,
+  dragHandleBg,
+  textMutedOnSurface,
+  textPrimaryOnSurface,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { useDialog, useMediaQuery } from "../shell/useDialog";
 import { CommentsTab } from "./CommentsTab";
 import type { MarginSheetModel } from "./Margin";
@@ -53,7 +64,7 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
       {sheet.expanded && isCompactViewport ? (
         <div
           aria-hidden="true"
-          className="fixed inset-0 z-[9] bg-slate-950/50"
+          className={`fixed inset-0 z-[9] ${backdrop50}`}
           onClick={() => sheet.toggle(false)}
         />
       ) : null}
@@ -61,7 +72,7 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
       <aside
         aria-label={isCompactViewport ? "Review panel" : "Review margin"}
         aria-modal={sheet.expanded && isCompactViewport ? true : undefined}
-        className={`fixed inset-x-0 bottom-0 z-10 border-t border-slate-200 bg-white shadow-[0_-8px_24px_rgba(15,23,42,0.08)] ${
+        className={`fixed inset-x-0 bottom-0 z-10 border-t shadow-[0_-8px_24px_rgba(15,23,42,0.08)] ${card} ${
           issueKey === undefined
             ? "hidden"
             : sheet.expanded
@@ -75,11 +86,14 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
       >
         {isCompactViewport ? (
           <>
-            <div aria-hidden="true" className="mx-auto mb-1 h-1 w-10 rounded-full bg-slate-300" />
+            <div
+              aria-hidden="true"
+              className={`mx-auto mb-1 h-1 w-10 rounded-full ${dragHandleBg}`}
+            />
             <button
               aria-expanded={sheet.expanded}
               aria-label={sheet.expanded ? "Close review panel" : "Open review panel"}
-              className="flex h-16 w-full items-center justify-between px-4 text-left text-sm font-semibold text-slate-800"
+              className={`flex h-16 w-full items-center justify-between px-4 text-left text-sm font-semibold ${textPrimaryOnSurface}`}
               onClick={() => {
                 if (sheetDragMoved.current) {
                   sheetDragMoved.current = false;
@@ -102,7 +116,7 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
               type="button"
             >
               <span>Review panel</span>
-              <span className="font-normal text-slate-500">
+              <span className={`font-normal ${textMutedOnSurface}`}>
                 {openAskCount} open {openAskCount === 1 ? "ask" : "asks"}
               </span>
             </button>
@@ -119,14 +133,14 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
           />
         )}
         <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
-          <div className="flex border-b border-slate-200" role="tablist">
+          <div className={`flex border-b ${borderDefault}`} role="tablist">
             {(["comments", "artifacts", "pinned"] as MarginTab[]).map((name) => (
               <button
                 aria-selected={tab.value === name}
                 className={
                   tab.value === name
-                    ? "border-b-2 border-sky-600 px-3 py-2 text-sm font-semibold text-sky-700"
-                    : "px-3 py-2 text-sm text-slate-600"
+                    ? `border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+                    : `px-3 py-2 text-sm ${textSecondaryOnSurface}`
                 }
                 key={name}
                 onClick={() => tab.set(name)}
@@ -138,10 +152,12 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
             ))}
           </div>
           {issueKey === undefined ? (
-            <p className="pt-3 text-sm text-slate-500">Open an issue to review its margin.</p>
+            <p className={`pt-3 text-sm ${textMutedOnSurface}`}>
+              Open an issue to review its margin.
+            </p>
           ) : null}
           {issueKey !== undefined && visibleArtifact === undefined && issuePending ? (
-            <p className="pt-3 text-sm text-slate-500">Loading margin…</p>
+            <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Loading margin…</p>
           ) : null}
           {issueKey !== undefined && visibleArtifact === undefined && issueError ? (
             <div className="pt-3">

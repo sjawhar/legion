@@ -10,6 +10,24 @@ import type {
   ArtifactVersionText,
   Version,
 } from "../../api/types";
+import {
+  badgePrimary,
+  borderDefault,
+  dangerText,
+  highlightRing,
+  inputClasses,
+  linkHoverText,
+  linkText,
+  secondaryButtonBorder,
+  secondaryButtonHoverBorder,
+  secondaryButtonText,
+  surfaceMutedBg,
+  textDisabled,
+  textMutedOnSurface,
+  textMutedOnSurfaceMuted,
+  textPrimaryOnSurface,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { VersionDiff } from "../doc/VersionDiff";
 import { buildIssuePath, parseIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -94,18 +112,26 @@ export function BlobVersionComparison({
   return (
     <section aria-label="Blob version comparison" className="space-y-2">
       <div className="grid grid-cols-2 gap-2">
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <p className="text-xs font-medium text-slate-500">From · Version {before.number}</p>
-          <p className="mt-1 text-sm text-slate-700">{formatBytes(before.size)}</p>
-          <p className="mt-1 break-all text-xs text-slate-500">SHA-256 {before.sha256}</p>
+        <div className={`rounded-lg p-3 ${borderDefault} ${surfaceMutedBg}`}>
+          <p className={`text-xs font-medium ${textMutedOnSurfaceMuted}`}>
+            From · Version {before.number}
+          </p>
+          <p className={`mt-1 text-sm ${textSecondaryOnSurface}`}>{formatBytes(before.size)}</p>
+          <p className={`mt-1 break-all text-xs ${textMutedOnSurfaceMuted}`}>
+            SHA-256 {before.sha256}
+          </p>
         </div>
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <p className="text-xs font-medium text-slate-500">To · Version {after.number}</p>
-          <p className="mt-1 text-sm text-slate-700">{formatBytes(after.size)}</p>
-          <p className="mt-1 break-all text-xs text-slate-500">SHA-256 {after.sha256}</p>
+        <div className={`rounded-lg p-3 ${borderDefault} ${surfaceMutedBg}`}>
+          <p className={`text-xs font-medium ${textMutedOnSurfaceMuted}`}>
+            To · Version {after.number}
+          </p>
+          <p className={`mt-1 text-sm ${textSecondaryOnSurface}`}>{formatBytes(after.size)}</p>
+          <p className={`mt-1 break-all text-xs ${textMutedOnSurfaceMuted}`}>
+            SHA-256 {after.sha256}
+          </p>
         </div>
       </div>
-      {identical ? <p className="text-sm text-slate-500">Identical blobs.</p> : null}
+      {identical ? <p className={`text-sm ${textMutedOnSurface}`}>Identical blobs.</p> : null}
     </section>
   );
 }
@@ -164,32 +190,32 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
 
   return (
     <article
-      className={`space-y-3 border-b border-slate-200 py-4 last:border-b-0 dark:border-slate-800 ${
-        highlighted ? "rounded-xl px-3 ring-2 ring-sky-400" : ""
+      className={`space-y-3 py-4 last:border-b-0 ${borderDefault} ${
+        highlighted ? `rounded-xl px-3 ${highlightRing}` : ""
       }`}
       data-testid={`artifact-${artifact.slug}`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2 text-slate-700 dark:text-slate-300">
+        <div className={`flex min-w-0 items-center gap-2 ${textSecondaryOnSurface}`}>
           {kindIcon(artifact.kind)}
           <div className="min-w-0">
-            <h2 className="truncate font-semibold text-slate-950 dark:text-slate-100">
-              {artifact.name}
-            </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <h2 className={`truncate font-semibold ${textPrimaryOnSurface}`}>{artifact.name}</h2>
+            <p className={`text-xs ${textMutedOnSurface}`}>
               {artifact.slug} · {versions.length} {versions.length === 1 ? "version" : "versions"}
             </p>
           </div>
         </div>
         {artifact.primary ? (
-          <span className="rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800">
+          <span
+            className={`rounded-full px-2 py-1 text-xs font-semibold ${badgePrimary.bg} ${badgePrimary.text}`}
+          >
             Primary
           </span>
         ) : artifact.kind === "doc" ? (
           <div className="flex flex-col items-end gap-1">
-            <span className="text-xs font-medium text-slate-500">Not primary</span>
+            <span className={`text-xs font-medium ${textMutedOnSurface}`}>Not primary</span>
             <button
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:border-sky-500"
+              className={`rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
               disabled={makePrimary.isPending}
               onClick={() => makePrimary.mutate()}
               type="button"
@@ -200,7 +226,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
         ) : (
           <span title="Only documents can be primary">
             <button
-              className="cursor-not-allowed rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-400"
+              className={`cursor-not-allowed rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textDisabled}`}
               disabled
               title="Only documents can be primary"
               type="button"
@@ -214,7 +240,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
       {artifact.kind === "image" && latestVersion !== undefined ? (
         <img
           alt={`${artifact.name} version ${latestVersion.number}`}
-          className="max-h-64 w-full rounded-lg border border-slate-200 object-contain"
+          className={`max-h-64 w-full rounded-lg border object-contain ${borderDefault}`}
           loading="lazy"
           src={artifactVersionUrl(artifact.id, latestVersion.number)}
         />
@@ -222,10 +248,10 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
 
       <section aria-label={`Versions for ${artifact.name}`} className="space-y-2">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-slate-700">Versions</h3>
+          <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Versions</h3>
           {versions.length > namedVersions.length ? (
             <button
-              className="text-sm font-medium text-sky-700 hover:text-sky-900"
+              className={`text-sm font-medium ${linkText} ${linkHoverText}`}
               onClick={() => setShowAllVersions((current) => !current)}
               type="button"
             >
@@ -234,7 +260,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
           ) : null}
         </div>
         {displayedVersions.length === 0 ? (
-          <p className="text-sm text-slate-500">No named versions yet.</p>
+          <p className={`text-sm ${textMutedOnSurface}`}>No named versions yet.</p>
         ) : (
           <ul className="space-y-1">
             {displayedVersions.map((version) => (
@@ -242,15 +268,15 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
                 className="flex flex-wrap items-center justify-between gap-2 text-sm"
                 key={version.number}
               >
-                <span className="text-slate-700">{versionName(version)}</span>
+                <span className={textSecondaryOnSurface}>{versionName(version)}</span>
                 <a
-                  className="font-medium text-sky-700 hover:text-sky-900"
+                  className={`font-medium ${linkText} ${linkHoverText}`}
                   download=""
                   href={artifactVersionUrl(artifact.id, version.number)}
                 >
                   Download version {version.number}
                 </a>
-                <span className="w-full text-xs text-slate-500 dark:text-slate-400">
+                <span className={`w-full text-xs ${textMutedOnSurface}`}>
                   <Timestamp at={version.created_at} />
                   {artifact.kind === "doc"
                     ? null
@@ -264,13 +290,13 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
 
       {versions.length >= 2 ? (
         <section aria-label={`Compare versions for ${artifact.name}`} className="space-y-2">
-          <h3 className="text-sm font-semibold text-slate-700">Diff versions</h3>
+          <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Diff versions</h3>
           <div className="grid grid-cols-2 gap-2">
-            <label className="text-xs font-medium text-slate-600">
+            <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
               From
               <select
                 aria-label={`Compare ${artifact.name} from`}
-                className="mt-1 block w-full rounded border border-slate-300 bg-white px-2 py-2 text-sm"
+                className={`mt-1 block w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
                 onChange={(event) => setBefore(Number(event.target.value))}
                 value={beforeVersion}
               >
@@ -281,11 +307,11 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
                 ))}
               </select>
             </label>
-            <label className="text-xs font-medium text-slate-600">
+            <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
               To
               <select
                 aria-label={`Compare ${artifact.name} to`}
-                className="mt-1 block w-full rounded border border-slate-300 bg-white px-2 py-2 text-sm"
+                className={`mt-1 block w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
                 onChange={(event) => setAfter(Number(event.target.value))}
                 value={afterVersion}
               >
@@ -299,37 +325,39 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
           </div>
           {artifact.kind === "doc" ? (
             beforeContent.isError || afterContent.isError ? (
-              <p className="text-sm text-rose-700">Could not load versions to compare.</p>
+              <p className={`text-sm ${dangerText}`}>Could not load versions to compare.</p>
             ) : isText(beforeContent.data) && isText(afterContent.data) ? (
               <VersionDiff
                 after={afterContent.data.markdown}
                 before={beforeContent.data.markdown}
               />
             ) : (
-              <p className="text-sm text-slate-500">Loading versions to compare…</p>
+              <p className={`text-sm ${textMutedOnSurface}`}>Loading versions to compare…</p>
             )
           ) : beforeBlob !== undefined && afterBlob !== undefined ? (
             <BlobVersionComparison after={afterBlob} before={beforeBlob} />
           ) : (
-            <p className="text-sm text-slate-500">Select two versions to compare.</p>
+            <p className={`text-sm ${textMutedOnSurface}`}>Select two versions to compare.</p>
           )}
         </section>
       ) : null}
 
-      {detail.isError ? <p className="text-sm text-rose-700">Could not load references.</p> : null}
+      {detail.isError ? (
+        <p className={`text-sm ${dangerText}`}>Could not load references.</p>
+      ) : null}
       {referencedBy.length === 0 ? null : (
         <section aria-label="Referenced by" className="space-y-2">
-          <h3 className="text-sm font-semibold text-slate-700">Referenced by</h3>
+          <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Referenced by</h3>
           {referencedBy.map((reference) => (
             <article
-              className="rounded-lg border border-slate-200 p-3"
+              className={`rounded-lg border p-3 ${borderDefault}`}
               key={`${reference.kind}:${reference.id}`}
             >
-              <p className="text-xs font-medium text-slate-500">
+              <p className={`text-xs font-medium ${textMutedOnSurface}`}>
                 {reference.kind[0]?.toUpperCase()}
                 {reference.kind.slice(1)} ·{" "}
                 <Link
-                  className="text-sky-700 underline"
+                  className={`underline ${linkText}`}
                   to={buildIssuePath({ key: reference.issue_key, kind: "issue" })}
                 >
                   {reference.issue_key}
@@ -341,7 +369,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
         </section>
       )}
       {makePrimary.isError ? (
-        <p className="text-sm text-rose-700">Could not select this document.</p>
+        <p className={`text-sm ${dangerText}`}>Could not select this document.</p>
       ) : null}
     </article>
   );
@@ -365,13 +393,15 @@ export function ArtifactsTab(): ReactNode {
   });
 
   if (issueKey === undefined) {
-    return <p className="pt-3 text-sm text-slate-500">Open an issue to view its artifacts.</p>;
+    return (
+      <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Open an issue to view its artifacts.</p>
+    );
   }
   if (artifacts.isPending) {
-    return <p className="pt-3 text-sm text-slate-500">Loading artifacts…</p>;
+    return <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Loading artifacts…</p>;
   }
   if (artifacts.isError) {
-    return <p className="pt-3 text-sm text-rose-700">Could not load artifacts.</p>;
+    return <p className={`pt-3 text-sm ${dangerText}`}>Could not load artifacts.</p>;
   }
 
   return (

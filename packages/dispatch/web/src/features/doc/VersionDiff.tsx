@@ -1,6 +1,14 @@
 import { diffLines } from "diff";
 import type { ReactNode } from "react";
 
+import {
+  card,
+  diffAddedBg,
+  diffAddedText,
+  diffRemovedBg,
+  diffRemovedText,
+} from "../../theme/classes";
+
 interface VersionDiffProps {
   before: string;
   after: string;
@@ -9,7 +17,7 @@ interface VersionDiffProps {
 export function VersionDiff({ before, after }: VersionDiffProps): ReactNode {
   return (
     <pre
-      className="[overflow-wrap:anywhere] rounded-lg border border-slate-200 bg-white p-4 text-sm leading-6 whitespace-pre-wrap"
+      className={`[overflow-wrap:anywhere] rounded-lg p-4 text-sm leading-6 whitespace-pre-wrap ${card}`}
       data-testid="version-diff"
     >
       <code>
@@ -17,7 +25,7 @@ export function VersionDiff({ before, after }: VersionDiffProps): ReactNode {
           if (part.added) {
             return (
               <ins
-                className="added block bg-emerald-100 text-emerald-950 no-underline"
+                className={`added block no-underline ${diffAddedBg} ${diffAddedText}`}
                 key={`added:${part.value}`}
               >
                 {part.value}
@@ -27,7 +35,7 @@ export function VersionDiff({ before, after }: VersionDiffProps): ReactNode {
           if (part.removed) {
             return (
               <del
-                className="removed block bg-rose-100 text-rose-950 no-underline"
+                className={`removed block no-underline ${diffRemovedBg} ${diffRemovedText}`}
                 key={`removed:${part.value}`}
               >
                 {part.value}

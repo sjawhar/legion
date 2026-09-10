@@ -4,6 +4,18 @@ import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { api } from "../../api/client";
 import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import {
+  borderDefault,
+  borderStrong,
+  enabledCardHoverBorder,
+  inputClasses,
+  surfaceMutedBg,
+  textMutedOnSurfaceMuted,
+  textPrimaryOnSurfaceMuted,
+  textSecondaryOnCanvas,
+  textSecondaryOnSurface,
+  textSecondaryOnSurfaceMuted,
+} from "../../theme/classes";
 import { actorLabel, describeAskResolution } from "../refs/actor";
 import { Timestamp } from "../refs/Timestamp";
 
@@ -111,22 +123,22 @@ export function AskThread({
   return (
     <section
       aria-label="Replies"
-      className="mt-4 space-y-3 border-t border-slate-200 pt-4 dark:border-slate-800"
+      className={`mt-4 space-y-3 border-t pt-4 ${borderDefault}`}
       data-testid={`thread-${ask.id}`}
     >
       {resolution === null ? null : (
-        <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+        <p
+          className={`rounded-lg px-3 py-2 text-sm ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
+        >
           {resolution}
         </p>
       )}
       {replies.length === 0 ? null : (
         <ul className="space-y-2">
           {replies.map((comment) => (
-            <li className="rounded-lg bg-slate-50 p-2 text-sm dark:bg-slate-800" key={comment.id}>
-              <p className="whitespace-pre-wrap text-slate-800 dark:text-slate-200">
-                {comment.body}
-              </p>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`} key={comment.id}>
+              <p className={`whitespace-pre-wrap ${textPrimaryOnSurfaceMuted}`}>{comment.body}</p>
+              <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
                 {replyAuthorLabel(comment)} · <Timestamp at={comment.created_at} />
               </p>
             </li>
@@ -136,12 +148,12 @@ export function AskThread({
       {resolution === null ? (
         <form className="flex flex-col gap-2" onSubmit={submitReply}>
           <label
-            className="block text-sm font-medium text-slate-700 dark:text-slate-300"
+            className={`block text-sm font-medium ${textSecondaryOnCanvas}`}
             htmlFor={replyFieldId}
           >
             Reply
             <textarea
-              className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950"
+              className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
               disabled={isPending}
               id={replyFieldId}
               onChange={(event) => setBody(event.target.value)}
@@ -149,7 +161,7 @@ export function AskThread({
             />
           </label>
           <button
-            className="self-start rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 enabled:hover:border-sky-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+            className={`self-start rounded-lg border px-3 py-1.5 text-sm font-medium ${borderStrong} ${textSecondaryOnSurface} ${enabledCardHoverBorder} disabled:cursor-not-allowed disabled:opacity-50`}
             disabled={body.trim() === "" || isPending}
             type="submit"
           >

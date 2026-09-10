@@ -3,6 +3,29 @@ import { Link } from "react-router-dom";
 
 import type { Comment } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import {
+  card,
+  dangerHoverText,
+  dangerText,
+  highlightRing,
+  inlineWarningText,
+  linkHoverText,
+  linkText,
+  quoteAccentBorder,
+  quoteBodyText,
+  secondaryButtonDisabledText,
+  selectedCardBg,
+  selectedCardBorder,
+  successHoverText,
+  successText,
+  suggestionAddedBg,
+  suggestionAddedText,
+  suggestionRemovedBg,
+  suggestionRemovedText,
+  textMutedOnSurface,
+  textMutedOnSurfaceMuted,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
 import { actorLabel } from "../refs/actor";
 import { buildIssuePath } from "../refs/routes";
@@ -65,19 +88,19 @@ function CommentCard({
   return (
     <article
       className={`rounded-xl border p-3 text-sm shadow-sm ${
-        selected ? "border-sky-500 bg-sky-50" : "border-slate-200 bg-white"
+        selected ? `${selectedCardBorder} ${selectedCardBg}` : card
       }`}
       data-margin-item={comment.id}
       data-testid={`margin-comment-${comment.id}`}
       style={{ marginLeft: `${depth * 12}px` }}
     >
       {anchor === null ? null : (
-        <blockquote className="mb-2 border-l-2 border-sky-400 pl-2 text-slate-600">
+        <blockquote className={`mb-2 border-l-2 pl-2 ${quoteAccentBorder} ${quoteBodyText}`}>
           {anchor.quote}
         </blockquote>
       )}
       {anchor?.orphaned ? (
-        <p className="mb-2 text-xs font-medium text-amber-800">
+        <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>
           Text changed.{" "}
           <Link
             className="underline"
@@ -95,24 +118,30 @@ function CommentCard({
       {suggestion === null ? <p className="whitespace-pre-wrap">{comment.body}</p> : null}
       {suggestion !== null && anchor !== null ? (
         <div className="space-y-1 font-mono text-xs">
-          <del className="block rounded bg-rose-50 px-2 py-1 text-rose-800">{anchor.quote}</del>
-          <ins className="block rounded bg-emerald-50 px-2 py-1 text-emerald-800">
+          <del
+            className={`block rounded px-2 py-1 ${suggestionRemovedBg} ${suggestionRemovedText}`}
+          >
+            {anchor.quote}
+          </del>
+          <ins className={`block rounded px-2 py-1 ${suggestionAddedBg} ${suggestionAddedText}`}>
             {suggestion.replace_with}
           </ins>
           {comment.body === "Suggested replacement." ? null : (
-            <p className="whitespace-pre-wrap font-sans text-slate-700">{comment.body}</p>
+            <p className={`whitespace-pre-wrap font-sans ${textSecondaryOnSurface}`}>
+              {comment.body}
+            </p>
           )}
         </div>
       ) : null}
       <Unfurl body={comment.body} />
-      <p className="mt-2 text-xs text-slate-500">
+      <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
         {actorLabel(comment.author)} · {new Date(comment.created_at).toLocaleString()}
       </p>
       <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
         {suggestion !== null && suggestion.accepted === null && !comment.resolved ? (
           <>
             <button
-              className="font-medium text-emerald-700 hover:text-emerald-900 disabled:cursor-not-allowed disabled:text-slate-400"
+              className={`font-medium disabled:cursor-not-allowed ${successText} ${successHoverText} ${secondaryButtonDisabledText}`}
               disabled={pendingAction}
               onClick={() => onAction(comment.id, "accept")}
               type="button"
@@ -120,7 +149,7 @@ function CommentCard({
               Accept
             </button>
             <button
-              className="font-medium text-rose-700 hover:text-rose-900 disabled:cursor-not-allowed disabled:text-slate-400"
+              className={`font-medium disabled:cursor-not-allowed ${dangerText} ${dangerHoverText} ${secondaryButtonDisabledText}`}
               disabled={pendingAction}
               onClick={() => onAction(comment.id, "reject")}
               type="button"
@@ -130,7 +159,7 @@ function CommentCard({
           </>
         ) : suggestion === null && !comment.resolved ? (
           <button
-            className="font-medium text-sky-700 hover:text-sky-900 disabled:cursor-not-allowed disabled:text-slate-400"
+            className={`font-medium disabled:cursor-not-allowed ${linkText} ${linkHoverText} ${secondaryButtonDisabledText}`}
             disabled={pendingAction}
             onClick={() => onAction(comment.id, "resolve")}
             type="button"
@@ -138,7 +167,7 @@ function CommentCard({
             Resolve
           </button>
         ) : (
-          <span className="font-medium text-slate-500">
+          <span className={`font-medium ${textMutedOnSurfaceMuted}`}>
             {suggestion?.accepted === true
               ? "Accepted"
               : suggestion?.accepted === false
@@ -147,13 +176,13 @@ function CommentCard({
           </span>
         )}
         {pendingAction ? (
-          <span className="text-xs text-slate-500" role="status">
+          <span className={`text-xs ${textMutedOnSurfaceMuted}`} role="status">
             Saving…
           </span>
         ) : null}
         {anchor === null ? null : (
           <button
-            className="font-medium text-sky-700 hover:text-sky-900"
+            className={`font-medium ${linkText} ${linkHoverText}`}
             onClick={() => onReply(comment)}
             type="button"
           >
@@ -230,12 +259,12 @@ export function CommentsTab({
               <div key={id}>
                 {item.kind === "ask" ? (
                   <div
-                    className={active ? "rounded-xl ring-2 ring-sky-400" : undefined}
+                    className={active ? `rounded-xl ${highlightRing}` : undefined}
                     data-margin-item={id}
                   >
                     <AskCard ask={item.ask} />
                     <Unfurl body={item.ask.question} />
-                    <p className="mt-2 text-xs text-slate-500">
+                    <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
                       {new Date(item.ask.created_at).toLocaleString()}
                     </p>
                   </div>
@@ -256,7 +285,7 @@ export function CommentsTab({
             );
           })}
           {items.length === 0 && !asksPending && !commentsPending && !answeredAsksPending ? (
-            <p className="text-sm text-slate-500">
+            <p className={`text-sm ${textMutedOnSurface}`}>
               No comments, asks, or suggestions on this document.
             </p>
           ) : null}

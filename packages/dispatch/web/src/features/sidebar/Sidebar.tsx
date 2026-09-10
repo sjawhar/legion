@@ -4,6 +4,18 @@ import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { AuthenticatedUser, IssueSummary, UserState } from "../../api/types";
+import {
+  railAccentText,
+  railActiveBg,
+  railBadgeBg,
+  railBadgeText,
+  railBorder,
+  railDangerText,
+  railHoverBg,
+  railHoverText,
+  railMutedText,
+  railSecondaryText,
+} from "../../theme/classes";
 import { buildIssuePath, parseIssuePath } from "../refs/routes";
 
 export type SidebarEntry = string | { key: string; children: SidebarEntry[] };
@@ -127,22 +139,24 @@ function IssueLink({
         aria-current={isActive ? "page" : undefined}
         className={
           isActive
-            ? "flex items-baseline gap-2 rounded bg-slate-800 px-2 py-1.5 text-sm font-medium text-sky-300"
-            : "flex items-baseline gap-2 rounded px-2 py-1.5 text-sm hover:bg-slate-800"
+            ? `flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railActiveBg} ${railAccentText}`
+            : `flex items-baseline gap-2 rounded px-2 py-1.5 text-sm ${railHoverBg}`
         }
         onClick={onNavigate}
         to={buildIssuePath({ key: issue.key, kind: "issue" })}
       >
         <span className="shrink-0 font-medium whitespace-nowrap">{issue.key}</span>
-        <span className="min-w-0 flex-1 text-slate-300">{issue.title}</span>
+        <span className={`min-w-0 flex-1 ${railSecondaryText}`}>{issue.title}</span>
         {issue.open_asks === 0 ? null : (
-          <span className="shrink-0 rounded-full bg-sky-500 px-1.5 py-0.5 text-xs text-slate-950">
+          <span
+            className={`shrink-0 rounded-full px-1.5 py-0.5 text-xs ${railBadgeBg} ${railBadgeText}`}
+          >
             {issue.open_asks}
           </span>
         )}
       </Link>
       {children.length === 0 ? null : (
-        <ul className="ml-3 border-l border-slate-700 pl-2">
+        <ul className={`ml-3 border-l pl-2 ${railBorder}`}>
           {children.map((child) => (
             <IssueLink
               currentIssue={currentIssue}
@@ -173,10 +187,10 @@ export function Sidebar({
     (issues.data ?? []).map((issue) => [issue.key, issue.last_seq] as const)
   );
   if (issues.isError || state.isError) {
-    return <p className="mt-8 text-sm text-rose-300">Could not load issues.</p>;
+    return <p className={`mt-8 text-sm ${railDangerText}`}>Could not load issues.</p>;
   }
   if (issues.isPending || state.isPending) {
-    return <p className="mt-8 text-sm text-slate-400">Loading issues…</p>;
+    return <p className={`mt-8 text-sm ${railMutedText}`}>Loading issues…</p>;
   }
 
   const displayed = arrangeIssues(issues.data ?? [], state.data ?? {}, lastSeqByIssue);
@@ -186,7 +200,7 @@ export function Sidebar({
     <nav aria-label="Issues" className="mt-8 space-y-5">
       {displayed.map((group) => (
         <section key={group.label}>
-          <h2 className="px-2 text-xs font-semibold tracking-wide text-slate-400 uppercase">
+          <h2 className={`px-2 text-xs font-semibold tracking-wide uppercase ${railMutedText}`}>
             {group.label}
             {group.count === 0 ? null : ` (${group.count})`}
           </h2>
@@ -204,9 +218,9 @@ export function Sidebar({
         </section>
       ))}
       {user.kind === "user" ? (
-        <div className="border-t border-slate-800 pt-4">
+        <div className={`border-t pt-4 ${railBorder}`}>
           <Link
-            className="block rounded px-2 py-1.5 text-sm font-medium text-slate-300 hover:bg-slate-800 hover:text-slate-100"
+            className={`block rounded px-2 py-1.5 text-sm font-medium ${railSecondaryText} ${railHoverBg} ${railHoverText}`}
             onClick={onNavigate}
             to="/settings"
           >

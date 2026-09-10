@@ -14,6 +14,38 @@ import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { Sidebar } from "./features/sidebar/Sidebar";
+import {
+  backdrop50,
+  badgeBlocking,
+  borderDefault,
+  borderStrong,
+  borderTransparent,
+  calloutDangerBg,
+  calloutDangerBorder,
+  calloutWarningBorder,
+  canvasText,
+  card,
+  linkHoverText,
+  linkText,
+  primaryButtonBg,
+  primaryButtonHoverBg,
+  railAccentHoverText,
+  railAccentText,
+  railActiveBg,
+  railBg,
+  railBorder,
+  railDangerText,
+  railFocusOverlayBg,
+  railFocusOverlayText,
+  railHoverBg,
+  railMutedText,
+  railText,
+  skeletonBg,
+  statusConnecting,
+  textMutedOnSurface,
+  textSecondaryOnSurface,
+  textTransparent,
+} from "./theme/classes";
 
 const IssuePage = lazy(() =>
   import("./features/issue/IssuePage").then((module) => ({ default: module.IssuePage }))
@@ -26,10 +58,7 @@ function ArtifactsTabFallback(): ReactNode {
   return (
     <div aria-busy="true" className="space-y-3 py-4">
       {[0, 1].map((row) => (
-        <div
-          className="h-20 w-full animate-pulse rounded-lg bg-slate-100 dark:bg-slate-800"
-          key={row}
-        />
+        <div className={`h-20 w-full animate-pulse rounded-lg ${skeletonBg}`} key={row} />
       ))}
     </div>
   );
@@ -46,30 +75,33 @@ function ArtifactsTabSlot(): ReactNode {
 function IssuePageFallback(): ReactNode {
   return (
     <div aria-busy="true">
-      <header className="mb-6 border-b border-slate-200 pb-6 dark:border-slate-800">
+      <header className={`mb-6 border-b pb-6 ${borderDefault}`}>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-sm font-semibold text-sky-700">
-            <span className="inline-block h-4 w-16 animate-pulse rounded bg-slate-200 align-middle dark:bg-slate-800" />
+          <p className={`text-sm font-semibold ${linkText}`}>
+            <span
+              className={`inline-block h-4 w-16 animate-pulse rounded align-middle ${skeletonBg}`}
+            />
           </p>
           <button
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-transparent dark:border-slate-700"
+            className={`rounded-lg border px-3 py-2 text-sm font-medium ${textTransparent} ${borderStrong}`}
             disabled
             type="button"
           >
             Pin issue
           </button>
         </div>
-        <h1 className="mt-2 w-full rounded-lg border border-transparent px-2 py-1 text-2xl font-semibold">
-          <span className="inline-block h-7 w-2/3 animate-pulse rounded bg-slate-200 align-middle dark:bg-slate-800" />
+        <h1
+          className={`mt-2 w-full rounded-lg border px-2 py-1 text-2xl font-semibold ${borderTransparent}`}
+        >
+          <span
+            className={`inline-block h-7 w-2/3 animate-pulse rounded align-middle ${skeletonBg}`}
+          />
         </h1>
       </header>
-      <div
-        className="mb-4 flex gap-2 border-b border-slate-200 dark:border-slate-800"
-        role="tablist"
-      >
+      <div className={`mb-4 flex gap-2 border-b ${borderDefault}`} role="tablist">
         {["Spec", "Log", "Children"].map((label) => (
           <span
-            className="animate-pulse rounded bg-slate-100 px-3 py-2 text-sm text-transparent dark:bg-slate-800"
+            className={`animate-pulse rounded px-3 py-2 text-sm ${textTransparent} ${skeletonBg}`}
             key={label}
           >
             {label}
@@ -78,10 +110,7 @@ function IssuePageFallback(): ReactNode {
       </div>
       <div className="space-y-3">
         {[0, 1, 2, 3].map((row) => (
-          <div
-            className="h-4 w-full animate-pulse rounded bg-slate-200 dark:bg-slate-800"
-            key={row}
-          />
+          <div className={`h-4 w-full animate-pulse rounded ${skeletonBg}`} key={row} />
         ))}
       </div>
     </div>
@@ -90,9 +119,9 @@ function IssuePageFallback(): ReactNode {
 
 function ShellMessagePage({ children, title }: { children?: ReactNode; title: string }): ReactNode {
   return (
-    <main className="grid min-h-dvh place-items-center bg-slate-50 px-6 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <p className="text-sm font-medium tracking-wide text-slate-500 uppercase dark:text-slate-400">
+    <main className={`grid min-h-dvh place-items-center px-6 ${canvasText}`}>
+      <section className={`w-full max-w-md rounded-2xl p-8 shadow-sm ${card}`}>
+        <p className={`text-sm font-medium tracking-wide uppercase ${textMutedOnSurface}`}>
           Dispatch
         </p>
         <h1 className="mt-3 text-2xl font-semibold">{title}</h1>
@@ -115,11 +144,11 @@ function InboxPage(): ReactNode {
 function SignInPage(): ReactNode {
   return (
     <ShellMessagePage title="Make the next decision clear.">
-      <p className="mt-3 text-slate-600 dark:text-slate-300">
+      <p className={`mt-3 ${textSecondaryOnSurface}`}>
         Sign in to review your team&apos;s open decisions.
       </p>
       <a
-        className="mt-8 inline-flex rounded-lg bg-sky-600 px-4 py-2 font-semibold text-white hover:bg-sky-500"
+        className={`mt-8 inline-flex rounded-lg px-4 py-2 font-semibold ${primaryButtonBg} ${primaryButtonHoverBg}`}
         href="/auth/start"
       >
         Sign in with GitHub
@@ -131,7 +160,7 @@ function SignInPage(): ReactNode {
 function ForbiddenPage(): ReactNode {
   return (
     <ShellMessagePage title="This GitHub account isn't allowed here.">
-      <p className="mt-3 text-slate-600 dark:text-slate-300">
+      <p className={`mt-3 ${textSecondaryOnSurface}`}>
         Ask a Dispatch admin to add your account, then sign in again.
       </p>
     </ShellMessagePage>
@@ -143,7 +172,7 @@ function ConnectionErrorPage({ onRetry }: { onRetry: () => void }): ReactNode {
     <ShellMessagePage title="Couldn't reach Dispatch.">
       <div className="mt-4" role="alert">
         <button
-          className="text-sm font-medium text-sky-700 underline hover:text-sky-900 dark:text-sky-400"
+          className={`text-sm font-medium underline ${linkText} ${linkHoverText}`}
           onClick={onRetry}
           type="button"
         >
@@ -156,28 +185,26 @@ function ConnectionErrorPage({ onRetry }: { onRetry: () => void }): ReactNode {
 
 function ShellSkeleton(): ReactNode {
   return (
-    <div
-      aria-busy="true"
-      className="min-h-dvh bg-slate-50 text-slate-900 xl:flex dark:bg-slate-950 dark:text-slate-100"
-    >
-      <header className="flex items-center border-b border-slate-200 bg-slate-950 px-3 text-slate-100 xl:hidden">
+    <div aria-busy="true" className={`xl:flex ${canvasText}`}>
+      <header
+        className={`flex items-center px-3 xl:hidden ${railBorder} ${railBg} ${railText} border-b`}
+      >
         <span className="text-lg font-semibold">Dispatch</span>
       </header>
-      <aside className="hidden border-slate-200 bg-slate-950 p-5 text-slate-100 xl:block xl:min-h-dvh xl:w-80 xl:border-r">
+      <aside
+        className={`hidden p-5 xl:block xl:min-h-dvh xl:w-80 xl:border-r ${railBorder} ${railBg} ${railText}`}
+      >
         <span className="text-lg font-semibold">Dispatch</span>
         <div aria-label="Loading navigation" className="mt-6 space-y-2" role="status">
           {[0, 1, 2, 3].map((row) => (
-            <div className="h-4 w-full animate-pulse rounded bg-slate-800" key={row} />
+            <div className={`h-4 w-full animate-pulse rounded ${railActiveBg}`} key={row} />
           ))}
         </div>
       </aside>
       <main className="min-w-0 flex-1 p-6">
         <div aria-label="Loading Dispatch" className="space-y-3" role="status">
           {[0, 1, 2].map((row) => (
-            <div
-              className="h-4 w-full animate-pulse rounded bg-slate-200 dark:bg-slate-800"
-              key={row}
-            />
+            <div className={`h-4 w-full animate-pulse rounded ${skeletonBg}`} key={row} />
           ))}
         </div>
       </main>
@@ -211,7 +238,7 @@ function NavigationContents({
         {compact ? (
           <button
             aria-label="Close navigation"
-            className="rounded-lg px-3 py-2 text-sm font-medium hover:bg-slate-800"
+            className={`rounded-lg px-3 py-2 text-sm font-medium ${railHoverBg}`}
             onClick={onClose}
             ref={closeButtonRef}
             type="button"
@@ -220,9 +247,9 @@ function NavigationContents({
           </button>
         ) : null}
       </div>
-      <p className="mt-3 text-sm text-slate-400">Signed in as {user.login}</p>
+      <p className={`mt-3 text-sm ${railMutedText}`}>Signed in as {user.login}</p>
       <button
-        className="mt-1 text-sm font-medium text-sky-300 hover:text-sky-200 disabled:cursor-not-allowed disabled:opacity-50"
+        className={`mt-1 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
         disabled={signOutPending}
         onClick={onSignOut}
         type="button"
@@ -230,7 +257,7 @@ function NavigationContents({
         Sign out
       </button>
       {signOutError ? (
-        <p className="mt-1 text-sm text-rose-400" role="alert">
+        <p className={`mt-1 text-sm ${railDangerText}`} role="alert">
           Couldn&apos;t sign out.{" "}
           <button className="font-medium underline" onClick={onSignOut} type="button">
             Retry
@@ -293,9 +320,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 
   return (
     <MarginProvider>
-      <div className="min-h-dvh bg-slate-50 text-slate-900 xl:flex dark:bg-slate-950 dark:text-slate-100">
+      <div className={`xl:flex ${canvasText}`} data-testid="app-shell">
         <a
-          className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-slate-950 focus:px-4 focus:py-2 focus:text-slate-100"
+          className={`sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:px-4 focus:py-2 ${railFocusOverlayBg} ${railFocusOverlayText}`}
           href="#main-content"
         >
           Skip to content
@@ -303,7 +330,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         {connection === "reconnecting" ? (
           <p
             aria-live="polite"
-            className="fixed right-4 bottom-20 z-40 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800 shadow-lg xl:bottom-4"
+            className={`fixed right-4 bottom-20 z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-4 ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
             data-testid="connection-pill"
           >
             Reconnecting…
@@ -311,7 +338,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         ) : connection === "unavailable" ? (
           <p
             aria-live="polite"
-            className="fixed right-4 bottom-20 z-40 flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-800 shadow-lg xl:bottom-4"
+            className={`fixed right-4 bottom-20 z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-4 ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
             data-testid="connection-pill"
           >
             Live updates unavailable
@@ -321,14 +348,16 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </p>
         ) : null}
         {isCompactViewport ? (
-          <header className="flex items-center justify-between border-b border-slate-200 bg-slate-950 px-3 text-slate-100">
+          <header
+            className={`flex items-center justify-between border-b px-3 ${railBorder} ${railBg} ${railText}`}
+          >
             <Link className="text-lg font-semibold" to="/">
               Dispatch
             </Link>
             <button
               aria-expanded={navigationOpen}
               aria-label="Open navigation"
-              className="rounded-lg px-3 py-2 text-sm font-medium hover:bg-slate-800"
+              className={`rounded-lg px-3 py-2 text-sm font-medium ${railHoverBg}`}
               onClick={() => setNavigationOpen(true)}
               type="button"
             >
@@ -340,13 +369,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <>
             <div
               aria-hidden="true"
-              className="fixed inset-0 z-20 bg-slate-950/50"
+              className={`fixed inset-0 z-20 ${backdrop50}`}
               onClick={() => setNavigationOpen(false)}
             />
             <aside
               aria-label="Navigation"
               aria-modal="true"
-              className="fixed inset-y-0 left-0 z-30 w-80 max-w-[calc(100vw-2rem)] border-b border-slate-200 bg-slate-950 p-5 text-slate-100 shadow-2xl"
+              className={`fixed inset-y-0 left-0 z-30 w-80 max-w-[calc(100vw-2rem)] border-b p-5 shadow-2xl ${railBorder} ${railBg} ${railText}`}
               ref={drawer.containerRef}
               role="dialog"
             >
@@ -357,7 +386,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         {isCompactViewport ? null : (
           <aside
             aria-label="Navigation"
-            className="order-1 min-h-dvh w-80 max-w-none border-r border-slate-200 bg-slate-950 p-5 text-slate-100"
+            className={`order-1 min-h-dvh w-80 max-w-none border-r p-5 ${railBorder} ${railBg} ${railText}`}
           >
             {navigation}
           </aside>

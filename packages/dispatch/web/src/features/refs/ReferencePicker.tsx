@@ -2,6 +2,15 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { type KeyboardEvent, type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
+import {
+  backdrop40,
+  card,
+  disclosureButtonText,
+  dismissButtonText,
+  inputClasses,
+  surfaceMutedHoverBg,
+  textMutedOnSurface,
+} from "../../theme/classes";
 import { useDialog } from "../shell/useDialog";
 import { buildDispatchReference } from "./routes";
 
@@ -46,19 +55,19 @@ export function ReferencePicker({ issueKey, onClose, onSelect }: ReferencePicker
 
   return (
     <>
-      <div aria-hidden="true" className="fixed inset-0 z-40 bg-slate-950/40" onClick={onClose} />
+      <div aria-hidden="true" className={`fixed inset-0 z-40 ${backdrop40}`} onClick={onClose} />
       <div className="pointer-events-none fixed inset-0 z-40 flex items-start justify-center p-4 pt-20">
         <section
           aria-label="Reference picker"
           aria-modal="true"
-          className="pointer-events-auto max-h-[70vh] w-full max-w-md space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-3 shadow-xl"
+          className={`pointer-events-auto max-h-[70vh] w-full max-w-md space-y-2 overflow-y-auto rounded-lg border p-3 shadow-xl ${card}`}
           ref={dialog.containerRef}
           role="dialog"
         >
           <div className="flex items-center justify-between gap-2">
             <input
               aria-label="Filter issues"
-              className="flex-1 rounded-lg border border-slate-300 px-2 py-1 text-sm outline-none focus:border-sky-500"
+              className={`flex-1 rounded-lg border px-2 py-1 text-sm outline-none ${inputClasses(true)}`}
               onChange={(event) => setFilter(event.target.value)}
               onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
                 if (event.key !== "Enter") {
@@ -77,15 +86,13 @@ export function ReferencePicker({ issueKey, onClose, onSelect }: ReferencePicker
               type="text"
               value={filter}
             />
-            <button
-              className="text-sm text-slate-600 hover:text-slate-950"
-              onClick={onClose}
-              type="button"
-            >
+            <button className={`text-sm ${dismissButtonText}`} onClick={onClose} type="button">
               Close
             </button>
           </div>
-          {issues.isPending ? <p className="text-sm text-slate-500">Loading issues…</p> : null}
+          {issues.isPending ? (
+            <p className={`text-sm ${textMutedOnSurface}`}>Loading issues…</p>
+          ) : null}
           {filtered.map((issue, index) => {
             const expanded = expandedIssues.has(issue.key);
             return (
@@ -94,7 +101,7 @@ export function ReferencePicker({ issueKey, onClose, onSelect }: ReferencePicker
                   <button
                     aria-expanded={expanded}
                     aria-label={expanded ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
-                    className="rounded px-1 text-slate-400 hover:text-slate-700"
+                    className={`rounded px-1 ${disclosureButtonText}`}
                     onClick={() =>
                       setExpandedIssues((current) => {
                         const next = new Set(current);
@@ -111,7 +118,7 @@ export function ReferencePicker({ issueKey, onClose, onSelect }: ReferencePicker
                     {expanded ? "▾" : "▸"}
                   </button>
                   <button
-                    className="block flex-1 rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
+                    className={`block flex-1 rounded px-2 py-1 text-left text-sm ${surfaceMutedHoverBg}`}
                     onClick={() =>
                       onSelect(buildDispatchReference({ key: issue.key, kind: "issue" }))
                     }
@@ -121,11 +128,11 @@ export function ReferencePicker({ issueKey, onClose, onSelect }: ReferencePicker
                   </button>
                 </div>
                 {expanded && artifactQueries[index]?.isPending ? (
-                  <p className="px-2 text-xs text-slate-500">Loading artifacts…</p>
+                  <p className={`px-2 text-xs ${textMutedOnSurface}`}>Loading artifacts…</p>
                 ) : null}
                 {(expanded ? (artifactQueries[index]?.data ?? []) : []).map((artifact) => (
                   <button
-                    className="ml-5 block w-[calc(100%-1.25rem)] rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
+                    className={`ml-5 block w-[calc(100%-1.25rem)] rounded px-2 py-1 text-left text-sm ${surfaceMutedHoverBg}`}
                     key={artifact.id}
                     onClick={() =>
                       onSelect(
@@ -145,7 +152,9 @@ export function ReferencePicker({ issueKey, onClose, onSelect }: ReferencePicker
             );
           })}
           {!issues.isPending && filtered.length === 0 ? (
-            <p className="px-2 text-sm text-slate-500">No issues match &quot;{filter}&quot;.</p>
+            <p className={`px-2 text-sm ${textMutedOnSurface}`}>
+              No issues match &quot;{filter}&quot;.
+            </p>
           ) : null}
         </section>
       </div>

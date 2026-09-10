@@ -4,6 +4,15 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import {
+  calloutDangerBg,
+  calloutDangerBorder,
+  calloutDangerText,
+  card,
+  errorCodeBlockBg,
+  errorCodeBlockText,
+  inlineWarningText,
+} from "../../theme/classes";
 
 const sanitizeSchema = {
   ...defaultSchema,
@@ -63,9 +72,13 @@ function MermaidDiagram({ source }: MermaidDiagramProps): ReactNode {
 
   if ("error" in rendered) {
     return (
-      <figure className="my-4 rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-950">
+      <figure
+        className={`my-4 rounded-lg p-4 text-sm ${calloutDangerBorder} ${calloutDangerBg} ${calloutDangerText}`}
+      >
         <figcaption role="alert">Could not render Mermaid: {rendered.error}</figcaption>
-        <pre className="mt-3 overflow-x-auto rounded bg-white p-3 text-slate-900">
+        <pre
+          className={`mt-3 overflow-x-auto rounded p-3 ${errorCodeBlockBg} ${errorCodeBlockText}`}
+        >
           <code>{source}</code>
         </pre>
       </figure>
@@ -74,7 +87,7 @@ function MermaidDiagram({ source }: MermaidDiagramProps): ReactNode {
 
   return (
     <div
-      className="my-4 overflow-x-auto rounded-lg border border-slate-200 bg-white p-4"
+      className={`my-4 overflow-x-auto rounded-lg p-4 ${card}`}
       data-testid="mermaid-diagram"
       ref={target}
     />
@@ -473,17 +486,17 @@ export function DocView({ highlight, markdown, onSelectionChange }: DocViewProps
   return (
     <>
       {selectionUnsupported ? (
-        <p className="mb-2 text-sm text-amber-800" role="status">
+        <p className={`mb-2 text-sm ${inlineWarningText}`} role="status">
           This selection cannot be anchored. Select text within one Markdown block.
         </p>
       ) : null}
       {historicalHighlightMissing ? (
-        <p className="mb-2 text-sm text-amber-800" role="status">
+        <p className={`mb-2 text-sm ${inlineWarningText}`} role="status">
           Text changed. The selected range no longer exists in this document.
         </p>
       ) : null}
       <article
-        className="prose prose-slate max-w-none break-words"
+        className="prose prose-slate max-w-none break-words dark:prose-invert"
         onKeyUp={reportSelection}
         onMouseUp={reportSelection}
         ref={root}

@@ -9,6 +9,23 @@ import * as Y from "yjs";
 
 import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
+import {
+  calloutWarningBg,
+  calloutWarningBorder,
+  calloutWarningText,
+  card,
+  dangerText,
+  inputClasses,
+  secondaryButtonBorder,
+  secondaryButtonDisabledText,
+  secondaryButtonHoverBorder,
+  secondaryButtonText,
+  statusConnected,
+  statusConnecting,
+  statusOffline,
+  textMutedOnSurface,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { useMargin } from "../margin/Margin";
 import { anchorDecorationExtension, setActiveAnchorIds, setAnchorDecorations } from "./anchors";
 import { DocView, type DocViewHighlight, quoteOccurrence } from "./DocView";
@@ -56,6 +73,7 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
   const userLoginRef = useRef(user.login);
   const viewRef = useRef<EditorView | null>(null);
   const readOnlyRef = useRef<Compartment | null>(null);
+  const themeRef = useRef<Compartment | null>(null);
   const decoratedAnchorKey = useRef<string | undefined>(undefined);
   const awaitingAnchorDocument = useRef(false);
   isClosedRef.current = isClosed;
@@ -177,6 +195,12 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
     ytext.observe(syncContent);
 
     const readOnly = new Compartment();
+    const theme = new Compartment();
+    const darkMediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    // CodeMirror's caret and selection colors are only legible against a dark background once a
+    // theme opts into `{ dark: true }` (its own base theme otherwise assumes a light page, even
+    // though it never sets a background itself — see `@codemirror/view`'s `baseTheme`); this
+    // compartment carries no other styling, the surrounding page supplies the actual colors.
     const view = new EditorView({
       parent,
       state: EditorState.create({
@@ -185,6 +209,7 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
           markdown(),
           EditorView.lineWrapping,
           EditorView.theme({ "&": { minHeight: "24rem" } }),
+          theme.of(EditorView.theme({}, { dark: darkMediaQuery.matches })),
           yCollab(ytext, awareness),
           anchorDecorationExtension({
             onHover: (id) => anchorHover.current(id),
@@ -199,9 +224,16 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
         ],
       }),
     });
+    const applyColorScheme = (event: MediaQueryListEvent) => {
+      view.dispatch({
+        effects: theme.reconfigure(EditorView.theme({}, { dark: event.matches })),
+      });
+    };
+    darkMediaQuery.addEventListener("change", applyColorScheme);
     providerRef.current = provider;
     viewRef.current = view;
     readOnlyRef.current = readOnly;
+    themeRef.current = theme;
     setConnection("connecting");
     setContent("");
     setSynced(false);
@@ -209,6 +241,7 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
     return () => {
       mounted = false;
       ytext.unobserve(syncContent);
+      darkMediaQuery.removeEventListener("change", applyColorScheme);
       view.destroy();
       provider.destroy();
       document.destroy();
@@ -220,6 +253,9 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
       }
       if (readOnlyRef.current === readOnly) {
         readOnlyRef.current = null;
+      }
+      if (themeRef.current === theme) {
+        themeRef.current = null;
       }
     };
   }, [artifact.id]);
@@ -307,10 +343,12 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
 
   return (
     <section aria-label="Document editor" className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3">
+      <div
+        className={`flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 ${card}`}
+      >
         <div className="flex flex-wrap items-center gap-2">
           <button
-            className="rounded border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:border-sky-500"
+            className={`rounded border px-3 py-1.5 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
             onClick={() => {
               setMode((current) => (current === "edit" ? "preview" : "edit"));
               setSelectedVersion(null);
@@ -321,7 +359,7 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
             {mode === "edit" ? "Preview" : "Edit"}
           </button>
           <button
-            className="rounded border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:border-sky-500 disabled:cursor-not-allowed disabled:text-slate-400"
+            className={`rounded border px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
             disabled={isClosed || nameVersion.isPending}
             onClick={requestNamedVersion}
             type="button"
@@ -330,7 +368,7 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
           </button>
           {selectedVersion === null ? null : (
             <button
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:border-sky-500"
+              className={`rounded border px-3 py-1.5 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
               onClick={() => setShowDiff((visible) => !visible)}
               type="button"
             >
@@ -340,21 +378,23 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
         </div>
         <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
           <span
-            className={
+            className={`rounded-full px-2 py-1 text-xs font-medium ${
               connection === "connected"
-                ? "rounded-full bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-800"
+                ? `${statusConnected.bg} ${statusConnected.text}`
                 : connection === "connecting"
-                  ? "rounded-full bg-amber-100 px-2 py-1 text-xs font-medium text-amber-800"
-                  : "rounded-full bg-slate-200 px-2 py-1 text-xs font-medium text-slate-700"
-            }
+                  ? `${statusConnecting.bg} ${statusConnecting.text}`
+                  : `${statusOffline.bg} ${statusOffline.text}`
+            }`}
             role="status"
           >
             {connection}
           </span>
-          <label className="flex min-w-0 items-center text-sm font-medium text-slate-700">
+          <label
+            className={`flex min-w-0 items-center text-sm font-medium ${textSecondaryOnSurface}`}
+          >
             Version
             <select
-              className="ml-2 min-w-0 max-w-56 truncate rounded border border-slate-300 bg-white px-2 py-1 font-normal"
+              className={`ml-2 min-w-0 max-w-56 truncate rounded px-2 py-1 font-normal ${inputClasses(true)}`}
               onChange={(event) => selectVersion(event.target.value)}
               value={selectedVersion ?? ""}
             >
@@ -370,12 +410,14 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
         </div>
       </div>
       {isClosed ? (
-        <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+        <p
+          className={`rounded-lg border p-3 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
+        >
           This issue is closed. Its document is read-only.
         </p>
       ) : null}
       {nameVersion.isError ? (
-        <p className="text-sm text-rose-700" role="alert">
+        <p className={`text-sm ${dangerText}`} role="alert">
           Could not name this version.
         </p>
       ) : null}
@@ -384,7 +426,7 @@ function DocEditorContent({ artifact, highlight, isClosed, user }: DocEditorProp
         ref={host}
       />
       {selectedVersion !== null && selectedMarkdown === undefined ? (
-        <p className="text-sm text-slate-500">Loading version…</p>
+        <p className={`text-sm ${textMutedOnSurface}`}>Loading version…</p>
       ) : selectedVersion !== null && selectedMarkdown !== undefined ? (
         showDiff ? (
           <VersionDiff after={liveMarkdown} before={selectedMarkdown} />
