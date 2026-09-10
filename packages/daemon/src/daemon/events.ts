@@ -544,6 +544,26 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       try {
         await deps.envoyPublish(roleTopic(role), notice.payloadJson);
       } catch (error) {
+        // Checked immediately on catching, before anything else: `stop()` racing this exact
+        // await (published just as `stop()` ran, then rejected anyway) must never schedule a
+        // recovery call or a sleep after the pump has already decided to shut down -- either
+        // one would create a timer/call that outlives the pump with nothing left to observe it.
+        if (controllerDrainDisposed) return;
+        if (isNoHolderError(error)) {
+          // No controller is currently claiming the role at all: retrying the publish alone can
+          // never succeed until something spawns one. Routes through the same controller
+          // recovery every other no-holder 404 does (`ensureController`, via `onUndeliverable`)
+          // on every failure, not only once some ceiling is reached -- `ensureController` itself
+          // is a no-op once a controller is already live or already being spawned, so calling it
+          // repeatedly here is safe.
+          await notifyUndeliverable(
+            role,
+            notice.eventId,
+            { event_id: notice.eventId, issued_at: Date.now() },
+            "controller-notice-drain",
+            "controller"
+          );
+        }
         const delayMs = retryDelayMs(attempt);
         console.error(
           `[legion] failed to deliver pending controller notice ${notice.eventId}, retrying in ${delayMs}ms:`,
@@ -909,6 +929,13 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       return result;
     },
     async drain(): Promise<void> {
+      // Awaited before the daemon's own final state save (see index.ts's `stop()` sequence): a
+      // controller-notice publish already in flight when shutdown began, if it succeeds, must
+      // have its own splice+`saveState` settled before that final save runs -- otherwise a
+      // notice already delivered could still be redelivered on the next restart, since the
+      // final save would not yet reflect its removal. `controllerNoticeQueue` never rejects
+      // (see its own doc comment), so awaiting it directly is always safe.
+      await controllerNoticeQueue;
       while (pending.size > 0) await Promise.allSettled([...pending]);
       if (failures.length > 0) throw new AggregateError(failures, "Event pump processing failed");
     },
