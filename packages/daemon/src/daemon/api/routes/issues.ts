@@ -79,9 +79,9 @@ export async function handleWaveRelease(
 ): Promise<Response> {
   const tree = ctx.requireTree(body);
   ctx.auth.requireArchitectCapability(body, tree);
-  const children = optionalStrings(body, "children").map((child) => issueKey({ child }, "child"));
-  for (const child of children) {
-    if (!treeContains(ctx.deps.state, tree, child)) {
+  const issues = optionalStrings(body, "issues").map((issue) => issueKey({ issue }, "issue"));
+  for (const issue of issues) {
+    if (!treeContains(ctx.deps.state, tree, issue)) {
       throw new HttpError(403, "Issue is outside tree");
     }
   }
@@ -91,13 +91,13 @@ export async function handleWaveRelease(
   // The PATCH itself is all this route does: the resulting `issue.updated` event (Dispatch echoes
   // every status write back through the daemon's own durable consumer) is what actually admits
   // each child, exactly like a human moving a child to `todo` in the dashboard would.
-  for (const child of children) {
-    await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, child, "todo");
+  for (const issue of issues) {
+    await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, issue, "todo");
   }
   await ctx.save();
   return Response.json(
     validateContractResponse(LegionDaemonApi.WaveRelease.response, {
-      released: children,
+      released: issues,
     })
   );
 }

@@ -36,7 +36,6 @@ export interface EnvelopeJson {
 }
 
 export interface ReducerConfig {
-  boardProjectIds: readonly string[];
   appLogins: readonly string[];
   maxFixAttempts: number;
 }
@@ -474,7 +473,7 @@ function collapseClosedTreeWakes(effects: Effect[]): Effect[] {
 }
 
 function openChildren(state: LegionState, parent: IssueNode): number {
-  return parent.children.filter((key) => state.issues[key]?.state === "open").length;
+  return parent.children.filter((key) => state.issues[key]?.status !== "done").length;
 }
 
 function filtered(comment: JsonRecord, config: ReducerConfig): boolean {
@@ -485,12 +484,12 @@ function filtered(comment: JsonRecord, config: ReducerConfig): boolean {
   );
 }
 
-function issueForBranch(branch: string): IssueKey | undefined {
+export function issueForBranch(branch: string): IssueKey | undefined {
   const match = /^legion\/([A-Z][A-Z0-9]*-[0-9]+)$/.exec(branch);
   return match?.[1];
 }
 
-function issueForPrBody(body: string): IssueKey | undefined {
+export function issueForPrBody(body: string): IssueKey | undefined {
   const match = /^Dispatch: ([A-Z][A-Z0-9]*-[0-9]+)$/m.exec(body);
   return match?.[1];
 }
@@ -869,7 +868,6 @@ function dispatchIssuePayload(payload: unknown, key: IssueKey): DispatchIssuePay
 function applyDispatchIssueFields(node: IssueNode, issue: DispatchIssuePayload): void {
   node.title = issue.title;
   node.status = issue.status;
-  node.state = issue.status === "done" ? "closed" : "open";
 }
 
 /** Creates a `issue.created` node. Idempotent against a redelivered or reordered duplicate that
@@ -885,10 +883,7 @@ function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effe
   const node: IssueNode = {
     key: issue.key,
     title: issue.title,
-    state: issue.status === "done" ? "closed" : "open",
     children: [],
-    released: true,
-    labels: [],
     status: issue.status,
   };
   if (issue.parent) node.parent = issue.parent;
@@ -926,7 +921,7 @@ function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effec
   const issue = dispatchIssuePayload(event.payload, event.key);
   const node = issue ? state.issues[issue.key] : undefined;
   if (!issue || !node) return [];
-  const wasOpen = node.state === "open";
+  const wasOpen = node.status !== "done";
   applyDispatchIssueFields(node, issue);
   if (!node.parent) {
     const tree = state.trees[issue.key];

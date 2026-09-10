@@ -40,7 +40,7 @@ function isLifecycleStatus(value: string): value is (typeof LIFECYCLE_STATUSES)[
 const LEGION_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
   set_status: ["issue", "status"],
   register_gate: ["issue", "askId"],
-  wave_release: ["children"],
+  release_wave: ["issues"],
   escalate: ["kind", "context"],
   merge_gate: ["pr"],
   spawn_worker: ["issue", "role", "task"],
@@ -52,7 +52,7 @@ function legionToolSchema(pi: PiApi): unknown {
     op: z.enum([
       "set_status",
       "register_gate",
-      "wave_release",
+      "release_wave",
       "escalate",
       "merge_gate",
       "spawn_worker",
@@ -60,9 +60,8 @@ function legionToolSchema(pi: PiApi): unknown {
     issue: z.string().optional(),
     status: z.enum(LIFECYCLE_STATUSES).optional(),
     askId: z.string().optional(),
-    children: z.array(z.string()).optional(),
     kind: z.enum(["re-file", "capacity", "cross-tree"]).optional(),
-    context: z.unknown().optional(),
+    issues: z.array(z.string()).optional(),
     rationale: z.string().optional(),
     pr: z.number().optional(),
     role: z.enum(LEGION_ROLES).optional(),
@@ -149,18 +148,18 @@ export function createLegionTool(deps: {
               askId: stringInput("askId"),
             });
             return jsonSuccess({});
-          case "wave_release": {
-            const children = parameters.children;
+          case "release_wave": {
+            const issues = parameters.issues;
             if (
-              !Array.isArray(children) ||
-              !children.every((child: unknown): child is string => typeof child === "string")
+              !Array.isArray(issues) ||
+              !issues.every((issue: unknown): issue is string => typeof issue === "string")
             ) {
-              throw new Error("wave_release requires children");
+              throw new Error("release_wave requires issues");
             }
             return jsonSuccess(
-              await daemon.waveRelease({
+              await daemon.releaseWave({
                 tree: architect.tree,
-                children,
+                issues,
                 sessionId,
                 secret: architect.secret,
               })

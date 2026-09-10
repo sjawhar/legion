@@ -308,9 +308,8 @@ function reportRootAnomalies(deps: RunResyncDeps, now: number): Promise<ResyncAn
 }
 
 /**
- * Retries failed daemon-owned status writes, heals Dispatch status drift this daemon's own
- * durable consumer missed, reconciles unsettled PR check rollups, and reports root-issue
- * anomalies a status replay alone cannot self-heal.
+ * Heals missed Dispatch status changes before retrying daemon-owned writes, then reconciles
+ * unsettled PR check rollups and reports root-issue anomalies a status replay cannot self-heal.
  */
 export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload> {
   const now = deps.now();
@@ -326,8 +325,8 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
   }
 
   lastRunAt.set(deps.state, now);
-  await retryPendingStatusWrites(deps);
   const healed = await healStatusDrift(deps, now);
+  await retryPendingStatusWrites(deps);
   const ciFetchFailureDetails = await reconcilePrs(deps, now);
   const anomalies = await reportRootAnomalies(deps, now);
   return {

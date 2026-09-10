@@ -13,7 +13,7 @@ The localhost-only Legion API lives in `api.ts`.
 | `GET /legion/v1/state` | Read redacted durable Legion state. |
 | `POST /legion/v1/process/started` | Register a root process with transcript-derived architect role backing. |
 | `POST /legion/v1/process/exit` | Authenticated architect exit that releases an admission slot or marks its root process dead. |
-| `POST /legion/v1/issues/status`, `/waves/release`, `/gates/register` | Scoped architect writes (any status in its tree; wave release PATCHes `todo` per child; gate registers a design-ask id) — and the controller capability may additionally set `todo`\|`backlog`\|`icebox` on any project issue via `/issues/status`. |
+| `POST /legion/v1/issues/status`, `/waves/release`, `/gates/register` | Scoped architect writes (any status in its tree; `release_wave` PATCHes `todo` for every key in `issues`; gate registers a design-ask id) — and the controller capability may additionally set `todo`\|`backlog`\|`icebox` on any project issue via `/issues/status`. |
 | `POST /legion/v1/worker-session`, `/grants`, `/git-credential`, `/gh-token` | Durable architect and worker capability recovery, and credential grants. |
 | `POST /legion/v1/worker/started` | Registers a headless phase worker's session against its daemon-minted boot token; mints its session capability, git identity lease, and records its tmux/socket locator and a hash of its boot token on the claim (so `/worker-session` can rebind it after a daemon restart). |
 | `POST /legion/v1/worker/ready` | Verifies the worker's session capability and sends its queued assignment (`pendingAssignment`, cleared once sent) as an OMP RPC `prompt` frame over the worker's `legion worker-shim` socket. |

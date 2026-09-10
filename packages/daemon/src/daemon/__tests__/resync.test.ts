@@ -1093,7 +1093,7 @@ describe("runResync", () => {
     expect(saves).toBe(1);
   });
 
-  it("retries a pending done write when Dispatch reports that a human reopened it", async () => {
+  it("never overwrites a remote human reopen with a pending done write", async () => {
     const state = newLegionState("omp", 1);
     state.issues[issue] = {
       key: issue,
@@ -1102,21 +1102,76 @@ describe("runResync", () => {
       lastAppliedSeq: 12,
       children: [],
     };
-    state.pendingStatusWrites[issue] = { status: "done", lastAppliedSeq: 12 } as never;
+    state.pendingStatusWrites[issue] = { status: "done", lastAppliedSeq: 12 };
     const statusWrites: Array<{ issue: string; status: string }> = [];
+    let detailReads = 0;
 
     await runResync({
       ...resyncDeps(state),
       dispatchClient: fakeDispatchClient({
-        getIssue: async () => ({ ...issueClosed.payload, status: "backlog" }) as never,
+        listIssues: async () =>
+          [
+            {
+              key: issue,
+              title: "Resync this Legion tree",
+              status: "backlog",
+              parent: null,
+              updated_at: "2026-09-10T00:00:00Z",
+              last_seq: 13,
+              open_asks: 0,
+            },
+          ] as never,
+        getIssue: async () => {
+          detailReads += 1;
+          return { ...issueClosed.payload, status: "backlog", last_seq: 13 } as never;
+        },
         setStatus: async (writtenIssue, status) => {
           statusWrites.push({ issue: writtenIssue, status });
         },
       }),
     });
 
-    expect(statusWrites).toEqual([{ issue, status: "done" }]);
+    expect(detailReads).toBe(1);
+    expect(statusWrites).toEqual([]);
     expect(state.pendingStatusWrites[issue]).toBeUndefined();
+    expect(state.issues[issue]).toMatchObject({ status: "backlog", lastAppliedSeq: 13 });
+  });
+  it("drops a pending in-progress write after a remote human icebox update", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = {
+      key: issue,
+      title: "Resync this Legion tree",
+      status: "in_progress",
+      lastAppliedSeq: 12,
+      children: [],
+    };
+    state.pendingStatusWrites[issue] = { status: "in_progress", lastAppliedSeq: 12 };
+    const statusWrites: Array<{ issue: string; status: string }> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      dispatchClient: fakeDispatchClient({
+        listIssues: async () =>
+          [
+            {
+              key: issue,
+              title: "Resync this Legion tree",
+              status: "icebox",
+              parent: null,
+              updated_at: "2026-09-10T00:00:00Z",
+              last_seq: 13,
+              open_asks: 0,
+            },
+          ] as never,
+        setStatus: async (writtenIssue, status) => {
+          statusWrites.push({ issue: writtenIssue, status });
+        },
+      }),
+    });
+
+    expect(statusWrites).toEqual([]);
+    expect(state.pendingStatusWrites[issue]).toBeUndefined();
+    expect(state.issues[issue]).toMatchObject({ status: "icebox", lastAppliedSeq: 13 });
   });
 
   it("persists pending-write cleanup after a successful retry without a drift effect", async () => {

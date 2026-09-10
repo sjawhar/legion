@@ -1537,10 +1537,10 @@ describe("Legion OMP extension", () => {
         details: { approved: true, pr: 17, headSha: "approved-head" },
       },
       {
-        input: { op: "wave_release", children: [issue] },
+        input: { op: "release_wave", issues: [issue] },
         request: {
           path: "/legion/v1/waves/release",
-          body: { tree, children: [issue], sessionId: "ses_architect", secret: "root-secret" },
+          body: { tree, issues: [issue], sessionId: "ses_architect", secret: "root-secret" },
         },
         details: { released: [issue] },
       },

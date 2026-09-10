@@ -42,7 +42,7 @@ export interface LegionDaemonClient {
   readonly provisioningCredential: (
     input: ProvisioningCredentialInput
   ) => Promise<ProvisioningCredentialResponse>;
-  readonly waveRelease: (input: WaveReleaseInput) => Promise<WaveReleaseResponse>;
+  readonly releaseWave: (input: WaveReleaseInput) => Promise<WaveReleaseResponse>;
   readonly escalate: (input: EscalateInput) => Promise<void>;
   readonly issueStatus: (input: IssueStatusInput) => Promise<void>;
   readonly gatesRegister: (input: GatesRegisterInput) => Promise<void>;
@@ -172,7 +172,7 @@ export function createLegionDaemonClient(
     spawnWorker: (input) =>
       post("/legion/v1/worker/spawn", input, LegionDaemonApi.SpawnWorker.response),
     mergeGate: (input) => post("/legion/v1/merge-gate", input, LegionDaemonApi.MergeGate.response),
-    waveRelease: (input) =>
+    releaseWave: (input) =>
       post("/legion/v1/waves/release", input, LegionDaemonApi.WaveRelease.response),
     provisioningCredential: (input) =>
       post(

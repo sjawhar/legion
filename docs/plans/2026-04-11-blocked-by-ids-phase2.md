@@ -1,3 +1,5 @@
+> **[HISTORICAL]** This plan describes retired GitHub board-collection paths and is kept for historical reference.
+
 # Plan: Full Blocking Issue IDs in State Collector (Phase 2)
 
 **Issue:** sjawhar-legion-114

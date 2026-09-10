@@ -76,7 +76,7 @@ export const LegionDaemonApi = {
     response: z.object({}),
   },
   WaveRelease: {
-    request: architectCapability.extend({ children: z.array(nonEmptyString).optional() }),
+    request: architectCapability.extend({ issues: z.array(nonEmptyString).optional() }),
     response: z.object({ released: z.array(nonEmptyString) }),
   },
   Escalate: {

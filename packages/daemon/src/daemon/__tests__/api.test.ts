@@ -703,7 +703,7 @@ describe("Legion HTTP API", () => {
 
     const released = await json("/legion/v1/waves/release", {
       tree: root,
-      children: [child],
+      issues: [child],
       ...architect,
     });
     expect(released.body).toEqual({ released: [child] });
@@ -711,7 +711,7 @@ describe("Legion HTTP API", () => {
     expect(publications).toEqual([]);
     const releasedAgain = await json("/legion/v1/waves/release", {
       tree: root,
-      children: [child],
+      issues: [child],
       ...architect,
     });
     expect(releasedAgain.body).toEqual({ released: [child] });
@@ -996,7 +996,7 @@ describe("Legion HTTP API", () => {
     }> = [
       {
         path: "/legion/v1/waves/release",
-        body: { tree: root, children: [child] },
+        body: { tree: root, issues: [child] },
       },
       {
         path: "/legion/v1/issues/status",
