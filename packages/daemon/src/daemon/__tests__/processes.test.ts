@@ -10,6 +10,7 @@ import {
   roleToken,
   roleTopic,
 } from "@legion/contracts";
+import { spawnCapabilityKey } from "../api/auth";
 import type { DaemonConfig } from "../config";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import {
@@ -5500,6 +5501,113 @@ describe("ProcessManager", () => {
           publication.subject === architectTopic && publication.json.includes("worker-started")
       )
     ).toHaveLength(1);
+  });
+
+  it("refuses to enqueue a spawn against an already-closed tree, even at cap, instead of queueing a locator-less claim nothing would ever prune", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const treeState = state.trees[root];
+    if (!treeState) throw new Error("tree missing");
+    // Already fully closed -- not merely closing (`closingTrees` is empty here, unlike the
+    // mid-teardown test below): the entry check must catch this via the SAME `isTreeGone`
+    // predicate `launchWorker` itself uses, not just `closingTrees.has`.
+    treeState.status = "closed";
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerCap: 0 }),
+    });
+
+    const error = await processes
+      .spawnWorker(root, root, "tester", "verify #41")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(TreeClosingError);
+    // Never enqueued: before this fix, a spawn against an already-closed tree at cap would still
+    // reach `launchOrQueue` and push a locator-less claim that nothing left running would ever
+    // prune (`pruneQueueForTree` only runs from inside an active `closeTreeLocked` call).
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(managedState.roles[roleToken("omp", root, "tester")]).toBeUndefined();
+  });
+
+  it("drops a queued token whose tree is already closed instead of leaving it wedged at the head forever, then promotes the next queued token", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const treeState = state.trees[root];
+    if (!treeState) throw new Error("tree missing");
+    treeState.status = "closed";
+    // Models a token that was validly queued before its tree closed (or a legacy pre-fix wedge):
+    // locator-less, still carrying a pending assignment, sitting at the head of the FIFO queue.
+    const deadToken = roleToken("omp", root, "tester");
+    state.roles[deadToken] = { issue: root, role: "tester", pendingAssignment: "verify #41" };
+
+    const otherRoot = formatIssueKey("sjawhar", "legion", 99);
+    state.trees[otherRoot] = {
+      root: otherRoot,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const liveToken = roleToken("omp", otherRoot, "planner");
+    state.roles[liveToken] = { issue: otherRoot, role: "planner", pendingAssignment: "plan #99" };
+    state.workerAdmission.queue.push(deadToken, liveToken);
+
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+    });
+
+    await processes.reconcileWorkerAdmission();
+
+    // The dead entry never blocks the live one behind it: dropped with no failure accounting
+    // (not rotated to the tail, not left wedged at the head for every future drain to retry and
+    // fail identically), and the queue is now empty because the live token was promoted in the
+    // same pass.
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(managedState.roles[deadToken]).toBeUndefined();
+    const liveClaim = managedState.roles[liveToken];
+    if (!liveClaim || !("issue" in liveClaim)) throw new Error("live claim missing");
+    expect(liveClaim.locator).toBeDefined();
+  });
+
+  it("prunes every spawn capability recorded for a tree once it closes, so a pre-shutdown spawn token can no longer authorize the legacy role-backing route into recreating a claim", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const closingSpawnToken = "spawn-token-for-closing-tree";
+    state.spawnCapabilities[spawnCapabilityKey(closingSpawnToken)] = {
+      tree: root,
+      issue: root,
+      role: "tester",
+    };
+    const otherRoot = formatIssueKey("sjawhar", "legion", 77);
+    state.trees[otherRoot] = {
+      root: otherRoot,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const unrelatedSpawnToken = "spawn-token-for-a-different-tree";
+    state.spawnCapabilities[spawnCapabilityKey(unrelatedSpawnToken)] = {
+      tree: otherRoot,
+      issue: otherRoot,
+      role: "planner",
+    };
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+    });
+
+    await processes.closeTree(root);
+
+    expect(managedState.trees[root]?.status).toBe("closed");
+    expect(managedState.spawnCapabilities[spawnCapabilityKey(closingSpawnToken)]).toBeUndefined();
+    // A capability for an unrelated, still-active tree must survive this tree's own close.
+    expect(managedState.spawnCapabilities[spawnCapabilityKey(unrelatedSpawnToken)]).toEqual({
+      tree: otherRoot,
+      issue: otherRoot,
+      role: "planner",
+    });
   });
 
   it("refuses to spawn or resume a worker on a tree that is mid-teardown, with a 409-mapped TreeClosingError", async () => {

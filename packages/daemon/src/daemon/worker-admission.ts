@@ -585,15 +585,37 @@ export class WorkerAdmission {
       return true;
     } catch (error) {
       console.error(`[legion] failed to promote queued worker ${token}:`, error);
-      if (error instanceof TreeClosingError || error instanceof StopFailed) {
-        // The tree closed (or a post-open retire failed while it was closing) — `launchWorker`'s
-        // own catch deliberately rethrows both without touching `launchFailures` (see there), so
-        // treating this like an ordinary launch failure here would be wrong twice over: it would
-        // bump a counter this was never a failure of, and rotate this token to the tail of a
-        // queue for a tree that is gone rather than leaving it for `closeTreeLocked`'s own
-        // queue-pruning (see `pruneQueueForTree`) to remove. `drainWorkerQueue`'s own
-        // attempted-token tracking stops this pass on the very next loop iteration regardless
-        // (the head hasn't moved), so nothing here can spin.
+      // launchWorker's own catch deliberately rethrows both TreeClosingError and StopFailed
+      // without touching `launchFailures` (see there) -- neither is an ordinary launch failure,
+      // so bumping that counter or rotating the token to the tail would be wrong for both. They
+      // still need different queue treatment, though.
+      if (error instanceof TreeClosingError) {
+        // This token's tree is confirmed gone. Unlike round 7's fix (leave it for
+        // `closeTreeLocked`'s own `pruneQueueForTree` to remove during that tree's teardown),
+        // reaching this case now means the tree was ALREADY closed with nothing left to prune it
+        // — `spawnWorker`'s own entry check rejects a fresh enqueue against an already-closed
+        // tree before this point (see `isTreeGone`), so this is now only reachable via the
+        // narrower "closed mid-decision" race, but a dead entry here would otherwise wedge every
+        // worker queued behind it forever, since no `closeTreeLocked` call is left running to
+        // prune it. Drops the token and clears whatever locator-less claim `launchWorker`'s
+        // entry-check check left untouched (its own post-open branch, if that is the leg that
+        // fired instead, has already deleted its fresh claim itself before throwing).
+        await this.withAdmissionLock(async () => {
+          const queue = this.deps.state.workerAdmission.queue;
+          const index = queue.indexOf(token);
+          if (index !== -1) queue.splice(index, 1);
+          delete this.deps.state.roles[token];
+        });
+        await this.deps.persist();
+        return true;
+      }
+      if (error instanceof StopFailed) {
+        // A post-open retire's real kill-pane failure -- the pane this launch just opened might
+        // still be alive under the locator `launchWorker` already wrote and persisted before
+        // throwing. Leave the token and its claim exactly as `launchWorker` left them for
+        // `closeTreeLocked` (or the periodic sweep) to retry -- dropping it here, unlike the
+        // TreeClosingError case above, could strand a genuinely still-running pane with no
+        // durable record and no queue entry either.
         return true;
       }
       // launchWorker's own catch already recorded launchFailures on the claim and published

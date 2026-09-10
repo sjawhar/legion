@@ -128,6 +128,21 @@ async function paneAlive(paneId: string): Promise<boolean> {
   return listed.stdout.split("\n").includes(paneId);
 }
 
+/** Polls until tmux itself no longer lists `paneId`, up to `timeoutMs`. `closeTree` resolving
+ * (or its own promise settling) only means the shim/OMP process has exited and the daemon
+ * considers the tree closed -- tmux's own reaping of the now-dead pane out of its internal pane
+ * table is a separate, asynchronous OS-level step that can lag behind by a a few milliseconds,
+ * especially under CI's heavier scheduling contention. A single unretried `paneAlive` check right
+ * after `closeTree` resolves races that lag directly. */
+async function waitForPaneGone(paneId: string, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!(await paneAlive(paneId))) return false;
+    if (Date.now() >= deadline) return true;
+    await Bun.sleep(20);
+  }
+}
+
 function config(
   stateDir: string,
   port: number,
@@ -207,6 +222,141 @@ afterAll(async () => {
 });
 
 describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
+  // Unlike its siblings below, this test needs no real tmux/shim process at all -- it proves a
+  // lock-ordering property (a slow GitHub lease inside /worker/started must never hold the
+  // per-token lock closeTree's own stop needs), so it runs unconditionally (not LEGION_E2E-gated)
+  // against a real ProcessManager/HTTP daemon with a fake `run`/`connectWorkerRpc`.
+  it("does not block closeTree's stop-then-delete for a worker whose /worker/started request is still waiting on its GitHub lease", async () => {
+    const stateDir = await scratchDir();
+    const root = formatIssueKey("sjawhar", "legion", 9003);
+    const state = newLegionState("realshutdown", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    const token = roleToken("realshutdown", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      locator: {
+        tmuxSession: "fake",
+        tmuxWindowId: "@1",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+
+    const closed = Promise.withResolvers<void>();
+    const fakeClient = {
+      closed: closed.promise,
+      runState: "idle" as const,
+      negotiate: async () => {},
+      prompt: async () => {},
+      getState: async () => ({}),
+      shutdown: () => {
+        // Resolves gracefully on the next microtask, exactly like the shared fake client used
+        // throughout processes.test.ts -- there is nothing hung about this worker's own stop;
+        // the only thing gated in this test is the OTHER request's GitHub lease.
+        queueMicrotask(() => closed.resolve());
+      },
+      close: () => closed.resolve(),
+      onIdle: () => {},
+    };
+
+    const reachedLease = Promise.withResolvers<void>();
+    const leaseGate = Promise.withResolvers<void>();
+    const cfg = config(stateDir, 0, { treeStopTimeoutSeconds: 5 });
+    const deps: ProcessManagerDeps = {
+      ...processManagerDeps(cfg, state),
+      run: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      connectWorkerRpc: async () => fakeClient,
+    };
+    const processes = new ProcessManager(deps);
+    let daemon: LegionApi | undefined;
+    try {
+      const apiDeps: LegionApiDeps = {
+        state,
+        processManager: processes,
+        tokenManager: {
+          getToken: async () => {
+            reachedLease.resolve();
+            await leaseGate.promise;
+            return {
+              token: "minted-token",
+              expiresAt: "2099-01-01T00:00:00.000Z",
+              gitIdentity: { name: "legion-implement[bot]", email: "implement@example.com" },
+            };
+          },
+        },
+        envoyPublish: async () => {},
+        onControllerReady: async () => {},
+        onControllerEvent: async () => {},
+      };
+      daemon = startLegionApi(cfg, apiDeps);
+      const port = daemon.server.port;
+
+      const bootToken = await daemon.mintWorkerBootToken(root, root, "tester", 1);
+      const requestPromise = fetch(`http://127.0.0.1:${port}/legion/v1/worker/started`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tree: root,
+          issue: root,
+          role: "tester",
+          bootToken,
+          sessionId: "ses_tester",
+          agentId: "agt_tester",
+          ompSessionFile: "/tmp/tester.json",
+        }),
+      });
+
+      // Waits for the handler to have actually reached (and blocked inside) the GitHub lease
+      // call before starting closeTree -- without this, closeTree could race ahead of the
+      // request even reaching `mutateLiveRoleClaim` at all, proving nothing about which side of
+      // the lock the lease sits on.
+      await reachedLease.promise;
+
+      let closeSettled = false;
+      const closePromise = processes.closeTree(root).then(() => {
+        closeSettled = true;
+      });
+
+      // Gives closeTree every real chance to finish its stop-then-delete for this exact token
+      // while the /worker/started request above is still blocked on its GitHub lease -- proving
+      // that lease is held OUTSIDE the per-token lock (round 8's fix), not across it (the round
+      // 7 shape this test would have caught: the lease there ran INSIDE mutateLiveRoleClaim's
+      // callback, so closeTree's own attempt to acquire that same token's lock for its stop
+      // would still be waiting, and this assertion would see `closeSettled === false`).
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(closeSettled).toBe(true);
+      expect(state.trees[root]?.status).toBe("closed");
+      expect(state.roles[token]).toBeUndefined();
+
+      leaseGate.resolve();
+      const response = await requestPromise;
+      await closePromise;
+
+      // The request itself still resolves once its lease finally comes back -- as a 409, since
+      // closeTree has by then deleted the claim it needed.
+      expect(response.status).toBe(409);
+    } finally {
+      daemon?.stop();
+    }
+  });
+
   it.skipIf(process.env.LEGION_E2E !== "1")(
     "kills a real pane wrapping a real worker-shim after its stop timeout, when the wrapped process never reacts to stdin closing",
     async () => {
@@ -251,7 +401,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
 
       expect(state.trees[root]?.status).toBe("closed");
       expect(state.roles[token]).toBeUndefined();
-      expect(await paneAlive(paneId)).toBe(false);
+      expect(await waitForPaneGone(paneId)).toBe(false);
       // Proves this actually went through the timeout-then-kill fallback rather than closing
       // gracefully for an unrelated reason (e.g. a connect failure short-circuiting straight to
       // a kill): the wrapped process never reacts to stdin closing, so `stopProcess` must have
@@ -365,7 +515,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
 
         expect(result).not.toBe(timeout);
         expect(state.trees[root]?.status).toBe("closed");
-        expect(await paneAlive(paneId)).toBe(false);
+        expect(await waitForPaneGone(paneId)).toBe(false);
         // The one assertion that actually proves `reportRootExit` ran (not just that the pane
         // exited for some other reason): a 200 here is only reachable through the real,
         // capability-authenticated `/process/exit` -> `reportRootExit` path given this tree's

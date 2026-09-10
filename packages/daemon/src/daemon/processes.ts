@@ -412,7 +412,13 @@ export class ProcessManager {
     if (this.rootForIssue(issue) !== treeKey) {
       throw new Error(`Issue ${issue} does not belong to Legion tree ${treeKey}`);
     }
-    if (this.closingTrees.has(treeKey)) {
+    // The same closed/absent/closing predicate `launchWorker` itself enforces, not merely
+    // `closingTrees.has` -- a spawn against a tree that has already fully closed (durable
+    // `status === "closed"`, `closingTrees` long since cleared) must 409 here, before ever
+    // enqueueing at cap: an enqueued locator-less claim for an already-closed tree can only ever
+    // hit `launchWorker`'s own `isTreeGone` check on promotion, and nothing else will ever prune
+    // that queue entry for a tree with no `closeTreeLocked` call left to run its own pruning.
+    if (this.isTreeGone(treeKey, issue)) {
       throw new TreeClosingError(treeKey);
     }
     if (role === "architect" && this.issueDepth(issue) >= this.deps.config.maxRecursionDepth) {
@@ -916,16 +922,32 @@ export class ProcessManager {
     await this.releaseSlot(treeKey);
     // Every stopped claim above (one with a locator) is already deleted; this also clears any
     // remaining claim under the tree that never had a locator to stop in the first place (e.g.
-    // a `registerRoleBacking`-only entry), which the fixed-point loop above never even sees.
+    // a `registerRoleBacking`-only entry), which the fixed-point loop above never even sees. Each
+    // delete runs inside that same token's own critical section (mirroring the fixed-point
+    // loop's delete-after-stop): a writer that acquired this exact token's lock just before
+    // `tree.status` flipped to "closed" above, and has not yet reached its own post-lock
+    // `rejectIfTreeGone` check, is let to finish (and reject itself against the now-closed tree)
+    // before this delete runs, rather than racing it.
     for (const [token, claim] of Object.entries(this.deps.state.roles)) {
       if ("issue" in claim && this.rootForIssue(claim.issue) === treeKey) {
-        delete this.deps.state.roles[token];
+        await this.workerAdmission.mutateClaim(token, async () => {
+          delete this.deps.state.roles[token];
+        });
       }
     }
     this.clearTreePhases(treeKey);
     // A tree that was closed while it still had queued (never-launched) tokens must never leave
     // them behind for a later, unrelated drain to promote against a tree that no longer exists.
     await this.workerAdmission.pruneQueueForTree(treeKey);
+    // A spawn capability minted before shutdown (`/legion/v1/spawn-token`) still authorizes the
+    // legacy `/legion/v1/role-backing` route (until #828 deletes it) to recreate a claim for this
+    // exact tree/issue/role -- deleting every capability recorded against this tree closes that
+    // replay window regardless of which legacy route it would have been redeemed through.
+    for (const [key, capability] of Object.entries(this.deps.state.spawnCapabilities)) {
+      if (capability.tree === treeKey) {
+        delete this.deps.state.spawnCapabilities[key];
+      }
+    }
     await this.deps.saveState();
     // Deleting this tree's claims may have freed running-worker slots other trees' queues are
     // waiting on.
