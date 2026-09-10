@@ -255,6 +255,59 @@ test("Escape on a suggestion with only a replacement shows the discard prompt in
   }
 });
 
+test("Escape from the composer while its reference picker opens closes only the picker", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [],
+    closed_at: null,
+    created_at: "2026-09-09T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    external_links: [],
+    key: "CORE-1",
+    labels: [],
+    last_seq: 1,
+    number: 1,
+    parent: null,
+    primary_artifact_id: "artifact-1",
+    project: "CORE",
+    route: null,
+    status: "open",
+    title: "Review the spec",
+    updated_at: "2026-09-09T00:00:00Z",
+  });
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  let closed = false;
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Composer
+        anchor={{ artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 }}
+        issueKey="CORE-1"
+        kind="comment"
+        onClose={() => {
+          closed = true;
+        }}
+      />
+    </QueryClientProvider>
+  );
+
+  try {
+    const comment = screen.getByLabelText("Comment");
+    fireEvent.keyDown(comment, { ctrlKey: true, key: "k" });
+    await screen.findByRole("dialog", { name: "Reference picker" });
+
+    fireEvent.keyDown(comment, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "Reference picker" })).toBeNull();
+    expect(screen.getByRole("form", { name: "Comment composer" })).not.toBeNull();
+    expect(closed).toBe(false);
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    listIssues.mockRestore();
+  }
+});
 test("Enter in the reference picker's filter inserts the top match instead of submitting a ready-to-save draft", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
   const getIssue = spyOn(api, "getIssue").mockResolvedValue({

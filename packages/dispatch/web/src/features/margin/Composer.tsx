@@ -208,6 +208,10 @@ export function Composer({
         return;
       }
       event.stopPropagation();
+      if (pickerOpen) {
+        setPickerOpen(false);
+        return;
+      }
       if (!hasUnsavedInput(body, replacement, askOptions) || confirmingDiscard) {
         onClose();
         return;
@@ -219,7 +223,7 @@ export function Composer({
     };
     form.addEventListener("keydown", handleEscape);
     return () => form.removeEventListener("keydown", handleEscape);
-  }, [askOptions, body, confirmingDiscard, onClose, replacement]);
+  }, [askOptions, body, confirmingDiscard, onClose, pickerOpen, replacement]);
   const references = useMemo(() => composerReferences(body), [body]);
   const save = useMutation({
     mutationFn: async () => {
