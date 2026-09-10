@@ -379,7 +379,7 @@ func walkYFragment(frag *crdt.YXmlFragment, position *int, block *crdt.YXmlEleme
 
 func isInlineContainerType(nodeType string) bool {
 	switch nodeType {
-	case "paragraph", "heading", "table_cell", "table_header":
+	case "paragraph", "heading":
 		return true
 	default:
 		return false

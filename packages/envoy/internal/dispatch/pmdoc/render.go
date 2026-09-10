@@ -25,6 +25,9 @@ func Render(doc *Node) (string, *PositionMap, error) {
 	if err := doc.Validate(); err != nil {
 		return "", nil, err
 	}
+	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
+		return "", &PositionMap{}, nil
+	}
 	r := &renderer{}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
@@ -98,18 +101,7 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "hr":
 		r.writeSyntax("---")
 		r.pos++
-	case "image":
-		src, _ := n.Attrs["src"].(string)
-		alt, _ := n.Attrs["alt"].(string)
-		title, _ := n.Attrs["title"].(string)
-		r.writeSyntax("![" + alt + "](" + src + titleSuffix(title) + ")")
-		r.pos++
-	case "html":
-		value, _ := n.Attrs["value"].(string)
-		r.writeSyntax(value)
-		r.pos++
 	case "frontmatter":
-		r.writeSyntax("---\n")
 		r.pos++
 		for _, child := range n.Children {
 			if child.Type != "text" {
@@ -118,7 +110,6 @@ func (r *renderer) block(n *Node, prefix string) {
 			}
 			r.writeText(child.Text)
 		}
-		r.writeSyntax("\n---")
 		r.pos++
 	case "table":
 		r.table(n, prefix)
@@ -219,8 +210,14 @@ func (r *renderer) tableRow(row *Node, header bool, prefix string) {
 		if i > 0 {
 			r.writeSyntax(" | ")
 		}
+		if len(cell.Children) != 1 || cell.Children[0].Type != "paragraph" {
+			r.err = fmt.Errorf("%w: table cell requires one paragraph", ErrSchema)
+			return
+		}
 		r.pos++
-		r.inline(cell.Children, prefix)
+		r.pos++
+		r.tableCellInline(cell.Children[0].Children, prefix)
+		r.pos++
 		r.pos++
 	}
 	r.writeSyntax(" |")
@@ -228,6 +225,14 @@ func (r *renderer) tableRow(row *Node, header bool, prefix string) {
 }
 
 func (r *renderer) inline(nodes []*Node, prefix string) {
+	r.inlineWithEscapes(nodes, prefix, false)
+}
+
+func (r *renderer) tableCellInline(nodes []*Node, prefix string) {
+	r.inlineWithEscapes(nodes, prefix, true)
+}
+
+func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, escapePipes bool) {
 	var active []Mark
 	for _, n := range nodes {
 		if r.err != nil {
@@ -244,11 +249,25 @@ func (r *renderer) inline(nodes []*Node, prefix string) {
 				r.writeSyntax(openMark(mark))
 			}
 			active = next
-			r.writeText(n.Text)
+			r.writeInlineText(n.Text, escapePipes)
 		case "hardbreak":
 			r.closeMarks(active)
 			active = nil
-			r.writeSyntax("  \n" + prefix)
+			r.writeSyntax("\\\n" + prefix)
+			r.pos++
+		case "image":
+			r.closeMarks(active)
+			active = nil
+			src, _ := n.Attrs["src"].(string)
+			alt, _ := n.Attrs["alt"].(string)
+			title, _ := n.Attrs["title"].(string)
+			r.writeSyntax("![" + alt + "](" + src + titleSuffix(title) + ")")
+			r.pos++
+		case "html":
+			r.closeMarks(active)
+			active = nil
+			value, _ := n.Attrs["value"].(string)
+			r.writeSyntax(value)
 			r.pos++
 		case "footnote_reference":
 			r.closeMarks(active)
@@ -281,6 +300,23 @@ func (r *renderer) writeText(value string) {
 	r.spans = append(r.spans, Span{MdFrom: from, MdTo: from + length, PmFrom: r.pos})
 	r.md16 += length
 	r.pos += length
+}
+
+func (r *renderer) writeInlineText(value string, escapePipes bool) {
+	if !escapePipes {
+		r.writeText(value)
+		return
+	}
+	for {
+		index := strings.IndexByte(value, '|')
+		if index < 0 {
+			r.writeText(value)
+			return
+		}
+		r.writeText(value[:index])
+		r.writeSyntax("\\|")
+		value = value[index+1:]
+	}
 }
 
 func visibleMarks(marks []Mark) []Mark {

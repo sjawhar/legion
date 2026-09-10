@@ -70,20 +70,129 @@ func yattrToMarkName(name string) string {
 }
 
 func (n *Node) Validate() error {
+	return validateNode(n)
+}
+
+func validateNode(n *Node) error {
+	if n == nil {
+		return fmt.Errorf("%w: nil node", ErrSchema)
+	}
 	if !nodeTypes[n.Type] {
 		return fmt.Errorf("%w: node %q", ErrSchema, n.Type)
+	}
+	if n.Type != "text" && len(n.Marks) != 0 {
+		return fmt.Errorf("%w: node %q cannot have marks", ErrSchema, n.Type)
 	}
 	for _, m := range n.Marks {
 		if !markTypes[m.Type] {
 			return fmt.Errorf("%w: mark %q", ErrSchema, m.Type)
 		}
 	}
-	for _, c := range n.Children {
-		if err := c.Validate(); err != nil {
+	for _, child := range n.Children {
+		if err := validateNode(child); err != nil {
 			return err
 		}
 	}
+
+	switch n.Type {
+	case "doc", "blockquote", "footnote_definition":
+		if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
+			return fmt.Errorf("%w: %s requires block children", ErrSchema, n.Type)
+		}
+	case "paragraph", "heading":
+		if !childrenAreInline(n.Children) {
+			return fmt.Errorf("%w: %s requires inline children", ErrSchema, n.Type)
+		}
+	case "bullet_list", "ordered_list":
+		if len(n.Children) == 0 || !childrenAre(n.Children, "list_item") {
+			return fmt.Errorf("%w: %s requires list items", ErrSchema, n.Type)
+		}
+	case "list_item":
+		if len(n.Children) == 0 || n.Children[0].Type != "paragraph" || !childrenAreBlocks(n.Children[1:]) {
+			return fmt.Errorf("%w: list item requires a paragraph followed by blocks", ErrSchema)
+		}
+	case "code_block":
+		if !childrenAre(n.Children, "text") {
+			return fmt.Errorf("%w: code block requires text children", ErrSchema)
+		}
+		for _, child := range n.Children {
+			for _, mark := range child.Marks {
+				if mark.Type != "proofAuthored" && mark.Type != "proofSuggestion" && mark.Type != "proofComment" && mark.Type != "proofFlagged" && mark.Type != "proofApproved" {
+					return fmt.Errorf("%w: code block cannot contain mark %q", ErrSchema, mark.Type)
+				}
+			}
+		}
+	case "table":
+		if len(n.Children) < 2 || n.Children[0].Type != "table_header_row" || !childrenAre(n.Children[1:], "table_row") {
+			return fmt.Errorf("%w: table requires a header row followed by rows", ErrSchema)
+		}
+	case "table_header_row":
+		if !childrenAre(n.Children, "table_header") {
+			return fmt.Errorf("%w: table header row requires header cells", ErrSchema)
+		}
+	case "table_row":
+		if !childrenAre(n.Children, "table_cell") {
+			return fmt.Errorf("%w: table row requires cells", ErrSchema)
+		}
+	case "table_header", "table_cell":
+		if !childrenAre(n.Children, "paragraph") || len(n.Children) != 1 {
+			return fmt.Errorf("%w: %s requires one paragraph", ErrSchema, n.Type)
+		}
+	case "frontmatter":
+		if !childrenAre(n.Children, "text") {
+			return fmt.Errorf("%w: frontmatter requires text children", ErrSchema)
+		}
+	case "text", "hr", "hardbreak", "image", "html", "footnote_reference":
+		if len(n.Children) != 0 {
+			return fmt.Errorf("%w: %s cannot have children", ErrSchema, n.Type)
+		}
+	}
 	return nil
+}
+
+func childrenAre(children []*Node, typeName string) bool {
+	for _, child := range children {
+		if child == nil || child.Type != typeName {
+			return false
+		}
+	}
+	return true
+}
+
+func childrenAreBlocks(children []*Node) bool {
+	for _, child := range children {
+		if child == nil || !isBlockNodeType(child.Type) {
+			return false
+		}
+	}
+	return true
+}
+
+func childrenAreInline(children []*Node) bool {
+	for _, child := range children {
+		if child == nil || !isInlineNodeType(child.Type) {
+			return false
+		}
+	}
+	return true
+}
+
+func isBlockNodeType(typeName string) bool {
+	switch typeName {
+	case "paragraph", "heading", "blockquote", "bullet_list", "ordered_list", "code_block", "hr", "table", "footnote_definition", "frontmatter":
+		return true
+	default:
+		return false
+	}
+}
+
+func isInlineNodeType(typeName string) bool {
+	switch typeName {
+	case "text", "hardbreak", "image", "html", "footnote_reference":
+		return true
+	default:
+		return false
+	}
 }
 
 func (n *Node) Equal(o *Node) bool {

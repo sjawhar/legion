@@ -1,6 +1,9 @@
 package pmdoc
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestParseMatchesMilkdownForFixtures(t *testing.T) {
 	for _, fx := range loadFixtures(t) {
@@ -42,5 +45,29 @@ func TestRenderParseRoundTrip(t *testing.T) {
 				t.Fatalf("round trip differs\n got: %s\nwant: %s\nmd:\n%s", g, w, md)
 			}
 		})
+	}
+}
+
+func TestParseRejectsBlockHTML(t *testing.T) {
+	_, err := Parse("<div>\nblock HTML\n</div>\n")
+	if err == nil || !errors.Is(err, ErrSchema) {
+		t.Fatalf("Parse(block HTML) = %v, want ErrSchema", err)
+	}
+}
+
+func TestParsePreservesInlineHTMLAtom(t *testing.T) {
+	got, err := Parse("Before <span class=\"note\">inside</span> after.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: "Before "},
+		{Type: "html", Attrs: Attrs{"value": "<span class=\"note\">"}},
+		{Type: "text", Text: "inside"},
+		{Type: "html", Attrs: Attrs{"value": "</span>"}},
+		{Type: "text", Text: " after."},
+	}}}}
+	if !got.Equal(want) {
+		t.Fatalf("Parse(inline HTML) = %#v, want %#v", got, want)
 	}
 }

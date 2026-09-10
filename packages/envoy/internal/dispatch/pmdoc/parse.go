@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"bytes"
 	"fmt"
 	"regexp"
 	"strings"
@@ -16,16 +17,24 @@ import (
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
 var markdownParser = goldmark.New(
-	goldmark.WithExtensions(extension.GFM, extension.Footnote, &frontmatter.Extender{}),
+	goldmark.WithExtensions(extension.GFM, extension.Footnote, &frontmatter.Extender{
+		Formats: []frontmatter.Format{frontmatter.YAML},
+	}),
 )
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
 	source := []byte(markdown)
 	root := markdownParser.Parser().Parse(gmtext.NewReader(source))
-	doc, err := parseBlock(root, source)
+	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
+	}
+	if frontmatter := parseFrontmatterBlock(source); frontmatter != nil {
+		doc.Children = append([]*Node{frontmatter}, doc.Children...)
+	}
+	if len(doc.Children) == 0 {
+		doc.Children = []*Node{{Type: "paragraph"}}
 	}
 	sortNodeMarks(doc)
 	if err := doc.Validate(); err != nil {
@@ -34,45 +43,93 @@ func Parse(markdown string) (*Node, error) {
 	return doc, nil
 }
 
-func parseBlock(node ast.Node, source []byte) (*Node, error) {
+// parseFrontmatterBlock restores the delimited text the Goldmark extension
+// consumes before its completed AST reaches us.
+func parseFrontmatterBlock(source []byte) *Node {
+	openEnd := bytes.IndexByte(source, '\n')
+	if openEnd < 0 || !frontmatterDelimiter(bytes.TrimSuffix(source[:openEnd], []byte("\r"))) {
+		return nil
+	}
+	delimiter := bytes.TrimSuffix(source[:openEnd], []byte("\r"))
+	for start := openEnd + 1; start < len(source); {
+		end := len(source)
+		if next := bytes.IndexByte(source[start:], '\n'); next >= 0 {
+			end = start + next
+		}
+		if bytes.Equal(bytes.TrimSuffix(source[start:end], []byte("\r")), delimiter) {
+			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: string(source[:end])}}}
+		}
+		if end == len(source) {
+			break
+		}
+		start = end + 1
+	}
+	return nil
+}
+
+func frontmatterDelimiter(line []byte) bool {
+	if len(line) < 3 {
+		return false
+	}
+	for _, char := range line {
+		if char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func footnoteLabels(root ast.Node) map[int]string {
+	labels := make(map[int]string)
+	var walk func(ast.Node)
+	walk = func(node ast.Node) {
+		if definition, ok := node.(*extensionast.Footnote); ok && definition.Index > 0 {
+			labels[definition.Index] = string(definition.Ref)
+		}
+		for child := node.FirstChild(); child != nil; child = child.NextSibling() {
+			walk(child)
+		}
+	}
+	walk(root)
+	return labels
+}
+
+func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, error) {
 	switch current := node.(type) {
 	case *ast.Document:
-		children, err := parseBlocks(current, source)
+		children, err := parseBlocks(current, source, footnotes)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "doc", Children: children}, nil
 	case *ast.Paragraph:
-		if image, ok := current.FirstChild().(*ast.Image); ok && image.NextSibling() == nil {
-			return parseImage(image, source)
-		}
-		children, err := parseInline(current, source, nil)
+		children, err := parseInline(current, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "paragraph", Children: children}, nil
 	case *ast.TextBlock:
-		children, err := parseInline(current, source, nil)
+		children, err := parseInline(current, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "paragraph", Children: children}, nil
 	case *ast.Heading:
-		children, err := parseInline(current, source, nil)
+		children, err := parseInline(current, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "heading", Attrs: Attrs{"level": current.Level, "id": ""}, Children: children}, nil
 	case *ast.Blockquote:
-		children, err := parseBlocks(current, source)
+		children, err := parseBlocks(current, source, footnotes)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "blockquote", Children: children}, nil
 	case *ast.List:
-		return parseList(current, source)
+		return parseList(current, source, footnotes)
 	case *ast.ListItem:
-		return parseListItem(current, source)
+		return parseListItem(current, source, footnotes)
 	case *ast.FencedCodeBlock:
 		language := string(current.Language(source))
 		var value any
@@ -93,18 +150,38 @@ func parseBlock(node ast.Node, source []byte) (*Node, error) {
 	case *ast.ThematicBreak:
 		return &Node{Type: "hr"}, nil
 	case *ast.HTMLBlock:
-		return &Node{Type: "html", Attrs: Attrs{"value": string(current.Lines().Value(source))}}, nil
+		// Proof's doc accepts blocks only, while html is an inline atom.
+		return nil, fmt.Errorf("%w: block HTML is not accepted by Proof", ErrSchema)
+	case *extensionast.Footnote:
+		children, err := parseBlocks(current, source, footnotes)
+		if err != nil {
+			return nil, err
+		}
+		if len(children) == 0 {
+			children = []*Node{{Type: "paragraph"}}
+		}
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: children}, nil
 	case *extensionast.Table:
-		return parseTable(current, source)
+		return parseTable(current, source, footnotes)
 	default:
 		return nil, fmt.Errorf("%w: unsupported markdown block %T", ErrSchema, node)
 	}
 }
 
-func parseBlocks(parent ast.Node, source []byte) ([]*Node, error) {
+func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*Node, error) {
 	children := make([]*Node, 0, parent.ChildCount())
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
-		parsed, err := parseBlock(child, source)
+		if footnoteList, ok := child.(*extensionast.FootnoteList); ok {
+			for definition := footnoteList.FirstChild(); definition != nil; definition = definition.NextSibling() {
+				parsed, err := parseBlock(definition, source, footnotes)
+				if err != nil {
+					return nil, err
+				}
+				children = append(children, parsed)
+			}
+			continue
+		}
+		parsed, err := parseBlock(child, source, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -113,28 +190,28 @@ func parseBlocks(parent ast.Node, source []byte) ([]*Node, error) {
 	return children, nil
 }
 
-func parseList(list *ast.List, source []byte) (*Node, error) {
+func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, error) {
 	nodeType := "bullet_list"
 	attrs := Attrs{"spread": !list.IsTight}
 	if list.IsOrdered() {
 		nodeType = "ordered_list"
 		attrs["order"] = list.Start
 	}
-	children, err := parseBlocks(list, source)
+	children, err := parseBlocks(list, source, footnotes)
 	if err != nil {
 		return nil, err
 	}
 	return &Node{Type: nodeType, Attrs: attrs, Children: children}, nil
 }
 
-func parseListItem(item *ast.ListItem, source []byte) (*Node, error) {
+func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string) (*Node, error) {
 	attrs := Attrs{"label": "•", "listType": "bullet", "checked": nil, "spread": false}
 	if firstBlock := item.FirstChild(); firstBlock != nil {
 		if checkbox, ok := firstBlock.FirstChild().(*extensionast.TaskCheckBox); ok {
 			attrs["checked"] = checkbox.IsChecked
 		}
 	}
-	children, err := parseBlocks(item, source)
+	children, err := parseBlocks(item, source, footnotes)
 	if err != nil {
 		return nil, err
 	}
@@ -149,18 +226,18 @@ func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
 	return []*Node{{Type: "text", Text: value}}
 }
 
-func parseTable(table *extensionast.Table, source []byte) (*Node, error) {
+func parseTable(table *extensionast.Table, source []byte, footnotes map[int]string) (*Node, error) {
 	children := make([]*Node, 0, table.ChildCount())
 	for child := table.FirstChild(); child != nil; child = child.NextSibling() {
 		switch row := child.(type) {
 		case *extensionast.TableHeader:
-			parsed, err := parseTableRow(row, true, source)
+			parsed, err := parseTableRow(row, true, source, footnotes)
 			if err != nil {
 				return nil, err
 			}
 			children = append(children, parsed)
 		case *extensionast.TableRow:
-			parsed, err := parseTableRow(row, false, source)
+			parsed, err := parseTableRow(row, false, source, footnotes)
 			if err != nil {
 				return nil, err
 			}
@@ -172,7 +249,7 @@ func parseTable(table *extensionast.Table, source []byte) (*Node, error) {
 	return &Node{Type: "table", Children: children}, nil
 }
 
-func parseTableRow(row ast.Node, header bool, source []byte) (*Node, error) {
+func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]string) (*Node, error) {
 	nodeType := "table_row"
 	cellType := "table_cell"
 	if header {
@@ -185,21 +262,24 @@ func parseTableRow(row ast.Node, header bool, source []byte) (*Node, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w: unsupported table cell %T", ErrSchema, child)
 		}
-		content, err := parseInline(cell, source, nil)
+		content, err := parseInline(cell, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
 		children = append(children, &Node{
-			Type:     cellType,
-			Attrs:    Attrs{"colspan": 1, "rowspan": 1, "colwidth": nil, "alignment": cell.Alignment.String()},
-			Children: content,
+			Type:  cellType,
+			Attrs: Attrs{"colspan": 1, "rowspan": 1, "colwidth": nil, "alignment": cell.Alignment.String()},
+			Children: []*Node{{
+				Type:     "paragraph",
+				Children: content,
+			}},
 		})
 	}
 	return &Node{Type: nodeType, Children: children}, nil
 }
 
-func parseImage(image *ast.Image, source []byte) (*Node, error) {
-	alt, err := parseInline(image, source, nil)
+func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Node, error) {
+	alt, err := parseInline(image, source, nil, footnotes)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +296,7 @@ func parseImage(image *ast.Image, source []byte) (*Node, error) {
 	}}, nil
 }
 
-func parseInline(parent ast.Node, source []byte, initial []Mark) ([]*Node, error) {
+func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
 	active := append([]Mark(nil), initial...)
 	var children []*Node
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
@@ -243,19 +323,19 @@ func parseInline(parent ast.Node, source []byte, initial []Mark) ([]*Node, error
 			if current.Level%2 == 1 {
 				next = append(next, Mark{Type: "emphasis", Attrs: Attrs{"marker": "*"}})
 			}
-			content, err := parseInline(current, source, next)
+			content, err := parseInline(current, source, next, footnotes)
 			if err != nil {
 				return nil, err
 			}
 			appendInline(&children, content)
 		case *ast.CodeSpan:
-			content, err := parseInline(current, source, append(active, Mark{Type: "inlineCode"}))
+			content, err := parseInline(current, source, append(active, Mark{Type: "inlineCode"}), footnotes)
 			if err != nil {
 				return nil, err
 			}
 			appendInline(&children, content)
 		case *ast.Link:
-			content, err := parseInline(current, source, append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.Destination), "title": titleOrNil(current.Title)}}))
+			content, err := parseInline(current, source, append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.Destination), "title": titleOrNil(current.Title)}}), footnotes)
 			if err != nil {
 				return nil, err
 			}
@@ -263,31 +343,42 @@ func parseInline(parent ast.Node, source []byte, initial []Mark) ([]*Node, error
 		case *ast.AutoLink:
 			appendText(&children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
 		case *extensionast.Strikethrough:
-			content, err := parseInline(current, source, append(active, Mark{Type: "strike_through"}))
+			content, err := parseInline(current, source, append(active, Mark{Type: "strike_through"}), footnotes)
 			if err != nil {
 				return nil, err
 			}
 			appendInline(&children, content)
 		case *extensionast.TaskCheckBox:
 			continue
+		case *ast.Image:
+			image, err := parseImage(current, source, footnotes)
+			if err != nil {
+				return nil, err
+			}
+			children = append(children, image)
+		case *extensionast.FootnoteLink:
+			label, ok := footnotes[current.Index]
+			if !ok {
+				return nil, fmt.Errorf("%w: footnote reference %d has no definition", ErrSchema, current.Index)
+			}
+			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": label}})
+		case *extensionast.FootnoteBacklink:
+			continue
 		case *ast.RawHTML:
 			value := string(current.Segments.Value(source))
 			if strings.EqualFold(strings.TrimSpace(value), "</span>") {
 				var removed bool
 				active, removed = closeAnchorMark(active)
-				if !removed {
-					return nil, fmt.Errorf("%w: unmatched inline </span>", ErrSchema)
+				if removed {
+					continue
 				}
+			}
+			anchor, ok := parseAnchorMark(value)
+			if ok {
+				active = append(active, anchor)
 				continue
 			}
-			anchor, ok, err := parseAnchorMark(value)
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				return nil, fmt.Errorf("%w: unsupported inline HTML %q", ErrSchema, value)
-			}
-			active = append(active, anchor)
+			children = append(children, &Node{Type: "html", Attrs: Attrs{"value": value}})
 		default:
 			return nil, fmt.Errorf("%w: unsupported markdown inline %T", ErrSchema, child)
 		}
@@ -328,23 +419,23 @@ func titleOrNil(title []byte) any {
 	return string(title)
 }
 
-func parseAnchorMark(value string) (Mark, bool, error) {
+func parseAnchorMark(value string) (Mark, bool) {
 	if !strings.HasPrefix(strings.TrimSpace(value), "<span") {
-		return Mark{}, false, nil
+		return Mark{}, false
 	}
 	attrs := map[string]string{}
 	for _, match := range anchorAttribute.FindAllStringSubmatch(value, -1) {
 		attrs[match[1]] = match[2]
 	}
 	if kind := attrs["data-proof"]; kind == "comment" {
-		return Mark{Type: "proofComment", Attrs: Attrs{"id": attrs["data-id"], "by": attrs["data-by"]}}, true, nil
+		return Mark{Type: "proofComment", Attrs: Attrs{"id": attrs["data-id"], "by": attrs["data-by"]}}, true
 	} else if kind == "suggestion" {
-		return Mark{Type: "proofSuggestion", Attrs: Attrs{"id": attrs["data-id"], "by": attrs["data-by"], "kind": attrs["data-kind"]}}, true, nil
+		return Mark{Type: "proofSuggestion", Attrs: Attrs{"id": attrs["data-id"], "by": attrs["data-by"], "kind": attrs["data-kind"]}}, true
 	}
 	if attrs["data-dispatch"] == "ask" {
-		return Mark{Type: "dispatchAsk", Attrs: Attrs{"id": attrs["data-id"], "by": attrs["data-by"]}}, true, nil
+		return Mark{Type: "dispatchAsk", Attrs: Attrs{"id": attrs["data-id"], "by": attrs["data-by"]}}, true
 	}
-	return Mark{}, false, fmt.Errorf("%w: unsupported proof span %q", ErrSchema, value)
+	return Mark{}, false
 }
 
 func closeAnchorMark(marks []Mark) ([]Mark, bool) {

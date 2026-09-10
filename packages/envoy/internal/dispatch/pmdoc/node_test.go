@@ -20,6 +20,26 @@ func TestEqualIgnoresAttrKeyOrder(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInlineAtomAsDocumentChild(t *testing.T) {
+	n := &Node{Type: "doc", Children: []*Node{{Type: "html", Attrs: Attrs{"value": "<i>"}}}}
+	if err := n.Validate(); err == nil || !errors.Is(err, ErrSchema) {
+		t.Fatalf("Validate() = %v, want ErrSchema", err)
+	}
+}
+
+func TestValidateRequiresParagraphInTableCell(t *testing.T) {
+	n := &Node{Type: "doc", Children: []*Node{{
+		Type: "table",
+		Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{{Type: "table_header", Children: []*Node{{Type: "text", Text: "header"}}}}},
+			{Type: "table_row", Children: []*Node{{Type: "table_cell", Children: []*Node{{Type: "text", Text: "cell"}}}}},
+		},
+	}}}
+	if err := n.Validate(); err == nil || !errors.Is(err, ErrSchema) {
+		t.Fatalf("Validate() = %v, want ErrSchema", err)
+	}
+}
+
 func TestJSONRoundTrip(t *testing.T) {
 	n := &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": float64(2), "id": ""}, Children: []*Node{{Type: "text", Text: "Hi"}}}}}
 	b, err := n.JSON()

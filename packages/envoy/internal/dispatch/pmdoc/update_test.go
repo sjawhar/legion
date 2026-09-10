@@ -157,23 +157,14 @@ func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 
 	encoded := base64.StdEncoding.EncodeToString(update)
 	output, stderr, err := runDecoder("decode.ts", encoded)
-	decoder := "decode.ts"
 	if err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || !strings.Contains(string(stderr), "@sjawhar/proof-editor/headless") {
-			t.Fatalf("run decode.ts: %v\nstderr:\n%s", err, stderr)
-		}
-		output, stderr, err = runDecoder("decode-interim.ts", encoded)
-		decoder = "decode-interim.ts"
-		if err != nil {
-			t.Fatalf("run decode-interim.ts after decode.ts exited for its unavailable headless import: %v\nstderr:\n%s", err, stderr)
-		}
+		t.Fatalf("run decode.ts: %v\nstderr:\n%s", err, stderr)
 	}
-	t.Logf("y-prosemirror decoded with %s", decoder)
+	t.Log("y-prosemirror decoded with decode.ts")
 
 	decoded, err := FromJSON(output)
 	if err != nil {
-		t.Fatalf("decode %s output: %v\n%s", decoder, err, output)
+		t.Fatalf("decode.ts output: %v\n%s", err, output)
 	}
 	return decoded
 }

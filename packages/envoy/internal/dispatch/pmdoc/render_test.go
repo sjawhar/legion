@@ -54,6 +54,89 @@ func TestPositionMapRoundTripsTextRuns(t *testing.T) {
 	}
 }
 
+func TestRenderEmptyDocumentPreservesProofParagraph(t *testing.T) {
+	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph"}}}
+	parsed, err := Parse("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Equal(want) {
+		t.Fatalf("Parse(\"\") = %#v, want %#v", parsed, want)
+	}
+	markdown, _, err := Render(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "" {
+		t.Fatalf("Render(Parse(\"\")) = %q, want empty markdown", markdown)
+	}
+	reparsed, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reparsed.Equal(want) {
+		t.Fatal("Parse(Render(Parse(\"\"))) lost the empty paragraph")
+	}
+}
+
+func TestRenderHardBreakUsesBackslash(t *testing.T) {
+	doc := &Node{Type: "doc", Children: []*Node{{
+		Type: "paragraph",
+		Children: []*Node{
+			{Type: "text", Text: "Before"},
+			{Type: "hardbreak", Attrs: Attrs{"isInline": false}},
+			{Type: "text", Text: "after"},
+		},
+	}}}
+	got, _, err := Render(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Before\\\nafter\n" {
+		t.Fatalf("Render(hardbreak) = %q", got)
+	}
+}
+
+func TestRenderTableCellEscapesPipes(t *testing.T) {
+	doc := &Node{Type: "doc", Children: []*Node{{
+		Type: "table",
+		Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{{Type: "table_header", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "head|er"}}}}}}},
+			{Type: "table_row", Children: []*Node{{Type: "table_cell", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "cel|l"}}}}}}},
+		},
+	}}}
+	got, _, err := Render(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "| head\\|er |\n| :--- |\n| cel\\|l |\n" {
+		t.Fatalf("Render(table) = %q", got)
+	}
+}
+
+func TestRenderTablePositionMapIncludesCellParagraph(t *testing.T) {
+	doc := &Node{Type: "doc", Children: []*Node{{
+		Type: "table",
+		Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{{Type: "table_header", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "header"}}}}}}},
+			{Type: "table_row", Children: []*Node{{Type: "table_cell", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "cell"}}}}}}},
+		},
+	}}}
+	markdown, positions, err := Render(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "| header |\n| :--- |\n| cell |\n" {
+		t.Fatalf("Render(table) = %q", markdown)
+	}
+	if got := positions.ToPM(len16("| ")); got != 4 {
+		t.Fatalf("header PM position = %d, want 4", got)
+	}
+	if got := positions.ToPM(len16("| header |\n| :--- |\n| ")); got != 16 {
+		t.Fatalf("cell PM position = %d, want 16", got)
+	}
+}
+
 func plain(markdown string) string {
 	markdown = orderedMarker.ReplaceAllString(markdown, "")
 	markdown = spanTag.ReplaceAllString(markdown, "")
