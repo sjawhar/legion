@@ -14,6 +14,7 @@ import type {
   CreateCommentInput,
   CreateIssueInput,
   CreateMessageInput,
+  CreateProjectInput,
   CreateVersionInput,
   EditArtifactInput,
   EditArtifactResponse,
@@ -84,11 +85,6 @@ export interface ListEventsOptions {
   ids?: string[];
   limit?: number;
   order?: "desc";
-}
-
-export interface CreateProjectInput {
-  key: string;
-  name: string;
 }
 
 function normalizeAsk(ask: Ask): Ask {

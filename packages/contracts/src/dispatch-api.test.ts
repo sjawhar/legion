@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DispatchEventSchema } from "./dispatch-api";
+import { type CreateProjectInput, DispatchEventSchema } from "./dispatch-api";
 
 test("accepts the typed artifact version event payload", () => {
   const event = {
@@ -18,4 +18,18 @@ test("accepts the typed artifact version event payload", () => {
   };
 
   expect(DispatchEventSchema.safeParse(event)).toMatchObject({ success: true });
+});
+
+test("permits the actor supplied with an agent project creation request", () => {
+  const input: CreateProjectInput = {
+    actor: { id: "session-1", kind: "session" },
+    key: "DSP",
+    name: "Dispatch",
+  };
+
+  expect(input).toEqual({
+    actor: { id: "session-1", kind: "session" },
+    key: "DSP",
+    name: "Dispatch",
+  });
 });
