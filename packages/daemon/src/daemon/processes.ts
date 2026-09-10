@@ -1745,6 +1745,30 @@ export class ProcessManager {
       priorSessionFile,
       "resurrecting"
     );
+    // A newer `spawnRoot` (generation bump) may already have run and finished for this exact
+    // tree while this launch was still blocked in `launchShimmedProcess` -- a park releasing the
+    // admission slot followed by an immediate re-admission starts a fresh generation without
+    // waiting for the older one to finish. Retire only this stale pane and touch nothing else:
+    // the newer generation already owns `tree.locator`/`tree.status` and any status write, and
+    // writing over them here would silently replace a live root with this older one and
+    // re-issue a stale `in_progress` PATCH.
+    const treeReplaced = this.deps.state.trees[tree.root] !== tree;
+    if (!treeReplaced && tree.generation !== generation) {
+      try {
+        await this.stopProcessSerialized(
+          roleToken(this.deps.state.project, tree.root, "architect"),
+          locator,
+          this.workerStopTimeoutMs
+        );
+      } catch (error) {
+        const paneId = locator.tmuxPaneId ?? locator.tmuxWindowId;
+        console.error(
+          `[legion] failed to retire a stale-generation root pane ${paneId} for ${tree.root}:`,
+          error
+        );
+      }
+      return;
+    }
     // Abort only for a genuine human park/close, never for this daemon's own `in_progress` echo
     // (including a delayed one landing mid-launch) or a resurrect in flight -- both of those
     // MUST proceed to a running root. `tree.status` "lingering"/"closed" already reflects a park
@@ -1752,7 +1776,6 @@ export class ProcessManager {
     // effect only fires when `tree.status` already read "active" at the time it ran); the issue
     // going `backlog`/`icebox`/`done` covers the window where it can't have fired yet (a
     // resurrect's tree still reads "dead" here, so the reducer saw no "active" tree to linger).
-    const treeReplaced = this.deps.state.trees[tree.root] !== tree;
     const issueStatus = this.deps.state.issues[tree.root]?.status;
     const humanParked =
       issueStatus === "backlog" || issueStatus === "icebox" || issueStatus === "done";

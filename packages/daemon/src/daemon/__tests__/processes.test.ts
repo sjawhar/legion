@@ -862,6 +862,83 @@ describe("ProcessManager", () => {
     expect(commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
   });
 
+  it("retires an older generation's launch as stale when a park-then-re-admit starts a newer one first", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Racing root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.admission.active.push(root);
+    const firstLaunchStarted = Promise.withResolvers<void>();
+    const releaseFirstLaunch = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          firstLaunchStarted.resolve();
+          await releaseFirstLaunch.promise;
+          return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "split-window") {
+          return { stdout: "%2 54321\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_id}")
+        ) {
+          return { stdout: "%1\n", exitCode: 0 };
+        }
+        if (
+          command[0] === "tmux" &&
+          command[1] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const firstSpawn = processes.spawnRoot(root);
+    await firstLaunchStarted.promise;
+
+    // Human parks the issue while the first launch (generation 1) is still blocked in tmux,
+    // releasing the admission slot and lingering the tree -- exactly as the reducer's linger
+    // effect would.
+    await processes.beginLinger(root);
+    // ...then it is re-admitted immediately, starting generation 2's own launch (queued behind
+    // generation 1's still-open tmux call, via `launchShimmedProcess`'s per-issue serialize
+    // lane) before the stale generation-1 launch ever returns.
+    state.issues[root].status = "todo";
+    expect(processes.admit(root)).toBe("spawned");
+
+    // Only now does the older, generation-1 launch's tmux call finally resolve; generation 2's
+    // queued launch runs immediately after it, splitting a second pane into the same window.
+    releaseFirstLaunch.resolve();
+    await firstSpawn;
+    await processes.drainSpawns();
+
+    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(managedState.trees[root]).toMatchObject({
+      generation: 2,
+      status: "active",
+      locator: { tmuxWindowId: "@42", tmuxPaneId: "%2" },
+    });
+    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
+  });
+
   it("resurrects a dead root whose Dispatch status is in_progress instead of treating it as a human park", async () => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "architect-session.json");

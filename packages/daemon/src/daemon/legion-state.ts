@@ -183,8 +183,9 @@ export interface LegionState {
    * registered via `/legion/v1/gates/register`; `designApproved` is set to that same ask id once
    * `ask.answered` selects `Approve` for it. Both absent before the architect opens the gate. */
   gates: Record<IssueKey, { designAskId?: string; designApproved?: string }>;
-  /** A daemon-owned lifecycle status write that failed its Dispatch PATCH. The recorded sequence
-   * lets resync discard an intent after a newer Dispatch event has been applied for that issue. */
+  /** A daemon-owned lifecycle status write that failed its Dispatch PATCH. The recorded status
+   * fence (`PendingStatusWrite.statusAtRecord`) lets resync discard the intent once a real
+   * status change has superseded it for that issue. */
   pendingStatusWrites: Record<IssueKey, PendingStatusWrite>;
 }
 
