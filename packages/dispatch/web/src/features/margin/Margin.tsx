@@ -45,18 +45,27 @@ export interface MarginSheetModel {
     closeComposer: () => void;
     onAction: (id: string, action: MarginItemAction) => void;
     onReply: (comment: Comment) => void;
+    onRetryAction: () => void;
+    onRetryAnsweredAsk: (() => void) | undefined;
+    onRetryComments: () => void;
+    onRetryIssue: () => void;
     onSelectionAction: (kind: ComposerKind, anchor: ComposerAnchor) => void;
   };
   composer: MarginComposer | undefined;
   items: {
+    actionErrorId: string | undefined;
+    answeredAsksPending: boolean;
     asksPending: boolean;
     comments: MarginItem[];
+    commentsError: boolean;
     commentsPending: boolean;
     commentListRef: RefObject<HTMLDivElement | null>;
     isClosed: boolean;
+    issueError: boolean;
     issueKey: string | undefined;
     issuePending: boolean;
     openAskCount: number;
+    pendingActionId: string | undefined;
     pinned: Event[];
     pinnedIds: string[];
     visibleArtifact: Artifact | undefined;
@@ -129,17 +138,26 @@ function useMarginSheet(): MarginSheetModel {
   const [expandedIssueKey, setExpandedIssueKey] = useState<string>();
   const commentListRef = useRef<HTMLDivElement>(null);
   const {
+    actionErrorId,
+    answeredAsksPending,
     asksPending,
+    commentsError,
     commentsPending,
     decorationAnchors,
     isClosed,
+    issueError,
     issueKey,
     issuePending,
     items,
     mutateItem,
+    pendingActionId,
     openAskCount,
     pinned,
     pinnedIds,
+    retryAnsweredAsk,
+    retryComments,
+    retryIssue,
+    retryItem,
     routeArtifactSlug,
     routeItemId,
     visibleArtifact,
@@ -231,18 +249,27 @@ function useMarginSheet(): MarginSheetModel {
       closeComposer,
       onAction,
       onReply,
+      onRetryAction: retryItem,
+      onRetryAnsweredAsk: retryAnsweredAsk,
+      onRetryComments: retryComments,
+      onRetryIssue: retryIssue,
       onSelectionAction: openComposer,
     },
     composer,
     items: {
+      actionErrorId,
+      answeredAsksPending,
       asksPending,
       comments: items,
+      commentsError,
       commentsPending,
       commentListRef,
       isClosed,
+      issueError,
       issueKey,
       issuePending,
       openAskCount,
+      pendingActionId,
       pinned,
       pinnedIds,
       visibleArtifact,

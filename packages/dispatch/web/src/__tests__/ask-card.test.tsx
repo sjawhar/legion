@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -19,6 +19,14 @@ function ask(overrides: Partial<Ask> = {}): Ask {
     state: "open",
     urgency: "med",
     ...overrides,
+  };
+}
+
+function answered(input: Ask, selected: string[], text: string | null = null): Ask {
+  return {
+    ...input,
+    answer: { at: "2026-09-09T00:05:00Z", selected, text, user: "alice" },
+    state: "answered",
   };
 }
 
@@ -121,6 +129,86 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
     await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([]));
     rejectAnswer(new Error("offline"));
     await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([input]));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard renders who answered, what was selected, and when, in place of the form", async () => {
+  const now = spyOn(Date, "now").mockReturnValue(new Date("2026-09-09T00:06:00Z").getTime());
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard ask={input} answerAsk={async () => answered(input, ["Ship"])} />
+  );
+
+  try {
+    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+
+    await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
+    expect(view.getByTestId("ask-ask-1").textContent).toContain("alice answered");
+    expect(view.getByText(/Ship/)).toBeTruthy();
+    expect(view.getByText("1 minute ago")).toBeTruthy();
+    expect(view.getByText("1 minute ago").closest("time")?.getAttribute("dateTime")).toBe(
+      "2026-09-09T00:05:00Z"
+    );
+    expect(view.queryByRole("button", { name: "Submit answer" })).toBeNull();
+  } finally {
+    now.mockRestore();
+    view.unmount();
+  }
+});
+
+test("AskCard retries a failed answer without losing its form", async () => {
+  let attempts = 0;
+  const input = ask({ options: [{ label: "Ship" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("offline");
+        }
+        return answered(input, ["Ship"]);
+      }}
+    />
+  );
+
+  try {
+    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+    await view.findByRole("alert");
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
+    expect(attempts).toBe(2);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard ignores a same-task duplicate answer submit", async () => {
+  let attempts = 0;
+  const input = ask({ options: [{ label: "Ship" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async () => {
+        attempts += 1;
+        return answered(input, ["Ship"]);
+      }}
+    />
+  );
+
+  try {
+    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    const submit = view.getByRole("button", { name: "Submit answer" });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
+    expect(attempts).toBe(1);
   } finally {
     view.unmount();
   }

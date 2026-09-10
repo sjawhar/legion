@@ -1,5 +1,5 @@
 import { type ReactNode, useRef } from "react";
-
+import { QueryError } from "../../components/QueryError";
 import { useDialog, useMediaQuery } from "../shell/useDialog";
 import { CommentsTab } from "./CommentsTab";
 import type { MarginSheetModel } from "./Margin";
@@ -17,14 +17,19 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
     actions,
     composer,
     items: {
+      actionErrorId,
+      answeredAsksPending,
       asksPending,
       comments,
+      commentsError,
       commentsPending,
       commentListRef,
       isClosed,
+      issueError,
       issueKey,
       issuePending,
       openAskCount,
+      pendingActionId,
       pinned,
       pinnedIds,
       visibleArtifact,
@@ -136,6 +141,14 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
           {issueKey !== undefined && visibleArtifact === undefined && issuePending ? (
             <p className="pt-3 text-sm text-slate-500">Loading margin…</p>
           ) : null}
+          {issueKey !== undefined && visibleArtifact === undefined && issueError ? (
+            <div className="pt-3">
+              <QueryError
+                message="Could not load this issue's margin."
+                onRetry={actions.onRetryIssue}
+              />
+            </div>
+          ) : null}
           {tab.value === "artifacts" ? (
             ArtifactsTabSlot === undefined ? null : (
               <ArtifactsTabSlot />
@@ -148,7 +161,10 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
             <CommentsTab
               artifactSlug={visibleArtifact.slug}
               asksPending={asksPending}
+              actionErrorId={actionErrorId}
+              answeredAsksPending={answeredAsksPending}
               commentsPending={commentsPending}
+              commentsError={commentsError}
               composer={composer}
               hoveredItemId={selection.hoveredItemId}
               isClosed={isClosed}
@@ -156,6 +172,10 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
               items={comments}
               list={commentListRef}
               onAction={actions.onAction}
+              onRetryAction={actions.onRetryAction}
+              onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
+              onRetryComments={actions.onRetryComments}
+              pendingActionId={pendingActionId}
               onCloseComposer={actions.closeComposer}
               onReply={actions.onReply}
               selectedItemId={selection.selectedItemId}

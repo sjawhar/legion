@@ -4,10 +4,13 @@ import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Ask, Comment } from "../../api/types";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { pinnedEventIds } from "../issue/log-model";
 import { parseIssuePath } from "../refs/routes";
 
 export type MarginTab = "artifacts" | "comments" | "pinned";
+
+import { useAnsweredAsks } from "./useAnsweredAsks";
 export type MarginItemAction = "accept" | "reject" | "resolve";
 export type MarginItem =
   | { ask: Ask; depth: number; kind: "ask" }
@@ -84,22 +87,17 @@ export function useMarginItems(tab: MarginTab) {
     queryKey: ["events", issueKey, "margin-pinned", pinnedIds],
     queryFn: () => api.getIssueEvents(issueKey ?? "", { ids: pinnedIds }),
   });
+  const answeredAsks = useAnsweredAsks(asks.data, issueKey, visibleArtifact?.id);
+  const anchoredAsks = answeredAsks.asks;
   const items = useMemo<MarginItem[]>(() => {
-    const anchoredAsks =
-      visibleArtifact === undefined
-        ? []
-        : (asks.data ?? [])
-            .filter(
-              (ask) => ask.issue_key === issueKey && ask.anchor?.artifact_id === visibleArtifact.id
-            )
-            .map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
+    const anchoredItems = anchoredAsks.map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
     const visibleComments = (comments.data ?? []).filter(
       (comment) => comment.anchor === null || comment.anchor.artifact_id === visibleArtifact?.id
     );
     const threads = commentThreads(visibleComments).map((thread) =>
       thread.map(({ comment, depth }) => ({ comment, depth, kind: "comment" as const }))
     );
-    const roots: MarginItem[][] = [...anchoredAsks.map((ask) => [ask]), ...threads];
+    const roots: MarginItem[][] = [...anchoredItems.map((ask) => [ask]), ...threads];
     return roots
       .sort((left, right) => {
         const leftRoot = left[0];
@@ -114,7 +112,7 @@ export function useMarginItems(tab: MarginTab) {
         return rightCreatedAt.localeCompare(leftCreatedAt);
       })
       .flat();
-  }, [asks.data, comments.data, issueKey, visibleArtifact]);
+  }, [anchoredAsks, comments.data, visibleArtifact]);
   const decorationAnchors = useMemo(
     () =>
       items.flatMap((item) => {
@@ -126,6 +124,7 @@ export function useMarginItems(tab: MarginTab) {
       }),
     [items]
   );
+  const actionGuard = useSubmitGuard();
   const action = useMutation({
     mutationFn: ({ id, kind }: { id: string; kind: MarginItemAction }) => {
       if (kind === "accept") {
@@ -136,24 +135,67 @@ export function useMarginItems(tab: MarginTab) {
       }
       return api.resolveComment(id);
     },
+    onSettled: () => {
+      actionGuard.release();
+    },
+    onMutate: async ({ id, kind }) => {
+      const commentsKey = ["comments", issueKey];
+      await queryClient.cancelQueries({ queryKey: commentsKey });
+      const previous = queryClient.getQueryData<Comment[]>(commentsKey);
+      queryClient.setQueryData<Comment[]>(commentsKey, (current) =>
+        current?.map((comment) => {
+          if (comment.id !== id) {
+            return comment;
+          }
+          if (kind === "resolve") {
+            return { ...comment, resolved: true };
+          }
+          return comment.suggestion === null
+            ? comment
+            : {
+                ...comment,
+                resolved: true,
+                suggestion: { ...comment.suggestion, accepted: kind === "accept" },
+              };
+        })
+      );
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      queryClient.setQueryData(["comments", issueKey], context?.previous);
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
       void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
     },
   });
 
+  const answeredAskError = answeredAsks.error;
+  const retryAnsweredAsk =
+    answeredAskError === undefined ? undefined : () => void answeredAskError.refetch();
+
   return {
+    actionErrorId: action.isError ? action.variables?.id : undefined,
+    answeredAsksPending: answeredAsks.pending,
     asksPending: asks.isPending,
+    commentsError: comments.isError,
     commentsPending: comments.isPending,
     decorationAnchors,
     isClosed: issue.data !== undefined && issue.data.closed_at !== null,
+    issueError: issue.isError,
     issueKey,
     issuePending: issue.isPending,
     items,
-    mutateItem: action.mutate,
+    mutateItem: (input: { id: string; kind: MarginItemAction }) =>
+      actionGuard.guard(() => action.mutate(input)),
+    pendingActionId: action.isPending ? action.variables?.id : undefined,
     openAskCount,
     pinned: pinned.data ?? [],
     pinnedIds,
+    retryAnsweredAsk,
+    retryComments: () => void comments.refetch(),
+    retryIssue: () => void issue.refetch(),
+    retryItem: () => actionGuard.retryLast(action),
     routeArtifactSlug,
     routeItemId,
     visibleArtifact,

@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, Comment, IssueDetails } from "../../api/types";
+import type { Artifact, Ask, Comment, IssueDetails } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
 import { Margin, MarginProvider, useMargin } from "./Margin";
 
@@ -74,6 +74,27 @@ const comment: Comment = {
   reply_to: null,
   resolved: false,
   suggestion: null,
+};
+
+const anchoredAsk: Ask = {
+  anchor: {
+    artifact_id: "artifact-1",
+    from: 0,
+    orphaned: false,
+    quote: "Review",
+    to: 6,
+    version: 1,
+  },
+  answer: null,
+  author: { id: "session-1", kind: "session" },
+  created_at: "2026-09-09T00:00:00Z",
+  id: "ask-1",
+  issue_key: "CORE-1",
+  multiple: false,
+  options: [{ label: "Ship" }],
+  question: "Should this ship?",
+  state: "open",
+  urgency: "med",
 };
 
 function CommentLink(): ReactNode {
@@ -347,5 +368,51 @@ test("margin item listeners attach after navigating from a route with no review 
     getInbox.mockRestore();
     getMyState.mockRestore();
     listComments.mockRestore();
+  }
+});
+
+test("Margin surfaces and retries a failed fetch for an answered anchored ask", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], [anchoredAsk]);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [comment]);
+  const getAsk = spyOn(api, "getAsk")
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue({
+      ...anchoredAsk,
+      answer: { at: "2026-09-09T00:05:00Z", selected: ["Ship"], text: null, user: "alice" },
+      state: "answered",
+    });
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByTestId("ask-ask-1");
+    act(() => {
+      queryClient.setQueryData(["inbox"], []);
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Could not load an answered ask.");
+    expect(screen.getByTestId("margin-comment-comment-1")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(2));
+    expect((await screen.findByTestId("ask-ask-1")).textContent).toContain("alice answered");
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
   }
 });
