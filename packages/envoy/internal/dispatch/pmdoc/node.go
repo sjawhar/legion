@@ -46,6 +46,18 @@ func sortMarks(marks []Mark) {
 	sort.Slice(marks, func(i, j int) bool { return marks[i].Type < marks[j].Type })
 }
 
+func marksEqual(left, right []Mark) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].Type != right[i].Type || !attrsEqual(left[i].Attrs, right[i].Attrs) {
+			return false
+		}
+	}
+	return true
+}
+
 func sortNodeMarks(n *Node) {
 	sortMarks(n.Marks)
 	for _, child := range n.Children {
