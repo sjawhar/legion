@@ -459,7 +459,7 @@ describe("executeDispatchTool", () => {
     });
   });
 
-  test("names the unmapped external repository and DISPATCH_REPO_PROJECTS", async () => {
+  test("names the unmapped external repository and both project env vars", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const path = new URL(String(url)).pathname;
       if (path === "/api/v1/issues/resolve") {
@@ -472,7 +472,8 @@ describe("executeDispatchTool", () => {
         return new Response(
           JSON.stringify({
             code: "PROJECT_UNMAPPED",
-            error: "repository is not mapped in DISPATCH_REPO_PROJECTS",
+            error:
+              "repository is not mapped in DISPATCH_REPO_PROJECTS and DISPATCH_DEFAULT_PROJECT is not configured",
           }),
           { status: 400, headers: { "Content-Type": "application/json" } }
         );
@@ -491,7 +492,9 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       })
-    ).rejects.toThrow("repository owner/repo is not mapped in DISPATCH_REPO_PROJECTS");
+    ).rejects.toThrow(
+      "repository owner/repo is not mapped in DISPATCH_REPO_PROJECTS and no DISPATCH_DEFAULT_PROJECT is configured"
+    );
   });
 
   test("does not send a blank body when posting a suggestion without a rationale", async () => {

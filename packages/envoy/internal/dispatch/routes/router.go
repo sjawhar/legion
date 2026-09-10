@@ -33,38 +33,40 @@ import (
 // read-only after BuildAppContext returns; per-request state lives on
 // *router.
 type AppContext struct {
-	SigningKey    string
-	WebDistDir    string
-	Users         auth.UserStore
-	Identity      identity.Identity
-	AllowedLogins map[string]struct{}
-	Store         *store.Store
-	AgentToken    string
-	RepoProjects  string
-	HTTPClient    auth.HTTPClient
-	apiDeps       api.Deps
-	app           *auth.AppConfig // nil ⇒ not configured
-	appSource     string          // "env" | "file:<path>" | "" — for diagnostic logs
-	appMu         sync.RWMutex
+	SigningKey     string
+	WebDistDir     string
+	Users          auth.UserStore
+	Identity       identity.Identity
+	AllowedLogins  map[string]struct{}
+	Store          *store.Store
+	AgentToken     string
+	RepoProjects   string
+	DefaultProject string
+	HTTPClient     auth.HTTPClient
+	apiDeps        api.Deps
+	app            *auth.AppConfig // nil ⇒ not configured
+	appSource      string          // "env" | "file:<path>" | "" — for diagnostic logs
+	appMu          sync.RWMutex
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey    string
-	WebDistDir    string
-	Users         auth.UserStore
-	Identity      identity.Identity
-	AllowedLogins map[string]struct{}
-	Store         *store.Store
-	AgentToken    string
-	RepoProjects  string
-	ServerURL     string
-	Docs          docs.API
-	Events        *events.Broker
-	App           *auth.AppConfig
-	AppSource     string
+	SigningKey     string
+	WebDistDir     string
+	Users          auth.UserStore
+	Identity       identity.Identity
+	AllowedLogins  map[string]struct{}
+	Store          *store.Store
+	AgentToken     string
+	RepoProjects   string
+	DefaultProject string
+	ServerURL      string
+	Docs           docs.API
+	Events         *events.Broker
+	App            *auth.AppConfig
+	AppSource      string
 }
 
 // BuildAppContext bundles the shared HTTP-handler state.
@@ -83,6 +85,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Identity:        opts.Identity,
 		AgentToken:      opts.AgentToken,
 		RepoProjectsRaw: opts.RepoProjects,
+		DefaultProject:  opts.DefaultProject,
 		ServerURL:       opts.ServerURL,
 		Docs:            opts.Docs,
 		Events:          opts.Events,
@@ -91,17 +94,18 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)
 	}
 	return &AppContext{
-		SigningKey:    opts.SigningKey,
-		WebDistDir:    opts.WebDistDir,
-		Users:         opts.Users,
-		Identity:      opts.Identity,
-		AllowedLogins: opts.AllowedLogins,
-		Store:         opts.Store,
-		AgentToken:    opts.AgentToken,
-		RepoProjects:  opts.RepoProjects,
-		apiDeps:       apiDeps,
-		app:           opts.App,
-		appSource:     opts.AppSource,
+		SigningKey:     opts.SigningKey,
+		WebDistDir:     opts.WebDistDir,
+		Users:          opts.Users,
+		Identity:       opts.Identity,
+		AllowedLogins:  opts.AllowedLogins,
+		Store:          opts.Store,
+		AgentToken:     opts.AgentToken,
+		RepoProjects:   opts.RepoProjects,
+		DefaultProject: opts.DefaultProject,
+		apiDeps:        apiDeps,
+		app:            opts.App,
+		appSource:      opts.AppSource,
 	}, nil
 }
 

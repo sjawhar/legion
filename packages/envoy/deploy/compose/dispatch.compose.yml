@@ -46,7 +46,11 @@ services:
       DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}
       DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}
       DISPATCH_NATS_DISABLED: ${DISPATCH_NATS_DISABLED:-}
+      # Optional per-repository overrides; DISPATCH_DEFAULT_PROJECT (below)
+      # catches everything else and is required unless this covers every
+      # repository the deployment will see.
       DISPATCH_REPO_PROJECTS: ${DISPATCH_REPO_PROJECTS:-}
+      DISPATCH_DEFAULT_PROJECT: ${DISPATCH_DEFAULT_PROJECT:-}
       # Session cookies are Secure by default; set this when serving the
       # OAuth dashboard over plain HTTP (local/tailnet use).
       DISPATCH_INSECURE_COOKIE: ${DISPATCH_INSECURE_COOKIE:-}

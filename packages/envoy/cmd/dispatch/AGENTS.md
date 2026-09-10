@@ -11,12 +11,18 @@ OAuth, and the GitHub REST/GraphQL proxy.
 store contains users, native issues, artifacts, document updates, and the event
 outbox.
 
-`DISPATCH_REPO_PROJECTS` optionally maps external repositories to native issue
-projects. `DISPATCH_NATS_DISABLED=1` leaves database and SSE paths available
-and makes `/healthz` report `nats: null`. Otherwise Dispatch reads `natsUrls`
-from shared `envoy.json`, connects through `bus.Connect`, and runs the outbox.
-Host adapters can override their configured Dispatch base URL with
-`DISPATCH_URL`; the server reads `dispatch.serverUrl` from shared `envoy.json`.
+`DISPATCH_REPO_PROJECTS` optionally maps specific external repositories to
+native issue projects; `DISPATCH_DEFAULT_PROJECT` names the project that
+catches every other repository (required unless `DISPATCH_REPO_PROJECTS`
+already covers every repository the deployment will see; validated against
+Postgres at boot). An issue created from a repository that only resolves
+through the default also gets a `repo:owner/name` label so it stays
+filterable. `DISPATCH_NATS_DISABLED=1` leaves database and SSE paths
+available and makes `/healthz` report `nats: null`. Otherwise Dispatch reads
+`natsUrls` from shared `envoy.json`, connects through `bus.Connect`, and runs
+the outbox. Host adapters can override their configured Dispatch base URL
+with `DISPATCH_URL`; the server reads `dispatch.serverUrl` from shared
+`envoy.json`.
 
 Documents use a Yjs `Y.Text` named `content`. `GET /ws/doc/{room}` uses
 Hocuspocus framing. Server-side edits use the document service, persist updates,

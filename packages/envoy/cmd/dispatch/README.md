@@ -12,8 +12,13 @@ application state in Postgres.
 | `DISPATCH_AGENT_TOKEN` | Shared bearer token for agent API callers. |
 | `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
 
-`DISPATCH_REPO_PROJECTS` is optional and maps GitHub repositories to Dispatch
-projects for the agent API.
+`DISPATCH_REPO_PROJECTS` optionally maps specific GitHub repositories to
+Dispatch projects for the agent API. `DISPATCH_DEFAULT_PROJECT` names the
+project that catches every repository `DISPATCH_REPO_PROJECTS` doesn't map;
+it's required unless `DISPATCH_REPO_PROJECTS` already covers every
+repository, and Dispatch validates it against Postgres at boot. An issue
+created from a repository that only resolves through the default also gets
+a `repo:owner/name` label.
 
 `dispatch.serverUrl` in the merged `envoy.json` identifies Dispatch's public
 base URL. The server recognizes native issue, artifact, ask, and comment links
@@ -62,6 +67,17 @@ retains the migrated schema; tests only truncate rows they create.
 
 ## Running locally
 
+`DISPATCH_DEFAULT_PROJECT` must already exist in Postgres — running the
+command below against a fresh database applies migrations, then exits with
+`DISPATCH_DEFAULT_PROJECT "LOCAL" does not exist`. Create the project once:
+
+```sh
+docker exec dispatch-pg psql -U postgres -d dispatch \
+  -c "insert into projects (key, name) values ('LOCAL', 'Local project')"
+```
+
+Then run (or re-run) the server:
+
 ```sh
 cd packages/envoy
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
@@ -69,6 +85,7 @@ DISPATCH_AGENT_TOKEN=local-agent-token \
 DISPATCH_IDENTITY='header:X-Dispatch-User' \
 DISPATCH_ALLOWED_LOGINS=sjawhar \
 DISPATCH_INSECURE_COOKIE=1 \
+DISPATCH_DEFAULT_PROJECT=LOCAL \
 go run ./cmd/dispatch
 ```
 

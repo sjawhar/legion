@@ -36,6 +36,7 @@ type bootConfig struct {
 	DatabaseURL    string
 	AgentToken     string
 	RepoProjects   string
+	DefaultProject string
 	IdentityHeader string
 	AllowedLogins  map[string]struct{}
 	NATSDisabled   bool
@@ -83,6 +84,10 @@ func main() {
 	defer database.Pool.Close()
 	if err := database.Migrate(ctx); err != nil {
 		slog.Error("dispatch: migrate database", "error", err)
+		os.Exit(1)
+	}
+	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
+		slog.Error("dispatch: validate default project", "error", err)
 		os.Exit(1)
 	}
 
@@ -142,15 +147,16 @@ func main() {
 		Users:      users,
 		Identity:   requestIdentity,
 
-		AllowedLogins: boot.AllowedLogins,
-		Store:         database,
-		AgentToken:    boot.AgentToken,
-		RepoProjects:  boot.RepoProjects,
-		ServerURL:     serverURL,
-		Docs:          documentService,
-		Events:        broker,
-		App:           appCfg,
-		AppSource:     appSource,
+		AllowedLogins:  boot.AllowedLogins,
+		Store:          database,
+		AgentToken:     boot.AgentToken,
+		RepoProjects:   boot.RepoProjects,
+		DefaultProject: boot.DefaultProject,
+		ServerURL:      serverURL,
+		Docs:           documentService,
+		Events:         broker,
+		App:            appCfg,
+		AppSource:      appSource,
 	})
 
 	if err != nil {
@@ -271,17 +277,21 @@ func loadAppCredentials(dataDir string) (*auth.AppConfig, string, error) {
 
 func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	boot := bootConfig{
-		DatabaseURL:   strings.TrimSpace(getenv("DATABASE_URL")),
-		AgentToken:    strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
-		RepoProjects:  strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
-		AllowedLogins: parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
-		NATSDisabled:  getenv("DISPATCH_NATS_DISABLED") == "1",
+		DatabaseURL:    strings.TrimSpace(getenv("DATABASE_URL")),
+		AgentToken:     strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
+		RepoProjects:   strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
+		DefaultProject: strings.TrimSpace(getenv("DISPATCH_DEFAULT_PROJECT")),
+		AllowedLogins:  parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
+		NATSDisabled:   getenv("DISPATCH_NATS_DISABLED") == "1",
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
 	}
 	if boot.AgentToken == "" {
 		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
+	}
+	if boot.DefaultProject == "" && boot.RepoProjects == "" {
+		return bootConfig{}, errors.New("DISPATCH_DEFAULT_PROJECT required unless DISPATCH_REPO_PROJECTS maps every repository")
 	}
 
 	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
@@ -301,6 +311,24 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)
 	}
 	return boot, nil
+}
+
+// validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project
+// that already exists, so a misconfigured deployment fails loudly at boot
+// instead of silently rejecting every unmapped external issue at request
+// time. An empty project (no default configured) is not validated here.
+func validateDefaultProject(ctx context.Context, database *store.Store, project string) error {
+	if project == "" {
+		return nil
+	}
+	var exists bool
+	if err := database.Pool.QueryRow(ctx, `select exists(select 1 from projects where key = $1)`, project).Scan(&exists); err != nil {
+		return fmt.Errorf("query DISPATCH_DEFAULT_PROJECT %q: %w", project, err)
+	}
+	if !exists {
+		return fmt.Errorf("DISPATCH_DEFAULT_PROJECT %q does not exist", project)
+	}
+	return nil
 }
 
 func parseAllowedLogins(raw string) map[string]struct{} {
