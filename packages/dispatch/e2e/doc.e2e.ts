@@ -100,7 +100,7 @@ test("document edits synchronize, version, and compare across users", async ({
       })
       .toMatchObject({ named: true, number: 4, summary: "Decided Postgres" });
 
-    const versionPicker = alicePage.getByLabel("Version");
+    const versionPicker = alicePage.getByRole("combobox", { name: "Version" });
     await expect(versionPicker).toContainText("Version 4 — Decided Postgres");
     await versionPicker.selectOption("2");
     await expect(alicePage.getByTestId("version-view")).toContainText("Use SQLite");

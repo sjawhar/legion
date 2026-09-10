@@ -6,7 +6,7 @@ production build from `web/dist`.
 
 ## Layout
 
-- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The three-column layout begins at the `xl` breakpoint (1280px); compact and tablet widths use the navigation drawer and margin bottom sheet.
+- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The issue main column has Spec, Log, Children, and Artifacts tabs; the review margin holds Comments and Pinned. The three-column layout begins at the `xl` breakpoint (1280px); compact and tablet widths use the navigation drawer and margin bottom sheet.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
   browser API boundary.

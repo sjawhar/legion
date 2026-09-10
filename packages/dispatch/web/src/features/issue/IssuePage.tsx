@@ -7,13 +7,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import type {
+  Artifact,
   AuthenticatedUser,
-  Comment,
   Event,
   ExternalLink,
   Issue,
@@ -49,16 +49,22 @@ import {
   textSecondaryHoverToPrimary,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { DocEditor } from "../doc/DocEditor";
-import { DocView } from "../doc/DocView";
+import { ArtifactDocument } from "../artifacts/ArtifactDocument";
+import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { actorLabel } from "../refs/actor";
-import { buildIssuePath, type DispatchRoute, parseIssuePath } from "../refs/routes";
-import { Timestamp } from "../refs/Timestamp";
+import {
+  buildIssuePath,
+  type DispatchRoute,
+  type IssueTab,
+  isPrimaryDocumentArtifactRoute,
+  issueTabForRoute,
+  parseIssuePath,
+} from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { BoardStrip } from "./BoardStrip";
 import { ChildrenTab } from "./ChildrenTab";
-import { type IssueTab, IssueTabs } from "./IssueTabs";
+import { IssueTabs } from "./IssueTabs";
 import { LogTab } from "./LogTab";
 import { useIssueDrafts } from "./useIssueDrafts";
 
@@ -490,81 +496,6 @@ function IssueHeader({
     </header>
   );
 }
-
-function historicalHighlight(
-  markdown: string,
-  highlight: { from: number; to: number } | undefined,
-  anchor: Comment["anchor"] | undefined
-): { from: number; to: number } | undefined {
-  if (highlight === undefined || anchor === null || anchor === undefined) {
-    return highlight;
-  }
-  if (markdown.slice(highlight.from, highlight.to) === anchor.quote) {
-    return highlight;
-  }
-  const from = markdown.indexOf(anchor.quote);
-  return from === -1 || markdown.indexOf(anchor.quote, from + 1) !== -1
-    ? highlight
-    : { from, to: from + anchor.quote.length };
-}
-
-function ArtifactVersionView({
-  artifactId,
-  createdAt,
-  from,
-  issueKey,
-  to,
-  version,
-}: {
-  artifactId: string;
-  createdAt: string | undefined;
-  from: number | undefined;
-  issueKey: string;
-  to: number | undefined;
-  version: number;
-}): ReactNode {
-  const content = useQuery({
-    queryKey: ["artifact", artifactId, "version", version],
-    queryFn: () => api.getArtifactVersion(artifactId, version),
-  });
-  const comments = useQuery({
-    queryKey: ["comments", issueKey, artifactId],
-    queryFn: () => api.listComments(issueKey, artifactId),
-  });
-
-  if (content.isPending) {
-    return <p className={textMutedOnCanvas}>Loading version…</p>;
-  }
-  if (content.isError || content.data === undefined || !("markdown" in content.data)) {
-    return <p className={dangerText}>Could not load this document version.</p>;
-  }
-  const anchor = comments.data?.find(
-    (comment) =>
-      comment.anchor?.artifact_id === artifactId &&
-      comment.anchor.version === version &&
-      comment.anchor.from === from &&
-      comment.anchor.to === to
-  )?.anchor;
-  const highlight = historicalHighlight(
-    content.data.markdown,
-    from === undefined || to === undefined ? undefined : { from, to },
-    anchor
-  );
-  return (
-    <section aria-label={`Document version ${version}`} className="space-y-3">
-      <h2 className={`text-lg font-semibold ${textPrimaryOnCanvas}`}>
-        Version {version}
-        {createdAt === undefined ? null : (
-          <span className={`ml-2 text-sm font-normal ${textMutedOnCanvas}`}>
-            <Timestamp at={createdAt} />
-          </span>
-        )}
-      </h2>
-      <DocView highlight={highlight} markdown={content.data.markdown} />
-    </section>
-  );
-}
-
 export function IssuePage({ user }: { user: AuthenticatedUser }): ReactNode {
   const { pathname, search } = useLocation();
   const route = parseIssuePath(pathname, search);
@@ -586,8 +517,8 @@ function IssueDetail({
 }): ReactNode {
   const { search } = useLocation();
   const artifactRoute = route.kind === "artifact" ? route : undefined;
+  const navigate = useNavigate();
   const artifactRouteSlug = artifactRoute?.slug;
-  const isSpecRoute = route.kind === "spec";
   const query = new URLSearchParams(search);
   const from = Number(query.get("from"));
   const to = Number(query.get("to"));
@@ -607,17 +538,8 @@ function IssueDetail({
     artifactRouteSlug === undefined
       ? primaryArtifact
       : issue.data?.artifacts?.find(({ slug }) => slug === artifactRouteSlug);
-  const isNonDocArtifactRoute = artifactRouteSlug !== undefined && selectedArtifact?.kind !== "doc";
-  const activeTab: IssueTab = isNonDocArtifactRoute
-    ? "log"
-    : route.kind === "children"
-      ? "children"
-      : route.kind === "log"
-        ? "log"
-        : artifactRoute !== undefined || isSpecRoute
-          ? "spec"
-          : // Bare `/issues/KEY` with no tab segment: Log is the historical default.
-            "log";
+  const isPrimaryArtifactRoute = isPrimaryDocumentArtifactRoute(route, selectedArtifact);
+  const activeTab = issueTabForRoute(route, selectedArtifact);
   const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
 
   useLayoutEffect(() => {
@@ -633,6 +555,7 @@ function IssueDetail({
   // below). A panel the user has never opened stays unmounted, so a fresh
   // page load doesn't pay for panels it never shows.
   const [activatedTabs, setActivatedTabs] = useState<Record<IssueTab, boolean>>(() => ({
+    artifacts: activeTab === "artifacts",
     children: activeTab === "children",
     log: activeTab === "log",
     spec: activeTab === "spec",
@@ -686,13 +609,21 @@ function IssueDetail({
   if (primaryArtifact === undefined) {
     return <p className={dangerText}>Could not load this issue&apos;s primary document.</p>;
   }
-  if (selectedArtifact === undefined) {
-    return <p className={dangerText}>Could not load this document artifact.</p>;
-  }
 
   const issueState = stateForIssue(state.data, issue.data.key);
   const isClosed = issue.data.closed_at !== null;
   const issueKey = issue.data.key;
+  const selectDocumentVersion = (artifact: Artifact, version: number | null) => {
+    navigate(
+      buildIssuePath(
+        version === null && artifact.primary
+          ? { key: artifact.issue_key, kind: "spec" }
+          : version === null
+            ? { key: artifact.issue_key, kind: "artifact", slug: artifact.slug }
+            : { key: artifact.issue_key, kind: "artifact", slug: artifact.slug, version }
+      )
+    );
+  };
 
   return (
     <section>
@@ -719,28 +650,16 @@ function IssueDetail({
         id="issue-spec-panel"
         role="tabpanel"
       >
-        {activatedTabs.spec && !isNonDocArtifactRoute ? (
-          artifactRoute?.version === undefined ? (
-            <DocEditor
-              artifact={selectedArtifact}
-              highlight={highlight}
-              isClosed={isClosed}
-              key={selectedArtifact.id}
-              user={user}
-            />
-          ) : (
-            <ArtifactVersionView
-              artifactId={selectedArtifact.id}
-              createdAt={
-                selectedArtifact.versions.find((item) => item.number === artifactRoute.version)
-                  ?.created_at
-              }
-              from={highlight?.from}
-              issueKey={issueKey}
-              to={highlight?.to}
-              version={artifactRoute.version}
-            />
-          )
+        {activatedTabs.spec && !(artifactRoute !== undefined && !isPrimaryArtifactRoute) ? (
+          <ArtifactDocument
+            artifact={primaryArtifact}
+            highlight={highlight}
+            isClosed={isClosed}
+            issueKey={issueKey}
+            onVersionChange={(version) => selectDocumentVersion(primaryArtifact, version)}
+            user={user}
+            version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+          />
         ) : null}
       </div>
       <div
@@ -769,6 +688,26 @@ function IssueDetail({
       >
         {activatedTabs.children ? <ChildrenTab issue={issue.data} /> : null}
       </div>
+      <ArtifactRoutePanel
+        active={activeTab === "artifacts"}
+        artifact={selectedArtifact}
+        artifactRoute={artifactRoute}
+        isPrimaryArtifactRoute={isPrimaryArtifactRoute}
+        mounted={activatedTabs.artifacts}
+        route={route}
+      >
+        {selectedArtifact?.kind === "doc" ? (
+          <ArtifactDocument
+            artifact={selectedArtifact}
+            highlight={highlight}
+            isClosed={isClosed}
+            issueKey={issueKey}
+            onVersionChange={(version) => selectDocumentVersion(selectedArtifact, version)}
+            user={user}
+            version={artifactRoute?.version}
+          />
+        ) : null}
+      </ArtifactRoutePanel>
     </section>
   );
 }

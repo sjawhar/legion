@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 
 import { MarginSheet } from "./MarginSheet";
 
@@ -58,6 +58,12 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
     expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
       "true"
     );
+    expect(
+      within(view.container)
+        .getAllByRole("tab")
+        .map((tab) => tab.textContent)
+    ).toEqual(["Comments", "Pinned"]);
+    expect(within(view.container).queryByRole("tab", { name: "Artifacts" })).toBeNull();
   } finally {
     view.unmount();
   }

@@ -6,22 +6,21 @@ import {
   borderDefault,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { buildIssuePath } from "../refs/routes";
-
-export type IssueTab = "spec" | "log" | "children";
+import { buildIssuePath, type IssueTab } from "../refs/routes";
 
 const tabs: { id: IssueTab; label: string }[] = [
   { id: "spec", label: "Spec" },
   { id: "log", label: "Log" },
   { id: "children", label: "Children" },
+  { id: "artifacts", label: "Artifacts" },
 ];
 
 /**
- * The Spec/Log/Children tablist. Follows the WAI-ARIA tabs pattern: a labelled
- * tablist, roving tabindex, and Left/Right/Home/End move and activate the
- * adjacent tab. Selecting a tab navigates to its route segment (see
- * `../refs/routes`), so the active tab is part of the URL rather than local
- * component state.
+ * The Spec/Log/Children/Artifacts tablist. Follows the WAI-ARIA tabs pattern:
+ * a labelled tablist, roving tabindex, and Left/Right/Home/End move and
+ * activate the adjacent tab. Selecting a tab navigates to its route segment
+ * (see `../refs/routes`), so the active tab is part of the URL rather than
+ * local component state.
  */
 export function IssueTabs({
   activeTab,
@@ -34,6 +33,7 @@ export function IssueTabs({
 }): ReactNode {
   const navigate = useNavigate();
   const tabRefs = useRef<Record<IssueTab, HTMLButtonElement | null>>({
+    artifacts: null,
     children: null,
     log: null,
     spec: null,
@@ -84,8 +84,8 @@ export function IssueTabs({
           aria-selected={activeTab === t.id}
           className={
             activeTab === t.id
-              ? `border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-              : `px-3 py-2 text-sm ${textSecondaryOnCanvas}`
+              ? `min-h-11 border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+              : `min-h-11 px-3 py-2 text-sm ${textSecondaryOnCanvas}`
           }
           id={`issue-${t.id}-tab`}
           key={t.id}

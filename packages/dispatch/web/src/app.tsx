@@ -50,27 +50,6 @@ import {
 const IssuePage = lazy(() =>
   import("./features/issue/IssuePage").then((module) => ({ default: module.IssuePage }))
 );
-const LazyArtifactsTab = lazy(() =>
-  import("./features/artifacts/ArtifactsTab").then((module) => ({ default: module.ArtifactsTab }))
-);
-
-function ArtifactsTabFallback(): ReactNode {
-  return (
-    <div aria-busy="true" className="space-y-3 py-4">
-      {[0, 1].map((row) => (
-        <div className={`h-20 w-full animate-pulse rounded-lg ${skeletonBg}`} key={row} />
-      ))}
-    </div>
-  );
-}
-
-function ArtifactsTabSlot(): ReactNode {
-  return (
-    <Suspense fallback={<ArtifactsTabFallback />}>
-      <LazyArtifactsTab />
-    </Suspense>
-  );
-}
 
 function IssuePageFallback(): ReactNode {
   return (
@@ -406,7 +385,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             </Routes>
           </Suspense>
         </main>
-        <Margin ArtifactsTabSlot={ArtifactsTabSlot} />
+        <Margin />
       </div>
     </MarginProvider>
   );

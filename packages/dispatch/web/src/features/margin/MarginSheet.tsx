@@ -20,11 +20,10 @@ import { SelectionMenu } from "./SelectionMenu";
 import type { MarginTab } from "./useMarginItems";
 
 interface MarginSheetProps {
-  ArtifactsTabSlot?: () => ReactNode;
   model: MarginSheetModel;
 }
 
-export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): ReactNode {
+export function MarginSheet({ model }: MarginSheetProps): ReactNode {
   const {
     actions,
     composer,
@@ -134,7 +133,7 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
         )}
         <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
           <div className={`flex border-b ${borderDefault}`} role="tablist">
-            {(["comments", "artifacts", "pinned"] as MarginTab[]).map((name) => (
+            {(["comments", "pinned"] as MarginTab[]).map((name) => (
               <button
                 aria-selected={tab.value === name}
                 className={
@@ -147,7 +146,7 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
                 role="tab"
                 type="button"
               >
-                {name === "comments" ? "Comments" : name === "artifacts" ? "Artifacts" : "Pinned"}
+                {name === "comments" ? "Comments" : "Pinned"}
               </button>
             ))}
           </div>
@@ -166,11 +165,6 @@ export function MarginSheet({ ArtifactsTabSlot, model }: MarginSheetProps): Reac
                 onRetry={actions.onRetryIssue}
               />
             </div>
-          ) : null}
-          {tab.value === "artifacts" ? (
-            ArtifactsTabSlot === undefined ? null : (
-              <ArtifactsTabSlot />
-            )
           ) : null}
           {tab.value === "pinned" ? (
             <PinnedTab events={pinned} issueKey={issueKey} pinnedIds={pinnedIds} />
