@@ -1,5 +1,5 @@
-import type { IssueDetails, IssueSummary } from "@legion/contracts";
-import type { IssueStatus } from "./legion-state";
+import type { IssueDetails, IssueKey, IssueSummary } from "@legion/contracts";
+import type { IssueStatus, LegionState } from "./legion-state";
 
 /** A non-2xx response from the Dispatch HTTP API: `status` is the HTTP status code, `message` is
  * the server's `error` field (or its raw body when the response is not the expected JSON shape). */
@@ -98,4 +98,27 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
       });
     },
   };
+}
+
+/** Writes a daemon-owned lifecycle status to Dispatch (spawnTree/closeTree/`phase/complete`, and
+ * the `/issues/status`/`/waves/release` routes) — every one of these writes is a side effect of a
+ * state transition that must complete regardless of Dispatch's momentary availability, so a
+ * failure is logged and recorded on `state.pendingStatusWrites` for `resync.ts` to retry, never
+ * thrown back at the caller. A later successful write (this one or resync's retry) clears the
+ * pending entry. */
+export async function writeStatus(
+  state: LegionState,
+  client: DispatchClient,
+  issue: IssueKey,
+  status: IssueStatus
+): Promise<void> {
+  try {
+    await client.setStatus(issue, status);
+    delete state.pendingStatusWrites[issue];
+  } catch (error) {
+    state.pendingStatusWrites[issue] = status;
+    console.error(
+      `[legion] failed to PATCH Dispatch status=${status} for ${issue} (recorded for resync retry): ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }

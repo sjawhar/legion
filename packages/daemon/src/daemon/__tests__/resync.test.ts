@@ -1,23 +1,23 @@
 import { describe, expect, it } from "bun:test";
-import { formatIssueKey, roleToken } from "@legion/contracts";
+import { roleToken } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
 import { type Effect, type EnvelopeJson, reduceGithubEvent } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
-import { checkPr } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient } from "./ci-fixtures";
 
-const issue = formatIssueKey("sjawhar", "legion", 42);
+const issue = "LEGION-42";
 
-function resyncDeps(state: LegionState, items: Record<string, unknown>[]): RunResyncDeps {
+function resyncDeps(state: LegionState): RunResyncDeps {
   return {
     state,
     config: {
       resyncIntervalMs: 600_000,
-      boardProjectIds: ["PVT_board"],
+      dispatchProject: "LEGSMOKE",
       appLogins: [],
       maxFixAttempts: 3,
     },
-    fetchGitHubProjectItems: async () => ({ items }),
+    dispatchClient: fakeDispatchClient(),
     fetchCiStatusBatch: async () => ({}),
     applyEffects: async () => {},
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
@@ -33,10 +33,8 @@ function trackIssue(state: LegionState): void {
   state.issues[issue] = {
     key: issue,
     title: "Resync this Legion tree",
-    state: "open",
+    status: "in_progress",
     children: [],
-    released: true,
-    labels: [],
   };
   state.trees[issue] = {
     root: issue,
@@ -53,10 +51,8 @@ describe("runResync", () => {
     state.issues[issue] = {
       key: issue,
       title: "Resync this Legion tree",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[issue] = {
       root: issue,
@@ -73,7 +69,7 @@ describe("runResync", () => {
     let now = Date.parse("2026-08-24T00:00:00.000Z");
     const fetches: Record<string, unknown>[] = [];
     const deps: RunResyncDeps = {
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       now: () => now,
       fetchCiStatusBatch: async (refs: Record<string, unknown>) => {
         fetches.push(refs);
@@ -141,7 +137,7 @@ describe("runResync", () => {
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "failing" as const,
@@ -201,7 +197,7 @@ describe("runResync", () => {
     let fetches = 0;
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => {
         fetches += 1;
         return {
@@ -254,10 +250,8 @@ describe("runResync", () => {
     state.issues[issue] = {
       key: issue,
       title: "Resync this Legion tree",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[issue] = {
       root: issue,
@@ -313,7 +307,7 @@ describe("runResync", () => {
           updated_at: "2026-08-24T00:00:03.000Z",
         },
       },
-      resyncDeps(state, []).config
+      resyncDeps(state).config
     );
 
   it("skips a fetched head when a same-sha lifecycle update lands during the read", async () => {
@@ -322,7 +316,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => {
         // synchronize(A, t3) arrives while the fetch (which saw B at t2) is outstanding.
         synchronizeBackToA(state);
@@ -349,7 +343,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => fetchedHeadB,
       applyEffects: async (effects) => {
         dispatched.push(effects);
@@ -367,7 +361,7 @@ describe("runResync", () => {
 
     // GitHub confirms head A at t3 (it had been at B between t0 and t3).
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "passing" as const,
@@ -400,7 +394,7 @@ describe("runResync", () => {
           updated_at: "2026-08-24T00:00:02.000Z",
         },
       },
-      resyncDeps(state, []).config
+      resyncDeps(state).config
     );
     // Still head A at t3, green, live fence intact; B never landed.
     expect(pr).toMatchObject({
@@ -436,7 +430,7 @@ describe("runResync", () => {
             updated_at: T,
           },
         },
-        resyncDeps(state, []).config
+        resyncDeps(state).config
       );
     synchronize("head-c");
     synchronize("head-b");
@@ -444,7 +438,7 @@ describe("runResync", () => {
 
     const dispatched: Effect[][] = [];
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "passing" as const,
@@ -480,7 +474,7 @@ describe("runResync", () => {
     const T = "2026-08-24T00:00:05.000Z";
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "passing" as const,
@@ -513,7 +507,7 @@ describe("runResync", () => {
           updated_at: T,
         },
       },
-      resyncDeps(state, []).config
+      resyncDeps(state).config
     );
 
     expect(pr).toMatchObject({
@@ -527,10 +521,8 @@ describe("runResync", () => {
     state.issues[issue] = {
       key: issue,
       title: "Resync this Legion tree",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.prs["sjawhar/legion#7"] = checkPr(issue, {
       repo: "sjawhar/legion",
@@ -538,7 +530,7 @@ describe("runResync", () => {
     });
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "passing" as const,
@@ -566,7 +558,7 @@ describe("runResync", () => {
           updated_at: "2026-08-24T00:00:01.000Z",
         },
       },
-      resyncDeps(state, []).config
+      resyncDeps(state).config
     );
 
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
@@ -581,7 +573,7 @@ describe("runResync", () => {
     state.prs["sjawhar/legion#7"] = checkPr(issue, { repo: "sjawhar/legion" });
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "passing" as const,
@@ -613,7 +605,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "passing" as const,
@@ -659,7 +651,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "failing" as const,
@@ -710,7 +702,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => {
         fetches += 1;
         return {
@@ -749,7 +741,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "failing" as const,
@@ -790,7 +782,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => {
         fetches += 1;
         return {
@@ -832,7 +824,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "pending" as const,
@@ -864,7 +856,7 @@ describe("runResync", () => {
     const dispatched: Effect[][] = [];
 
     await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           ciStatus: "passing" as const,
@@ -901,7 +893,7 @@ describe("runResync", () => {
     const before = structuredClone(state.prs["sjawhar/legion#7"]);
 
     const event = await runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
           owner: "sjawhar",
@@ -927,7 +919,7 @@ describe("runResync", () => {
     const fetchStarted = Promise.withResolvers<void>();
     const fetchedStatuses = Promise.withResolvers<Record<string, CiFetchResult>>();
     const resync = runResync({
-      ...resyncDeps(state, []),
+      ...resyncDeps(state),
       fetchCiStatusBatch: async () => {
         fetchStarted.resolve();
         return fetchedStatuses.promise;
@@ -945,5 +937,55 @@ describe("runResync", () => {
       ciFetchFailures: 1,
       ciFetchFailureDetails: [{ owner: "sjawhar", error: "GitHub App token request failed" }],
     });
+  });
+  it("drops a pending done write instead of retrying it once the issue is already closed", async () => {
+    // A pending `done` write can only be recorded before `closeTreeLocked`'s own guard existed,
+    // or from state written by an older daemon version — either way, retrying it against a real
+    // Dispatch server would fail with the same permanent "issue is closed" error forever. Resync
+    // must clear it instead of looping on a write that can never succeed.
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = {
+      key: issue,
+      title: "Resync this Legion tree",
+      status: "done",
+      children: [],
+    };
+    state.pendingStatusWrites[issue] = "done";
+    const statusWrites: Array<{ issue: string; status: string }> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (writtenIssue, status) => {
+          statusWrites.push({ issue: writtenIssue, status });
+        },
+      }),
+    });
+
+    expect(statusWrites).toEqual([]);
+    expect(state.pendingStatusWrites[issue]).toBeUndefined();
+  });
+  it("still retries a pending non-done write, or a pending done write the issue doesn't yet reflect", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = {
+      key: issue,
+      title: "Resync this Legion tree",
+      status: "in_progress",
+      children: [],
+    };
+    state.pendingStatusWrites[issue] = "in_progress";
+    const statusWrites: Array<{ issue: string; status: string }> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (writtenIssue, status) => {
+          statusWrites.push({ issue: writtenIssue, status });
+        },
+      }),
+    });
+
+    expect(statusWrites).toEqual([{ issue, status: "in_progress" }]);
+    expect(state.pendingStatusWrites[issue]).toBeUndefined();
   });
 });

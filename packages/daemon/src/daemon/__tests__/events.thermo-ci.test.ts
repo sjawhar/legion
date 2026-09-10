@@ -9,6 +9,7 @@ import { runResync } from "../resync";
 import {
   config as daemonConfig,
   FakeNats,
+  fakeDispatchClient,
   prPayload,
   settledChecks,
   stateForCi,
@@ -89,7 +90,7 @@ async function resyncWith(
   await runResync({
     state,
     config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
+    dispatchClient: fakeDispatchClient(),
     fetchCiStatusBatch: async () => status,
     applyEffects: async (effects) => {
       applied.push(effects);
@@ -682,7 +683,7 @@ it("does not apply a fetched green rollup after a live red settlement advances C
     const resync = runResync({
       state,
       config,
-      fetchGitHubProjectItems: async () => ({ items: [] }),
+      dispatchClient: fakeDispatchClient(),
       fetchCiStatusBatch: async () => {
         fetchStarted.resolve();
         return fetchedStatuses.promise;
@@ -746,7 +747,7 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
   const resync = runResync({
     state,
     config,
-    fetchGitHubProjectItems: async () => ({ items: [] }),
+    dispatchClient: fakeDispatchClient(),
     fetchCiStatusBatch: async () => {
       fetchStarted.resolve();
       return fetchedStatuses.promise;

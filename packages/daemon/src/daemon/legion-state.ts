@@ -1,11 +1,6 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import {
-  assertLegionProjectToken,
-  formatIssueKey,
-  type IssueKey,
-  isLegionProjectToken,
-} from "@legion/contracts";
+import { assertLegionProjectToken, type IssueKey, isLegionProjectToken } from "@legion/contracts";
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
 
@@ -30,15 +25,13 @@ export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 export interface IssueNode {
   key: IssueKey;
   title: string;
-  state: "open" | "closed";
   parent?: IssueKey;
   children: IssueKey[];
-  released: boolean;
-  labels: string[];
-  backlogMarker?: string;
   finalCommentRef?: string;
   /** The issue's Dispatch lifecycle status, set from `issue.created`/`issue.updated` events.
-   * Absent on an issue this daemon has not yet observed through the Dispatch lane. */
+   * Absent on an issue this daemon has not yet observed through the Dispatch lane. A `"done"`
+   * status is this daemon's only notion of closed — GitHub's separate open/closed issue state
+   * (and its labels, `released` flag, and backlog marker) no longer exist on a Legion issue. */
   status?: IssueStatus;
   /** The highest Dispatch event `seq` this daemon has applied to this issue, across every event
    * type keyed on it (`issue.created`/`updated`/`closed` on itself, `child.status` delivered to
@@ -181,6 +174,12 @@ export interface LegionState {
    * registered via `/legion/v1/gates/register`; `designApproved` is set to that same ask id once
    * `ask.answered` selects `Approve` for it. Both absent before the architect opens the gate. */
   gates: Record<IssueKey, { designAskId?: string; designApproved?: string }>;
+  /** A daemon-owned lifecycle status write (`spawnTree`/`closeTree`/`phase/complete`, the
+   * `/issues/status` and `/waves/release` routes) that failed its Dispatch PATCH, keyed by issue
+   * — `dispatch-client.ts`'s `writeStatus` records it here instead of failing the caller; cleared
+   * on the next successful write for that issue, whether from the same call site or from
+   * `resync.ts`'s retry sweep. */
+  pendingStatusWrites: Record<IssueKey, IssueStatus>;
 }
 
 export interface LegionStateInit {
@@ -188,40 +187,25 @@ export interface LegionStateInit {
   cap: number;
 }
 
-/** The legacy `owner/repo#number` GitHub issue key: still accepted by `IssueKeySchema` because
- * existing daemon state may carry it until reducers/resync stop producing it. */
-const LEGACY_ISSUE_KEY_PATTERN = /^[^/#]+\/[^/#]+#\d+$/;
-/** The Dispatch issue key going forward (`^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-7`). */
+/** Legion's own issue key: the Dispatch key (`^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-7`). */
 export const ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]*-[0-9]+$/;
 const REPOSITORY_PATTERN = /^[^/]+\/[^/]+$/;
 const ENVOY_ROLE_TOKEN_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 
 const IssueKeySchema = z.custom<IssueKey>(
-  (value) =>
-    typeof value === "string" &&
-    (LEGACY_ISSUE_KEY_PATTERN.test(value) || ISSUE_KEY_PATTERN.test(value)),
-  { message: "Expected an owner/repo#number or a Dispatch PROJECT-number issue key" }
+  (value) => typeof value === "string" && ISSUE_KEY_PATTERN.test(value),
+  { message: "Expected a Dispatch PROJECT-number issue key" }
 );
 const RepositorySchema = z.custom<`${string}/${string}`>(
   (value) => typeof value === "string" && REPOSITORY_PATTERN.test(value),
   { message: "Expected owner/repo repository" }
 );
-const GateLabelSchema = z.enum([
-  "needs-approval",
-  "human-approved",
-  "legion-child",
-  "legion-backlog",
-]);
 const IssueNodeSchema = z
   .object({
     key: IssueKeySchema,
     title: z.string(),
-    state: z.enum(["open", "closed"]),
     parent: IssueKeySchema.optional(),
     children: z.array(IssueKeySchema),
-    released: z.boolean(),
-    labels: z.array(GateLabelSchema),
-    backlogMarker: z.string().optional(),
     finalCommentRef: z.string().optional(),
     status: z.enum(ISSUE_STATUSES).optional(),
     lastAppliedSeq: z.number().int().positive().optional(),
@@ -380,6 +364,7 @@ const LegionStateSchema = z
           .strict()
       )
       .default({}),
+    pendingStatusWrites: z.record(IssueKeySchema, z.enum(ISSUE_STATUSES)).default({}),
   })
   .strict();
 
@@ -405,6 +390,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     phases: {},
     controllerPendingNotices: [],
     gates: {},
+    pendingStatusWrites: {},
   };
 }
 
@@ -458,7 +444,10 @@ function dispatchThreadKey(value: unknown): IssueKey | undefined {
   }
   const [owner, name, ...extra] = repo.split("/");
   if (!owner || !name || extra.length > 0 || thread < 0) return undefined;
-  return formatIssueKey(owner, name, thread);
+  // Reconstructs the legacy `owner/repo#number` GitHub issue key exactly as v7 state recorded
+  // it, purely to match it against `state.issues`/`heldEvents` entries during this historical
+  // migration — `@legion/contracts` no longer has a shared helper for this dead format.
+  return `${owner}/${name}#${thread}`;
 }
 
 function withoutDispatchReplies(value: unknown): unknown {
@@ -730,7 +719,7 @@ function migrateV18State(state: unknown): unknown {
   ) {
     throw new Error("Cannot migrate a Legion state with active trees to the Dispatch lifecycle");
   }
-  return { ...state, version: 19, gates: {} };
+  return { ...state, version: 19, gates: {}, pendingStatusWrites: {} };
 }
 
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {

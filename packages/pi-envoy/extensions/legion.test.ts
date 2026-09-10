@@ -266,8 +266,8 @@ async function bootWorker(options: {
   readonly context: SessionContext;
   readonly token: string;
 }> {
-  const tree = options.tree ?? "owner/repo#42";
-  const issue = options.issue ?? "owner/repo#43";
+  const tree = options.tree ?? "REPO-42";
+  const issue = options.issue ?? "REPO-43";
   const sessionId = options.sessionId ?? `ses_${options.role}`;
   const token = roleToken("omp", issue, options.role);
   process.env.ENVOY_URL = "http://envoy.test";
@@ -318,22 +318,22 @@ describe("Legion OMP extension", () => {
     expect(
       classifySession({
         LEGION_ROLE: "architect",
-        LEGION_TREE: "owner/repo#42",
-        LEGION_ISSUE: "owner/repo#42",
+        LEGION_TREE: "REPO-42",
+        LEGION_ISSUE: "REPO-42",
       })
-    ).toEqual({ kind: "root-architect", tree: "owner/repo#42" });
+    ).toEqual({ kind: "root-architect", tree: "REPO-42" });
     // A sub-architect on a child issue is a phase worker like any other role.
     expect(
       classifySession({
         LEGION_ROLE: "architect",
-        LEGION_TREE: "owner/repo#42",
-        LEGION_ISSUE: "owner/repo#43",
+        LEGION_TREE: "REPO-42",
+        LEGION_ISSUE: "REPO-43",
       })
     ).toEqual({
       kind: "phase-worker",
       role: "architect",
-      tree: "owner/repo#42",
-      issue: "owner/repo#43",
+      tree: "REPO-42",
+      issue: "REPO-43",
     });
     expect(classifySession({ LEGION_CONTROLLER: "1" })).toEqual({
       kind: "controller",
@@ -341,14 +341,14 @@ describe("Legion OMP extension", () => {
     expect(
       classifySession({
         LEGION_ROLE: "reviewer",
-        LEGION_TREE: "owner/repo#42",
-        LEGION_ISSUE: "owner/repo#43",
+        LEGION_TREE: "REPO-42",
+        LEGION_ISSUE: "REPO-43",
       })
     ).toEqual({
       kind: "phase-worker",
       role: "reviewer",
-      tree: "owner/repo#42",
-      issue: "owner/repo#43",
+      tree: "REPO-42",
+      issue: "REPO-43",
     });
     expect(classifySession({})).toEqual({ kind: "not-legion" });
   });
@@ -358,16 +358,16 @@ describe("Legion OMP extension", () => {
     });
   });
   test("rejects an unrecognized LEGION_ROLE value", () => {
-    expect(() =>
-      classifySession({ LEGION_ROLE: "explorer", LEGION_TREE: "owner/repo#42" })
-    ).toThrow('LEGION_ROLE "explorer" is not a Legion role');
+    expect(() => classifySession({ LEGION_ROLE: "explorer", LEGION_TREE: "REPO-42" })).toThrow(
+      'LEGION_ROLE "explorer" is not a Legion role'
+    );
   });
   test("rejects a session launched with both controller and tree markers", () => {
     expect(() =>
       classifySession({
         LEGION_CONTROLLER: "1",
         LEGION_CONTROLLER_SECRET: "controller-secret",
-        LEGION_TREE: "owner/repo#42",
+        LEGION_TREE: "REPO-42",
       })
     ).toThrow("both controller and tree launch markers");
   });
@@ -376,7 +376,7 @@ describe("Legion OMP extension", () => {
       readonly path: string;
       readonly body: Record<string, unknown> | undefined;
     }[] = [];
-    const tree = "owner/repo#42";
+    const tree = "REPO-42";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -408,11 +408,11 @@ describe("Legion OMP extension", () => {
           secret: "recovered-root-secret",
         });
       }
-      if (url.pathname === "/legion/v1/issues/comment") {
+      if (url.pathname === "/legion/v1/merge-gate") {
         if (body?.secret === "root-secret") {
           return Response.json({ error: "Invalid session secret" }, { status: 403 });
         }
-        return Response.json({ commentId: 4, url: "https://github.test/comment/4" });
+        return Response.json({ approved: true, pr: 17, headSha: "recovered-head" });
       }
       return Response.json({
         session_id: body?.session_id,
@@ -433,7 +433,7 @@ describe("Legion OMP extension", () => {
     if (legionTool === undefined) throw new Error("Legion root tool was not registered");
     const result = await legionTool.execute(
       "call-root-recovery",
-      { op: "comment", issue: tree, body: "daemon restart recovery" },
+      { op: "merge_gate", pr: 17 },
       undefined,
       undefined,
       context
@@ -457,13 +457,12 @@ describe("Legion OMP extension", () => {
         body: { tree, sessionId: "ses_root", secret: "root-secret" },
       },
       {
-        path: "/legion/v1/issues/comment",
+        path: "/legion/v1/merge-gate",
         body: {
           tree,
           sessionId: "ses_root",
           secret: "root-secret",
-          issue: tree,
-          body: "daemon restart recovery",
+          pr: 17,
         },
       },
       {
@@ -471,20 +470,19 @@ describe("Legion OMP extension", () => {
         body: { sessionId: "ses_root", recoveryToken: "root-recovery" },
       },
       {
-        path: "/legion/v1/issues/comment",
+        path: "/legion/v1/merge-gate",
         body: {
           tree,
           sessionId: "ses_root",
           secret: "recovered-root-secret",
-          issue: tree,
-          body: "daemon restart recovery",
+          pr: 17,
         },
       },
     ]);
   });
   test("registers the root process before claiming its role and agent delivery subject", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const tree = "owner/repo#42";
+    const tree = "REPO-42";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -780,8 +778,8 @@ describe("Legion OMP extension", () => {
   });
   test("boots a phase worker from its environment and reports readiness to the daemon", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const tree = "owner/repo#42";
-    const issue = "owner/repo#43";
+    const tree = "REPO-42";
+    const issue = "REPO-43";
     const role: LegionRole = "tester";
     const token = roleToken("omp", issue, role);
     const workspace = await createJjWorkspace();
@@ -860,8 +858,8 @@ describe("Legion OMP extension", () => {
   test("throws naming the missing variable when a phase worker boots without LEGION_BOOT_TOKEN", async () => {
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_TREE = "owner/repo#42";
-    process.env.LEGION_ISSUE = "owner/repo#43";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
     process.env.LEGION_ROLE = "tester";
     delete process.env.LEGION_BOOT_TOKEN;
     globalThis.fetch = (async (_input, _init) => Response.json({})) as typeof fetch;
@@ -876,8 +874,8 @@ describe("Legion OMP extension", () => {
   });
   test("recovers a live worker's capability after the daemon loses its secret", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const tree = "owner/repo#42";
-    const issue = "owner/repo#43";
+    const tree = "REPO-42";
+    const issue = "REPO-43";
     const role: LegionRole = "tester";
     const token = roleToken("omp", issue, role);
     const workspace = await createJjWorkspace();
@@ -960,11 +958,11 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
     process.env.LEGION_BOOT_TOKEN = "boot-sub-architect";
     process.env.LEGION_GENERATION = "1";
-    process.env.LEGION_TREE = "owner/repo#42";
-    process.env.LEGION_ISSUE = "owner/repo#43";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
     process.env.LEGION_ROLE = "architect";
     process.env.LEGION_WORKSPACE = workspace;
-    const token = roleToken("omp", "owner/repo#43", "architect");
+    const token = roleToken("omp", "REPO-43", "architect");
     globalThis.fetch = (async (input) => {
       const url = new URL(input.toString());
       if (url.pathname === "/legion/v1/worker/started") {
@@ -1126,8 +1124,8 @@ describe("Legion OMP extension", () => {
     expect(requests.at(-1)).toEqual({
       path: "/legion/v1/grants",
       body: {
-        tree: "owner/repo#42",
-        issue: "owner/repo#43",
+        tree: "REPO-42",
+        issue: "REPO-43",
         sessionId: "ses_reviewer",
         secret: "worker-secret",
       },
@@ -1179,7 +1177,7 @@ describe("Legion OMP extension", () => {
     });
   });
   test("blocks a bash call from a worker session that has not completed its boot handshake", async () => {
-    process.env.LEGION_TREE = "owner/repo#42";
+    process.env.LEGION_TREE = "REPO-42";
     process.env.LEGION_ROLE = "implementer";
     const fixture = createPi();
     legionExtension(fixture.pi);
@@ -1239,7 +1237,7 @@ describe("Legion OMP extension", () => {
   });
   test("materializes the session transcript before the boot handshake", async () => {
     const order: string[] = [];
-    const tree = "owner/repo#42";
+    const tree = "REPO-42";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -1286,8 +1284,8 @@ describe("Legion OMP extension", () => {
       exits.push(code);
       throw new Error("process would exit");
     });
-    const tree = "owner/repo#42";
-    const issue = "owner/repo#43";
+    const tree = "REPO-42";
+    const issue = "REPO-43";
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
     process.env.LEGION_BOOT_TOKEN = "stale-boot-token";
@@ -1320,8 +1318,8 @@ describe("Legion OMP extension", () => {
       throw new Error("process would exit");
     });
     const workspace = await createJjWorkspace();
-    const tree = "owner/repo#42";
-    const issue = "owner/repo#43";
+    const tree = "REPO-42";
+    const issue = "REPO-43";
     const role: LegionRole = "implementer";
     const token = roleToken("omp", issue, role);
     process.env.ENVOY_URL = "http://envoy.test";
@@ -1367,7 +1365,7 @@ describe("Legion OMP extension", () => {
       exits.push(code);
       throw new Error("process would exit");
     });
-    const tree = "owner/repo#42";
+    const tree = "REPO-42";
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
     process.env.LEGION_GENERATION = "3";
@@ -1398,7 +1396,7 @@ describe("Legion OMP extension", () => {
       exits.push(code);
       throw new Error("process would exit");
     });
-    const tree = "owner/repo#42";
+    const tree = "REPO-42";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -1436,85 +1434,8 @@ describe("Legion OMP extension", () => {
     );
     expect(exits).toEqual([1]);
   });
-  test("proxies architect issue creation through the daemon and returns the issue identity", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const tree = "owner/repo#42";
-    const token = roleToken("omp", tree, "architect");
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_GENERATION = "3";
-    process.env.LEGION_BOOT_TOKEN = "boot-issue-create";
-    process.env.LEGION_TREE = tree;
-    process.env.LEGION_ROLE = "architect";
-    process.env.LEGION_ISSUE = tree;
-    globalThis.fetch = (async (input, init) => {
-      const url = new URL(input.toString());
-      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
-      requests.push({ path: url.pathname, body });
-      if (url.pathname === "/legion/v1/process/started") {
-        return Response.json({
-          roleTokens: { architect: token },
-          controlSubject: "legion.ctl.owner-repo-42.3",
-          secret: "root-secret",
-        });
-      }
-      if (url.pathname === "/legion/v1/issues") {
-        return Response.json({
-          issue: "owner/repo#43",
-          url: "https://github.test/owner/repo/issues/43",
-        });
-      }
-      return Response.json({
-        session_id: "ses_architect",
-        machine_id: "machine",
-        dir: context.cwd,
-        topics: [token],
-      });
-    }) as typeof fetch;
-    const fixture = createPi();
-    const context = sessionContext("ses_architect");
-
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
-    await sessionStart({}, context);
-    const legion = fixture.tools.find((tool) => tool.name === "legion");
-    if (legion === undefined) throw new Error("legion tool was not registered");
-
-    const result = await legion.execute(
-      "call-1",
-      { op: "issue_create", title: "Child work", body: "Do it", labels: ["needs-approval"] },
-      undefined,
-      undefined,
-      context
-    );
-
-    expect(requests.at(-1)).toEqual({
-      path: "/legion/v1/issues",
-      body: {
-        tree,
-        title: "Child work",
-        body: "Do it",
-        labels: ["needs-approval"],
-        sessionId: "ses_architect",
-        secret: "root-secret",
-      },
-    });
-    expect(result).toEqual({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            issue: "owner/repo#43",
-            url: "https://github.test/owner/repo/issues/43",
-          }),
-        },
-      ],
-      details: { issue: "owner/repo#43", url: "https://github.test/owner/repo/issues/43" },
-    });
-  });
   test("registers only the Legion tool for a confirmed architect session", async () => {
-    const tree = "owner/repo#42";
+    const tree = "REPO-42";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -1553,8 +1474,8 @@ describe("Legion OMP extension", () => {
   });
   test("maps every remaining legion operation to its daemon proxy endpoint", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const tree = "owner/repo#42";
-    const issue = "owner/repo#43";
+    const tree = "REPO-42";
+    const issue = "REPO-43";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -1575,16 +1496,10 @@ describe("Legion OMP extension", () => {
         });
       }
       if (url.pathname === "/legion/v1/waves/release") return Response.json({ released: [issue] });
-      if (url.pathname === "/legion/v1/issues/comment") {
-        return Response.json({
-          commentId: 99,
-          url: "https://github.test/owner/repo/issues/43#issuecomment-99",
-        });
-      }
-      if (url.pathname === "/legion/v1/issues/labels")
-        return Response.json({ labels: ["needs-approval"] });
       if (url.pathname === "/legion/v1/merge-gate")
         return Response.json({ approved: true, pr: 17, headSha: "approved-head" });
+      if (url.pathname === "/legion/v1/worker/spawn")
+        return Response.json({ status: "spawned", roleToken: "role-token-implementer" });
       if (url.pathname.startsWith("/legion/v1/")) return Response.json({});
       return Response.json({
         session_id: "ses_architect",
@@ -1630,27 +1545,13 @@ describe("Legion OMP extension", () => {
         details: { released: [issue] },
       },
       {
-        input: { op: "comment", issue, body: "Status update" },
+        input: { op: "set_status", issue, status: "todo" },
         request: {
-          path: "/legion/v1/issues/comment",
+          path: "/legion/v1/issues/status",
           body: {
             tree,
             issue,
-            body: "Status update",
-            sessionId: "ses_architect",
-            secret: "root-secret",
-          },
-        },
-        details: { commentId: 99, url: "https://github.test/owner/repo/issues/43#issuecomment-99" },
-      },
-      {
-        input: { op: "post_spec", issue, body: "Specification" },
-        request: {
-          path: "/legion/v1/issues/body",
-          body: {
-            tree,
-            issue,
-            body: "Specification",
+            status: "todo",
             sessionId: "ses_architect",
             secret: "root-secret",
           },
@@ -1658,18 +1559,33 @@ describe("Legion OMP extension", () => {
         details: {},
       },
       {
-        input: { op: "label_add", issue, label: "needs-approval" },
+        input: { op: "register_gate", issue, askId: "ask-1" },
         request: {
-          path: "/legion/v1/issues/labels",
+          path: "/legion/v1/gates/register",
           body: {
             tree,
             issue,
-            add: ["needs-approval"],
+            askId: "ask-1",
             sessionId: "ses_architect",
             secret: "root-secret",
           },
         },
-        details: { labels: ["needs-approval"] },
+        details: {},
+      },
+      {
+        input: { op: "spawn_worker", issue, role: "implementer", task: "Implement the feature" },
+        request: {
+          path: "/legion/v1/worker/spawn",
+          body: {
+            tree,
+            issue,
+            role: "implementer",
+            task: "Implement the feature",
+            sessionId: "ses_architect",
+            secret: "root-secret",
+          },
+        },
+        details: { status: "spawned", roleToken: "role-token-implementer" },
       },
       {
         input: { op: "escalate", kind: "capacity", context: { reason: "No slots" } },
@@ -1693,20 +1609,6 @@ describe("Legion OMP extension", () => {
             tree,
             kind: "re-file",
             context: { issue, rationale: "Independent work" },
-            sessionId: "ses_architect",
-            secret: "root-secret",
-          },
-        },
-        details: {},
-      },
-      {
-        input: { op: "issue_close", issue, comment: "Completed" },
-        request: {
-          path: "/legion/v1/issues/close",
-          body: {
-            tree,
-            issue,
-            comment: "Completed",
             sessionId: "ses_architect",
             secret: "root-secret",
           },
@@ -1783,7 +1685,7 @@ describe("Legion OMP extension", () => {
   });
   test("reports root process exit to the daemon on session shutdown", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const tree = "owner/repo#42";
+    const tree = "REPO-42";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -1829,7 +1731,7 @@ describe("Legion OMP extension", () => {
     });
   });
   test("blocks code tools in a root architect session", async () => {
-    const tree = "owner/repo#42";
+    const tree = "REPO-42";
     const architectToken = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatIssueKey, type IssueKey } from "@legion/contracts";
+import type { IssueKey } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { overseerCatchup, workerCatchup } from "../catchup";
 import { TokenManager } from "../github-apps";
@@ -14,24 +14,20 @@ function stateForTree(): {
   child: IssueKey;
 } {
   const state = newLegionState("omp", 2);
-  const root = formatIssueKey("acme", "widgets", 1);
-  const child = formatIssueKey("acme", "widgets", 2);
+  const root = "WIDGETS-1" as IssueKey;
+  const child = "WIDGETS-2" as IssueKey;
   state.issues[root] = {
     key: root,
     title: "Root",
-    state: "open",
+    status: "in_progress",
     children: [child],
-    released: true,
-    labels: ["needs-approval"],
   };
   state.issues[child] = {
     key: child,
     title: "Child",
-    state: "closed",
+    status: "done",
     parent: root,
     children: [],
-    released: true,
-    labels: ["human-approved", "legion-child"],
   };
   state.trees[root] = {
     root,
@@ -100,12 +96,14 @@ describe("derived catch-up", () => {
   it("derives an overseer snapshot from tree state", async () => {
     const { state, root, child } = stateForTree();
     state.prs["acme/widgets#7"] = prState(root);
+    state.gates[root] = { designAskId: "ask-root" };
+    state.gates[child] = { designAskId: "ask-child", designApproved: "ask-child" };
 
     expect(await overseerCatchup(state, root)).toEqual({
       type: "catchup-overseer",
       gates: {
-        [root]: { needsApproval: true, humanApproved: false },
-        [child]: { needsApproval: false, humanApproved: true },
+        [root]: { designAskId: "ask-root" },
+        [child]: { designAskId: "ask-child", designApproved: "ask-child" },
       },
       childCounts: {
         [root]: { total: 1, open: 0, closed: 1 },
@@ -209,6 +207,7 @@ describe("derived catch-up", () => {
       await workerCatchup(state, root, "implementer", {
         runner,
         tokenManager: tokenManager(),
+        repo: "acme/widgets",
       })
     ).toEqual({
       type: "catchup-worker",
@@ -284,6 +283,7 @@ describe("derived catch-up", () => {
       await workerCatchup(state, root, "implementer", {
         runner,
         tokenManager: tokenManager(),
+        repo: "acme/widgets",
       })
     ).toEqual({
       type: "catchup-worker",

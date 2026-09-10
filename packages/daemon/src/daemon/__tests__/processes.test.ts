@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import {
   controllerToken,
-  formatIssueKey,
   type IssueKey,
   type LegionRole,
   roleToken,
@@ -28,10 +27,11 @@ import {
   TreeClosingError,
 } from "../processes";
 import type { WorkerRpcClient } from "../worker-rpc";
+import { fakeDispatchClient } from "./ci-fixtures";
 
-const root = formatIssueKey("sjawhar", "legion", 42);
-const child = formatIssueKey("sjawhar", "legion", 43);
-const grandchild = formatIssueKey("sjawhar", "legion", 44);
+const root = "LEGION-42";
+const child = "LEGION-43";
+const grandchild = "LEGION-44";
 const tempDirs: string[] = [];
 const liveManagers: ProcessManager[] = [];
 
@@ -161,7 +161,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     dispatchProject: "LEGSMOKE",
-    boardProjectIds: [],
+    repo: "sjawhar/legion",
     repos: ["sjawhar/legion"],
     appLogins: [],
     admissionCap: 1,
@@ -289,6 +289,7 @@ function manager(
     panePath: "/full/bin:/usr/bin",
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
+      repo: "sjawhar/legion",
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
         getToken: async () => ({
@@ -302,6 +303,7 @@ function manager(
       },
     },
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+    dispatchClient: fakeDispatchClient(),
     revokeSessionCapability: (sessionId) => revokedSessions.push(sessionId),
     ...overrides,
     run: async (command, runnerOptions) => {
@@ -459,7 +461,7 @@ describe("ProcessManager", () => {
   it("provisions the root issue workspace before launching OMP in that workspace", async () => {
     const stateDir = await temporaryDir();
     const repo = path.join(stateDir, "repos", "github.com", "sjawhar", "legion");
-    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
     await mkdir(path.join(repo, ".jj"), { recursive: true });
     const workspaceCalls: Array<{
       readonly command: string[];
@@ -507,8 +509,19 @@ describe("ProcessManager", () => {
     expect(commands).toEqual([
       ["jj", "git", "fetch", "-R", repo],
       ["git", `--git-dir=${repo}/.git`, "worktree", "prune"],
-      ["jj", "workspace", "add", workspace, "--name", "issue-42", "--revision", "main", "-R", repo],
-      ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
+      [
+        "jj",
+        "workspace",
+        "add",
+        workspace,
+        "--name",
+        "legion-42",
+        "--revision",
+        "main",
+        "-R",
+        repo,
+      ],
+      ["jj", "bookmark", "set", "legion/LEGION-42", "--allow-backwards"],
       ...[
         ["git", `--git-dir=${repo}/.git`, "config", "--replace-all", "credential.helper", ""],
         [
@@ -549,11 +562,11 @@ describe("ProcessManager", () => {
         "-t",
         "legion-omp",
         "-n",
-        "sjawhar__legion-42",
+        "legion-42",
         "-e",
-        "LEGION_TREE=sjawhar/legion#42",
+        "LEGION_TREE=LEGION-42",
         "-e",
-        "LEGION_ISSUE=sjawhar/legion#42",
+        "LEGION_ISSUE=LEGION-42",
         "-e",
         "LEGION_ROLE=architect",
         "-e",
@@ -571,7 +584,7 @@ describe("ProcessManager", () => {
         "-e",
         "ENVOY_URL=http://127.0.0.1:9020",
         "-e",
-        "LEGION_CONTROL_SUBJECT=legion.ctl.sjawhar-legion-42.1",
+        "LEGION_CONTROL_SUBJECT=legion.ctl.legion-42.1",
         "-e",
         "LEGION_MAX_RECURSION_DEPTH=8",
         "-e",
@@ -588,13 +601,13 @@ describe("ProcessManager", () => {
         "DISPATCH_URL=http://127.0.0.1:18766",
         "-e",
         "DISPATCH_TOKEN=test-dispatch-token",
-        `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-architect-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
+        `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
     ]);
     expect(workspaceCalls).toContainEqual({
-      command: ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
+      command: ["jj", "bookmark", "set", "legion/LEGION-42", "--allow-backwards"],
       opts: { cwd: workspace },
     });
     expect(workspaceCalls).toContainEqual({
@@ -647,14 +660,14 @@ describe("ProcessManager", () => {
       LEGION_TREE: root,
       LEGION_ISSUE: root,
       LEGION_ROLE: "architect",
-      LEGION_ROOT_WORKSPACE: path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42"),
+      LEGION_ROOT_WORKSPACE: path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42"),
       LEGION_GENERATION: "1",
       LEGION_BOOT_TOKEN: "boot-token",
       LEGION_DAEMON_URL: "http://127.0.0.1:13999",
       LEGION_PROJECT: "omp",
       ENVOY_NATS_URL: "nats://127.0.0.1:4222",
       ENVOY_URL: "http://127.0.0.1:9020",
-      LEGION_CONTROL_SUBJECT: "legion.ctl.sjawhar-legion-42.1",
+      LEGION_CONTROL_SUBJECT: "legion.ctl.legion-42.1",
       LEGION_MAX_RECURSION_DEPTH: "8",
       LEGION_STATE_DIR: stateDir,
       LEGION_CREDENTIAL_HELPER: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
@@ -663,10 +676,104 @@ describe("ProcessManager", () => {
       PATH: "/full/bin:/usr/bin",
     });
   });
+  it("writes the tree's Dispatch status to in_progress on a successful spawn, then to done on close", async () => {
+    const stateDir = await temporaryDir();
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    let sessionExists = false;
+    const { manager: processes, state: managedState } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") sessionExists = true;
+        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+
+    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(managedState.trees[root]?.status).toBe("active");
+
+    await processes.closeTree(root);
+
+    expect(statusWrites).toEqual([
+      { issue: root, status: "in_progress" },
+      { issue: root, status: "done" },
+    ]);
+    expect(managedState.trees[root]?.status).toBe("closed");
+  });
+  it("skips the close-time Dispatch done write when the issue is already closed", async () => {
+    // Reproduces a real Dispatch server's behavior: `reduceIssueClosed` applies a closed issue's
+    // `status: "done"` onto `state.issues` before `closeTree` ever runs (via `expireLinger`'s
+    // linger, or `reportRootExit`'s own `status === "done"` gate) — so by the time `closeTree`
+    // gets here, Dispatch already considers the issue closed and permanently refuses a further
+    // status PATCH on it. Writing "done" again must not be attempted.
+    const stateDir = await temporaryDir();
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    let sessionExists = false;
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "done", children: [] };
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") sessionExists = true;
+        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    await processes.closeTree(root);
+
+    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(managedState.trees[root]?.status).toBe("closed");
+    expect(managedState.pendingStatusWrites[root]).toBeUndefined();
+  });
+
+  it("records a failed Dispatch status write in pendingStatusWrites without throwing, for both spawn and close", async () => {
+    const stateDir = await temporaryDir();
+    let sessionExists = false;
+    const { manager: processes, state: managedState } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async () => {
+          throw new Error("Dispatch unavailable");
+        },
+      }),
+      run: async (command) => {
+        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[1] === "new-session") sessionExists = true;
+        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+
+    expect(managedState.trees[root]?.status).toBe("active");
+    expect(managedState.pendingStatusWrites[root]).toBe("in_progress");
+
+    await processes.closeTree(root);
+
+    expect(managedState.trees[root]?.status).toBe("closed");
+    expect(managedState.pendingStatusWrites[root]).toBe("done");
+  });
   it("gives collision-prone issue paths distinct escaped cosmetic window names", async () => {
     const stateDir = await temporaryDir();
-    const left = formatIssueKey("example", "org-legion-smoke", 1);
-    const right = formatIssueKey("example-org", "legion-smoke", 1);
+    const left = "ORGLEGIONSMOKE-1";
+    const right = "LEGIONSMOKE-1";
     const { manager: processes, commands } = manager(newLegionState("omp", 2), {
       config: config(stateDir, { admissionCap: 2 }),
     });
@@ -677,12 +784,12 @@ describe("ProcessManager", () => {
     const names = commands
       .filter((command) => command[0] === "tmux" && command.includes("-n"))
       .map((command) => command[command.indexOf("-n") + 1]);
-    expect(names).toEqual(["example__org_hlegion_hsmoke-1", "example_horg__legion_hsmoke-1"]);
+    expect(names).toEqual(["orglegionsmoke-1", "legionsmoke-1"]);
   });
 
   it("caps an escaped cosmetic window name", async () => {
     const stateDir = await temporaryDir();
-    const issue = formatIssueKey("a".repeat(200), "b".repeat(200), 1);
+    const issue = `${"B".repeat(200)}-1`;
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
       config: config(stateDir),
     });
@@ -695,7 +802,7 @@ describe("ProcessManager", () => {
 
   it("keeps the worker socket path under the Unix socket length limit for a very long issue key", async () => {
     const stateDir = await temporaryDir();
-    const issue = formatIssueKey("a".repeat(200), "b".repeat(200), 1);
+    const issue = `${"B".repeat(200)}-1`;
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
       config: config(stateDir),
     });
@@ -816,11 +923,11 @@ describe("ProcessManager", () => {
     await processes.spawnRoot(root);
     await processes.ensureController();
 
-    const workspaceDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const workspaceDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
     const controllerDir = path.join(stateDir, "controller");
     const extensionDir = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
-    const socketPath = path.join(stateDir, "workers", "42-architect-edb483d7.sock");
+    const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const controllerSocketPath = path.join(stateDir, "workers", "controller.sock");
     const windows = commands.filter((command) => command[1] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
@@ -1195,7 +1302,7 @@ describe("ProcessManager", () => {
   it("never promotes stale queue entries whose trees are not queued", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
-    const closed = formatIssueKey("sjawhar", "legion", 45);
+    const closed = "LEGION-45";
     tree(state, root);
     tree(state, child);
     tree(state, grandchild);
@@ -1404,10 +1511,10 @@ describe("ProcessManager", () => {
 
     await processes.resurrect(root);
 
-    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
-    const socketPath = path.join(stateDir, "workers", "42-architect-edb483d7.sock");
+    const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
       `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`
@@ -1435,10 +1542,10 @@ describe("ProcessManager", () => {
       log.mockRestore();
     }
 
-    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
-    const socketPath = path.join(stateDir, "workers", "42-architect-edb483d7.sock");
+    const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
       `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`
@@ -1477,11 +1584,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "closed",
+      status: "done",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     state.phases[root] = { phase: "merger", sessionId: "ses_root_merger" };
     state.phases[child] = { phase: "reviewer", sessionId: "ses_child_reviewer" };
@@ -1591,11 +1696,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     state.roles[roleToken("omp", child, "implementer")] = {
       issue: child,
@@ -1665,11 +1768,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     state.roles[roleToken("omp", child, "implementer")] = {
       issue: child,
@@ -1722,20 +1823,16 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     state.issues[grandchild] = {
       key: grandchild,
       title: "Grandchild",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     state.roles[roleToken("omp", child, "implementer")] = {
       issue: child,
@@ -2106,10 +2203,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -2170,11 +2265,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const architectToken = roleToken("omp", root, "architect");
     state.roles[architectToken] = {
@@ -2217,7 +2310,7 @@ describe("ProcessManager", () => {
 
     expect(controlRequests).toEqual([
       {
-        subject: "legion.ctl.sjawhar-legion-42.3",
+        subject: "legion.ctl.legion-42.3",
         json: JSON.stringify(directive),
       },
     ]);
@@ -2230,11 +2323,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const role: LegionRole = "implementer";
     const token = roleToken("omp", child, role);
@@ -2274,11 +2365,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const role: LegionRole = "implementer";
     const token = roleToken("omp", child, role);
@@ -2338,11 +2427,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
+      status: "in_progress",
     };
     const role: LegionRole = "implementer";
     const token = roleToken("omp", child, role);
@@ -2393,11 +2480,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const role: LegionRole = "implementer";
     const token = roleToken("omp", child, role);
@@ -2451,11 +2536,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const role: LegionRole = "implementer";
     const token = roleToken("omp", child, role);
@@ -2499,11 +2582,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const role: LegionRole = "implementer";
     const token = roleToken("omp", child, role);
@@ -2566,11 +2647,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const role: LegionRole = "implementer";
     const token = roleToken("omp", child, role);
@@ -2639,11 +2718,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const role: LegionRole = "implementer";
     const token = roleToken("omp", child, role);
@@ -2712,11 +2789,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const implementerToken = roleToken("omp", child, "implementer");
     const testerToken = roleToken("omp", child, "tester");
@@ -3441,11 +3516,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const role: LegionRole = "architect";
     const token = roleToken("omp", child, role);
@@ -3611,7 +3684,7 @@ describe("ProcessManager", () => {
         await Promise.all([processes.resurrect(root), processes.resurrect(root)]);
         expect(await processes.probe(root)).toBe("alive");
         expect((await commandRunner(["tmux", "list-windows", "-t", session])).stdout).toContain(
-          "sjawhar__legion-42"
+          "legion-42"
         );
       } finally {
         await commandRunner(["tmux", "kill-session", "-t", session]);
@@ -3621,16 +3694,14 @@ describe("ProcessManager", () => {
 
   it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
     const stateDir = await temporaryDir();
-    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
     await mkdir(workspace, { recursive: true });
     const state = newLegionState("omp", 1);
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -3657,7 +3728,7 @@ describe("ProcessManager", () => {
       (command) => command[0] === "tmux" && command[1] === "new-window" && command.includes("-n")
     );
     if (!windowCommand) throw new Error("worker spawn did not open a tmux window");
-    expect(windowCommand[windowCommand.indexOf("-n") + 1]).toBe("sjawhar__legion-42");
+    expect(windowCommand[windowCommand.indexOf("-n") + 1]).toBe("legion-42");
     expect(tmuxWindowEnvironment(windowCommand)).toEqual({
       LEGION_TREE: root,
       LEGION_ISSUE: root,
@@ -3681,7 +3752,7 @@ describe("ProcessManager", () => {
       "tester.md"
     );
     expect(windowCommand.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-tester-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${promptPath})" --append-system-prompt '${addressingFragment("omp", root, root, "tester").replaceAll("'", "'\\''")}'`
+      `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "tester-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${promptPath})" --append-system-prompt '${addressingFragment("omp", root, root, "tester").replaceAll("'", "'\\''")}'`
     );
     const claim = managedState.roles[roleToken("omp", root, "tester")];
     if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");
@@ -3691,7 +3762,7 @@ describe("ProcessManager", () => {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@99",
       tmuxPaneId: "%201",
-      socketPath: path.join(stateDir, "workers", "42-tester-edb483d7.sock"),
+      socketPath: path.join(stateDir, "workers", "tester-9e2fb104.sock"),
     });
   });
 
@@ -3703,10 +3774,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -3756,10 +3825,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -3812,10 +3879,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -3881,19 +3946,15 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [child],
-      released: true,
-      labels: [],
     };
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -3971,19 +4032,15 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [child],
-      released: true,
-      labels: [],
     };
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     // No root locator: the root leg is skipped entirely, isolating this test to the worker race.
     state.trees[root] = {
@@ -4046,19 +4103,15 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [child],
-      released: true,
-      labels: [],
     };
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -4124,10 +4177,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     // No root locator: isolates this test to the worker race.
     state.trees[root] = {
@@ -4208,10 +4259,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -4298,10 +4347,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     tree(state);
     const token = roleToken("omp", root, "tester");
@@ -4350,10 +4397,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     tree(state);
     const token = roleToken("omp", root, "tester");
@@ -4394,10 +4439,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -4601,10 +4644,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -4688,10 +4729,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -4745,10 +4784,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -4795,10 +4832,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -4874,10 +4909,8 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -4933,19 +4966,15 @@ describe("ProcessManager", () => {
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [child],
-      released: true,
-      labels: [],
     };
     state.issues[child] = {
       key: child,
       title: "Child",
       parent: root,
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     tree(state);
     const { manager: processes } = manager(state, {
@@ -5631,11 +5660,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     // The child issue has since graduated into its own tree root: rootForIssue(child) now
     // resolves to `child` itself, not `root` — exactly the case the old root-architect exclusion
@@ -5677,11 +5704,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const plannerGate = Promise.withResolvers<void>();
     const { manager: processes } = manager(state, {
@@ -6093,7 +6118,7 @@ describe("ProcessManager", () => {
     const deadToken = roleToken("omp", root, "tester");
     state.roles[deadToken] = { issue: root, role: "tester", pendingAssignment: "verify #41" };
 
-    const otherRoot = formatIssueKey("sjawhar", "legion", 99);
+    const otherRoot = "LEGION-99";
     state.trees[otherRoot] = {
       root: otherRoot,
       generation: 1,
@@ -6131,7 +6156,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
     };
-    const otherRoot = formatIssueKey("sjawhar", "legion", 77);
+    const otherRoot = "LEGION-77";
     state.trees[otherRoot] = {
       root: otherRoot,
       generation: 1,
@@ -6741,11 +6766,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const token = roleToken("omp", child, "implementer");
     state.roles[token] = {
@@ -6827,11 +6850,9 @@ describe("ProcessManager", () => {
     state.issues[child] = {
       key: child,
       title: "Child",
-      state: "open",
+      status: "in_progress",
       parent: root,
       children: [],
-      released: true,
-      labels: [],
     };
     const token = roleToken("omp", child, "implementer");
     state.roles[token] = {

@@ -5,7 +5,6 @@ import {
   controllerToken,
   type IssueKey,
   type LegionRole,
-  parseIssueKey,
   parseRoleToken,
   roleToken,
   roleTopic,
@@ -19,6 +18,7 @@ import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { createCancellableSleep } from "./cancellable-sleep";
 import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
+import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
 import type { LegionState, TreeState, WorkerLocator, WorkerRoleClaim } from "./legion-state";
 import { StopFailed, TreeClosingError } from "./process-errors";
@@ -99,6 +99,7 @@ export interface ProcessManagerDeps {
    * supplies this. */
   onAdmissionEvent?(token: string, event: "reservation-released" | "queue-drain-triggered"): void;
   workerCatchup: WorkerCatchupDeps;
+  dispatchClient: DispatchClient;
   /** Invalidates a session's daemon-minted capability the moment its process is observed dead, so a stale credential file cannot keep minting grants until a respawn overwrites it. */
   revokeSessionCapability(sessionId: string): void;
   now(): number;
@@ -114,16 +115,7 @@ const TMUX_RECONCILIATION_GRACE_MS = 120_000;
 export { StopFailed, TreeClosingError } from "./process-errors";
 
 function treeName(issue: IssueKey): string {
-  const parsed = parseIssueKey(issue);
-  if (!parsed) throw new Error(`Invalid IssueKey: ${issue}`);
-  const encodeIssuePart = (part: string) => {
-    const normalized = part.toLowerCase();
-    if (!/^[a-z0-9._-]+$/.test(normalized)) {
-      throw new Error(`Invalid Legion issue token part: ${part}`);
-    }
-    return normalized.replaceAll("_", "_u").replaceAll(".", "_d").replaceAll("-", "_h");
-  };
-  const fullName = `${encodeIssuePart(parsed.owner)}__${encodeIssuePart(parsed.repo)}-${parsed.number}`;
+  const fullName = issue.toLowerCase();
   if (fullName.length <= MAX_TMUX_WINDOW_NAME_LENGTH) return fullName;
 
   const suffix = createHash("sha256").update(fullName).digest("hex").slice(0, 16);
@@ -133,14 +125,12 @@ function treeName(issue: IssueKey): string {
 /**
  * A worker socket's basename must stay well under the ~100-byte Unix socket path limit
  * regardless of the issue key's length (unlike `treeName`, which only bounds itself to tmux's
- * much longer window-name limit): derived from the issue number and role alone, plus a short
- * hash of the full issue key to disambiguate the same issue number across different repos.
+ * much longer window-name limit): derived from the role and a short hash of the full issue key,
+ * so an unusually long Dispatch project token still produces a bounded, unique name.
  */
 function workerSocketBasename(issue: IssueKey, role: LegionRole): string {
-  const parsed = parseIssueKey(issue);
-  if (!parsed) throw new Error(`Invalid IssueKey: ${issue}`);
   const hash = createHash("sha256").update(issue).digest("hex").slice(0, 8);
-  return `${parsed.number}-${role}-${hash}`;
+  return `${role}-${hash}`;
 }
 
 /** Builds the second `--append-system-prompt` fragment every root and phase-worker process gets,
@@ -1079,6 +1069,20 @@ export class ProcessManager {
 
     tree.status = "closed";
     delete tree.lingerUntil;
+    // The only two paths into `closeTreeLocked` are `expireLinger` (whose linger began on this
+    // same issue's own `issue.closed` event — `reduceIssueClosed` applies the closed payload's
+    // `status: "done"` onto `state.issues[treeKey]` before ever emitting the `linger` effect)
+    // and `reportRootExit` (gated on `state.issues[treeKey]?.status === "done"` by its caller,
+    // `handleProcessExit`). Every real caller therefore already has a Dispatch-side `done`
+    // status by the time it gets here — writing it again is not just redundant, it 404s: Dispatch
+    // refuses a further status PATCH on an issue it already considers closed ("issue is closed"),
+    // and that failure is permanent, not transient, so `writeStatus`'s catch would park it in
+    // `pendingStatusWrites` for resync to retry forever, never once succeeding. Only write when
+    // the local mirror disagrees — a hypothetical future caller that closes a tree without the
+    // issue already being done.
+    if (this.deps.state.issues[treeKey]?.status !== "done") {
+      await writeStatus(this.deps.state, this.deps.dispatchClient, treeKey, "done");
+    }
     await this.releaseSlot(treeKey);
     // Every stopped claim above (one with a locator) is already deleted; this also clears any
     // remaining claim under the tree that never had a locator to stop in the first place (a
@@ -1687,12 +1691,12 @@ export class ProcessManager {
   /** Provisions the jj workspace and credential wiring shared by every issue's process — the
    * root architect and every phase worker alike. */
   private async provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
-    const parsed = parseIssueKey(issue);
-    if (!parsed) throw new Error(`Invalid IssueKey: ${issue}`);
+    const [owner] = this.deps.config.repo.split("/") as [string, string];
     return provisionIssueWorkspace(issue, {
+      repo: this.deps.config.repo,
       extensionPackage: EXTENSION_PACKAGE,
       stateDir: this.deps.config.stateDir,
-      provisioningToken: async () => await this.deps.provisioningToken(parsed.owner),
+      provisioningToken: async () => await this.deps.provisioningToken(owner),
       credentialHelper: this.deps.credentialHelper,
       run: async (command, options) => {
         const result = await this.deps.run(command, options);
@@ -1753,6 +1757,7 @@ export class ProcessManager {
     );
     tree.locator = locator;
     tree.status = "active";
+    await writeStatus(this.deps.state, this.deps.dispatchClient, tree.root, "in_progress");
   }
 
   private issueDepth(issue: IssueKey): number {

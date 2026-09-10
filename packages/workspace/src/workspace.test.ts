@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { formatIssueKey } from "@legion/contracts";
 import { provisionIssueWorkspace, type RunResult } from "./workspace";
 
 type RunCall = {
@@ -119,15 +118,16 @@ function credentialConfigCommands(gitDir: string, helper: string): string[][] {
 describe("provisionIssueWorkspace", () => {
   test("clones a missing repository before fetching and provisioning its issue workspace", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
-    const issue = formatIssueKey("acme", "widgets", 42);
+    const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
-    const bookmark = "legion/issue-42";
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    const bookmark = "legion/WIDGETS-42";
     const calls: RunCall[] = [];
     process.env.LEGION_MAX_RECURSION_DEPTH = "11";
 
     const spec = await provisionIssueWorkspace(issue, {
       extensionPackage,
+      repo: "acme/widgets",
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
@@ -159,7 +159,7 @@ describe("provisionIssueWorkspace", () => {
         "add",
         workspaceDir,
         "--name",
-        "issue-42",
+        "widgets-42",
         "--revision",
         "main",
         "-R",
@@ -177,14 +177,15 @@ describe("provisionIssueWorkspace", () => {
 
   test("creates a missing workspace parent before adding an issue workspace", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
-    const issue = formatIssueKey("acme", "widgets", 42);
+    const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
     await provisionIssueWorkspace(issue, {
       extensionPackage,
+      repo: "acme/widgets",
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
@@ -199,9 +200,9 @@ describe("provisionIssueWorkspace", () => {
   });
   test("configures the backing Git repository for a stock JJ workspace", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
-    const issue = formatIssueKey("acme", "widgets", 42);
+    const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     const gitDir = path.join(repoCloneDir, ".git");
     await mkdir(path.dirname(repoCloneDir), { recursive: true });
     expect(
@@ -214,6 +215,7 @@ describe("provisionIssueWorkspace", () => {
 
     await provisionIssueWorkspace(issue, {
       extensionPackage,
+      repo: "acme/widgets",
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
@@ -239,9 +241,9 @@ describe("provisionIssueWorkspace", () => {
   test("runs the supplied pinned credential helper instead of a PATH Legion and fails loudly", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
     const helperDir = await temporaryDirectory();
-    const issue = formatIssueKey("acme", "widgets", 42);
+    const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     const gitDir = path.join(repoCloneDir, ".git");
     const runtime = path.join(helperDir, "bun");
     const cli = path.join(helperDir, "legion-cli.ts");
@@ -273,6 +275,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
     await provisionIssueWorkspace(issue, {
       extensionPackage,
+      repo: "acme/widgets",
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper: pinnedHelper,
@@ -316,15 +319,16 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
   test("does not add a second workspace when an issue is reactivated", async () => {
     const stateDir = await temporaryDirectory();
-    const issue = formatIssueKey("acme", "widgets", 42);
+    const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     const calls: RunCall[] = [];
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
     const deps = {
       extensionPackage,
+      repo: "acme/widgets" as const,
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
@@ -343,7 +347,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     await expect(provisionIssueWorkspace(issue, deps)).resolves.toEqual({
       repoCloneDir,
       workspaceDir,
-      bookmark: "legion/issue-42",
+      bookmark: "legion/WIDGETS-42",
     });
     const fetch = calls[1];
     if (!fetch) throw new Error("Provisioning did not fetch the repository");
@@ -351,7 +355,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(calls.map((call) => call.cmd)).toEqual([
       ["jj", "workspace", "update-stale"],
       ["jj", "git", "fetch", "-R", repoCloneDir],
-      ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
+      ["jj", "bookmark", "set", "legion/WIDGETS-42", "--allow-backwards"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
     ]);
   });
@@ -362,12 +366,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       { name: "stock JJ 0.44", command: STOCK_JJ },
     ]) {
       const stateDir = path.join(await temporaryDirectory(), "state");
-      const issue = formatIssueKey("acme", "widgets", 42);
+      const issue = "WIDGETS-42";
       const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-      const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+      const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
       const remoteDir = path.join(stateDir, "remote");
       const siblingDir = path.join(stateDir, "sibling");
-      const bookmark = "legion/issue-42";
+      const bookmark = "legion/WIDGETS-42";
       process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       const runSuccessfully = async (args: string[], options?: RunCall["opts"]) => {
@@ -377,6 +381,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       };
       const deps = {
         extensionPackage,
+        repo: "acme/widgets" as const,
         stateDir,
         provisioningToken: async () => "installation-token",
         credentialHelper,
@@ -434,9 +439,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
   test("recovers a jj registration for a deleted issue workspace", async () => {
     const stateDir = await temporaryDirectory();
-    const issue = formatIssueKey("acme", "widgets", 42);
+    const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     const gitDir = path.join(repoCloneDir, ".git");
     const calls: RunCall[] = [];
     let workspaceAddAttempts = 0;
@@ -448,6 +453,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     await expect(
       provisionIssueWorkspace(issue, {
         extensionPackage,
+        repo: "acme/widgets",
         stateDir,
         provisioningToken: async () => "installation-token",
         credentialHelper,
@@ -459,7 +465,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
               return {
                 exitCode: 1,
                 stdout: "",
-                stderr: "Workspace named 'issue-42' already exists",
+                stderr: "Workspace named 'widgets-42' already exists",
               };
             }
             await mkdir(workspaceDir, { recursive: true });
@@ -470,7 +476,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     ).resolves.toEqual({
       repoCloneDir,
       workspaceDir,
-      bookmark: "legion/issue-42",
+      bookmark: "legion/WIDGETS-42",
     });
 
     const fetch = calls[0];
@@ -485,13 +491,13 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         "add",
         workspaceDir,
         "--name",
-        "issue-42",
+        "widgets-42",
         "--revision",
         "main",
         "-R",
         repoCloneDir,
       ],
-      ["jj", "workspace", "forget", "issue-42", "--cleanup", "--force", "-R", repoCloneDir],
+      ["jj", "workspace", "forget", "widgets-42", "--cleanup", "--force", "-R", repoCloneDir],
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       [
         "jj",
@@ -499,20 +505,20 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         "add",
         workspaceDir,
         "--name",
-        "issue-42",
+        "widgets-42",
         "--revision",
-        "legion/issue-42",
+        "legion/WIDGETS-42",
         "-R",
         repoCloneDir,
       ],
-      ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
+      ["jj", "bookmark", "set", "legion/WIDGETS-42", "--allow-backwards"],
       ...credentialConfigCommands(gitDir, credentialHelper),
     ]);
   });
 
   test("rejects a partial repository clone before provisioning an issue workspace", async () => {
     const stateDir = await temporaryDirectory();
-    const issue = formatIssueKey("acme", "widgets", 42);
+    const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
     await mkdir(repoCloneDir, { recursive: true });
 
@@ -520,6 +526,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       provisionIssueWorkspace(issue, {
         extensionPackage,
         stateDir,
+        repo: "acme/widgets",
         provisioningToken: async () => "installation-token",
         credentialHelper,
         run: async () => ({ exitCode: 0, stdout: "", stderr: "" }),

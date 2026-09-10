@@ -1,21 +1,13 @@
 import {
-  type AdmissionResponse,
-  type BacklogInput,
-  type CommentResponse,
-  type ControllerIssueInput,
   type ControllerReadyInput,
   type DaemonStateResponse,
   type EscalateInput,
+  type GatesRegisterInput,
   type GitHubTokenInput,
   type GitHubTokenResponse,
   type GrantInput,
   type GrantResponse,
-  type IssueCloseInput,
-  type IssueCreateInput,
-  type IssueCreateResponse,
-  type IssueTextInput,
-  type LabelsInput,
-  type LabelsResponse,
+  type IssueStatusInput,
   LegionDaemonApi,
   type MergeGateInput,
   type MergeGateResponse,
@@ -47,19 +39,13 @@ export interface LegionDaemonClient {
   readonly workerReady: (input: WorkerReadyInput) => Promise<void>;
   readonly spawnWorker: (input: SpawnWorkerInput) => Promise<SpawnWorkerResponse>;
   readonly mergeGate: (input: MergeGateInput) => Promise<MergeGateResponse>;
-  readonly issueCreate: (input: IssueCreateInput) => Promise<IssueCreateResponse>;
   readonly provisioningCredential: (
     input: ProvisioningCredentialInput
   ) => Promise<ProvisioningCredentialResponse>;
   readonly waveRelease: (input: WaveReleaseInput) => Promise<WaveReleaseResponse>;
-  readonly comment: (input: IssueTextInput) => Promise<CommentResponse>;
-  readonly postBody: (input: IssueTextInput) => Promise<void>;
-  readonly labels: (input: LabelsInput) => Promise<LabelsResponse>;
   readonly escalate: (input: EscalateInput) => Promise<void>;
-  readonly issueClose: (input: IssueCloseInput) => Promise<void>;
-  readonly gatesApprove: (input: ControllerIssueInput) => Promise<void>;
-  readonly admission: (input: ControllerIssueInput) => Promise<AdmissionResponse>;
-  readonly backlog: (input: BacklogInput) => Promise<void>;
+  readonly issueStatus: (input: IssueStatusInput) => Promise<void>;
+  readonly gatesRegister: (input: GatesRegisterInput) => Promise<void>;
   readonly processExit: (input: ProcessExitInput) => Promise<void>;
   readonly grant: (input: GrantInput) => Promise<GrantResponse>;
   readonly githubToken: (input: GitHubTokenInput) => Promise<GitHubTokenResponse>;
@@ -186,28 +172,21 @@ export function createLegionDaemonClient(
     spawnWorker: (input) =>
       post("/legion/v1/worker/spawn", input, LegionDaemonApi.SpawnWorker.response),
     mergeGate: (input) => post("/legion/v1/merge-gate", input, LegionDaemonApi.MergeGate.response),
-    issueCreate: (input) => post("/legion/v1/issues", input, LegionDaemonApi.IssueCreate.response),
     waveRelease: (input) =>
       post("/legion/v1/waves/release", input, LegionDaemonApi.WaveRelease.response),
-    comment: (input) => post("/legion/v1/issues/comment", input, LegionDaemonApi.Comment.response),
     provisioningCredential: (input) =>
       post(
         "/legion/v1/provisioning-credential",
         input,
         LegionDaemonApi.ProvisioningCredential.response
       ),
-    postBody: (input) =>
-      noContent("/legion/v1/issues/body", input, LegionDaemonApi.PostBody.response),
-    labels: (input) => post("/legion/v1/issues/labels", input, LegionDaemonApi.Labels.response),
     escalate: (input) => noContent("/legion/v1/escalate", input, LegionDaemonApi.Escalate.response),
-    issueClose: (input) =>
-      noContent("/legion/v1/issues/close", input, LegionDaemonApi.IssueClose.response),
+    issueStatus: (input) =>
+      noContent("/legion/v1/issues/status", input, LegionDaemonApi.IssueStatus.response),
+    gatesRegister: (input) =>
+      noContent("/legion/v1/gates/register", input, LegionDaemonApi.GatesRegister.response),
     workerSession: (input) =>
       post("/legion/v1/worker-session", input, LegionDaemonApi.WorkerSession.response),
-    gatesApprove: (input) =>
-      noContent("/legion/v1/gates/approve", input, LegionDaemonApi.GatesApprove.response),
-    admission: (input) => post("/legion/v1/admission", input, LegionDaemonApi.Admission.response),
-    backlog: (input) => noContent("/legion/v1/backlog", input, LegionDaemonApi.Backlog.response),
     processExit: (input) =>
       noContent("/legion/v1/process/exit", input, LegionDaemonApi.ProcessExit.response),
     grant: (input) => post("/legion/v1/grants", input, LegionDaemonApi.Grant.response),

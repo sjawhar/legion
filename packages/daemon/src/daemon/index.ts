@@ -16,7 +16,6 @@ import {
   defaultRunner,
   getCiStatusBatch,
 } from "../state/fetch";
-import { fetchGitHubProjectItems, type GitHubProjectItemsResult } from "../state/github-fetch";
 import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { rootForIssue } from "./api/context";
@@ -24,6 +23,7 @@ import { EnvoyPublishError } from "./api/http";
 import { setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, type GitHubAppRole, loadConfig } from "./config";
+import { createDispatchClient, type DispatchClient } from "./dispatch-client";
 import {
   createDaemonRunner,
   type DaemonEnvironment,
@@ -61,7 +61,7 @@ interface DaemonDependencies {
   readProcessCmdline?: ProcessManagerDeps["readProcessCmdline"];
   readPluginManifest(manifestPath: string): Promise<string>;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
-  fetchGitHubProjectItems(): Promise<GitHubProjectItemsResult>;
+  dispatchClient: DispatchClient;
   tokenManager: Pick<TokenManager, "getToken">;
   resolveDaemonEnvironment(
     ompInvocation: string,
@@ -89,13 +89,17 @@ export interface DaemonHandle {
   stop(): Promise<void>;
 }
 
-function projectBoard(legionId: string): { owner: string; number: number } {
-  const [owner, numberText, ...extra] = legionId.split("/");
-  const number = Number(numberText);
-  if (!owner || extra.length > 0 || !Number.isSafeInteger(number) || number <= 0) {
-    throw new Error(`LEGION_ID must match owner/number (got: ${legionId})`);
-  }
-  return { owner, number };
+/** The GitHub owner whose App installation token every configured role resolves against —
+ * `config.repo`'s owner, the single source of repo ownership since B6 (a Dispatch issue key
+ * carries no owner/repo of its own). Legacy `projectBoard`/`LEGION_ID must match owner/number`
+ * parsed this from `legionId` instead, a leftover from the pre-Dispatch GitHub Projects V2 board
+ * design where the project identifier doubled as `owner/number`; `legionId` is now an arbitrary
+ * daemon identity (tmux session naming, state dir, role-token namespacing) with no owner
+ * embedded in it, so that parse rejected any `legionId` not shaped like `owner/number` even
+ * though nothing GitHub-board-related is left to validate. */
+function repoOwner(repo: `${string}/${string}`): string {
+  const [owner] = repo.split("/") as [string, string];
+  return owner;
 }
 
 async function resolveConfiguredAppLogins(
@@ -114,20 +118,6 @@ async function resolveConfiguredAppLogins(
     throw new Error("gates.merge=human requires at least one configured GitHub App login");
   }
   return [...new Set(logins)];
-}
-
-export function createBoardProjectItemsFetcher(
-  board: { owner: string; number: number },
-  tokenManager: Pick<TokenManager, "getToken">,
-  runner: CommandRunner = defaultRunner
-): () => Promise<GitHubProjectItemsResult> {
-  return () =>
-    fetchGitHubProjectItems(board.owner, board.number, runner, async (owner) => {
-      const lease = await tokenManager.getToken("implement", owner);
-      return {
-        env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
-      };
-    });
 }
 
 export function createCiStatusFetcher(
@@ -257,9 +247,23 @@ async function verifyLegionPluginLoaded(
   }
 }
 
-function defaultDependencies(config: DaemonConfig): DaemonDependencies {
-  const board = projectBoard(config.legionId);
+function defaultDependencies(
+  config: DaemonConfig,
+  overrides: Partial<DaemonDependencies> = {}
+): DaemonDependencies {
   const tokenManager = new TokenManager(config.githubApps);
+  if (!overrides.dispatchClient && (!config.dispatchUrl || !config.dispatchToken)) {
+    throw new Error(
+      "dispatch_url and DISPATCH_TOKEN are required to run the Legion daemon (Dispatch is the sole issue lifecycle source)"
+    );
+  }
+  const dispatchClient =
+    overrides.dispatchClient ??
+    createDispatchClient({
+      baseUrl: config.dispatchUrl as string,
+      token: config.dispatchToken as string,
+      project: config.dispatchProject,
+    });
   return {
     loadState,
     saveState,
@@ -270,7 +274,7 @@ function defaultDependencies(config: DaemonConfig): DaemonDependencies {
     statPrompt: stat,
     readPluginManifest: (manifestPath) => readFile(manifestPath, "utf8"),
     envoyPublish: (topic, payloadJson) => publishToEnvoy(config, topic, payloadJson),
-    fetchGitHubProjectItems: createBoardProjectItemsFetcher(board, tokenManager),
+    dispatchClient,
     tokenManager,
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimeout: (timer) => clearTimeout(timer as number),
@@ -291,15 +295,15 @@ export async function startDaemon(
   config: DaemonConfig,
   options: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
-  const board = projectBoard(config.legionId);
-  const deps = { ...defaultDependencies(config), ...options.deps };
+  const owner = repoOwner(config.repo);
+  const deps = { ...defaultDependencies(config, options.deps), ...options.deps };
   // At most one daemon runs per project: two sharing a durable JetStream
   // consumer would split its messages and race saves to the same state
   // file. Released on clean shutdown (stop(), below) or on any startup
   // failure past this point.
   const instanceLock = await deps.acquireInstanceLock(config.stateDir);
   try {
-    return await startDaemonLocked(config, deps, board, instanceLock);
+    return await startDaemonLocked(config, deps, owner, instanceLock);
   } catch (error) {
     await instanceLock.release();
     throw error;
@@ -309,7 +313,7 @@ export async function startDaemon(
 async function startDaemonLocked(
   config: DaemonConfig,
   deps: DaemonDependencies,
-  board: { owner: string; number: number },
+  owner: string,
   instanceLock: InstanceLock
 ): Promise<DaemonHandle> {
   const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
@@ -318,8 +322,8 @@ async function startDaemonLocked(
   const runner = createDaemonRunner(environment, deps.runner);
   await verifyOmpAgentsCapability(environment.ompInvocation, runner);
   await verifyLegionPluginLoaded(environment.ompInvocation, runner, deps.readPluginManifest);
-  config.appLogins = await resolveConfiguredAppLogins(config, deps.tokenManager, board.owner);
-  await deps.tokenManager.getToken("implement", board.owner);
+  config.appLogins = await resolveConfiguredAppLogins(config, deps.tokenManager, owner);
+  await deps.tokenManager.getToken("implement", owner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,
@@ -364,7 +368,8 @@ async function startDaemonLocked(
       (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
     readProcessCmdline: deps.readProcessCmdline,
-    workerCatchup: { runner, tokenManager: deps.tokenManager },
+    workerCatchup: { runner, tokenManager: deps.tokenManager, repo: config.repo },
+    dispatchClient: deps.dispatchClient,
     now: deps.now,
   });
 
@@ -462,14 +467,14 @@ async function startDaemonLocked(
       runResync({
         state,
         config,
-        fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
+        dispatchClient: deps.dispatchClient,
         fetchCiStatusBatch,
         applyEffects: eventPump.applyEffects,
         now: deps.now,
       })
     );
     console.log(
-      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems} ciFetchFailures=${payload.ciFetchFailures}${
+      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} ciFetchFailures=${payload.ciFetchFailures}${
         payload.ciFetchFailureDetails.length === 0
           ? ""
           : ` ciFetchFailureDetails=${payload.ciFetchFailureDetails
@@ -489,6 +494,7 @@ async function startDaemonLocked(
     runner,
     tokenManager: deps.tokenManager,
     processManager,
+    dispatchClient: deps.dispatchClient,
     envoyPublish: deps.envoyPublish,
     onTreeReady: emitOverseerCatchup,
     // The controller is a role holder like any other: its catch-up on ready is the same
@@ -510,6 +516,7 @@ async function startDaemonLocked(
     {
       port: config.port,
       hostname: "127.0.0.1",
+      repo: config.repo,
       gates: config.gates,
       appLogins: config.appLogins,
     },

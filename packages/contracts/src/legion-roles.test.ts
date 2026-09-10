@@ -1,9 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   controllerToken,
-  formatIssueKey,
   LEGION_ROLES,
-  parseIssueKey,
   parseRoleToken,
   roleToken,
   roleTopic,
@@ -12,31 +10,16 @@ import {
 
 const ENVOY_ROLE_TOKEN = /^[a-z0-9][a-z0-9_-]*$/;
 
-describe("issue keys", () => {
-  test("formats and parses owner/repo issue references", () => {
-    const issue = formatIssueKey("sjawhar", "legion", 42);
-
-    expect(issue).toBe("sjawhar/legion#42");
-    expect(parseIssueKey(issue)).toEqual({ owner: "sjawhar", repo: "legion", number: 42 });
-  });
-
-  test("rejects malformed issue references", () => {
-    expect(parseIssueKey("sjawhar/legion")).toBeUndefined();
-    expect(parseIssueKey("sjawhar/legion#not-a-number")).toBeUndefined();
-    expect(parseIssueKey("sjawhar/legion#42-extra")).toBeUndefined();
-  });
-});
-
 describe("role token grammar", () => {
   test("matches the injective Legion token grammar", () => {
-    const token = roleToken("omp", "sjawhar/legion#42", "implementer");
+    const token = roleToken("omp", "LEGION-42", "implementer");
 
-    expect(token).toBe("legion-omp-sjawhar__legion-42-implementer");
-    expect(roleTopic(token)).toBe("notifications.role.legion-omp-sjawhar__legion-42-implementer");
+    expect(token).toBe("legion-omp-legion-42-implementer");
+    expect(roleTopic(token)).toBe("notifications.role.legion-omp-legion-42-implementer");
   });
 
   test("round-trips the complete issue key", () => {
-    const issue = formatIssueKey("sjawhar", "legion", 42);
+    const issue = "LEGION-42";
     const token = roleToken("omp", issue, "implementer");
 
     expect(parseRoleToken("omp", token)).toEqual({
@@ -57,49 +40,10 @@ describe("role token grammar", () => {
     });
   });
 
-  test("distinguishes a Dispatch key from a legacy owner/repo key with the same project prefix", () => {
-    const dispatchToken = roleToken("acme", "ACME-9", "planner");
-    const legacyToken = roleToken("acme", formatIssueKey("acme", "widgets", 9), "planner");
-
-    expect(dispatchToken).not.toBe(legacyToken);
-    expect(parseRoleToken("acme", dispatchToken)).toEqual({
-      project: "acme",
-      issue: "ACME-9",
-      role: "planner",
-    });
-  });
-
-  test("distinguishes repositories that collided after dash sanitization", () => {
-    const firstIssue = formatIssueKey("foo-bar", "baz", 17);
-    const secondIssue = formatIssueKey("foo", "bar-baz", 17);
-    const first = roleToken("omp", firstIssue, "reviewer");
-    const second = roleToken("omp", secondIssue, "reviewer");
-
-    expect(first).toBe("legion-omp-foo_hbar__baz-17-reviewer");
-    expect(second).toBe("legion-omp-foo__bar_hbaz-17-reviewer");
-    expect(first).not.toBe(second);
-    expect(parseRoleToken("omp", first)).toEqual({
-      project: "omp",
-      issue: firstIssue,
-      role: "reviewer",
-    });
-    expect(parseRoleToken("omp", second)).toEqual({
-      project: "omp",
-      issue: secondIssue,
-      role: "reviewer",
-    });
-  });
-
-  test("round-trips dots, underscores, and hyphens in issue names", () => {
-    const issue = formatIssueKey("Owner.Name", "repo_name-with.dot", 9);
-    const token = roleToken("omp", issue, "tester");
-
-    expect(token).toBe("legion-omp-owner_dname__repo_uname_hwith_ddot-9-tester");
-    expect(parseRoleToken("omp", token)).toEqual({
-      project: "omp",
-      issue: "owner.name/repo_name-with.dot#9",
-      role: "tester",
-    });
+  test("rejects an invalid Dispatch issue key", () => {
+    expect(() => roleToken("omp", "sjawhar/legion#42", "implementer")).toThrow(
+      "Invalid IssueKey: sjawhar/legion#42"
+    );
   });
 
   test("round-trips the controller token", () => {
@@ -110,14 +54,14 @@ describe("role token grammar", () => {
   });
 
   test("rejects invalid mint projects loudly", () => {
-    expect(() => roleToken("omp-tool", "sjawhar/legion#42", "implementer")).toThrow(
+    expect(() => roleToken("omp-tool", "LEGION-42", "implementer")).toThrow(
       "Invalid Legion project token"
     );
   });
 
   test("rejects a token for another project or an unknown role", () => {
     expect(parseRoleToken("other", controllerToken("omp"))).toBeUndefined();
-    expect(parseRoleToken("omp", "legion-omp-sjawhar__legion-42-operator")).toBeUndefined();
+    expect(parseRoleToken("omp", "legion-omp-legion-42-operator")).toBeUndefined();
   });
 });
 
@@ -142,11 +86,18 @@ describe("sanitizeToken", () => {
       }
       return value;
     };
+    const randomDispatchProject = () => {
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+      const length = (next() % 10) + 1;
+      let value = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[next() % 26];
+      for (let index = 1; index < length; index += 1) {
+        value += alphabet[next() % alphabet.length];
+      }
+      return value;
+    };
 
     for (let index = 0; index < 1_000; index += 1) {
-      const owner = randomTokenPart();
-      const repo = randomTokenPart();
-      const issue = formatIssueKey(owner, repo, (next() % 10_000) + 1);
+      const issue = `${randomDispatchProject()}-${(next() % 10_000) + 1}`;
       const role = LEGION_ROLES[next() % LEGION_ROLES.length];
       const token = roleToken("omp", issue, role);
 

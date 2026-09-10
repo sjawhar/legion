@@ -12,11 +12,12 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { formatIssueKey, roleToken } from "@legion/contracts";
+import { roleToken } from "@legion/contracts";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import type { DaemonConfig } from "../config";
 import { newLegionState } from "../legion-state";
 import { ProcessManager, type ProcessManagerDeps } from "../processes";
+import { fakeDispatchClient } from "./ci-fixtures";
 
 const SESSION = "legion-smoke-T8Shutdown";
 const STUCK_OMP = path.join(
@@ -156,7 +157,7 @@ function config(
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "bun",
     dispatchProject: "LEGSMOKE",
-    boardProjectIds: [],
+    repo: "sjawhar/legion",
     repos: ["sjawhar/legion"],
     appLogins: [],
     admissionCap: 1,
@@ -214,8 +215,10 @@ function processManagerDeps(
           },
         }),
       },
+      repo: "sjawhar/legion",
     },
     now: () => Date.now(),
+    dispatchClient: fakeDispatchClient(),
     revokeSessionCapability: () => {},
   };
 }
@@ -232,15 +235,13 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
   // against a real ProcessManager/HTTP daemon with a fake `run`/`connectWorkerRpc`.
   it("does not block closeTree's stop-then-delete for a worker whose /worker/started request is still waiting on its GitHub lease", async () => {
     const stateDir = await scratchDir();
-    const root = formatIssueKey("sjawhar", "legion", 9003);
+    const root = "LEGION-9003";
     const state = newLegionState("realshutdown", 1);
     state.issues[root] = {
       key: root,
       title: "Root",
-      state: "open",
+      status: "in_progress",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[root] = {
       root,
@@ -293,6 +294,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       const apiDeps: LegionApiDeps = {
         state,
         processManager: processes,
+        dispatchClient: fakeDispatchClient(),
         tokenManager: {
           getToken: async () => {
             reachedLease.resolve();
@@ -370,7 +372,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       await waitForSocket(socketPath);
       expect(await paneAlive(paneId)).toBe(true);
 
-      const root = formatIssueKey("sjawhar", "legion", 9001);
+      const root = "LEGION-9001";
       const state = newLegionState("realshutdown", 1);
       state.trees[root] = {
         root,
@@ -425,15 +427,13 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       const secretFile = path.join(stateDir, "secret.txt");
       const resultFile = path.join(stateDir, "result.txt");
 
-      const root = formatIssueKey("sjawhar", "legion", 9002);
+      const root = "LEGION-9002";
       const state = newLegionState("realshutdown", 1);
       state.issues[root] = {
         key: root,
         title: "Root",
-        state: "closed",
+        status: "done",
         children: [],
-        released: true,
-        labels: [],
       };
       state.trees[root] = {
         root,
@@ -450,6 +450,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         const apiDeps: LegionApiDeps = {
           state,
           processManager: processes,
+          dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => {
               throw new Error("unused");

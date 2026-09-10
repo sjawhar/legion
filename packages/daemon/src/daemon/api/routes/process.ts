@@ -90,7 +90,7 @@ export async function handleProcessExit(
   if (!treeState || treeState.generation !== generation) {
     throw new HttpError(409, "Stale process generation");
   }
-  if (ctx.deps.state.issues[tree]?.state === "closed") {
+  if (ctx.deps.state.issues[tree]?.status === "done") {
     // Never await/join a `closeTree` here: the caller of this route IS the tree's own root
     // process, currently blocked on this very HTTP response inside its `session_shutdown`
     // hook. If a `closeTree` for this tree is already in flight (the common case — a linger

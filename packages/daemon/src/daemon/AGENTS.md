@@ -13,13 +13,13 @@ The localhost-only Legion API lives in `api.ts`.
 | `GET /legion/v1/state` | Read redacted durable Legion state. |
 | `POST /legion/v1/process/started` | Register a root process with transcript-derived architect role backing. |
 | `POST /legion/v1/process/exit` | Authenticated architect exit that releases an admission slot or marks its root process dead. |
-| `POST /legion/v1/issues`, `/waves/release`, `/issues/comment`, `/issues/body`, `/issues/labels`, `/issues/close` | Scoped architect writes. |
+| `POST /legion/v1/issues/status`, `/waves/release`, `/gates/register` | Scoped architect writes (any status in its tree; wave release PATCHes `todo` per child; gate registers a design-ask id) — and the controller capability may additionally set `todo`\|`backlog`\|`icebox` on any project issue via `/issues/status`. |
 | `POST /legion/v1/worker-session`, `/grants`, `/git-credential`, `/gh-token` | Durable architect and worker capability recovery, and credential grants. |
 | `POST /legion/v1/worker/started` | Registers a headless phase worker's session against its daemon-minted boot token; mints its session capability, git identity lease, and records its tmux/socket locator and a hash of its boot token on the claim (so `/worker-session` can rebind it after a daemon restart). |
 | `POST /legion/v1/worker/ready` | Verifies the worker's session capability and sends its queued assignment (`pendingAssignment`, cleared once sent) as an OMP RPC `prompt` frame over the worker's `legion worker-shim` socket. |
 | `POST /legion/v1/worker/spawn` | Architect-only: spawns a phase worker for `{issue, role, task}` — resumes an already-live worker over its socket (`resumed`), respawns a dead one with `--resume` (`spawned`), opens a fresh pane (`spawned`), or — at the configured running-worker cap — enqueues the task in FIFO order for promotion once a slot frees (`queued`). |
 | `POST /legion/v1/phase/complete` | Authenticates via a short-lived grant (`{grantId, summary}`, resolved read-only — the same grant mechanism `/git-credential` and `/gh-token` use, never a live session secret) rather than a session capability. Verifies the claim for the grant's (issue, role) still belongs to the grant's session (409 `Grant does not match the worker currently holding this role` otherwise) and that the issue's active phase still matches (409 `Phase for <issue> is no longer owned by this worker` otherwise), then captures and clears the phase synchronously — before the publish `await`, so a second concurrent completion for the same phase always 409s on that check instead of both publishing — and publishes `{type:"phase-complete", issue, role, summary}` to the tree's architect role. A non-404 publish failure restores the captured phase and returns 502 (idempotent retry). A 404 no-holder never drops the completion: the phase is recorded as `phases[issue].completed = {summary, at}` instead of cleared, and the response is 202 — `overseerCatchup` replays it to a reconnecting architect, and `routeActive` treats a completed phase as no active phase (routes to the architect) until a fresh assignment overwrites the record. A save failure restores the captured phase and returns 500 (retry redoes the whole attempt). |
-| `POST /legion/v1/controller/ready`, `/gates/approve`, `/admission`, `/backlog` | Controller lifecycle and control-plane actions. |
+| `POST /legion/v1/controller/ready` | Controller lifecycle. |
 
 ## Files
 
@@ -34,7 +34,8 @@ The localhost-only Legion API lives in `api.ts`.
 | `api.ts` | Localhost extension/controller write surface and session-bound credential grants. |
 | `legion-state.ts` | Strict versioned state schema and atomic persistence. |
 | `catchup.ts` | Derived overseer and worker catch-up payloads. |
-| `resync.ts` | Low-frequency board convergence, re-emitted triage for unadmitted tracked roots, and residual anomaly reporting. |
+| `resync.ts` | Low-frequency: retries failed daemon-owned Dispatch status writes, heals Dispatch status drift this daemon's own durable consumer missed, reconciles unsettled PR check rollups, and reports root-issue anomalies. |
+| `dispatch-client.ts` | Thin HTTP client for Dispatch's native-tool API (`listIssues`/`getIssue`/`setStatus`) and `writeStatus`, the one helper every daemon-owned lifecycle status write goes through — a PATCH failure is logged and recorded on `state.pendingStatusWrites` for `resync.ts` to retry, never thrown back at the caller. |
 | `approval-check.ts` | Human approval status backstop for the current PR head. |
 | `worker-rpc.ts` | Minimal OMP RPC protocol v2 client (`negotiate_protocol`/`prompt`/`get_state`/`shutdown`) reached through a worker's `legion worker-shim` unix socket rather than a spawned process's stdio. |
 | `tmux.ts` | Pure tmux command construction/parsing (open/split a window, probe pane liveness and pid, kill a window or a single pane, list a session's unknown owned windows and its unrecorded worker-shim panes) over an injected `run` callback — no daemon state. |

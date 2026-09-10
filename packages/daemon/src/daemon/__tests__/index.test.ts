@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, formatIssueKey, roleTopic } from "@legion/contracts";
+import { controllerToken, roleTopic } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
@@ -11,6 +11,7 @@ import * as daemonIndex from "../index";
 import { newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
 import type { WorkerRpcClient } from "../worker-rpc";
+import { fakeDispatchClient } from "./ci-fixtures";
 
 const { startDaemon } = daemonIndex;
 
@@ -109,7 +110,7 @@ function controllerException(project: string): string {
       reason: "no_holder",
       payload: JSON.stringify({
         type: "triage",
-        issue: formatIssueKey("acme", "widgets", 42),
+        issue: "WIDGETS-42",
         preexistingChildren: [],
       }),
     }),
@@ -168,10 +169,7 @@ function daemonTestDependencies(
       envoyPublish: async (topic, payload) => {
         publications.push({ topic, payload: JSON.parse(payload) });
       },
-      fetchGitHubProjectItems: async () => ({
-        items: [],
-        excludedNullContentItems: 0,
-      }),
+      dispatchClient: fakeDispatchClient(),
       tokenManager: {
         getToken: async () => ({
           token: "test-token",
@@ -202,8 +200,8 @@ function config(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     dispatchProject: "LEGSMOKE",
-    boardProjectIds: ["PVT_board"],
     repos: ["acme/widgets"],
+    repo: "acme/widgets",
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 4,
     workerCap: 6,
@@ -238,85 +236,6 @@ const daemonEnvironment: DaemonEnvironment = {
 };
 
 describe("startDaemon", () => {
-  it("runs board resync queries with the board owner's implementer App token", async () => {
-    const originalEnvironment = {
-      GH_TOKEN: process.env.GH_TOKEN,
-      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
-      XDG_STATE_HOME: process.env.XDG_STATE_HOME,
-    };
-    process.env.GH_TOKEN = "personal-gh-token";
-    process.env.GITHUB_TOKEN = "personal-github-token";
-    process.env.GH_CONFIG_DIR = "/home/user/.config/gh";
-    process.env.XDG_STATE_HOME = "/tmp/legion-daemon-test-state";
-    const commandOptions: CommandRunnerOptions[] = [];
-    const runner: CommandRunner = async (_command, options) => {
-      if (options) commandOptions.push(options);
-      return {
-        stdout: JSON.stringify({
-          data: {
-            organization: {
-              projectV2: {
-                items: {
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                  nodes: [],
-                },
-              },
-            },
-          },
-        }),
-        stderr: "",
-        exitCode: 0,
-      };
-    };
-    const tokenCalls: Array<{ role: string; owner: string }> = [];
-    const tokenManager = {
-      getToken: async (role: "implement" | "review", owner: string) => {
-        tokenCalls.push({ role, owner });
-        return {
-          token: "ghs_board_owner_app_token",
-          expiresAt: "2099-01-01T00:00:00.000Z",
-          gitIdentity: {
-            name: "legion-implement[bot]",
-            email: "3202636+legion-implement[bot]@users.noreply.github.com",
-          },
-        };
-      },
-    };
-
-    try {
-      const { createBoardProjectItemsFetcher } = daemonIndex as typeof daemonIndex & {
-        createBoardProjectItemsFetcher?: (
-          board: { owner: string; number: number },
-          manager: typeof tokenManager,
-          commandRunner: CommandRunner
-        ) => () => Promise<unknown>;
-      };
-      expect(createBoardProjectItemsFetcher).toBeFunction();
-      if (!createBoardProjectItemsFetcher) throw new Error("Missing board resync fetcher");
-      await createBoardProjectItemsFetcher(
-        { owner: "example-org", number: 7 },
-        tokenManager,
-        runner
-      )();
-      expect(tokenCalls).toEqual([{ role: "implement", owner: "example-org" }]);
-      expect(commandOptions).toHaveLength(1);
-      expect(commandOptions[0]?.env).toMatchObject({
-        GH_TOKEN: "ghs_board_owner_app_token",
-        GH_CONFIG_DIR: "/tmp/legion-daemon-test-state/legion/gh",
-      });
-      expect(commandOptions[0]?.env?.GITHUB_TOKEN).toBeUndefined();
-    } finally {
-      if (originalEnvironment.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
-      else process.env.GH_TOKEN = originalEnvironment.GH_TOKEN;
-      if (originalEnvironment.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN;
-      else process.env.GITHUB_TOKEN = originalEnvironment.GITHUB_TOKEN;
-      if (originalEnvironment.GH_CONFIG_DIR === undefined) delete process.env.GH_CONFIG_DIR;
-      else process.env.GH_CONFIG_DIR = originalEnvironment.GH_CONFIG_DIR;
-      if (originalEnvironment.XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME;
-      else process.env.XDG_STATE_HOME = originalEnvironment.XDG_STATE_HOME;
-    }
-  });
   it("runs CI reconciliation queries with each PR owner's implementer App token", async () => {
     const commandOptions: CommandRunnerOptions[] = [];
     const runner: CommandRunner = async (_command, options) => {
@@ -364,15 +283,13 @@ describe("startDaemon", () => {
   it("does not resolve until boot-time admission reconciliation, including its tmux orphan reap, has settled", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
-    const issue = formatIssueKey("acme", "widgets", 42);
+    const issue = "WIDGETS-42";
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
     state.issues[issue] = {
       key: issue,
       title: "Queued at boot",
-      state: "open",
+      status: "todo",
       children: [],
-      released: true,
-      labels: [],
     };
     state.trees[issue] = {
       root: issue,
@@ -427,7 +344,7 @@ describe("startDaemon", () => {
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
           envoyPublish: async () => {},
-          fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
+          dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => ({
               token: "test-token",
@@ -472,7 +389,7 @@ describe("startDaemon", () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
-    const prIssue = formatIssueKey("acme", "widgets", 42);
+    const prIssue = "WIDGETS-42";
     state.prs["acme/widgets#7"] = {
       key: prIssue,
       repo: "acme/widgets",
@@ -512,10 +429,7 @@ describe("startDaemon", () => {
           statPrompt: async () => {},
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
-          fetchGitHubProjectItems: async () => ({
-            items: [],
-            excludedNullContentItems: 0,
-          }),
+          dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => {
               tokenCalls += 1;
@@ -555,7 +469,7 @@ describe("startDaemon", () => {
         ciCheckRuns: [{ name: "build", id: 900 }],
       });
       expect(logs).toContain(
-        "[legion] resync complete: anomalies=0 healed=0 reconciled-labels=0 excluded-null-content-items=0 ciFetchFailures=1 ciFetchFailureDetails=owner=acme error=GitHub App token request failed"
+        "[legion] resync complete: anomalies=0 healed=0 ciFetchFailures=1 ciFetchFailureDetails=owner=acme error=GitHub App token request failed"
       );
     } finally {
       await daemon?.stop();
@@ -767,8 +681,8 @@ describe("startDaemon", () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = { ...config(stateDir), admissionCap: 2 };
     const state = newLegionState(daemonConfig.project, 1);
-    const first = formatIssueKey("acme", "widgets", 42);
-    const second = formatIssueKey("acme", "widgets", 43);
+    const first = "WIDGETS-42";
+    const second = "WIDGETS-43";
     state.admission.queue.push(first, second);
     await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
       recursive: true,
@@ -820,10 +734,7 @@ describe("startDaemon", () => {
           statPrompt: async () => {},
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
-          fetchGitHubProjectItems: async () => ({
-            items: [],
-            excludedNullContentItems: 0,
-          }),
+          dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => ({
               token: "test-token",
@@ -891,10 +802,7 @@ describe("startDaemon", () => {
           statPrompt: async () => {},
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
-          fetchGitHubProjectItems: async () => ({
-            items: [],
-            excludedNullContentItems: 0,
-          }),
+          dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => ({
               token: "test-token",
@@ -972,6 +880,7 @@ describe("startDaemon", () => {
                 exitCode: 0,
               };
             },
+            dispatchClient: fakeDispatchClient(),
             resolveDaemonEnvironment: async () => daemonEnvironment,
             tokenManager: {
               getToken: async () => ({
@@ -1039,6 +948,7 @@ describe("startDaemon", () => {
               probeCommand = command;
               return { stdout: "", stderr: "LEGION_PLUGIN_LOADED=no\n", exitCode: 0 };
             },
+            dispatchClient: fakeDispatchClient(),
             resolveDaemonEnvironment: async () => daemonEnvironment,
             readPluginManifest: async (manifestPath) => {
               capturedManifestPath = manifestPath;
@@ -1109,10 +1019,7 @@ describe("startDaemon", () => {
           return validLegionPluginManifest;
         },
         envoyPublish: async () => {},
-        fetchGitHubProjectItems: async () => ({
-          items: [],
-          excludedNullContentItems: 0,
-        }),
+        dispatchClient: fakeDispatchClient(),
         tokenManager: {
           getToken: async () => ({
             token: "test-token",
@@ -1167,10 +1074,7 @@ describe("startDaemon", () => {
         envoyPublish: async () => {
           throw new Error("listener down");
         },
-        fetchGitHubProjectItems: async () => ({
-          items: [],
-          excludedNullContentItems: 0,
-        }),
+        dispatchClient: fakeDispatchClient(),
         tokenManager: {
           getToken: async () => ({
             token: "test-token",
@@ -1239,7 +1143,7 @@ describe("startDaemon", () => {
       resolveDaemonEnvironment: async () => daemonEnvironment,
       statPrompt: async () => {},
       envoyPublish: async () => {},
-      fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
+      dispatchClient: fakeDispatchClient(),
       tokenManager: {
         getToken: async () => ({
           token: "test-token",

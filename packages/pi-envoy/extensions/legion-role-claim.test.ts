@@ -71,7 +71,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   const intervals: (() => void)[] = [];
   const registrations: { readonly session_id: string; readonly topics: readonly string[] }[] = [];
   const heartbeatRegistration = Promise.withResolvers<void>();
-  const tree = "owner/repo#42";
+  const tree = "REPO-42";
   const sessionID = "ses_legion_root";
   const role = roleToken("omp", tree, "architect");
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";

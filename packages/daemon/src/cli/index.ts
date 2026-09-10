@@ -283,6 +283,10 @@ async function postController(pathname: string, body: Record<string, unknown>): 
   return payload;
 }
 
+async function cmdSetIssueStatus(issue: string, status: string): Promise<void> {
+  console.log(JSON.stringify(await postController("/legion/v1/issues/status", { issue, status })));
+}
+
 async function runCli(action: () => Promise<void>): Promise<void> {
   try {
     await action();
@@ -405,7 +409,7 @@ export const handoffCommand = defineCommand({
 const startCommand = defineCommand({
   meta: { name: "start", description: "Start the Legion daemon" },
   args: {
-    project: { type: "positional", description: "GitHub project owner/number" },
+    project: { type: "positional", description: "Legion daemon identity (legionId)" },
     config: { type: "string", description: "Path to legion.yaml" },
     checkConfig: {
       type: "boolean",
@@ -428,7 +432,7 @@ const stopCommand = defineCommand({
     project: {
       type: "positional",
       required: true,
-      description: "GitHub project owner/number",
+      description: "Legion daemon identity (legionId)",
     },
   },
   run: ({ args }) => runCli(() => cmdStop(String(args.project))),
@@ -440,7 +444,7 @@ const restartCommand = defineCommand({
     project: {
       type: "positional",
       required: true,
-      description: "GitHub project owner/number",
+      description: "Legion daemon identity (legionId)",
     },
     config: { type: "string", description: "Path to legion.yaml" },
   },
@@ -449,15 +453,29 @@ const restartCommand = defineCommand({
 });
 
 const statusCommand = defineCommand({
-  meta: { name: "status", description: "Show daemon status" },
+  meta: {
+    name: "status",
+    description:
+      "Show daemon status for a project, or set an issue's Dispatch lifecycle status " +
+      "(todo|backlog|icebox) when a status argument is given",
+  },
   args: {
-    project: {
+    target: {
       type: "positional",
       required: true,
-      description: "GitHub project owner/number",
+      description: "Legion daemon identity (legionId), or an issue key when status is also given",
+    },
+    status: {
+      type: "positional",
+      description: "Lifecycle status to set on target (todo|backlog|icebox)",
     },
   },
-  run: ({ args }) => runCli(() => cmdStatus(String(args.project))),
+  run: ({ args }) =>
+    runCli(() =>
+      args.status
+        ? cmdSetIssueStatus(String(args.target), String(args.status))
+        : cmdStatus(String(args.target))
+    ),
 });
 
 const legionsCommand = defineCommand({
@@ -526,62 +544,6 @@ const stateCommand = defineCommand({
     }),
 });
 
-const approveCommand = defineCommand({
-  meta: { name: "approve", description: "Apply a human approval" },
-  args: {
-    issue: { type: "positional", required: true, description: "Issue key" },
-  },
-  run: ({ args }) =>
-    runCli(async () =>
-      console.log(
-        JSON.stringify(
-          await postController("/legion/v1/gates/approve", {
-            issue: String(args.issue),
-          })
-        )
-      )
-    ),
-});
-
-const admitCommand = defineCommand({
-  meta: { name: "admit", description: "Admit a root issue" },
-  args: {
-    issue: { type: "positional", required: true, description: "Issue key" },
-  },
-  run: ({ args }) =>
-    runCli(async () =>
-      console.log(
-        JSON.stringify(
-          await postController("/legion/v1/admission", {
-            issue: String(args.issue),
-          })
-        )
-      )
-    ),
-});
-
-const backlogCommand = defineCommand({
-  meta: {
-    name: "backlog",
-    description: "Mark an issue as deliberately backlogged",
-  },
-  args: {
-    issue: { type: "positional", required: true, description: "Issue key" },
-    marker: { type: "string", required: true, description: "Backlog marker" },
-  },
-  run: ({ args }) =>
-    runCli(async () => {
-      console.log(
-        JSON.stringify(
-          await postController("/legion/v1/backlog", {
-            issue: String(args.issue),
-            marker: String(args.marker),
-          })
-        )
-      );
-    }),
-});
-
 export const mainCommand = defineCommand({
   meta: { name: "legion", description: "Wake-driven Legion daemon" },
   subCommands: {
@@ -595,9 +557,6 @@ export const mainCommand = defineCommand({
     credential: credentialCommand,
     "worker-shim": workerShimCommand,
     state: stateCommand,
-    approve: approveCommand,
-    admit: admitCommand,
-    backlog: backlogCommand,
   },
 });
 

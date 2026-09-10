@@ -1,10 +1,5 @@
-import {
-  formatIssueKey,
-  type IssueKey,
-  LEGION_ROLES,
-  type LegionRole,
-  parseIssueKey,
-} from "@legion/contracts";
+import { type IssueKey, LEGION_ROLES, type LegionRole } from "@legion/contracts";
+import { ISSUE_KEY_PATTERN } from "../legion-state";
 
 export class HttpError extends Error {
   constructor(
@@ -94,11 +89,10 @@ export function requiredNumber(body: Record<string, unknown>, field: string): nu
 
 export function issueKey(body: Record<string, unknown>, field: string): IssueKey {
   const value = requiredString(body, field);
-  const parsed = parseIssueKey(value);
-  if (!parsed) {
+  if (!ISSUE_KEY_PATTERN.test(value)) {
     throw new HttpError(400, `Expected issue key ${field}`);
   }
-  return formatIssueKey(parsed.owner, parsed.repo, parsed.number);
+  return value;
 }
 
 export function legionRole(value: string): LegionRole {

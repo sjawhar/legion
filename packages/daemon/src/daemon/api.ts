@@ -18,12 +18,7 @@ import {
   validateContractRequest,
   validateContractResponse,
 } from "./api/http";
-import {
-  handleAdmission,
-  handleBacklog,
-  handleControllerReady,
-  handleGatesApprove,
-} from "./api/routes/controller";
+import { handleControllerReady } from "./api/routes/controller";
 import {
   handleGhToken,
   handleGitCredential,
@@ -32,11 +27,8 @@ import {
 } from "./api/routes/credentials";
 import {
   handleEscalate,
-  handleIssueBody,
-  handleIssueClose,
-  handleIssueComment,
-  handleIssueCreate,
-  handleIssueLabels,
+  handleGatesRegister,
+  handleIssueStatus,
   handleWaveRelease,
 } from "./api/routes/issues";
 import { handleMergeGate } from "./api/routes/merge-gate";
@@ -48,6 +40,7 @@ import {
   handleWorkerSession,
   handleWorkerStarted,
 } from "./api/routes/workers";
+import type { DispatchClient } from "./dispatch-client";
 import type { LegionState } from "./legion-state";
 import { StopFailed, TreeClosingError } from "./processes";
 
@@ -58,6 +51,7 @@ type MergeGateSetting = "human" | "off";
 export interface LegionApiConfig {
   port: number;
   hostname?: string;
+  repo: `${string}/${string}`;
   gates: { design: "root-issues" | "off"; merge: MergeGateSetting };
   appLogins?: string[];
   now?: () => number;
@@ -99,6 +93,7 @@ export interface LegionApiDeps {
   saveState?: () => Promise<void>;
   runner?: CommandRunner;
   tokenManager: GitHubTokenSource;
+  dispatchClient: DispatchClient;
   processManager: LegionApiProcessManager;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   onTreeReady?(tree: IssueKey): Promise<void>;
@@ -142,23 +137,9 @@ const ROUTES: Record<string, RouteEntry> = {
     handler: handleProcessExit,
   },
   "/legion/v1/merge-gate": { request: LegionDaemonApi.MergeGate.request, handler: handleMergeGate },
-  "/legion/v1/issues": { request: LegionDaemonApi.IssueCreate.request, handler: handleIssueCreate },
   "/legion/v1/waves/release": {
     request: LegionDaemonApi.WaveRelease.request,
     handler: handleWaveRelease,
-  },
-  "/legion/v1/issues/comment": {
-    request: LegionDaemonApi.Comment.request,
-    handler: handleIssueComment,
-  },
-  "/legion/v1/issues/body": { request: LegionDaemonApi.PostBody.request, handler: handleIssueBody },
-  "/legion/v1/issues/labels": {
-    request: LegionDaemonApi.Labels.request,
-    handler: handleIssueLabels,
-  },
-  "/legion/v1/issues/close": {
-    request: LegionDaemonApi.IssueClose.request,
-    handler: handleIssueClose,
   },
   "/legion/v1/escalate": { request: LegionDaemonApi.Escalate.request, handler: handleEscalate },
   "/legion/v1/worker/started": {
@@ -195,12 +176,14 @@ const ROUTES: Record<string, RouteEntry> = {
     request: LegionDaemonApi.ControllerReady.request,
     handler: handleControllerReady,
   },
-  "/legion/v1/gates/approve": {
-    request: LegionDaemonApi.GatesApprove.request,
-    handler: handleGatesApprove,
+  "/legion/v1/issues/status": {
+    request: LegionDaemonApi.IssueStatus.request,
+    handler: handleIssueStatus,
   },
-  "/legion/v1/admission": { request: LegionDaemonApi.Admission.request, handler: handleAdmission },
-  "/legion/v1/backlog": { request: LegionDaemonApi.Backlog.request, handler: handleBacklog },
+  "/legion/v1/gates/register": {
+    request: LegionDaemonApi.GatesRegister.request,
+    handler: handleGatesRegister,
+  },
 };
 
 export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): LegionApi {
@@ -214,7 +197,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     await deps.saveState?.();
   };
   const auth = new CapabilityService(now);
-  const github = new GitHubService(deps.tokenManager, runner);
+  const github = new GitHubService(config.repo, deps.tokenManager, runner);
 
   const ctx: RouteContext = {
     config,

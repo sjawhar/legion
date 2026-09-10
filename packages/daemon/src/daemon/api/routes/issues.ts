@@ -1,15 +1,8 @@
-import {
-  ARCHITECT_MUTABLE_LABELS,
-  formatIssueKey,
-  type IssueKey,
-  isArchitectMutableLabel,
-  LegionDaemonApi,
-  parseIssueKey,
-} from "@legion/contracts";
+import { LegionDaemonApi } from "@legion/contracts";
+import { writeStatus } from "../../dispatch-client";
+import type { IssueStatus } from "../../legion-state";
 import { type RouteContext, treeContains } from "../context";
-import { issueUrl } from "../github";
 import {
-  asRecord,
   HttpError,
   issueKey,
   optionalStrings,
@@ -17,209 +10,67 @@ import {
   validateContractResponse,
 } from "../http";
 
-async function createIssueComment(
+/**
+ * Sets an issue's Dispatch status. Two mutually exclusive credentials, distinguished by which is
+ * actually presented in the body (never by whether `tree` happens to be set alone):
+ * - Controller capability (bare `secret`): may move `todo`/`backlog`/`icebox` on any issue in the
+ *   project — the triage decision.
+ * - Architect capability (`tree`+`sessionId` alongside `secret`): may set any status on an issue
+ *   within its own tree.
+ * A body presenting exactly one of `tree`/`sessionId` without the other is malformed and
+ * rejected before either capability check runs.
+ */
+export async function handleIssueStatus(
   ctx: RouteContext,
-  issue: IssueKey,
-  commentBody: string
-): Promise<{ commentId: number; url: string }> {
-  const result = asRecord(
-    JSON.parse(
-      await ctx.github.gh(issue, [
-        "gh",
-        "api",
-        `${issueUrl(issue)}/comments`,
-        "-f",
-        `body=${commentBody}`,
-      ])
-    )
-  );
-  const commentId = result.id;
-  const url = result.html_url;
-  if (typeof commentId !== "number" || typeof url !== "string") {
-    throw new Error("GitHub comment create returned invalid response");
+  body: Record<string, unknown>
+): Promise<Response> {
+  const tree = body.tree;
+  const sessionId = body.sessionId;
+  const hasTree = tree !== undefined;
+  const hasSessionId = sessionId !== undefined;
+  if (hasTree !== hasSessionId) {
+    throw new HttpError(400, "issues/status requires both tree and sessionId, or neither");
   }
-  return { commentId, url };
+  const issue = issueKey(body, "issue");
+  const status = requiredString(body, "status");
+
+  if (hasTree) {
+    const architectTree = ctx.requireTree(body);
+    ctx.auth.requireArchitectCapability(body, architectTree);
+    if (!treeContains(ctx.deps.state, architectTree, issue)) {
+      throw new HttpError(403, "Issue is outside tree");
+    }
+  } else {
+    await ctx.auth.requireController(ctx.deps.state, body);
+    if (status !== "todo" && status !== "backlog" && status !== "icebox") {
+      throw new HttpError(403, "Controller capability may only set todo, backlog, or icebox");
+    }
+    if (!ctx.deps.state.issues[issue]) {
+      throw new HttpError(404, "Unknown issue");
+    }
+  }
+  await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, issue, status as IssueStatus);
+  await ctx.save();
+  return Response.json(validateContractResponse(LegionDaemonApi.IssueStatus.response, {}));
 }
 
-export async function handleIssueCreate(
+/** Registers the design gate's ask id: the architect opens `dispatch_ask` on its root issue, then
+ * records the resulting ask id here so `ask.answered` (`reducers.ts`'s `reduceAskAnswered`) knows
+ * which answer approves the gate. */
+export async function handleGatesRegister(
   ctx: RouteContext,
   body: Record<string, unknown>
 ): Promise<Response> {
   const tree = ctx.requireTree(body);
   ctx.auth.requireArchitectCapability(body, tree);
-  const title = requiredString(body, "title");
-  const issueBody = requiredString(body, "body");
-  const labels = optionalStrings(body, "labels");
-  if (labels.some((label) => !isArchitectMutableLabel(label))) {
-    throw new HttpError(
-      400,
-      `Architect issue creation only accepts ${ARCHITECT_MUTABLE_LABELS.join(", ")}`
-    );
+  const issue = issueKey(body, "issue");
+  if (!treeContains(ctx.deps.state, tree, issue)) {
+    throw new HttpError(403, "Issue is outside tree");
   }
-  const childLabels = [...new Set([...labels, "legion-child"])];
-  const parsedTree = parseIssueKey(tree);
-  if (!parsedTree) {
-    throw new Error(`Invalid issue key in Legion state: ${tree}`);
-  }
-  const createCommand = [
-    "gh",
-    "api",
-    `repos/${parsedTree.owner}/${parsedTree.repo}/issues`,
-    "-f",
-    `title=${title}`,
-    "-f",
-    `body=${issueBody}`,
-    ...childLabels.flatMap((label) => ["-f", `labels[]=${label}`]),
-  ];
-  const created = asRecord(JSON.parse(await ctx.github.gh(tree, createCommand)));
-  const number = created.number;
-  const createdUrl = created.html_url;
-  const childNodeId = created.node_id;
-  if (
-    typeof number !== "number" ||
-    !Number.isInteger(number) ||
-    typeof createdUrl !== "string" ||
-    typeof childNodeId !== "string"
-  ) {
-    throw new Error("GitHub issue create returned invalid response");
-  }
-  const child = formatIssueKey(parsedTree.owner, parsedTree.repo, number);
-  const parent = asRecord(JSON.parse(await ctx.github.gh(tree, ["gh", "api", issueUrl(tree)])));
-  const parentNodeId = parent.node_id;
-  if (typeof parentNodeId !== "string") {
-    throw new Error("GitHub parent issue returned invalid response");
-  }
-  const mutation =
-    "mutation($parentId: ID!, $childId: ID!) { addSubIssue(input: {issueId: $parentId, subIssueId: $childId}) { issue { id } } }";
-  await ctx.github.gh(tree, [
-    "gh",
-    "api",
-    "graphql",
-    "-f",
-    `query=${mutation}`,
-    "-F",
-    `parentId=${parentNodeId}`,
-    "-F",
-    `childId=${childNodeId}`,
-  ]);
-  ctx.deps.state.issues[child] = {
-    key: child,
-    title,
-    parent: tree,
-    state: "open",
-    children: [],
-    released: false,
-    labels: childLabels,
-  };
-  ctx.deps.state.issues[tree]?.children.push(child);
+  const askId = requiredString(body, "askId");
+  ctx.deps.state.gates[issue] = { ...ctx.deps.state.gates[issue], designAskId: askId };
   await ctx.save();
-  return Response.json(
-    validateContractResponse(LegionDaemonApi.IssueCreate.response, {
-      issue: child,
-      url: createdUrl,
-    })
-  );
-}
-
-export async function handleIssueComment(
-  ctx: RouteContext,
-  body: Record<string, unknown>
-): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
-  ctx.auth.requireArchitectCapability(body, tree);
-  const { commentId, url } = await createIssueComment(
-    ctx,
-    issue,
-    ctx.appendFooter(tree, issue, requiredString(body, "body"))
-  );
-  await ctx.save();
-  return Response.json(
-    validateContractResponse(LegionDaemonApi.Comment.response, {
-      commentId,
-      url,
-    })
-  );
-}
-
-export async function handleIssueBody(
-  ctx: RouteContext,
-  body: Record<string, unknown>
-): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
-  ctx.auth.requireArchitectCapability(body, tree);
-  await ctx.github.gh(issue, [
-    "gh",
-    "api",
-    "-X",
-    "PATCH",
-    issueUrl(issue),
-    "-f",
-    `body=${requiredString(body, "body")}`,
-  ]);
-  await ctx.save();
-  return Response.json(validateContractResponse(LegionDaemonApi.PostBody.response, {}));
-}
-
-export async function handleIssueLabels(
-  ctx: RouteContext,
-  body: Record<string, unknown>
-): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
-  ctx.auth.requireArchitectCapability(body, tree);
-  const add = optionalStrings(body, "add");
-  if (add.some((label) => !isArchitectMutableLabel(label))) {
-    throw new HttpError(
-      400,
-      `Architect label changes only add ${ARCHITECT_MUTABLE_LABELS.join(", ")}`
-    );
-  }
-  if (add.length > 0) {
-    await ctx.github.gh(issue, [
-      "gh",
-      "api",
-      "-X",
-      "POST",
-      `${issueUrl(issue)}/labels`,
-      ...add.flatMap((label) => ["-f", `labels[]=${label}`]),
-    ]);
-  }
-  const node = ctx.deps.state.issues[issue];
-  if (!node) {
-    throw new HttpError(404, "Unknown issue");
-  }
-  node.labels = [...new Set([...node.labels, ...add])];
-  await ctx.save();
-  return Response.json(
-    validateContractResponse(LegionDaemonApi.Labels.response, {
-      labels: node.labels,
-    })
-  );
-}
-
-export async function handleIssueClose(
-  ctx: RouteContext,
-  body: Record<string, unknown>
-): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
-  ctx.auth.requireArchitectCapability(body, tree);
-  const comment = body.comment;
-  if (comment !== undefined && typeof comment !== "string") {
-    throw new HttpError(400, "Expected string comment");
-  }
-  let finalCommentRef: string | undefined;
-  if (comment) {
-    const created = await createIssueComment(ctx, issue, ctx.appendFooter(tree, issue, comment));
-    finalCommentRef = created.url;
-  }
-  await ctx.github.gh(issue, ["gh", "api", "-X", "PATCH", issueUrl(issue), "-f", "state=closed"]);
-  const node = ctx.deps.state.issues[issue];
-  if (node) {
-    node.state = "closed";
-    node.finalCommentRef = finalCommentRef;
-  }
-  if (issue === tree) await ctx.deps.processManager.beginLinger(tree);
-  await ctx.save();
-  return Response.json(validateContractResponse(LegionDaemonApi.IssueClose.response, {}));
+  return Response.json(validateContractResponse(LegionDaemonApi.GatesRegister.response, {}));
 }
 
 export async function handleWaveRelease(
@@ -237,15 +88,11 @@ export async function handleWaveRelease(
   if (!ctx.deps.state.trees[tree]) {
     throw new HttpError(404, "Unknown tree");
   }
-  // No events accumulate for an unreleased child: its role has no live holder (nothing was ever
-  // spawned for it), so nothing was ever published or held. Marking it released just lifts that
-  // 404-until-spawned state; the eventual `spawn_worker` for it delivers a state-derived
-  // catch-up, never a replay of anything queued here.
+  // The PATCH itself is all this route does: the resulting `issue.updated` event (Dispatch echoes
+  // every status write back through the daemon's own durable consumer) is what actually admits
+  // each child, exactly like a human moving a child to `todo` in the dashboard would.
   for (const child of children) {
-    const node = ctx.deps.state.issues[child];
-    if (node) {
-      node.released = true;
-    }
+    await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, child, "todo");
   }
   await ctx.save();
   return Response.json(

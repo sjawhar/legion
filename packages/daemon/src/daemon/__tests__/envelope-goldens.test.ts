@@ -4,7 +4,6 @@ import { newLegionState } from "../legion-state";
 import { type ReducerConfig, reduceGithubEvent } from "../reducers";
 
 const config: ReducerConfig = {
-  boardProjectIds: [],
   appLogins: [],
   maxFixAttempts: 3,
 };
