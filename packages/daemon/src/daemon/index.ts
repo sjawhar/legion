@@ -196,6 +196,11 @@ async function verifyOmpAgentsCapability(
 // plugin is disabled (`omp plugin disable`) or unregistered, in which case OMP's
 // ambient discovery silently skips it and every spawned session is Legion-less.
 const LEGION_LOADED_MARKER = "LEGION_PLUGIN_LOADED=yes";
+/** Caps how much of a failed launch probe's stderr lands in the thrown error message — a
+ * misbehaving launch prefix (e.g. a wrapper that dumps a stack trace) must not blow up the
+ * daemon's own startup-failure log line; the tail is kept since that's where the actual error
+ * usually is. */
+const MAX_PROBE_STDERR_LENGTH = 2048;
 const LEGION_LOAD_PROBE = `export default function probeLegionPluginLoaded(pi) {
   const loaded = globalThis[Symbol.for("legion.pi-envoy.legion-loaded")];
   process.stderr.write(loaded ? "LEGION_PLUGIN_LOADED=yes\\n" : "LEGION_PLUGIN_LOADED=no\\n");
@@ -237,8 +242,22 @@ async function verifyLegionPluginLoaded(
     ) {
       return;
     }
-    // The manifest read is a best-effort version hint for the error message only —
-    // it is not part of the pass/fail gate above.
+    if (result.exitCode !== 0) {
+      // The launch command itself (the configured `omp_launch_prefix` plus the OMP invocation)
+      // failed to even run the probe — e.g. `secrets` denying a key — never reaching omp. This
+      // is a launch failure, not a plugin-registration problem, and must say so distinctly: a
+      // nonzero exit here previously got the identical "disabled or unregistered; run omp
+      // plugin list" diagnosis a genuinely-unloaded plugin gets, misdirecting the operator
+      // toward `omp plugin list` when the real fix is the launch prefix/credential itself.
+      const launchCommand = withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation);
+      const stderr = result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH);
+      throw new Error(
+        `[legion] OMP launch probe failed (exit ${result.exitCode}) for launch command "${launchCommand}"${stderr ? `: ${stderr}` : ""}`
+      );
+    }
+    // exit 0, marker simply absent: the plugin is genuinely disabled or unregistered. The
+    // manifest read is a best-effort version hint for the error message only — it is not part
+    // of the pass/fail gate above.
     const manifestPath = path.join(
       getPluginsNodeModules(),
       "@sjawhar",
@@ -251,15 +270,8 @@ async function verifyLegionPluginLoaded(
         return manifest.version;
       })
       .catch(() => undefined);
-    // Named so a failure of the *launch prefix itself* (e.g. `secrets` denying a key, a
-    // nonzero exit with its own stderr) is distinguishable from the plugin genuinely being
-    // disabled/unregistered (exit 0, marker simply absent) — both previously reported the
-    // identical "not loaded" message, hiding the real cause.
-    const probeDetail = [`exit ${result.exitCode}`, result.stderr.trim()]
-      .filter((part) => part.length > 0)
-      .join(": ");
     throw new Error(
-      `[legion] pi-legion-envoy${version ? ` ${version}` : ""} is installed but not loaded by omp (disabled or unregistered; probe ${probeDetail}); run omp plugin list`
+      `[legion] pi-legion-envoy${version ? ` ${version}` : ""} is installed but not loaded by omp (disabled or unregistered); run omp plugin list`
     );
   } finally {
     await rm(probeDir, { recursive: true, force: true });

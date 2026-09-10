@@ -1039,7 +1039,7 @@ describe("startDaemon", () => {
           },
         })
       ).rejects.toThrow(
-        "pi-legion-envoy 0.8.5 is installed but not loaded by omp (disabled or unregistered; probe exit 0: LEGION_PLUGIN_LOADED=no); run omp plugin list"
+        "pi-legion-envoy 0.8.5 is installed but not loaded by omp (disabled or unregistered); run omp plugin list"
       );
 
       expect(probeCommand?.slice(0, 4)).toEqual([
@@ -1068,11 +1068,14 @@ describe("startDaemon", () => {
     let shProbeCalls = 0;
 
     try {
-      await expect(
-        startDaemon(daemonConfig, {
+      let caughtError: unknown;
+      try {
+        await startDaemon(daemonConfig, {
           deps: {
             runner: async (command) => {
-              if (command[0] !== "sh") throw new Error(`Unexpected command: ${command.join(" ")}`);
+              if (command[0] !== "sh") {
+                throw new Error(`Unexpected command: ${command.join(" ")}`);
+              }
               shProbeCalls += 1;
               if (shProbeCalls === 1) {
                 // First sh-shaped probe: verifyOmpAgentsCapability.
@@ -1109,8 +1112,21 @@ describe("startDaemon", () => {
               throw new Error("NATS must not start after a failed plugin load check");
             },
           },
-        })
-      ).rejects.toThrow("probe exit 1: secrets: ANTHROPIC_API_KEY: access denied");
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toBeInstanceOf(Error);
+      const message = (caughtError as Error).message;
+      // Names the launch failure directly — exit code, the launch command (prefix + omp path),
+      // and the probe's own stderr — never the plugin-registration diagnosis a genuinely
+      // disabled/unregistered plugin gets.
+      expect(message).toContain("OMP launch probe failed (exit 1)");
+      expect(message).toContain("secrets ANTHROPIC_API_KEY -- /tools/omp");
+      expect(message).toContain("secrets: ANTHROPIC_API_KEY: access denied");
+      expect(message).not.toContain("disabled or unregistered");
+      expect(message).not.toContain("omp plugin list");
     } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
