@@ -1870,6 +1870,38 @@ describe("Legion HTTP API", () => {
     expect(state.roles[token]).toMatchObject({ sessionId: "ses_tester", agentId: "agt_tester" });
   });
 
+  it("preserves a claim's accumulated launchFailures across worker/started registration, since only a durable ready confirmation resets it", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      launchFailures: 2,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+
+    expect(started.response.status).toBe(200);
+    expect(state.roles[token]).toMatchObject({ launchFailures: 2, sessionId: "ses_tester" });
+  });
+
   it("retries cleanly after a transient tokenForIssue failure, leaving exactly one claim", async () => {
     let calls = 0;
     await start({

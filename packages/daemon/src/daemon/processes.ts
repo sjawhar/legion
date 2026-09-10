@@ -657,9 +657,16 @@ export class ProcessManager {
       if (task) {
         await this.promptExistingWorker(client, token, issue, role, sessionId, task, () => {
           claim.readyConfirmedAt = this.deps.now();
+          // A durably confirmed boot is the one moment this counter resets -- never a mere
+          // `/worker/started` registration, which a worker that keeps registering but never
+          // reaching this point could otherwise reset every generation, masking a persistent
+          // post-registration failure from ever escalating to `worker-died` (see
+          // `retireUnconfirmedBoot`'s own increment).
+          delete claim.launchFailures;
         });
       } else {
         claim.readyConfirmedAt = this.deps.now();
+        delete claim.launchFailures;
         await this.persist();
       }
       this.cancelBootWatchdog(token, generation);

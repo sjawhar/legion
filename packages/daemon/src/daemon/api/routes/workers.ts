@@ -190,11 +190,11 @@ export async function handleWorkerStarted(
       bootTokenHash: secretHash(bootToken).toString("hex"),
       locator: { ...current.locator, ompSessionFile },
     };
-    // A worker registration resets launch-failure accounting — never a mere relaunch, which the
-    // boot watchdog's own accounting (`processes.ts`'s `launchWorker`) deliberately carries
-    // forward so a worker that keeps opening a pane but never reaches this point still escalates
-    // to worker-died.
-    delete nextClaim.launchFailures;
+    // launchFailures is deliberately untouched here: a mere registration is not a recovery
+    // signal for launch accounting -- only a durably confirmed `/worker/ready` (`workerReady` in
+    // processes.ts) resets it, so a worker that keeps registering but never reaches ready
+    // confirmation still escalates to `worker-died` at the threshold instead of resetting every
+    // generation.
     ctx.deps.state.roles[token] = nextClaim;
     ctx.deps.state.phases[issue] = { phase: role, sessionId };
     try {

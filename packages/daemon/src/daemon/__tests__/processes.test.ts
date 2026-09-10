@@ -2940,14 +2940,15 @@ describe("ProcessManager", () => {
     expect(relaunched.launchFailures).toBe(1);
     expect(commands.some((command) => command.join(" ").includes("--resume"))).toBeTrue();
 
-    // Models the relaunched worker's /worker/started transition. It resets launch-failure
-    // accounting but does not complete ready confirmation; the following workerReady call does.
+    // Models the relaunched worker's /worker/started transition: the session capability is
+    // minted, but launch-failure accounting is deliberately left untouched here -- only a
+    // durably confirmed /worker/ready (the following workerReady call) resets it.
     relaunched.sessionId = "ses_implementer";
-    delete relaunched.launchFailures;
     await processes.workerReady(child, role, "ses_implementer", relaunched.generation ?? 0);
 
     expect(readyClient.prompts).toEqual(["implement #43"]);
     expect(relaunched.pendingAssignment).toBeUndefined();
+    expect(relaunched.launchFailures).toBeUndefined();
   });
 
   it("retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm, escalating to worker-died at the launch-failure threshold", async () => {
@@ -6721,7 +6722,7 @@ describe("ProcessManager", () => {
     expect(managedState.roles[token]).toBeUndefined();
   });
 
-  it("delivers a worker's pending assignment over its socket on worker/ready and clears it", async () => {
+  it("delivers a worker's pending assignment over its socket on worker/ready, clears it, and resets launchFailures", async () => {
     const state = newLegionState("omp", 1);
     const token = roleToken("omp", root, "tester");
     state.roles[token] = {
@@ -6730,6 +6731,9 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       pendingAssignment: "verify #41",
+      // A prior generation's unconfirmed boot(s) left this behind; a durable ready
+      // confirmation is the only thing that ever resets it (never mere registration).
+      launchFailures: 2,
       locator: {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
@@ -6748,10 +6752,41 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.launchFailures).toBeUndefined();
     // Same fix as the resumed-live-socket branch of spawnWorker: a delivered pending assignment
     // must re-register as the issue's active phase, or the worker's eventual `handoff complete`
     // 409s against a phase this delivery path never restored.
     expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+  });
+
+  it("resets launchFailures once worker/ready durably confirms a claim with no pending assignment", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      launchFailures: 2,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => client,
+    });
+
+    await processes.workerReady(root, "tester", "ses_tester", 1);
+
+    expect(client.prompts).toEqual([]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.readyConfirmedAt).toBeNumber();
+    expect(claim.launchFailures).toBeUndefined();
   });
   it("serializes concurrent worker/ready calls so the pending assignment prompts once", async () => {
     const state = newLegionState("omp", 1);
@@ -7938,8 +7973,8 @@ describe("ProcessManager", () => {
     // The pane already exists at this point (a real, running worker-shim process) — a
     // `saveState` failure here is a durable-state persistence issue, not a launch failure:
     // `launchFailures` is never touched at all (a launch success carries forward whatever it
-    // was before -- 0 for a claim with no prior failures, exactly as here -- only a confirmed
-    // `/worker/started` ever resets it), the token is never
+    // was before -- 0 for a claim with no prior failures, exactly as here -- only a durably
+    // confirmed `/worker/ready` ever resets it), the token is never
     // re-queued (it already has a live pane; re-queuing it would launch a second pane for the
     // same issue/role the next time it is promoted), and the locator plus `pendingAssignment`
     // stay exactly as `launchWorker` wrote them — the in-memory claim remains authoritative
