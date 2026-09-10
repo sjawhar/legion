@@ -118,6 +118,8 @@ path-scoped workflow.
 
 ## Phase work
 
+Specifications written into Dispatch follow [`skills/dispatch`'s Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+
 Follow the repository's normal engineering workflow and the assigned issue's acceptance
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase
 artifact and its completion evidence. Do not replace architect-owned decomposition, gate

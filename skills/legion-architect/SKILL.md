@@ -70,6 +70,8 @@ exercise a criterion end to end, building that path is a child issue of this tre
   relationship from `parent`. Keep the returned issue keys in ordered waves; a child is
   inert until released.
 
+Specifications written into Dispatch follow [`skills/dispatch`'s Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+
 Write one root specification containing the accepted scope, adoption/decomposition,
 waves, acceptance criteria, and integration test. When the config-armed root design gate
 applies, run this exact sequence **before any Legion-role spawn**, including a

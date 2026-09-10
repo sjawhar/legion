@@ -1,9 +1,26 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { z } from "zod";
-import { dispatchToolSchema, dispatchToolSpecs } from "./dispatch-tools";
+import { dispatchToolSchema, dispatchToolSpecs, SPEC_SECTIONS } from "./dispatch-tools";
 import { zodSchemaApi } from "./tool-schema";
 
 const schemaApi = zodSchemaApi(z);
+function dispatchSkillSpecSections() {
+  const repoRoot = resolve(import.meta.dir, "../../..");
+  const skill = readFileSync(resolve(repoRoot, "skills/dispatch/SKILL.md"), "utf8");
+  const sectionStart = skill.indexOf("## Writing a spec\n");
+  if (sectionStart === -1) throw new Error("Dispatch skill has no Writing a spec section");
+
+  const sectionEnd = skill.indexOf("\n## ", sectionStart + 1);
+  return skill
+    .slice(sectionStart, sectionEnd === -1 ? undefined : sectionEnd)
+    .split("\n")
+    .flatMap((line) => {
+      const match = line.match(/^\| \*\*(.+?)\*\* \|/u);
+      return match === null ? [] : [match[1]];
+    });
+}
 
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
@@ -128,6 +145,21 @@ describe("dispatchToolSpecs", () => {
       }).success
     ).toBe(false);
   });
+  test("keeps shared spec guidance aligned with the Dispatch skill", () => {
+    const skillSections = dispatchSkillSpecSections();
+    expect(skillSections).toEqual([...SPEC_SECTIONS]);
+    const sectionOrder = SPEC_SECTIONS.join(", ");
+    const issue = dispatchToolSpecs.find((spec) => spec.name === "dispatch_issue");
+    const documentEdit = dispatchToolSpecs.find((spec) => spec.name === "dispatch_doc_edit");
+    if (!issue || !documentEdit) throw new Error("missing spec-writing tools");
+
+    const issueArguments = issue.arguments(schemaApi) as unknown as {
+      spec: z.ZodOptional<z.ZodString>;
+    };
+    expect(issueArguments.spec.unwrap().description).toContain(sectionOrder);
+    expect(documentEdit.description).toContain(sectionOrder);
+  });
+
   test("leaves Dispatch subscriptions to successful tool results", () => {
     expect(dispatchToolSpecs.every((spec) => !("subscribes" in spec))).toBe(true);
   });
