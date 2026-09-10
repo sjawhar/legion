@@ -142,3 +142,89 @@ test("Composer shows the server's stale anchor error", async () => {
     createComment.mockRestore();
   }
 });
+
+test("Escape on a suggestion with only a replacement shows the discard prompt instead of closing silently", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  let closed = false;
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Composer
+        anchor={{ artifact: "document-1", from: 8, occurrence: 1, quote: "selected", to: 16 }}
+        issueKey="CORE-1"
+        kind="suggestion"
+        onClose={() => {
+          closed = true;
+        }}
+      />
+    </QueryClientProvider>
+  );
+
+  try {
+    fireEvent.change(screen.getByLabelText("Replacement"), { target: { value: "red" } });
+    fireEvent.keyDown(screen.getByLabelText("Reason"), { key: "Escape" });
+
+    await waitFor(() => expect(screen.getByText("Discard draft?")).toBeDefined());
+    expect(closed).toBe(false);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("Enter in the reference picker's filter inserts the top match instead of submitting a ready-to-save draft", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [],
+    closed_at: null,
+    created_at: "2026-09-09T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    external_links: [],
+    key: "CORE-1",
+    labels: [],
+    last_seq: 1,
+    number: 1,
+    parent: null,
+    primary_artifact_id: "artifact-1",
+    project: "CORE",
+    route: null,
+    status: "open",
+    title: "Review the spec",
+    updated_at: "2026-09-09T00:00:00Z",
+  });
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([
+    {
+      key: "CORE-2",
+      open_asks: 0,
+      parent: null,
+      status: "todo",
+      title: "Related work",
+      updated_at: "2026-09-09T00:00:00Z",
+    },
+  ]);
+  const view = renderComposer("comment");
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "why?" } });
+    fireEvent.keyDown(screen.getByLabelText("Comment"), { ctrlKey: true, key: "k" });
+    const filterInput = await screen.findByLabelText("Filter issues");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "CORE-2: Related work" })).toBeDefined()
+    );
+
+    fireEvent.keyDown(filterInput, { key: "Enter" });
+
+    await waitFor(() =>
+      expect((screen.getByLabelText("Comment") as HTMLTextAreaElement).value).toBe(
+        "why? dispatch://CORE-2"
+      )
+    );
+    expect(screen.queryByLabelText("Filter issues")).toBeNull();
+    expect(createComment).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+    getIssue.mockRestore();
+    listIssues.mockRestore();
+  }
+});

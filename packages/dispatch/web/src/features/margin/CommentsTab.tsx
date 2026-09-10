@@ -162,6 +162,7 @@ export function CommentsTab({
       {composer === undefined || isClosed ? null : (
         <Composer
           anchor={composer.anchor}
+          autoFocus
           kind={composer.kind}
           issueKey={issueKey}
           onClose={onCloseComposer}
@@ -170,7 +171,7 @@ export function CommentsTab({
       )}
       <section
         aria-label="Margin review items"
-        className="max-h-[45dvh] space-y-3 overflow-y-auto"
+        className="space-y-3 md:max-h-[45dvh] md:overflow-y-auto"
         ref={list}
       >
         {items.map((item) => {

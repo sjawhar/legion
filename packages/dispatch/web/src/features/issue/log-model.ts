@@ -19,6 +19,56 @@ export function pinnedEventIds(dismissed: string[]): string[] {
     .map((item) => item.slice(prefix.length));
 }
 
+export function dismissedEventIds(dismissed: string[]): string[] {
+  const prefix = "event:";
+  return dismissed
+    .filter((item) => item.startsWith(prefix))
+    .map((item) => item.slice(prefix.length));
+}
+
+export function eventDescription(event: Event): string {
+  if (event.type === "ask.answered") {
+    const question = event.payload.question;
+    return `Ask answered: ${typeof question === "string" ? question : "ask"}`;
+  }
+  if (event.type === "comment.resolved") {
+    return "Comment resolved";
+  }
+  if (event.type === "message.created") {
+    const body = event.payload.body;
+    return typeof body === "string" ? body : "Message created";
+  }
+  if (event.type === "ask.opened") {
+    const question = event.payload.question;
+    return `Ask opened: ${typeof question === "string" ? question : "ask"}`;
+  }
+  if (event.type === "comment.created") {
+    return "Comment created";
+  }
+  if (event.type === "issue.created") {
+    return "Issue created";
+  }
+  if (event.type === "issue.updated") {
+    return "Issue updated";
+  }
+  if (event.type === "issue.closed") {
+    return "Issue closed";
+  }
+  if (event.type === "artifact.created") {
+    return "Artifact created";
+  }
+  if (event.type === "artifact.version") {
+    return "Artifact version saved";
+  }
+  if (event.type === "suggestion.accepted") {
+    return "Suggestion accepted";
+  }
+  if (event.type === "suggestion.rejected") {
+    return "Suggestion rejected";
+  }
+  return "Child status changed";
+}
+
 export function buildLogItems(
   events: Event[],
   dismissed: string[],

@@ -1,10 +1,11 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   type ClipboardEvent,
   type DragEvent,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -12,6 +13,7 @@ import {
 
 import { ApiError, api } from "../../api/client";
 import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
+import { ReferencePicker } from "../refs/ReferencePicker";
 import {
   buildDispatchReference,
   buildIssuePath,
@@ -36,6 +38,7 @@ export type ComposerKind = "ask" | "comment" | "suggestion";
 
 interface ComposerProps {
   anchor: ComposerAnchor;
+  autoFocus?: boolean;
   kind: ComposerKind;
   issueKey: string;
   onClose: () => void;
@@ -93,6 +96,20 @@ function appendReference(body: string, reference: string): string {
   return `${body}${body.length === 0 || /\s$/.test(body) ? "" : " "}${reference}`;
 }
 
+export function hasDraft(kind: ComposerKind, body: string, replacement: string): boolean {
+  return (kind === "suggestion" ? replacement : body).trim().length > 0;
+}
+
+/**
+ * Whether the user has typed anything at all, in any field — used to decide whether Escape
+ * needs to confirm before discarding. Unlike hasDraft (which gates submit and only counts the
+ * field a given kind actually saves), this counts every field so a suggestion's optional
+ * "Reason" alone still triggers the discard prompt even though it alone cannot be submitted.
+ */
+export function hasUnsavedInput(body: string, replacement: string): boolean {
+  return body.trim().length > 0 || replacement.trim().length > 0;
+}
+
 export function canSubmitComposer(
   kind: ComposerKind,
   body: string,
@@ -100,37 +117,58 @@ export function canSubmitComposer(
   isSaving: boolean,
   pendingUploads: number
 ): boolean {
-  return (
-    (kind === "suggestion" ? replacement.trim().length > 0 : body.trim().length > 0) &&
-    !isSaving &&
-    pendingUploads === 0
-  );
+  return hasDraft(kind, body, replacement) && !isSaving && pendingUploads === 0;
 }
 
-export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerProps): ReactNode {
+export function Composer({
+  anchor,
+  autoFocus,
+  kind,
+  issueKey,
+  onClose,
+  replyTo,
+}: ComposerProps): ReactNode {
   const queryClient = useQueryClient();
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const replacementTextarea = useRef<HTMLTextAreaElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const lastFocusedField = useRef<HTMLTextAreaElement | null>(null);
   const [body, setBody] = useState("");
   const [replacement, setReplacement] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pendingUploads, setPendingUploads] = useState(0);
-  const currentIssue = useQuery({
-    enabled: pickerOpen,
-    queryKey: ["issue", issueKey],
-    queryFn: () => api.getIssue(issueKey),
-  });
-  const pickerIssues = useQuery({
-    enabled: pickerOpen && currentIssue.data !== undefined,
-    queryKey: ["issues", currentIssue.data?.project],
-    queryFn: () => api.listIssues({ project: currentIssue.data?.project }),
-  });
-  const pickerArtifacts = useQueries({
-    queries: (pickerIssues.data ?? []).map((issue) => ({
-      enabled: pickerOpen,
-      queryKey: ["artifacts", issue.key],
-      queryFn: () => api.listArtifacts(issue.key),
-    })),
-  });
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  useEffect(() => {
+    if (autoFocus) {
+      textarea.current?.focus();
+    }
+  }, [autoFocus]);
+  // Attached to the form (not `document`) so a nested dialog — the reference picker, or the
+  // phone bottom sheet this composer can sit inside — claims Escape first during the native
+  // bubble phase; only when nothing closer intercepts does closing the composer itself run.
+  useEffect(() => {
+    const form = formRef.current;
+    if (form === null) {
+      return;
+    }
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.stopPropagation();
+      if (!hasUnsavedInput(body, replacement) || confirmingDiscard) {
+        onClose();
+        return;
+      }
+      lastFocusedField.current =
+        document.activeElement === replacementTextarea.current
+          ? replacementTextarea.current
+          : textarea.current;
+      setConfirmingDiscard(true);
+    };
+    form.addEventListener("keydown", handleEscape);
+    return () => form.removeEventListener("keydown", handleEscape);
+  }, [body, confirmingDiscard, onClose, replacement]);
   const references = useMemo(() => composerReferences(body), [body]);
   const save = useMutation({
     mutationFn: async () => {
@@ -219,6 +257,7 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
       aria-label={`${title} composer`}
       className="space-y-3 rounded-xl border border-sky-200 bg-sky-50 p-3"
       onSubmit={submit}
+      ref={formRef}
     >
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm font-semibold text-sky-950">{title}</p>
@@ -233,13 +272,38 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
       <blockquote className="border-l-2 border-sky-500 pl-2 text-sm text-slate-700">
         {anchor.quote}
       </blockquote>
+      {confirmingDiscard ? (
+        <div
+          className="flex items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900"
+          role="alert"
+        >
+          <span>Discard draft?</span>
+          <button className="font-semibold underline" onClick={onClose} type="button">
+            Discard
+          </button>
+          <button
+            className="underline"
+            onClick={() => {
+              setConfirmingDiscard(false);
+              lastFocusedField.current?.focus();
+            }}
+            type="button"
+          >
+            Keep
+          </button>
+        </div>
+      ) : null}
       {kind === "suggestion" ? (
         <label className="block text-sm font-medium text-slate-700">
           Replace with
           <textarea
             aria-label="Replacement"
             className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500"
-            onChange={(event) => setReplacement(event.target.value)}
+            onChange={(event) => {
+              setReplacement(event.target.value);
+              setConfirmingDiscard(false);
+            }}
+            ref={replacementTextarea}
             value={replacement}
           />
         </label>
@@ -250,7 +314,10 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
           aria-label={kind === "ask" ? "Question" : kind === "suggestion" ? "Reason" : "Comment"}
           className="mt-1 block min-h-24 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal outline-none focus:border-sky-500"
           maxLength={kind === "ask" ? 800 : 2000}
-          onChange={(event) => setBody(event.target.value)}
+          onChange={(event) => {
+            setBody(event.target.value);
+            setConfirmingDiscard(false);
+          }}
           onDrop={handleDrop}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
@@ -275,48 +342,11 @@ export function Composer({ anchor, kind, issueKey, onClose, replyTo }: ComposerP
         </section>
       )}
       {pickerOpen ? (
-        <section
-          aria-label="Reference picker"
-          className="space-y-2 rounded-lg border border-slate-200 bg-white p-2"
-        >
-          {pickerIssues.isPending ? (
-            <p className="text-sm text-slate-500">Loading issues…</p>
-          ) : null}
-          {(pickerIssues.data ?? []).map((issue, index) => (
-            <div className="space-y-1" key={issue.key}>
-              <button
-                className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
-                onClick={() =>
-                  addReference(buildDispatchReference({ key: issue.key, kind: "issue" }))
-                }
-                type="button"
-              >
-                {issue.key}: {issue.title}
-              </button>
-              {pickerArtifacts[index]?.isPending ? (
-                <p className="px-2 text-xs text-slate-500">Loading artifacts…</p>
-              ) : null}
-              {(pickerArtifacts[index]?.data ?? []).map((artifact) => (
-                <button
-                  className="ml-3 block w-[calc(100%-0.75rem)] rounded px-2 py-1 text-left text-sm hover:bg-slate-100"
-                  key={artifact.id}
-                  onClick={() =>
-                    addReference(
-                      buildDispatchReference({
-                        key: issue.key,
-                        kind: "artifact",
-                        slug: artifact.slug,
-                      })
-                    )
-                  }
-                  type="button"
-                >
-                  {artifact.name}
-                </button>
-              ))}
-            </div>
-          ))}
-        </section>
+        <ReferencePicker
+          issueKey={issueKey}
+          onClose={() => setPickerOpen(false)}
+          onSelect={addReference}
+        />
       ) : null}
       {pendingUploads > 0 ? (
         <p className="text-sm text-slate-500" role="status">

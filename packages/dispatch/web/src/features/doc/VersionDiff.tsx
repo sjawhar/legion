@@ -9,7 +9,7 @@ interface VersionDiffProps {
 export function VersionDiff({ before, after }: VersionDiffProps): ReactNode {
   return (
     <pre
-      className="overflow-x-auto rounded-lg border border-slate-200 bg-white p-4 text-sm leading-6"
+      className="[overflow-wrap:anywhere] rounded-lg border border-slate-200 bg-white p-4 text-sm leading-6 whitespace-pre-wrap"
       data-testid="version-diff"
     >
       <code>
