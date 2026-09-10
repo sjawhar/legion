@@ -23,7 +23,7 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 }
 
 const ISSUE_REFERENCE =
-  "An issue is a native KEY or external owner/repo#n reference; an external reference creates its native issue on first use in the repository's mapped project (DISPATCH_REPO_PROJECTS) or, failing that, the default project (DISPATCH_DEFAULT_PROJECT).";
+  "An issue is a native KEY or external owner/repo#n reference; an external reference creates its native issue in the repository's dashboard-configured project or, failing that, the default project (DISPATCH_DEFAULT_PROJECT).";
 
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;

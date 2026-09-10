@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -84,6 +85,10 @@ func main() {
 	defer database.Pool.Close()
 	if err := database.Migrate(ctx); err != nil {
 		slog.Error("dispatch: migrate database", "error", err)
+		os.Exit(1)
+	}
+	if err := seedRepoProjects(ctx, database, boot.RepoProjects); err != nil {
+		slog.Error("dispatch: seed repository projects", "error", err)
 		os.Exit(1)
 	}
 	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
@@ -290,9 +295,6 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	if boot.AgentToken == "" {
 		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
 	}
-	if boot.DefaultProject == "" && boot.RepoProjects == "" {
-		return bootConfig{}, errors.New("DISPATCH_DEFAULT_PROJECT required unless DISPATCH_REPO_PROJECTS maps every repository")
-	}
 
 	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
 	case mode == "" || mode == "cookie":
@@ -327,6 +329,24 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 	}
 	if !exists {
 		return fmt.Errorf("DISPATCH_DEFAULT_PROJECT %q does not exist", project)
+	}
+	return nil
+}
+
+func seedRepoProjects(ctx context.Context, database *store.Store, raw string) error {
+	mappings, err := api.ParseRepoProjects(raw)
+	if err != nil {
+		return err
+	}
+	createdBy := []byte(`{"kind":"session","id":"environment"}`)
+	for repo, project := range mappings {
+		if _, err := database.Pool.Exec(ctx, `
+			insert into repo_projects (repo, project, created_by)
+			values ($1, $2, $3)
+			on conflict (repo) do nothing
+		`, repo, project, createdBy); err != nil {
+			return fmt.Errorf("seed repository project %q: %w", repo, err)
+		}
 	}
 	return nil
 }

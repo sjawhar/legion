@@ -49,6 +49,14 @@ type Project struct {
 	Name string `json:"name"`
 }
 
+// RepoProject assigns an external repository to a native Dispatch project.
+type RepoProject struct {
+	Repo      string    `json:"repo"`
+	Project   string    `json:"project"`
+	CreatedBy Actor     `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // ExternalLink connects a native issue to an external tracker item.
 type ExternalLink struct {
 	URL  string `json:"url"`

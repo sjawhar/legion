@@ -16,9 +16,10 @@ production build from `web/dist`.
   Query cache entries for the affected issue.
 - `web/src/main.tsx` installs React Router and the shared Query client.
 
-`AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the
-GitHub sign-in link at `/auth/start`. All application requests use the same
-origin so the browser sends the signed-in cookie.
+`AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the GitHub
+sign-in link at `/auth/start`. Authenticated humans can manage external
+repository-to-project mappings at `/settings`. All application requests use the
+same origin so the browser sends the signed-in cookie.
 
 ## Commands
 

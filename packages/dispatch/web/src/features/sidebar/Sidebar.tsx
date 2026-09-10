@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { IssueSummary, UserState } from "../../api/types";
+import type { AuthenticatedUser, IssueSummary, UserState } from "../../api/types";
 import { buildIssuePath, parseIssuePath } from "../refs/routes";
 
 export type SidebarEntry = string | { key: string; children: SidebarEntry[] };
@@ -158,7 +158,13 @@ function IssueLink({
   );
 }
 
-export function Sidebar({ onNavigate }: { onNavigate?: () => void }): ReactNode {
+export function Sidebar({
+  onNavigate,
+  user,
+}: {
+  onNavigate?: () => void;
+  user: AuthenticatedUser;
+}): ReactNode {
   const location = useLocation();
   const issues = useQuery({ queryKey: ["issues"], queryFn: () => api.listIssues() });
   const state = useQuery({ queryKey: ["user-state"], queryFn: () => api.getMyState() });
@@ -197,6 +203,17 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }): ReactNode 
           </ul>
         </section>
       ))}
+      {user.kind === "user" ? (
+        <div className="border-t border-slate-800 pt-4">
+          <Link
+            className="block rounded px-2 py-1.5 text-sm font-medium text-slate-300 hover:bg-slate-800 hover:text-slate-100"
+            onClick={onNavigate}
+            to="/settings"
+          >
+            Settings
+          </Link>
+        </div>
+      ) : null}
     </nav>
   );
 }

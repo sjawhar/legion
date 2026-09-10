@@ -1,13 +1,21 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 func TestResolveBootConfigRejectsUntrustedHeaderIdentityWithOAuth(t *testing.T) {
@@ -24,26 +32,15 @@ func TestResolveBootConfigRejectsUntrustedHeaderIdentityWithOAuth(t *testing.T) 
 	}
 }
 
-func TestResolveBootConfigRejectsCookieModeWithoutAllowlist(t *testing.T) {
-	_, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":           "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":   "agent-token",
-		"DISPATCH_REPO_PROJECTS": "owner/repo=TEST",
-	}))
-	if err == nil || !strings.Contains(err.Error(), "DISPATCH_ALLOWED_LOGINS") {
-		t.Fatalf("error: got %v, want missing allowlist rejection", err)
-	}
-}
-
-func TestResolveBootConfigRequiresDefaultProjectWithoutRepoMapping(t *testing.T) {
-	_, err := resolveBootConfig(envGetter(map[string]string{
+func TestResolveBootConfigAllowsRepositorySettingsWithoutDefaultProject(t *testing.T) {
+	boot, err := resolveBootConfig(envGetter(map[string]string{
 		"DATABASE_URL":            "postgres://dispatch",
 		"DISPATCH_AGENT_TOKEN":    "agent-token",
 		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
 		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
 	}))
-	if err == nil || !strings.Contains(err.Error(), "DISPATCH_DEFAULT_PROJECT") {
-		t.Fatalf("error: got %v, want default project requirement", err)
+	if err != nil || boot.DefaultProject != "" {
+		t.Fatalf("resolve boot config: boot=%#v err=%v", boot, err)
 	}
 }
 
@@ -107,4 +104,96 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 
 func envGetter(values map[string]string) func(string) string {
 	return func(key string) string { return values[key] }
+}
+
+func openSeedTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	baseURL, err := url.Parse(os.Getenv("DISPATCH_TEST_DATABASE_URL"))
+	if err != nil || baseURL.String() == "" {
+		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres command tests")
+	}
+	adminURL := *baseURL
+	adminURL.Path = "/postgres"
+	admin, err := pgxpool.New(context.Background(), adminURL.String())
+	if err != nil {
+		t.Fatalf("open test database admin pool: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		t.Fatalf("random database name: %v", err)
+	}
+	databaseName := "dispatch_command_test_" + hex.EncodeToString(suffix[:])
+	if _, err := admin.Exec(context.Background(), "create database "+databaseName); err != nil {
+		t.Fatalf("create isolated database: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
+			t.Errorf("drop isolated database: %v", err)
+		}
+	})
+
+	testURL := *baseURL
+	testURL.Path = "/" + databaseName
+	database, err := store.Open(context.Background(), testURL.String())
+	if err != nil {
+		t.Fatalf("open isolated database: %v", err)
+	}
+	t.Cleanup(database.Pool.Close)
+	if err := database.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate isolated database: %v", err)
+	}
+	return database
+}
+
+func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T) {
+	database := openSeedTestStore(t)
+	ctx := context.Background()
+	for _, project := range []string{"APP", "CORE"} {
+		if _, err := database.Pool.Exec(ctx, "insert into projects (key, name) values ($1, $1)", project); err != nil {
+			t.Fatalf("create project %q: %v", project, err)
+		}
+	}
+	createdBy, err := json.Marshal(map[string]string{"kind": "user", "id": "alice"})
+	if err != nil {
+		t.Fatalf("encode actor: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into repo_projects (repo, project, created_by) values ('dashboard/repo', 'CORE', $1)
+	`, createdBy); err != nil {
+		t.Fatalf("create dashboard mapping: %v", err)
+	}
+
+	if err := seedRepoProjects(ctx, database, "Seed/Repo.git=APP,dashboard/repo=APP"); err != nil {
+		t.Fatalf("seed repository projects: %v", err)
+	}
+
+	rows, err := database.Pool.Query(ctx, "select repo, project from repo_projects order by repo")
+	if err != nil {
+		t.Fatalf("list mappings: %v", err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var repo, project string
+		if err := rows.Scan(&repo, &project); err != nil {
+			t.Fatalf("scan mapping: %v", err)
+		}
+		got[repo] = project
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate mappings: %v", err)
+	}
+	if got["seed/repo"] != "APP" || got["dashboard/repo"] != "CORE" || len(got) != 2 {
+		t.Fatalf("seeded mappings: got %#v", got)
+	}
+}
+
+func TestSeedRepoProjectsRejectsMissingProject(t *testing.T) {
+	database := openSeedTestStore(t)
+	err := seedRepoProjects(context.Background(), database, "missing/repo=MISSING")
+	if err == nil || !strings.Contains(err.Error(), `seed repository project "missing/repo"`) {
+		t.Fatalf("seed missing project: got %v", err)
+	}
 }

@@ -92,18 +92,22 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		project, mapped := s.deps.RepoProjects[externalRepo]
-		if !mapped {
+		project, err := s.repoProject(r.Context(), externalRepo)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if project == "" {
 			project = s.deps.DefaultProject
 			if project == "" {
 				writeError(w, "PROJECT_UNMAPPED", http.StatusBadRequest,
-					"repository is not mapped in DISPATCH_REPO_PROJECTS and DISPATCH_DEFAULT_PROJECT is not configured")
+					"repository is not mapped in repository settings and DISPATCH_DEFAULT_PROJECT is not configured")
 				return
 			}
 			usingDefaultProject = true
 		}
 		if input.Project != "" && input.Project != project {
-			writeError(w, "EXTERNAL_PROJECT_MISMATCH", http.StatusBadRequest, "external issue project must match DISPATCH_REPO_PROJECTS")
+			writeError(w, "EXTERNAL_PROJECT_MISMATCH", http.StatusBadRequest, "external issue project must match repository settings")
 			return
 		}
 		input.Project = project

@@ -87,6 +87,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	expectedTables := []string{
 		"users",
 		"projects",
+		"repo_projects",
 		"issues",
 		"issue_external_links",
 		"artifacts",
@@ -124,6 +125,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"users_pkey",
 		"projects_pkey",
 		"projects_key_check",
+		"repo_projects_pkey",
+		"repo_projects_project_fkey",
 		"issues_pkey",
 		"issues_project_key_fkey",
 		"issues_project_key_number_key",
@@ -168,8 +171,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 4 {
-		t.Errorf("recorded migrations: got %d, want 4", migrations)
+	if migrations != 5 {
+		t.Errorf("recorded migrations: got %d, want 5", migrations)
 	}
 }
 

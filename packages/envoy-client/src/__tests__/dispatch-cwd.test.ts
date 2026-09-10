@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { canonicalRepo } from "@legion/contracts/repo";
 import { type ExecFn, parseGitHubRemoteUrl, resolveCwdRepo, resolveOrigin } from "../dispatch-cwd";
 
 /** Route each call by `${file} ${args.join(" ")}` to a canned stdout or a thrown error. */
@@ -42,6 +43,14 @@ describe("parseGitHubRemoteUrl", () => {
   it("matches the GitHub host case-insensitively", () => {
     expect(parseGitHubRemoteUrl("https://GitHub.com/acme/widgets")).toBe("acme/widgets");
     expect(parseGitHubRemoteUrl("git@GITHUB.COM:acme/widgets.git")).toBe("acme/widgets");
+  });
+
+  it("canonicalizes repository owner and name", () => {
+    expect(parseGitHubRemoteUrl("https://github.com/Owner/Repo.git")).toBe("owner/repo");
+  });
+
+  it("trims repository components", () => {
+    expect(canonicalRepo(" Owner ", " Repo.git ")).toBe("owner/repo");
   });
 
   it("returns null for a non-GitHub host", () => {

@@ -56,6 +56,11 @@ func TestCreateExternalIssueIsIdempotentDuringConcurrentCreation(t *testing.T) {
 	}, "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "TEST",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("map external repository: status=%d body=%s", response.Code, response.Body.String())
+	}
 
 	start := make(chan struct{})
 	responses := make(chan *httptest.ResponseRecorder, 2)

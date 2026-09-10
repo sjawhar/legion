@@ -85,7 +85,11 @@ test("sidebar renders listed issues without fetching individual issue details", 
     createElement(
       MemoryRouter,
       { initialEntries: ["/"] },
-      createElement(QueryClientProvider, { client: queryClient }, createElement(Sidebar))
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(Sidebar, { user: { kind: "user", login: "alice" } })
+      )
     )
   );
 

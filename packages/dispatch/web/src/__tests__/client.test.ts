@@ -141,6 +141,39 @@ test("API client sends the documented method and JSON body for mutations", async
   });
 });
 
+test("API client sends repository project mapping requests to their settings routes", async () => {
+  const stub = stubFetch(() => Response.json({ repo: "owner/repo", project: "CORE" }));
+  const settingsApi = createApiClient(stub.fetch);
+
+  await settingsApi.listRepoProjects();
+  await settingsApi.putRepoProject("owner/repo", { project: "CORE" });
+  await settingsApi.deleteRepoProject("owner/repo");
+
+  expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
+    ["GET", "/api/v1/settings/repo-projects"],
+    ["PUT", "/api/v1/settings/repo-projects/owner/repo"],
+    ["DELETE", "/api/v1/settings/repo-projects/owner/repo"],
+  ]);
+  expect(JSON.parse(stub.requests[1]?.body as string)).toEqual({ project: "CORE" });
+});
+
+test("API client sends inline artifacts as JSON", async () => {
+  const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
+  const api = createApiClient(stub.fetch);
+
+  await api.uploadArtifact("CORE-1", { content: "# Draft", name: "spec.md", summary: "Initial" });
+
+  expect(stub.requests.map(({ init, path }) => [init?.method, path])).toEqual([
+    ["POST", "/api/v1/issues/CORE-1/artifacts"],
+  ]);
+  expect(stub.requests[0]?.init?.headers).toEqual({ "Content-Type": "application/json" });
+  expect(JSON.parse(stub.requests[0]?.body as string)).toEqual({
+    content: "# Draft",
+    name: "spec.md",
+    summary: "Initial",
+  });
+});
+
 test("API client encodes list filters and artifact version query parameters", async () => {
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
@@ -174,7 +207,6 @@ test("API client exposes response status and server error code on failure", asyn
     status: 409,
   });
 });
-
 test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async () => {
   const unauthorized = createApiClient(stubFetch(() => new Response(null, { status: 401 })).fetch);
   const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
@@ -208,7 +240,6 @@ test("isRetryableQueryError exempts auth outcomes (401, 403) but retries a trans
   expect(isRetryableQueryError(forbiddenError)).toBe(false);
   expect(isRetryableQueryError(serverErrorResult)).toBe(true);
 });
-
 test("API client reaches every remaining documented endpoint", async () => {
   const stub = stubFetch((request) =>
     request.path.startsWith("/api/v1/inbox") ? Response.json([]) : Response.json({})

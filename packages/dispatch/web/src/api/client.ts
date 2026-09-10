@@ -24,6 +24,7 @@ import type {
   IssueSummary,
   Message,
   Project,
+  RepoProject,
   UpdateIssueInput,
   UserIssueState,
   UserState,
@@ -95,6 +96,14 @@ function pathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
+function repoPath(repo: string): string {
+  const [owner, name, ...rest] = repo.split("/");
+  if (owner === "" || name === "" || rest.length !== 0) {
+    throw new Error("repository must be formatted as owner/repo");
+  }
+  return `${pathSegment(owner)}/${pathSegment(name)}`;
+}
+
 function pathWithQuery(path: string, values: object): string {
   const query = new URLSearchParams();
 
@@ -152,6 +161,18 @@ export class DispatchApiClient {
 
   createProject(input: CreateProjectInput): Promise<Project> {
     return this.post<Project>("/api/v1/projects", input);
+  }
+
+  listRepoProjects(): Promise<RepoProject[]> {
+    return this.json<RepoProject[]>("/api/v1/settings/repo-projects");
+  }
+
+  putRepoProject(repo: string, input: { project: string }): Promise<RepoProject> {
+    return this.send<RepoProject>("PUT", `/api/v1/settings/repo-projects/${repoPath(repo)}`, input);
+  }
+
+  async deleteRepoProject(repo: string): Promise<void> {
+    await this.response(`/api/v1/settings/repo-projects/${repoPath(repo)}`, { method: "DELETE" });
   }
 
   listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {

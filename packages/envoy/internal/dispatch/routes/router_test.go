@@ -144,7 +144,8 @@ func TestWhoamiUsesHeaderIdentity(t *testing.T) {
 	request.Header.Set("X-Dispatch-User", "sjawhar")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"sjawhar"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"sjawhar"`) ||
+		!strings.Contains(response.Body.String(), `"kind":"user"`) {
 		t.Errorf("allowed header response: status=%d body=%s", response.Code, response.Body.String())
 	}
 

@@ -12,13 +12,12 @@ application state in Postgres.
 | `DISPATCH_AGENT_TOKEN` | Shared bearer token for agent API callers. |
 | `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
 
-`DISPATCH_REPO_PROJECTS` optionally maps specific GitHub repositories to
-Dispatch projects for the agent API. `DISPATCH_DEFAULT_PROJECT` names the
-project that catches every repository `DISPATCH_REPO_PROJECTS` doesn't map;
-it's required unless `DISPATCH_REPO_PROJECTS` already covers every
-repository, and Dispatch validates it against Postgres at boot. An issue
-created from a repository that only resolves through the default also gets
-a `repo:owner/name` label.
+`DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
+with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
+precedence over this seed. Dispatch resolves every external issue through the
+stored mapping, then falls back to `DISPATCH_DEFAULT_PROJECT` when configured.
+An unmapped external repository without a default project is rejected. An issue
+created through the default also gets a `repo:owner/name` label.
 
 `dispatch.serverUrl` in the merged `envoy.json` identifies Dispatch's public
 base URL. The server recognizes native issue, artifact, ask, and comment links
@@ -104,6 +103,8 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 | `/api/github/graphql` | POST | cookie or trusted header | Proxy GitHub GraphQL using the caller's stored token. |
 | `/healthz` | GET | none | Report Postgres readiness. |
 | `/api/v1/inbox?project=` | GET | cookie, trusted header, or bearer | List open asks newest-first, including their issue key and title. |
+| `/api/v1/settings/repo-projects` | GET | cookie or trusted header | List external repository-to-project mappings. |
+| `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask. |
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |

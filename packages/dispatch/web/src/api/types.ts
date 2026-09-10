@@ -43,6 +43,7 @@ export type {
   Message,
   Project,
   ReferencedBy,
+  RepoProject,
   Suggestion,
   TargetCandidate,
   UpdateIssueInput,

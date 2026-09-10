@@ -133,7 +133,7 @@ describe("executeDispatchTool", () => {
       cwd: "/workspace",
       host: "omp",
       config,
-      env: { LEGION_ISSUE: "owner/repo#42" },
+      env: { LEGION_ISSUE: "Owner/Repo.git#42" },
       exec,
       fetchImpl: fetchImpl as typeof fetch,
     });
@@ -528,7 +528,7 @@ describe("executeDispatchTool", () => {
           JSON.stringify({
             code: "PROJECT_UNMAPPED",
             error:
-              "repository is not mapped in DISPATCH_REPO_PROJECTS and DISPATCH_DEFAULT_PROJECT is not configured",
+              "repository is not mapped in repository settings and DISPATCH_DEFAULT_PROJECT is not configured",
           }),
           { status: 400, headers: { "Content-Type": "application/json" } }
         );
@@ -548,7 +548,7 @@ describe("executeDispatchTool", () => {
         fetchImpl: fetchImpl as typeof fetch,
       })
     ).rejects.toThrow(
-      "repository owner/repo is not mapped in DISPATCH_REPO_PROJECTS and no DISPATCH_DEFAULT_PROJECT is configured"
+      "repository owner/repo is not mapped in repository settings and no DISPATCH_DEFAULT_PROJECT is configured"
     );
   });
 

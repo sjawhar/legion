@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
@@ -5,6 +6,12 @@ import { defineConfig } from "vite";
 export default defineConfig({
   root: "web",
   plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@legion/contracts/repo": fileURLToPath(new URL("../../contracts/src/repo.ts", import.meta.url)),
+      "@legion/contracts": fileURLToPath(new URL("../../contracts/src/index.ts", import.meta.url)),
+    },
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,

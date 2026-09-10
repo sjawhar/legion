@@ -46,7 +46,7 @@ test("DocEditor destroys its room provider when it unmounts", () => {
   try {
     const { unmount } = render(
       <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifact} isClosed={false} user={{ login: "alice" }} />
+        <DocEditor artifact={artifact} isClosed={false} user={{ kind: "user", login: "alice" }} />
       </QueryClientProvider>
     );
     unmount();
@@ -69,7 +69,7 @@ test("DocEditor makes a closed document visibly read-only", () => {
   try {
     const { container, unmount } = render(
       <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifact} isClosed={true} user={{ login: "alice" }} />
+        <DocEditor artifact={artifact} isClosed={true} user={{ kind: "user", login: "alice" }} />
       </QueryClientProvider>
     );
     expect(screen.getByText("This issue is closed. Its document is read-only.")).not.toBeNull();
@@ -92,12 +92,12 @@ test("DocEditor preserves the room when the issue closes", () => {
   try {
     const { rerender, unmount } = render(
       <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifact} isClosed={false} user={{ login: "alice" }} />
+        <DocEditor artifact={artifact} isClosed={false} user={{ kind: "user", login: "alice" }} />
       </QueryClientProvider>
     );
     rerender(
       <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifact} isClosed={true} user={{ login: "alice" }} />
+        <DocEditor artifact={artifact} isClosed={true} user={{ kind: "user", login: "alice" }} />
       </QueryClientProvider>
     );
 
@@ -148,7 +148,11 @@ test("DocEditor uses an empty synchronized document in preview and version diffs
   try {
     const rendered = render(
       <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifactWithVersion} isClosed={false} user={{ login: "alice" }} />
+        <DocEditor
+          artifact={artifactWithVersion}
+          isClosed={false}
+          user={{ kind: "user", login: "alice" }}
+        />
       </QueryClientProvider>
     );
     unmount = rendered.unmount;
@@ -213,7 +217,11 @@ test("DocEditor resets version mode and diff state for a different artifact", as
   try {
     const rendered = render(
       <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={firstArtifact} isClosed={false} user={{ login: "alice" }} />
+        <DocEditor
+          artifact={firstArtifact}
+          isClosed={false}
+          user={{ kind: "user", login: "alice" }}
+        />
       </QueryClientProvider>
     );
     const editor = within(rendered.container);
@@ -223,7 +231,11 @@ test("DocEditor resets version mode and diff state for a different artifact", as
 
     rendered.rerender(
       <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={secondArtifact} isClosed={false} user={{ login: "alice" }} />
+        <DocEditor
+          artifact={secondArtifact}
+          isClosed={false}
+          user={{ kind: "user", login: "alice" }}
+        />
       </QueryClientProvider>
     );
 
@@ -256,7 +268,7 @@ test("DocEditor renders a deep-linked historical range in preview", async () => 
           artifact={artifact}
           highlight={{ from: 9, to: 16 }}
           isClosed={false}
-          user={{ login: "alice" }}
+          user={{ kind: "user", login: "alice" }}
         />
       </QueryClientProvider>
     );
@@ -299,7 +311,11 @@ test("DocEditor keeps preview mode when Version changes back to Current", async 
   try {
     const rendered = render(
       <QueryClientProvider client={queryClient}>
-        <DocEditor artifact={artifactWithVersion} isClosed={false} user={{ login: "alice" }} />
+        <DocEditor
+          artifact={artifactWithVersion}
+          isClosed={false}
+          user={{ kind: "user", login: "alice" }}
+        />
       </QueryClientProvider>
     );
     const documentEditor = within(rendered.container);

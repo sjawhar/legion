@@ -69,7 +69,10 @@ function renderIssuePage(path = "/issues/CORE-1") {
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <Routes>
-          <Route path="/issues/:key/*" element={<IssuePage user={{ login: "alice" }} />} />
+          <Route
+            path="/issues/:key/*"
+            element={<IssuePage user={{ kind: "user", login: "alice" }} />}
+          />
         </Routes>
       </QueryClientProvider>
     </MemoryRouter>
@@ -99,7 +102,10 @@ test("IssuePage reads newest events when looking for active sessions", async () 
       <MemoryRouter initialEntries={["/issues/CORE-1"]}>
         <QueryClientProvider client={queryClient}>
           <Routes>
-            <Route path="/issues/:key/*" element={<IssuePage user={{ login: "alice" }} />} />
+            <Route
+              path="/issues/:key/*"
+              element={<IssuePage user={{ kind: "user", login: "alice" }} />}
+            />
           </Routes>
         </QueryClientProvider>
       </MemoryRouter>
@@ -294,7 +300,10 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
         <QueryClientProvider client={queryClient}>
           <Link to="/issues/CORE-2">Go to CORE-2</Link>
           <Routes>
-            <Route path="/issues/:key/*" element={<IssuePage user={{ login: "alice" }} />} />
+            <Route
+              path="/issues/:key/*"
+              element={<IssuePage user={{ kind: "user", login: "alice" }} />}
+            />
           </Routes>
         </QueryClientProvider>
       </MemoryRouter>

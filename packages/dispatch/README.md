@@ -9,8 +9,9 @@ suggestions, artifacts, and durable event history. The Go server in
 
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
 GitHub sign-in flow. All application requests are same-origin. React Router serves
-the Inbox at `/` and an issue workspace at `/issues/:key/*`; TanStack Query and
-SSE keep the issue, Inbox, documents, and sidebar current.
+the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
+repository-to-project settings page at `/settings`; TanStack Query and SSE keep
+the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Below the `md`
 breakpoint, navigation is a drawer and the margin is a bottom sheet. Controls use
