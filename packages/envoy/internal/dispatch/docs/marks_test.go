@@ -309,15 +309,16 @@ func TestReplaceTextReanchorsOpenRows(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "A quick brown dog and a slow brown cat", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
-	waitForDocumentVersion(t, service.store, artifactID, 2)
+	// The anchored ask and comment above schedule their own settlements, so version 2 can be the
+	// pre-replace snapshot; wait for the replacement's settled state, not a version number.
+	waitFor(t, time.Second, "the deleted quote's comment to orphan", func() bool {
+		return loadCommentAnchor(t, service, commentID).Orphaned
+	})
 	if anchor := loadAskAnchor(t, service, askID); anchor.Orphaned || anchor.Quote != "brown" {
 		t.Fatalf("ask anchor after replace = %#v, want first brown mark", anchor)
 	}
 	if _, quote, found := pmdoc.FindMark(liveTree(t, service, artifactID), "dispatchAsk", askID); !found || quote != "brown" {
 		t.Fatalf("ask mark after replace = %q found=%t, want brown", quote, found)
-	}
-	if anchor := loadCommentAnchor(t, service, commentID); !anchor.Orphaned {
-		t.Fatalf("comment anchor after replace = %#v, want orphaned", anchor)
 	}
 }
 

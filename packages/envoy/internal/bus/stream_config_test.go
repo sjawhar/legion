@@ -121,7 +121,10 @@ func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 		t.Fatalf("NATS connection string: %v", err)
 	}
 
-	connectCtx, cancel := context.WithTimeout(baseCtx, time.Second)
+	// The property under test is that a connect context that is done by the time the server
+	// drops the connection does not poison automatic reconnect; cancel it explicitly instead of
+	// racing a short dial deadline against the freshly started container.
+	connectCtx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 	defer cancel()
 	reconnected := make(chan struct{}, 1)
 	conn, err := connectWithContext(connectCtx, "reconnect-dialer-test", []string{uri}, func(*nats.Conn) {
@@ -131,6 +134,7 @@ func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 		t.Fatalf("connect with deadline: %v", err)
 	}
 	defer conn.Close()
+	cancel()
 	<-connectCtx.Done()
 
 	if err := conn.ForceReconnect(); err != nil {
