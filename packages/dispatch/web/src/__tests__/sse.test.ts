@@ -22,7 +22,7 @@ function event(
   } as Event;
 }
 
-test("ask events refresh the issue, its asks, selected ask, user state, and the inbox", () => {
+test("ask events refresh the issue, its asks list, user state, and the inbox", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -31,7 +31,7 @@ test("ask events refresh the issue, its asks, selected ask, user state, and the 
     },
   };
 
-  applyEventInvalidations(queryClient, event("ask.answered", { id: "ask-1" }));
+  applyEventInvalidations(queryClient, event("ask.answered"));
 
   expect(invalidated).toEqual([
     ["issue", "CORE-1"],
@@ -40,7 +40,6 @@ test("ask events refresh the issue, its asks, selected ask, user state, and the 
     ["user-state"],
     ["inbox"],
     ["asks", "CORE-1"],
-    ["ask", "ask-1"],
   ]);
 });
 
@@ -190,7 +189,7 @@ test("a resolved ask refreshes the inbox, issue count, and its reply thread", ()
     },
   };
 
-  applyEventInvalidations(queryClient, event("ask.resolved" as Event["type"], { id: "ask-1" }));
+  applyEventInvalidations(queryClient, event("ask.resolved", { id: "ask-1" }));
 
   expect(invalidated).toEqual([
     ["issue", "CORE-1"],
@@ -199,7 +198,6 @@ test("a resolved ask refreshes the inbox, issue count, and its reply thread", ()
     ["user-state"],
     ["inbox"],
     ["asks", "CORE-1"],
-    ["ask", "ask-1"],
     ["ask-thread", "ask-1"],
   ]);
 });

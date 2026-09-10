@@ -259,16 +259,19 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 9 on desktop (chromium) for this fixture: whoami, issues,
+  // Exactly 10 on desktop (chromium) for this fixture: whoami, issues,
   // me/state, issue detail, inbox (BoardStrip + Margin's open-ask count,
   // deduped to one request by TanStack Query), the stream connection, two
-  // active-sessions/log event reads, and the primary artifact's comments.
+  // active-sessions/log event reads, the primary artifact's comments, and
+  // the margin's own issue-asks list (+1: the margin lists the issue's
+  // asks so answered anchored asks render for every viewer, not only a
+  // tab that watched one get answered live).
   // The phone project (iphone) never fetches the bare `/api/v1/issues` list —
-  // its sidebar sits behind a drawer that starts closed — so its budget is 8.
+  // its sidebar sits behind a drawer that starts closed — so its budget is 9.
   // Asserted exactly (not a ceiling) so a panel that starts eagerly fetching
   // before its tab is ever opened — e.g. Spec's DocEditor or Children — trips
   // this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 8 : 9);
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 9 : 10);
 
   await alice.close();
 });

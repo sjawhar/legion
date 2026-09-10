@@ -112,6 +112,7 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
 | `/api/v1/issues?project=&status=&parent=&updated_since=` | GET | cookie, trusted header, or bearer | List issue summaries. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. Summaries contain `key`, `title`, `status`, `parent`, `updated_at`, `last_seq`, and `open_asks`. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. |
+| `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |
 | `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. |

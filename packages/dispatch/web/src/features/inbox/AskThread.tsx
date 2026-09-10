@@ -40,10 +40,10 @@ function useAskThread(
 ): UseAskThreadResult {
   const queryClient = useQueryClient();
   const [body, setBody] = useState("");
-  // A distinct queryKey from ["ask", id] (the bare-Ask query useAnsweredAsks
-  // uses to keep an answered ask visible): the two consumers expect
-  // incompatible shapes (Ask vs. {ask, replies}), and react-query caches by
-  // key alone, so sharing a key would silently corrupt whichever read second.
+  // A distinct queryKey from ["asks", issueKey] (the issue-wide asks list
+  // useAnsweredAsks queries): the two consumers expect incompatible shapes
+  // (Ask[] vs. {ask, replies}), and react-query caches by key alone, so
+  // sharing a key would silently corrupt whichever read second.
   const thread = useQuery({
     queryKey: ["ask-thread", ask.id],
     queryFn: () => getAskThread(ask.id),

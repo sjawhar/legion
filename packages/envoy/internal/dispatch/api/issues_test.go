@@ -408,3 +408,63 @@ func planNodeSeqScansRelation(t *testing.T, planJSON json.RawMessage, relation s
 	}
 	return false
 }
+
+// GET /issues/{key}/asks?state=open must also stay on the asks_open partial index even
+// after Postgres switches the underlying prepared statement from a per-execution custom
+// plan (built for that call's actual bound values) to a cached generic plan, which it
+// automatically considers starting on a statement's 6th execution. loadIssueAsks bakes the
+// open case's state predicate into the query text as a literal instead of a bound
+// parameter specifically so that no plan kind can lose the fact that it always matches
+// state = 'open'; a $-parameterized predicate keeps the index for a custom plan (built
+// knowing the actual bound value) but loses it for a generic one, which cannot assume the
+// parameter is always 'open' and so cannot prove the partial index applies at all -
+// forcing a sequential scan of asks.
+//
+// plan_cache_mode = force_generic_plan pins every execution (including the first) to a
+// generic plan instead of relying on Postgres's cost-based custom/generic switch, which
+// this test's otherwise-empty table cannot trigger reliably: with enable_seqscan = off
+// also active, the cost comparison that decides whether to switch sees a near-zero custom
+// plan (using the index) against an artificially inflated generic-plan estimate (assuming
+// the seq scan the buggy query would need), so Postgres keeps the cheap custom plan and
+// never organically reaches the generic plan this test exists to catch.
+func TestListIssueAsksOpenQueryUsesAsksOpenIndex(t *testing.T) {
+	_, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin explain transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
+		t.Fatalf("disable sequential scans: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "set local plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatalf("force generic plan mode: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "prepare list_open_asks (text) as "+listIssueAsksQueryOpen); err != nil {
+		t.Fatalf("prepare open asks query: %v", err)
+	}
+	for i := range 6 {
+		if _, err := tx.Exec(ctx, "execute list_open_asks('nonexistent-issue')"); err != nil {
+			t.Fatalf("execute open asks query %d: %v", i, err)
+		}
+	}
+
+	var planJSON []byte
+	if err := tx.QueryRow(ctx, "explain (format json) execute list_open_asks('nonexistent-issue')").Scan(&planJSON); err != nil {
+		t.Fatalf("explain execute open asks query: %v", err)
+	}
+	var plans []struct {
+		Plan json.RawMessage `json:"Plan"`
+	}
+	if err := json.Unmarshal(planJSON, &plans); err != nil {
+		t.Fatalf("decode explain output: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("explain plans = %#v, want one plan", plans)
+	}
+	if planNodeSeqScansRelation(t, plans[0].Plan, "asks") {
+		t.Fatalf("open asks generic query plan sequentially scans asks; want an index scan via asks_open:\n%s", planJSON)
+	}
+}
