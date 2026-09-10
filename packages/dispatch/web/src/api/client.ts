@@ -157,7 +157,7 @@ export class DispatchApiClient {
     return this.send<T>("POST", path, body);
   }
 
-  getProjects(): Promise<Project[]> {
+  listProjects(): Promise<Project[]> {
     return this.json<Project[]>("/api/v1/projects");
   }
 

@@ -45,8 +45,9 @@ type AnchorInput struct {
 
 // Project groups native issues under a short key.
 type Project struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
+	Key       string    `json:"key"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // RepoProject assigns an external repository to a native Dispatch project.
