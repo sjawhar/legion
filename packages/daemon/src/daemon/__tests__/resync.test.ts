@@ -940,7 +940,7 @@ describe("runResync", () => {
       ciFetchFailureDetails: [{ owner: "sjawhar", error: "GitHub App token request failed" }],
     });
   });
-  it("retries a pending non-done write", async () => {
+  it("retries a pending non-done write when the remote status still matches the record fence", async () => {
     const state = newLegionState("omp", 1);
     state.issues[issue] = {
       key: issue,
@@ -948,12 +948,13 @@ describe("runResync", () => {
       status: "in_progress",
       children: [],
     };
-    state.pendingStatusWrites[issue] = { status: "in_progress" };
+    state.pendingStatusWrites[issue] = { status: "in_progress", statusAtRecord: "todo" };
     const statusWrites: Array<{ issue: string; status: string }> = [];
 
     await runResync({
       ...resyncDeps(state),
       dispatchClient: fakeDispatchClient({
+        getIssue: async () => ({ status: "todo" }) as never,
         setStatus: async (writtenIssue, status) => {
           statusWrites.push({ issue: writtenIssue, status });
         },
@@ -1066,7 +1067,7 @@ describe("runResync", () => {
       lastAppliedSeq: 12,
       children: [],
     };
-    state.pendingStatusWrites[issue] = { status: "done", lastAppliedSeq: 12 } as never;
+    state.pendingStatusWrites[issue] = { status: "done", statusAtRecord: "retro" };
     let detailReads = 0;
     let saves = 0;
     const statusWrites: Array<{ issue: string; status: string }> = [];
@@ -1102,7 +1103,7 @@ describe("runResync", () => {
       lastAppliedSeq: 12,
       children: [],
     };
-    state.pendingStatusWrites[issue] = { status: "done", lastAppliedSeq: 12 };
+    state.pendingStatusWrites[issue] = { status: "done", statusAtRecord: "retro" };
     const statusWrites: Array<{ issue: string; status: string }> = [];
     let detailReads = 0;
 
@@ -1145,7 +1146,7 @@ describe("runResync", () => {
       lastAppliedSeq: 12,
       children: [],
     };
-    state.pendingStatusWrites[issue] = { status: "in_progress", lastAppliedSeq: 12 };
+    state.pendingStatusWrites[issue] = { status: "in_progress", statusAtRecord: "todo" };
     const statusWrites: Array<{ issue: string; status: string }> = [];
 
     await runResync({
@@ -1163,6 +1164,7 @@ describe("runResync", () => {
               open_asks: 0,
             },
           ] as never,
+        getIssue: async () => ({ status: "icebox" }) as never,
         setStatus: async (writtenIssue, status) => {
           statusWrites.push({ issue: writtenIssue, status });
         },
@@ -1183,7 +1185,7 @@ describe("runResync", () => {
       lastAppliedSeq: 8,
       children: [],
     };
-    state.pendingStatusWrites[issue] = { status: "testing", lastAppliedSeq: 8 } as never;
+    state.pendingStatusWrites[issue] = { status: "testing", statusAtRecord: "in_progress" };
     const statusWrites: Array<{ issue: string; status: string }> = [];
     let saves = 0;
 
@@ -1193,6 +1195,7 @@ describe("runResync", () => {
         saves += 1;
       },
       dispatchClient: fakeDispatchClient({
+        getIssue: async () => ({ status: "in_progress" }) as never,
         setStatus: async (writtenIssue, status) => {
           statusWrites.push({ issue: writtenIssue, status });
         },
@@ -1204,7 +1207,7 @@ describe("runResync", () => {
     expect(saves).toBe(1);
   });
 
-  it("drops a pending daemon write fenced by a newer applied Dispatch status", async () => {
+  it("drops a pending write once the remote status no longer matches the record fence", async () => {
     const state = newLegionState("omp", 1);
     state.issues[issue] = {
       key: issue,
@@ -1213,7 +1216,7 @@ describe("runResync", () => {
       lastAppliedSeq: 13,
       children: [],
     };
-    state.pendingStatusWrites[issue] = { status: "in_progress", lastAppliedSeq: 12 } as never;
+    state.pendingStatusWrites[issue] = { status: "in_progress", statusAtRecord: "todo" };
     const statusWrites: Array<{ issue: string; status: string }> = [];
     let saves = 0;
 
@@ -1223,6 +1226,7 @@ describe("runResync", () => {
         saves += 1;
       },
       dispatchClient: fakeDispatchClient({
+        getIssue: async () => ({ status: "backlog" }) as never,
         setStatus: async (writtenIssue, status) => {
           statusWrites.push({ issue: writtenIssue, status });
         },

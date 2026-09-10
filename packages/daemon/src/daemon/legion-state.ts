@@ -21,11 +21,14 @@ export const ISSUE_STATUSES = [
   "done",
 ] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
-/** A daemon status intent is valid only against the Dispatch event sequence it observed when the
- * write failed. A later applied event fences it before resync can replay stale daemon intent. */
+/** A daemon status intent is valid only against the issue's own local status at the moment the
+ * write failed (`statusAtRecord`). At retry, a single remote read resolves it: the remote status
+ * already matching the intended `status` means it landed; the remote status disagreeing with
+ * `statusAtRecord` means a real status change (human or another daemon-owned transition)
+ * superseded it; otherwise the retry PATCHes again. See `resync.ts`'s `retryPendingStatusWrites`. */
 export interface PendingStatusWrite {
   status: IssueStatus;
-  lastAppliedSeq?: number;
+  statusAtRecord?: IssueStatus;
 }
 
 export interface IssueNode {
@@ -373,7 +376,7 @@ const LegionStateSchema = z
         z
           .object({
             status: z.enum(ISSUE_STATUSES),
-            lastAppliedSeq: z.number().int().positive().optional(),
+            statusAtRecord: z.enum(ISSUE_STATUSES).optional(),
           })
           .strict()
       )

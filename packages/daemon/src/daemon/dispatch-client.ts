@@ -1,5 +1,5 @@
 import type { IssueDetails, IssueKey, IssueSummary } from "@legion/contracts";
-import type { IssueStatus, LegionState } from "./legion-state";
+import type { IssueStatus, LegionState, PendingStatusWrite } from "./legion-state";
 
 /** A non-2xx response from the Dispatch HTTP API: `status` is the HTTP status code, `message` is
  * the server's `error` field (or its raw body when the response is not the expected JSON shape). */
@@ -100,10 +100,27 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
   };
 }
 
-/** Writes a daemon-owned lifecycle status to Dispatch. A failed write records both the requested
- * status and the latest applied Dispatch sequence so resync can discard the intent after a newer
- * human or daemon event. Returns whether this call changed pending-write state. */
-export async function writeStatus(
+const issueWriteLanes = new Map<IssueKey, Promise<void>>();
+
+/** Serializes `fn` against every other daemon-owned Dispatch write for the same issue: enqueued
+ * after every earlier write for this issue settles, and before any later one starts. Both
+ * `writeStatus` and `retryPendingWrite` go through this so a direct status write (an API route,
+ * a phase-complete write, a spawn/close write) can never interleave with a concurrent resync
+ * retry for the same issue. */
+function serializeIssueWrite<T>(issue: IssueKey, fn: () => Promise<T>): Promise<T> {
+  const previous = issueWriteLanes.get(issue) ?? Promise.resolve();
+  const result = previous.then(fn, fn);
+  issueWriteLanes.set(
+    issue,
+    result.then(
+      () => undefined,
+      () => undefined
+    )
+  );
+  return result;
+}
+
+async function writeStatusLocked(
   state: LegionState,
   client: DispatchClient,
   issue: IssueKey,
@@ -115,13 +132,58 @@ export async function writeStatus(
     delete state.pendingStatusWrites[issue];
     return previous !== undefined;
   } catch (error) {
-    const pending = { status, lastAppliedSeq: state.issues[issue]?.lastAppliedSeq };
+    const pending: PendingStatusWrite = { status, statusAtRecord: state.issues[issue]?.status };
     state.pendingStatusWrites[issue] = pending;
     console.error(
       `[legion] failed to PATCH Dispatch status=${status} for ${issue} (recorded for resync retry): ${error instanceof Error ? error.message : String(error)}`
     );
     return (
-      previous?.status !== pending.status || previous?.lastAppliedSeq !== pending.lastAppliedSeq
+      previous?.status !== pending.status || previous?.statusAtRecord !== pending.statusAtRecord
     );
   }
+}
+
+/** Writes a daemon-owned lifecycle status to Dispatch, serialized against every other write for
+ * the same issue (see `serializeIssueWrite`). A failed write records both the requested status
+ * and the issue's own local status at the moment of failure (`statusAtRecord`) so resync can
+ * discard the intent once that fence no longer holds. Returns whether this call changed
+ * pending-write state. */
+export function writeStatus(
+  state: LegionState,
+  client: DispatchClient,
+  issue: IssueKey,
+  status: IssueStatus
+): Promise<boolean> {
+  return serializeIssueWrite(issue, () => writeStatusLocked(state, client, issue, status));
+}
+
+/** Resolves one pending status write against a single remote read (`remote`), then performs the
+ * delete-or-PATCH under `issue`'s write lane, re-validating the pending entry is still exactly
+ * `expected` (a concurrent direct `writeStatus` may already have replaced or cleared it while the
+ * remote read was in flight) — a decision computed before that read can never clobber a fresher
+ * intent. `remote.status === expected.status` means the intent landed; `remote.status !==
+ * expected.statusAtRecord` means a real status change superseded it; otherwise the retry PATCHes
+ * again. Returns whether state changed (for the caller's own save). */
+export async function retryPendingWrite(
+  state: LegionState,
+  client: DispatchClient,
+  issue: IssueKey,
+  remote: Pick<IssueDetails, "status">,
+  expected: PendingStatusWrite
+): Promise<boolean> {
+  return serializeIssueWrite(issue, async () => {
+    const current = state.pendingStatusWrites[issue];
+    if (
+      !current ||
+      current.status !== expected.status ||
+      current.statusAtRecord !== expected.statusAtRecord
+    ) {
+      return false;
+    }
+    if (remote.status === current.status || remote.status !== current.statusAtRecord) {
+      delete state.pendingStatusWrites[issue];
+      return true;
+    }
+    return writeStatusLocked(state, client, issue, current.status);
+  });
 }

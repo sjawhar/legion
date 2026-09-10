@@ -3,7 +3,7 @@ import { type CiFetchFailure, type CiFetchResult, isCiFetchFailure } from "../st
 import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { DispatchClient } from "./dispatch-client";
-import { writeStatus } from "./dispatch-client";
+import { retryPendingWrite } from "./dispatch-client";
 import type { LegionState } from "./legion-state";
 import {
   acceptGitHubFence,
@@ -192,32 +192,23 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
   return ciFetchFailures;
 }
 
-/** Retries each failed daemon-owned Dispatch status write. A close intent is discarded only after
- * Dispatch confirms the issue is already done; every intent is also fenced by a newer local
- * Dispatch sequence, so a human status event cannot be overwritten by a stale daemon retry. */
+/** Retries each failed daemon-owned Dispatch status write against a single fresh remote read: a
+ * remote status matching the pending intent means it already landed; a remote status other than
+ * the issue's own local status at the moment the write failed (`statusAtRecord`) means a real
+ * status change (human or another daemon-owned transition) superseded the intent; otherwise the
+ * write retries. See `dispatch-client.ts`'s `retryPendingWrite` for the per-issue write lane and
+ * CAS that keeps this from clobbering a write that raced in after this read. */
 async function retryPendingStatusWrites(deps: RunResyncDeps): Promise<void> {
   for (const [issue, pending] of Object.entries(deps.state.pendingStatusWrites)) {
-    if (pending.status === "done") {
-      const remote = await deps.dispatchClient.getIssue(issue);
-      if (remote.status === "done") {
-        delete deps.state.pendingStatusWrites[issue];
-        await deps.saveState();
-        continue;
-      }
-    }
-    const lastAppliedSeq = deps.state.issues[issue]?.lastAppliedSeq;
-    if (
-      pending.lastAppliedSeq !== undefined &&
-      lastAppliedSeq !== undefined &&
-      lastAppliedSeq > pending.lastAppliedSeq
-    ) {
-      delete deps.state.pendingStatusWrites[issue];
-      await deps.saveState();
-      continue;
-    }
-    if (await writeStatus(deps.state, deps.dispatchClient, issue, pending.status)) {
-      await deps.saveState();
-    }
+    const remote = await deps.dispatchClient.getIssue(issue);
+    const changed = await retryPendingWrite(
+      deps.state,
+      deps.dispatchClient,
+      issue,
+      remote,
+      pending
+    );
+    if (changed) await deps.saveState();
   }
 }
 
