@@ -1579,6 +1579,64 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("serializes overlapping /controller/ready drains: each queued notice publishes exactly once, none dropped", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const controllerRole = controllerToken(state.project);
+    const firstPublishGate = Promise.withResolvers<void>();
+    let gateArmed = false;
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        if (!state.roles[controllerRole]) throw { status: 404 };
+        if (!gateArmed) {
+          // Holds only the very first publish attempt open, so a second, overlapping
+          // `drainControllerNotices()` call has a real chance to start racing the first
+          // before either has removed anything from the queue.
+          gateArmed = true;
+          await firstPublishGate.promise;
+        }
+        published.push(payloadJson);
+      })
+    );
+
+    // Two notices queued before the controller claims the role.
+    nats.emit(
+      "notifications.slack.workspace.channel.mention",
+      envelope({ text: "first" }, "mention-1")
+    );
+    await flush();
+    nats.emit(
+      "notifications.slack.workspace.channel.mention",
+      envelope({ text: "second" }, "mention-2")
+    );
+    await flush();
+    expect(state.controllerPendingNotices).toEqual([
+      { payloadJson: JSON.stringify({ text: "first" }), eventId: "mention-1" },
+      { payloadJson: JSON.stringify({ text: "second" }), eventId: "mention-2" },
+    ]);
+
+    // The controller claims the role (what a real `/controller/ready` does before draining),
+    // then two overlapping `/controller/ready` deliveries both start draining without either
+    // awaiting the other first.
+    state.roles[controllerRole] = { role: "controller", sessionId: "ses-controller" };
+    const drain1 = pump.drainControllerNotices();
+    const drain2 = pump.drainControllerNotices();
+    await Promise.resolve();
+    await Promise.resolve();
+    firstPublishGate.resolve();
+    await Promise.all([drain1, drain2]);
+
+    // Each notice published exactly once, in order, and the queue is fully drained —
+    // never a duplicate publish and never a notice dropped by a racing removal.
+    expect(published).toEqual([
+      JSON.stringify({ text: "first" }),
+      JSON.stringify({ text: "second" }),
+    ]);
+    expect(state.controllerPendingNotices).toEqual([]);
+    pump.stop();
+  });
+
   it("does not ack when a GitHub mention's publish rejects", async () => {
     const { state } = stateForIssue();
     const nats = new FakeNats();

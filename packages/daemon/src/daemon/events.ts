@@ -329,10 +329,13 @@ export interface EventPump {
   /**
    * Delivers every `controllerPendingNotices` entry, in order, to the controller's role topic —
    * called once the controller has just claimed its role (`/controller/ready`), so the publish
-   * should now succeed. Removes each notice only after Envoy acks its publication (at-most-once,
-   * same discipline the deleted held-event queue once used for its own redelivery). Stops at the
-   * first failure, leaving the remainder queued for the next `/controller/ready` rather than
-   * skipping ahead or dropping any of them.
+   * should now succeed. Removes each notice, by identity, only after Envoy acks its publication
+   * (at-most-once, same discipline the deleted held-event queue once used for its own
+   * redelivery). Stops at the first failure, leaving the remainder queued for the next
+   * `/controller/ready` rather than skipping ahead or dropping any of them. Serialized: two
+   * overlapping calls (a second `/controller/ready` arriving while the first drain is still
+   * awaiting a publish) run one at a time, never interleaved, so neither double-publishes an
+   * entry nor drops one to a race against the other's removal.
    */
   drainControllerNotices(): Promise<void>;
   stop(): void;
@@ -495,6 +498,42 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         return;
       }
       throw error;
+    }
+  };
+
+  // Serializes `drainControllerNotices` the same way `githubQueue` serializes durable GitHub
+  // messages/resync -- a dedicated queue, not that one, since this drain never touches a
+  // `PrState` or anything `githubQueue` protects and chaining onto it would add unrelated
+  // cross-blocking. Two overlapping `/controller/ready` calls are a real possibility (nothing
+  // prevents a second controller-ready delivery while the first drain is still awaiting a
+  // publish); without this, interleaved reads of the same head entry would publish it twice, and
+  // removing by position rather than identity would then let a second entry queued mid-drain
+  // lose its own publish to whatever `shift()` happens to remove by the time each call gets
+  // there. `.then(() => {}, () => {})` (mirroring `runExclusive`) keeps the queue itself always
+  // resolving so one caller's failure never wedges every later drain behind a permanently
+  // rejected chain link.
+  let controllerNoticeQueue: Promise<void> = Promise.resolve();
+
+  const drainControllerNoticesLocked = async (): Promise<void> => {
+    const role = controllerToken(deps.state.project);
+    while (deps.state.controllerPendingNotices.length > 0) {
+      const notice = deps.state.controllerPendingNotices[0];
+      if (!notice) break;
+      try {
+        await deps.envoyPublish(roleTopic(role), notice.payloadJson);
+      } catch (error) {
+        console.error(
+          `[legion] failed to deliver pending controller notice ${notice.eventId}, leaving it queued for the next /controller/ready:`,
+          error
+        );
+        return;
+      }
+      // By identity, not position: the entry just published is exactly this `notice` object,
+      // wherever it now sits in the array (an unrelated append while this publish was in flight
+      // would otherwise make a positional `shift()` remove the wrong entry).
+      const index = deps.state.controllerPendingNotices.indexOf(notice);
+      if (index !== -1) deps.state.controllerPendingNotices.splice(index, 1);
+      await deps.saveState();
     }
   };
 
@@ -835,23 +874,13 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     async publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void> {
       await publishControllerDirect(JSON.stringify(payload), envelope);
     },
-    async drainControllerNotices(): Promise<void> {
-      const role = controllerToken(deps.state.project);
-      while (deps.state.controllerPendingNotices.length > 0) {
-        const notice = deps.state.controllerPendingNotices[0];
-        if (!notice) break;
-        try {
-          await deps.envoyPublish(roleTopic(role), notice.payloadJson);
-        } catch (error) {
-          console.error(
-            `[legion] failed to deliver pending controller notice ${notice.eventId}, leaving it queued for the next /controller/ready:`,
-            error
-          );
-          return;
-        }
-        deps.state.controllerPendingNotices.shift();
-        await deps.saveState();
-      }
+    drainControllerNotices(): Promise<void> {
+      const result = controllerNoticeQueue.then(() => drainControllerNoticesLocked());
+      controllerNoticeQueue = result.then(
+        () => {},
+        () => {}
+      );
+      return result;
     },
     async drain(): Promise<void> {
       while (pending.size > 0) await Promise.allSettled([...pending]);
