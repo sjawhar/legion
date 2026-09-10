@@ -9,6 +9,7 @@ import {
   type LegionRole,
   roleToken,
 } from "@legion/contracts";
+import { z } from "zod";
 import { classifySession } from "../src/legion/classify";
 import { handleLegionControlDirective } from "../src/legion/control";
 import type {
@@ -17,6 +18,7 @@ import type {
   RegisteredTool,
   SessionContext,
   ZodNumberProperty,
+  ZodProperty,
 } from "../src/pi-types";
 
 const natsConnections: { readonly name: string }[] = [];
@@ -191,6 +193,22 @@ function createPi(): {
   };
   envoyExtension(pi as never);
   return { commands, handlers, tools, sentMessages, activeTools, pi };
+}
+
+/** A real zod-backed `pi.zod`, unlike `createPi()`'s identity-passthrough fake: lets a test parse
+ * raw tool input through the actual schema `legionToolSchema` builds, proving a field survives
+ * (or a malformed input is rejected) at the real registered-tool boundary, not only through a
+ * mocked direct `execute()` call. */
+function createRealZodPi(): TestPi["zod"] {
+  return {
+    object: (shape) => z.object(shape as Record<string, z.ZodTypeAny>),
+    string: () => z.string() as unknown as ZodProperty,
+    number: () => z.number() as unknown as ZodNumberProperty,
+    array: (item) => z.array(item as z.ZodTypeAny) as unknown as ZodProperty,
+    enum: (values) => z.enum(values as [string, ...string[]]) as unknown as ZodProperty,
+    unknown: () => z.unknown() as unknown as ZodProperty,
+    discriminatedUnion: () => ({}),
+  };
 }
 
 function sessionContext(
@@ -1634,6 +1652,90 @@ describe("Legion OMP extension", () => {
       isError: true,
     });
     expect(requests).toHaveLength(requestCountBeforeRejectedField);
+  });
+  test("validates escalate's context and release_wave's issues through the real registered tool schema, not the mocked direct execute", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const tree = "REPO-42";
+    const issue = "REPO-43";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-schema";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    const context = sessionContext("ses_architect");
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      if (url.pathname === "/legion/v1/waves/release") return Response.json({ released: [issue] });
+      if (url.pathname.startsWith("/legion/v1/")) return Response.json({});
+      return Response.json({
+        session_id: "ses_architect",
+        machine_id: "machine",
+        dir: context.cwd,
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    const realPi: TestPi = { ...fixture.pi, zod: createRealZodPi() };
+
+    legionExtension(realPi as never);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+    await sessionStart({}, context);
+    const legion = fixture.tools.find((tool) => tool.name === "legion");
+    if (legion === undefined) throw new Error("legion tool was not registered");
+    const schema = legion.parameters as { parse: (value: unknown) => Record<string, unknown> };
+
+    const parsedEscalate = schema.parse({
+      op: "escalate",
+      kind: "capacity",
+      context: { reason: "No slots" },
+    });
+    expect(parsedEscalate.context).toEqual({ reason: "No slots" });
+    const escalateResult = await legion.execute(
+      "call-escalate",
+      parsedEscalate,
+      undefined,
+      undefined,
+      context
+    );
+    expect(escalateResult.isError).toBeUndefined();
+    expect(requests.at(-1)).toEqual({
+      path: "/legion/v1/escalate",
+      body: {
+        tree,
+        kind: "capacity",
+        context: { reason: "No slots" },
+        sessionId: "ses_architect",
+        secret: "root-secret",
+      },
+    });
+
+    const parsedRelease = schema.parse({ op: "release_wave", issues: [issue] });
+    expect(parsedRelease.issues).toEqual([issue]);
+    const releaseResult = await legion.execute(
+      "call-release",
+      parsedRelease,
+      undefined,
+      undefined,
+      context
+    );
+    expect(releaseResult.isError).toBeUndefined();
+    expect(requests.at(-1)).toEqual({
+      path: "/legion/v1/waves/release",
+      body: { tree, issues: [issue], sessionId: "ses_architect", secret: "root-secret" },
+    });
   });
   test("withholds architect-only Legion tools until an architect session is confirmed", () => {
     const fixture = createPi();

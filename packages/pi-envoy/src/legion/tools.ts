@@ -61,6 +61,7 @@ function legionToolSchema(pi: PiApi): unknown {
     status: z.enum(LIFECYCLE_STATUSES).optional(),
     askId: z.string().optional(),
     kind: z.enum(["re-file", "capacity", "cross-tree"]).optional(),
+    context: z.unknown().optional(),
     issues: z.array(z.string()).optional(),
     rationale: z.string().optional(),
     pr: z.number().optional(),
