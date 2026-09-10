@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
+	"sort"
 )
 
 type Attrs map[string]any
@@ -36,6 +38,23 @@ var markTypes = map[string]bool{
 	"strong": true, "emphasis": true, "inlineCode": true, "link": true, "strike_through": true,
 	"proofSuggestion": true, "proofComment": true, "proofFlagged": true, "proofApproved": true,
 	"proofAuthored": true, "dispatchAsk": true,
+}
+
+var yattrMarkSuffix = regexp.MustCompile(`^(.*)--[a-zA-Z0-9+/=]{8}$`)
+
+func sortMarks(marks []Mark) {
+	sort.Slice(marks, func(i, j int) bool { return marks[i].Type < marks[j].Type })
+}
+
+func sortNodeMarks(n *Node) {
+	sortMarks(n.Marks)
+	for _, child := range n.Children {
+		sortNodeMarks(child)
+	}
+}
+
+func yattrToMarkName(name string) string {
+	return yattrMarkSuffix.ReplaceAllString(name, "$1")
 }
 
 func (n *Node) Validate() error {
@@ -77,12 +96,20 @@ func (n *Node) Equal(o *Node) bool {
 
 // attrsEqual treats nil and empty as equal and compares values by JSON semantics.
 func attrsEqual(a, b Attrs) bool {
-	if len(a) != len(b) {
-		return false
+	for key, av := range a {
+		bv, ok := b[key]
+		if !ok {
+			if av == nil {
+				continue
+			}
+			return false
+		}
+		if !reflect.DeepEqual(normalizeJSON(av), normalizeJSON(bv)) {
+			return false
+		}
 	}
-	for k, av := range a {
-		bv, ok := b[k]
-		if !ok || !reflect.DeepEqual(normalizeJSON(av), normalizeJSON(bv)) {
+	for key, bv := range b {
+		if _, ok := a[key]; !ok && bv != nil {
 			return false
 		}
 	}
@@ -150,6 +177,7 @@ func FromJSON(b []byte) (*Node, error) {
 		return nil, fmt.Errorf("pmdoc: decode json: %w", err)
 	}
 	n := j.toNode()
+	sortNodeMarks(n)
 	if err := n.Validate(); err != nil {
 		return nil, err
 	}
