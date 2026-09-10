@@ -422,7 +422,10 @@ describe("ProcessManager", () => {
       state,
       commands,
     } = manager(newLegionState("omp", 1), {
-      config: config(stateDir, { dispatchUrl: "http://127.0.0.1:18766" }),
+      config: config(stateDir, {
+        dispatchUrl: "http://127.0.0.1:18766",
+        dispatchToken: "test-dispatch-token",
+      }),
       run: async (
         command: string[],
         opts?: {
@@ -531,7 +534,7 @@ describe("ProcessManager", () => {
         "-e",
         "DISPATCH_URL=http://127.0.0.1:18766",
         "-e",
-        "DISPATCH_MCP_URL=http://127.0.0.1:18766/mcp",
+        "DISPATCH_TOKEN=test-dispatch-token",
         `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "42-architect-edb483d7.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
@@ -6025,7 +6028,7 @@ describe("ProcessManager", () => {
     expect(claim.pendingAssignment).toBe("verify #41");
   });
 
-  it("passes both DISPATCH_URL and the transitional DISPATCH_MCP_URL alias to a spawned phase worker", async () => {
+  it("passes DISPATCH_URL and DISPATCH_TOKEN to a spawned phase worker, never the retired DISPATCH_MCP_URL alias", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     await mkdir(workspace, { recursive: true });
@@ -6038,7 +6041,10 @@ describe("ProcessManager", () => {
       heldEvents: [],
     };
     const { manager: processes, commands } = manager(state, {
-      config: config(stateDir, { dispatchUrl: "http://127.0.0.1:18766" }),
+      config: config(stateDir, {
+        dispatchUrl: "http://127.0.0.1:18766",
+        dispatchToken: "test-dispatch-token",
+      }),
       run: async (command) => {
         commands.push(command);
         if (command[0] === "tmux" && command[1] === "new-window") {
@@ -6056,7 +6062,29 @@ describe("ProcessManager", () => {
     if (!windowCommand) throw new Error("worker spawn did not open a tmux window");
     const environment = tmuxWindowEnvironment(windowCommand);
     expect(environment.DISPATCH_URL).toBe("http://127.0.0.1:18766");
-    expect(environment.DISPATCH_MCP_URL).toBe("http://127.0.0.1:18766/mcp");
+    expect(environment.DISPATCH_TOKEN).toBe("test-dispatch-token");
+    expect(environment.DISPATCH_MCP_URL).toBeUndefined();
+  });
+
+  it("passes DISPATCH_URL and DISPATCH_TOKEN to the controller pane, never the retired DISPATCH_MCP_URL alias", async () => {
+    const stateDir = await temporaryDir();
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir, {
+        dispatchUrl: "http://127.0.0.1:18766",
+        dispatchToken: "test-dispatch-token",
+      }),
+    });
+
+    await processes.ensureController();
+
+    const windowCommand = commands.find(
+      (command) => command[0] === "tmux" && command[1] === "new-window"
+    );
+    if (!windowCommand) throw new Error("controller spawn did not open a tmux window");
+    const environment = tmuxWindowEnvironment(windowCommand);
+    expect(environment.DISPATCH_URL).toBe("http://127.0.0.1:18766");
+    expect(environment.DISPATCH_TOKEN).toBe("test-dispatch-token");
+    expect(environment.DISPATCH_MCP_URL).toBeUndefined();
   });
 
   it("kills a still-running pane whose socket is unreachable before clearing its locator on reconnect", async () => {

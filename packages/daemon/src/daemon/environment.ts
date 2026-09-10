@@ -93,10 +93,21 @@ async function fullMiseEnvironment(
       `[legion] Could not load the full mise environment${detail ? `: ${detail}` : ""}`
     );
   }
-  return {
+  const merged: NodeJS.ProcessEnv = {
     ...env,
     ...parseMiseEnvironment(result.stdout),
-  } as FullMiseEnvironment;
+  };
+  // paneEnv becomes the base environment for every daemon-spawned subprocess, including the
+  // `tmux new-session`/`new-window` invocations that start each pane's tmux session — tmux
+  // captures that invocation's environment as the session's own base environment, which every
+  // later pane in the same session inherits regardless of the `-e` pairs a specific `new-window`
+  // call adds. If the daemon's own process (or mise's) happened to carry a dispatch env var, it
+  // would leak into every pane unconditionally. Stripping the three dispatch keys here makes the
+  // explicit, config-driven `-e` list processes.ts builds the only way a pane ever sees them.
+  delete merged.DISPATCH_TOKEN;
+  delete merged.DISPATCH_URL;
+  delete merged.DISPATCH_MCP_URL;
+  return merged as FullMiseEnvironment;
 }
 
 function miseToolFromInvocation(invocation: string): string | undefined {

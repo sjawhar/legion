@@ -60,6 +60,54 @@ describe("resolveDaemonEnvironment", () => {
     });
   });
 
+  it("strips DISPATCH_TOKEN, DISPATCH_URL, and DISPATCH_MCP_URL from paneEnv regardless of source", async () => {
+    const environment = await resolveDaemonEnvironment(
+      `mise x ${OMP_PIN} -- omp`,
+      dependencies({
+        env: {
+          PATH: "/narrow/bin",
+          DISPATCH_TOKEN: "leaked-from-daemon-process",
+          DISPATCH_URL: "http://leaked-from-daemon-process",
+        },
+        run: async (command) => {
+          if (command.join(" ") === "/tools/mise env --json") {
+            return {
+              stdout: JSON.stringify({
+                PATH: "/full/bin:/usr/bin",
+                HOME: "/home/legion",
+                DISPATCH_TOKEN: "leaked-from-mise",
+                DISPATCH_URL: "http://leaked-from-mise",
+                DISPATCH_MCP_URL: "http://leaked-from-mise/mcp",
+              }),
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          if (command.join(" ") === `/tools/mise where ${OMP_PIN}`) {
+            return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
+          }
+          throw new Error(`Unexpected startup command: ${command.join(" ")}`);
+        },
+      })
+    );
+
+    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_TOKEN");
+    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_URL");
+    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_MCP_URL");
+    expect(environment.paneEnv).toMatchObject({ PATH: "/full/bin:/usr/bin", HOME: "/home/legion" });
+
+    const received: Array<{ options: Parameters<CommandRunner>[1] }> = [];
+    const runner = createDaemonRunner(environment, async (_command, options) => {
+      received.push({ options });
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    await runner(["tmux", "new-session"]);
+
+    expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_TOKEN");
+    expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_URL");
+    expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_MCP_URL");
+  });
+
   it("refuses unpinned OMP invocations without an explicit executable override", async () => {
     await expect(resolveDaemonEnvironment("omp", dependencies())).rejects.toThrow(
       "[legion] OMP invocation must be 'mise x <tool> -- omp'. Set LEGION_OMP_PATH to an absolute executable path."

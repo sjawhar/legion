@@ -53,7 +53,7 @@ describe("daemon config", () => {
     expect(config.stateDir).toEndWith(path.join(".legion", "acme42"));
   });
 
-  it("rejects the retired dispatch_mcp_url passthrough from the environment", () => {
+  it("rejects DISPATCH_MCP_URL from the environment as a legacy key", () => {
     expect(() =>
       resolveDaemonConfig({
         env: {
@@ -65,25 +65,56 @@ describe("daemon config", () => {
           githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
         },
       })
-    ).toThrow("dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)");
+    ).toThrow("DISPATCH_MCP_URL was replaced by DISPATCH_URL");
   });
 
-  it("accepts DISPATCH_MCP_URL from the environment when it is the daemon's own consistent alias", () => {
-    // The daemon exports DISPATCH_MCP_URL into every pane it spawns, derived from its own
-    // dispatchUrl; `legion start`/`restart`/`check-config` run from inside a spawned pane
-    // always inherits it, and must not fail just because it is present.
+  it("throws when dispatch_url is set and DISPATCH_TOKEN is not", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          LEGION_BOARD_PROJECT_IDS: "PVT_x",
+          DISPATCH_URL: "http://127.0.0.1:18766",
+        },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(
+      "dispatch_url is set but DISPATCH_TOKEN is not; the dispatch tools would not register"
+    );
+  });
+
+  it("treats a whitespace-only DISPATCH_TOKEN as absent, same as fully unset", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          LEGION_BOARD_PROJECT_IDS: "PVT_x",
+          DISPATCH_URL: "http://127.0.0.1:18766",
+          DISPATCH_TOKEN: "   ",
+        },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(
+      "dispatch_url is set but DISPATCH_TOKEN is not; the dispatch tools would not register"
+    );
+  });
+
+  it("leaves dispatchToken undefined and unexported when DISPATCH_TOKEN is set without dispatch_url", () => {
     const { config } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
         LEGION_BOARD_PROJECT_IDS: "PVT_x",
-        DISPATCH_URL: "http://127.0.0.1:18766",
-        DISPATCH_MCP_URL: "http://127.0.0.1:18766/mcp",
+        DISPATCH_TOKEN: "some-token",
       },
       cliOverrides: {
         githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
       },
     });
-    expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
+    expect(config.dispatchToken).toBeUndefined();
   });
 
   it("defaults worker and tree stop timeouts to 10 and 60 seconds", () => {
@@ -96,22 +127,6 @@ describe("daemon config", () => {
     });
     expect(config.workerStopTimeoutSeconds).toBe(10);
     expect(config.treeStopTimeoutSeconds).toBe(60);
-  });
-
-  it("rejects DISPATCH_MCP_URL from the environment when it disagrees with DISPATCH_URL", () => {
-    expect(() =>
-      resolveDaemonConfig({
-        env: {
-          ...requiredEnv,
-          LEGION_BOARD_PROJECT_IDS: "PVT_x",
-          DISPATCH_URL: "http://127.0.0.1:18766",
-          DISPATCH_MCP_URL: "http://127.0.0.1:9999/mcp",
-        },
-        cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
-        },
-      })
-    ).toThrow("dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)");
   });
 
   it("rejects the retired worker_budget key from the environment", () => {
@@ -136,18 +151,20 @@ describe("daemon config", () => {
     ).toThrow("worker_budget was replaced by worker_cap");
   });
 
-  it("resolves the optional dispatch service base URL from the environment", () => {
+  it("resolves the optional dispatch service base URL and bearer token from the environment", () => {
     const { config } = resolveDaemonConfig({
       env: {
         ...requiredEnv,
         LEGION_BOARD_PROJECT_IDS: "PVT_x",
         DISPATCH_URL: "http://127.0.0.1:18766",
+        DISPATCH_TOKEN: "test-dispatch-token",
       },
       cliOverrides: {
         githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
       },
     });
     expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
+    expect(config.dispatchToken).toBe("test-dispatch-token");
   });
 
   it("normalizes a trailing slash off the dispatch service base URL", () => {
@@ -156,6 +173,7 @@ describe("daemon config", () => {
         ...requiredEnv,
         LEGION_BOARD_PROJECT_IDS: "PVT_x",
         DISPATCH_URL: "http://127.0.0.1:18766/",
+        DISPATCH_TOKEN: "test-dispatch-token",
       },
       cliOverrides: {
         githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
@@ -205,7 +223,10 @@ describe("daemon config", () => {
       ].join("\n"),
       "/tmp/legion-config"
     );
-    const { config } = resolveDaemonConfig({ env: requiredEnv, configFile: file });
+    const { config } = resolveDaemonConfig({
+      env: { ...requiredEnv, DISPATCH_TOKEN: "test-dispatch-token" },
+      configFile: file,
+    });
 
     expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
   });
