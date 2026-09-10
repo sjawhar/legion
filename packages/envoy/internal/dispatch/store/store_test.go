@@ -168,8 +168,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 3 {
-		t.Errorf("recorded migrations: got %d, want 3", migrations)
+	if migrations != 4 {
+		t.Errorf("recorded migrations: got %d, want 4", migrations)
 	}
 }
 
@@ -214,5 +214,47 @@ func TestMigrationVersionParsesNumericFilenamePrefix(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: got %d, want %d", tc.filename, got, tc.want)
 		}
+	}
+}
+
+func TestMigrateMarksLegacyNonNotifyingEventsPublished(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// A database that stopped at the notify-only outbox: forget the backfill, then record
+	// an event of the kind that outbox never published.
+	if _, err := store.Pool.Exec(ctx, "delete from schema_migrations where version = 4"); err != nil {
+		t.Fatalf("forget backfill migration: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by)
+			values ('CORE-1', 'CORE', 1, 'Legacy', '{"kind":"session","id":"s"}');
+		insert into events (issue_key, seq, type, actor, payload, notify)
+			values ('CORE-1', 1, 'issue.created', '{"kind":"session","id":"s"}', '{}', false),
+			       ('CORE-1', 2, 'comment.created', '{"kind":"user","id":"alice"}', '{}', true);
+	`); err != nil {
+		t.Fatalf("seed legacy events: %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate again: %v", err)
+	}
+	var legacyPublished, notifyingPublished bool
+	if err := store.Pool.QueryRow(ctx, `
+		select
+			bool_and(published_at is not null) filter (where not notify),
+			bool_and(published_at is not null) filter (where notify)
+		from events
+	`).Scan(&legacyPublished, &notifyingPublished); err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if !legacyPublished {
+		t.Error("legacy non-notifying event is still unpublished; the widened outbox scan would replay it")
+	}
+	if notifyingPublished {
+		t.Error("notifying event was marked published by the backfill; it must still reach the outbox")
 	}
 }
