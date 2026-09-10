@@ -1601,20 +1601,6 @@ describe("Legion OMP extension", () => {
         },
         details: {},
       },
-      {
-        input: { op: "request_refile", issue, rationale: "Independent work" },
-        request: {
-          path: "/legion/v1/escalate",
-          body: {
-            tree,
-            kind: "re-file",
-            context: { issue, rationale: "Independent work" },
-            sessionId: "ses_architect",
-            secret: "root-secret",
-          },
-        },
-        details: {},
-      },
     ];
 
     for (const entry of cases) {

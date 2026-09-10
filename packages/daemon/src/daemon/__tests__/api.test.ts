@@ -114,48 +114,7 @@ describe("Legion HTTP API", () => {
       options?.runner ??
       ((async (command) => {
         commands.push(command);
-        if (command[2] === "repos/acme/widgets/issues" && command[3] === "-f") {
-          return {
-            stdout: JSON.stringify({
-              number: 2,
-              html_url: "https://github.com/acme/widgets/issues/2",
-              node_id: "I_child",
-            }),
-            stderr: "",
-            exitCode: 0,
-          };
-        }
-        if (command[2] === "repos/acme/widgets/issues/1") {
-          return {
-            stdout: JSON.stringify({ node_id: "I_parent" }),
-            stderr: "",
-            exitCode: 0,
-          };
-        }
-        if (command[2] === "graphql") {
-          return {
-            stdout: JSON.stringify({
-              data: { addSubIssue: { issue: { id: "I_child" } } },
-            }),
-            stderr: "",
-            exitCode: 0,
-          };
-        }
-        if (command.some((part) => part.endsWith("/comments"))) {
-          return {
-            stdout: JSON.stringify({
-              id: 55,
-              html_url: "https://github.com/acme/widgets/issues/2#issuecomment-55",
-            }),
-            stderr: "",
-            exitCode: 0,
-          };
-        }
-        return {
-          stdout: JSON.stringify({ labels: [] }),
-          stderr: "",
-          exitCode: 0,
-        };
+        return { stdout: "", stderr: "", exitCode: 0 };
       }) satisfies CommandRunner);
 
     const deps: LegionApiDeps = {

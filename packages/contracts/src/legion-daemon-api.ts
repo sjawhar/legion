@@ -148,10 +148,10 @@ export const LegionDaemonApi = {
       secret: nonEmptyString,
     }),
   },
-  // Controller capability (bare `secret`) may set `todo`/`backlog`/`icebox` on any issue in the
-  // project; architect capability (`tree`+`sessionId` alongside `secret`) may set any status on
-  // an issue within its own tree. The route handler rejects a body presenting both or neither —
-  // this schema only shapes the fields, `tree`/`sessionId` optional together.
+  // A bare controller credential sets `todo`/`backlog`/`icebox` project-wide. An architect
+  // credential includes both `tree` and `sessionId` and may set any status within that tree.
+  // Exactly one of `tree` or `sessionId` is invalid; neither selects controller access and both
+  // select architect access.
   IssueStatus: {
     request: controllerIssue.extend({
       status: z.enum(LIFECYCLE_STATUSES),

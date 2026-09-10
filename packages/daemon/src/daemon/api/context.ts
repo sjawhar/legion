@@ -1,4 +1,4 @@
-import { type IssueKey, roleToken } from "@legion/contracts";
+import type { IssueKey } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import type { LegionApiConfig, LegionApiDeps } from "../api";
 import type { LegionState } from "../legion-state";
@@ -59,16 +59,6 @@ export function requireTreeIssue(
   return { tree, issue };
 }
 
-export function appendFooter(
-  state: LegionState,
-  tree: IssueKey,
-  issue: IssueKey,
-  body: string
-): string {
-  const session = state.roles[roleToken(state.project, tree, "architect")]?.sessionId ?? "";
-  return `${body}\n\n<!-- legion: ${JSON.stringify({ session, issue })} -->`;
-}
-
 /** The single object every Legion HTTP API route handler receives. */
 export interface RouteContext {
   config: LegionApiConfig;
@@ -81,5 +71,4 @@ export interface RouteContext {
   github: GitHubService;
   requireTree(body: Record<string, unknown>): IssueKey;
   requireTreeIssue(body: Record<string, unknown>): { tree: IssueKey; issue: IssueKey };
-  appendFooter(tree: IssueKey, issue: IssueKey, body: string): string;
 }

@@ -42,7 +42,6 @@ const LEGION_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
   register_gate: ["issue", "askId"],
   wave_release: ["children"],
   escalate: ["kind", "context"],
-  request_refile: ["issue", "rationale"],
   merge_gate: ["pr"],
   spawn_worker: ["issue", "role", "task"],
 };
@@ -55,7 +54,6 @@ function legionToolSchema(pi: PiApi): unknown {
       "register_gate",
       "wave_release",
       "escalate",
-      "request_refile",
       "merge_gate",
       "spawn_worker",
     ]),
@@ -184,15 +182,6 @@ export function createLegionTool(deps: {
             });
             return jsonSuccess({});
           }
-          case "request_refile":
-            await daemon.escalate({
-              tree: architect.tree,
-              sessionId,
-              secret: architect.secret,
-              kind: "re-file",
-              context: { issue: stringInput("issue"), rationale: stringInput("rationale") },
-            });
-            return jsonSuccess({});
           case "spawn_worker": {
             const role = parameters.role;
             if (typeof role !== "string" || !LEGION_ROLES.includes(role as LegionRole)) {

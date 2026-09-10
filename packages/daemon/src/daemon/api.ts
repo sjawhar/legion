@@ -8,7 +8,7 @@ import {
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
 import { CapabilityService, secretHash, spawnCapabilityKey } from "./api/auth";
-import { appendFooter, type RouteContext, requireTree, requireTreeIssue } from "./api/context";
+import { type RouteContext, requireTree, requireTreeIssue } from "./api/context";
 
 import { GitHubService, type GitHubTokenSource } from "./api/github";
 import {
@@ -210,7 +210,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     github,
     requireTree: (body) => requireTree(deps.state, body),
     requireTreeIssue: (body) => requireTreeIssue(deps.state, body),
-    appendFooter: (tree, issue, body) => appendFooter(deps.state, tree, issue, body),
   };
 
   const handler = async (request: Request): Promise<Response> => {

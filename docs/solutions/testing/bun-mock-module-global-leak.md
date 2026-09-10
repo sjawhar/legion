@@ -14,7 +14,7 @@ related_issues:
   - "#92"
 symptoms:
   - "Tests in other files fail after mock.module() in one test file"
-  - "fetchGitHubProjectItems tests broken by unrelated test file"
+  - "An external collector test is affected by an unrelated test file"
   - "mock.module replaces module globally across test files"
   - "Bun test isolation failure with module mocks"
 ---
@@ -27,10 +27,8 @@ symptoms:
 test run. Unlike `globalThis.fetch` mocks (which can be restored in `afterEach`), module
 mocks cannot be undone — they persist across all test files in the same process.
 
-This means if `server.test.ts` calls `mock.module("../../state/github-fetch", ...)`, then
-`github-fetch.test.ts` (which tests the **real** `fetchGitHubProjectItems`) will get the
-mock instead of the real implementation. Tests pass in isolation but fail in CI where all
-test files run in one process.
+This means a test that calls `mock.module()` for a shared dependency can change what a later test
+imports. Tests pass in isolation but fail when the full suite loads both files into one process.
 
 ## Symptoms
 
@@ -41,53 +39,18 @@ test files run in one process.
 
 ## When This Happens
 
-Any function that uses `Bun.spawn` internally (like `fetchGitHubProjectItems` which shells
-out to `gh`) cannot be mocked via `globalThis.fetch`. The natural instinct is to reach for
-`mock.module()` — but that creates the global leak.
+Any function that shells out or reaches a non-interceptable dependency cannot be safely replaced
+with `globalThis.fetch`. Replacing its module registry leaks that replacement to other tests.
 
-## Solution: Dependency Injection via ServerOptions
+## Solution: dependency injection
 
-Instead of module-level mocking, inject the function via the options interface:
+Make the external operation an explicit dependency of the subsystem that consumes it. For example,
+`RunResyncDeps` receives both the Dispatch client and the CI-status reader, so a test provides only
+the controlled response it needs while the resync reducer and persistence path remain real.
 
-### 1. Add optional function to ServerOptions
-
-```typescript
-export interface ServerOptions {
-  // ... existing fields ...
-  /** Injectable fetcher for testing — defaults to fetchGitHubProjectItems */
-  fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
-}
-```
-
-### 2. Use injected function with fallback in handler
-
-```typescript
-const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
-const rawIssues = await fetchFn(boardParts[0], projectNumber);
-```
-
-### 3. Pass mock via test helper
-
-```typescript
-function makeFetchProjectItems(boardMocks: Map<string, unknown>) {
-  return async (owner: string, projectNumber: number) => {
-    const key = `${owner}/${projectNumber}`;
-    const result = boardMocks.get(key);
-    if (result instanceof Error) throw result;    // simulate board failure
-    if (result === undefined) throw new Error(`No mock for board ${key}`);
-    return result;
-  };
-}
-
-// In test:
-const boardMocks = new Map([
-  ["acme/123", [makeGitHubProjectItem("acme/widgets", 10, "Todo")]],
-]);
-await startTestServer({
-  legionId: "acme/123",
-  fetchProjectItems: makeFetchProjectItems(boardMocks),
-});
-```
+Keep the dependency at the boundary that owns the side effect, not in a module-level test mock.
+The caller's test helper can provide a narrow function or client double; other test files then keep
+their own real imports and cannot observe the replacement.
 
 ## Rule
 
