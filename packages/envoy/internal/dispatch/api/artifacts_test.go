@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 func createArtifactIssue(t *testing.T, handler http.Handler) model.Issue {
@@ -158,5 +160,133 @@ func TestUploadArtifactJSONRejectsOversizedContent(t *testing.T) {
 	}, "alice")
 	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) {
 		t.Fatalf("oversized JSON content: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestArtifactRoutesResolveUUIDsAndIssueScopedSlugs(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	otherIssueResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Other artifact issue",
+	}, "alice")
+	if otherIssueResponse.Code != http.StatusCreated {
+		t.Fatalf("create other issue: status=%d body=%s", otherIssueResponse.Code, otherIssueResponse.Body.String())
+	}
+	otherIssue := decodeBody[model.Issue](t, otherIssueResponse)
+
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "architect-spec.md", "content": "# Artifact routes\n",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create artifact: status=%d body=%s", created.Code, created.Body.String())
+	}
+	upload := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, created)
+
+	for _, route := range []struct {
+		name   string
+		method string
+		suffix string
+		body   any
+	}{
+		{name: "details", method: http.MethodGet},
+		{name: "text", method: http.MethodGet, suffix: "/text"},
+		{name: "version", method: http.MethodGet, suffix: "/versions/1"},
+		{name: "named version", method: http.MethodPost, suffix: "/versions", body: map[string]string{"summary": "Named version"}},
+		{name: "primary", method: http.MethodPost, suffix: "/primary"},
+		{name: "edit", method: http.MethodPost, suffix: "/edits", body: map[string]any{"ops": []any{}}},
+	} {
+		t.Run("invalid UUID "+route.name, func(t *testing.T) {
+			response := dispatchRequest(t, handler, route.method, "/api/v1/artifacts/"+upload.Artifact.Slug+route.suffix, route.body, "alice")
+			if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"ARTIFACT_NOT_FOUND"`) {
+				t.Fatalf("invalid UUID %s: status=%d body=%s", route.name, response.Code, response.Body.String())
+			}
+		})
+	}
+
+	for _, route := range []struct {
+		name   string
+		suffix string
+	}{
+		{name: "details", suffix: ""},
+		{name: "text", suffix: "/text"},
+		{name: "version", suffix: "/versions/1"},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			byID := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+upload.Artifact.ID+route.suffix, nil, "alice")
+			bySlug := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts/"+upload.Artifact.Slug+route.suffix, nil, "alice")
+			if byID.Code != http.StatusOK || bySlug.Code != http.StatusOK {
+				t.Fatalf("read by ID=%d body=%s; by slug=%d body=%s", byID.Code, byID.Body.String(), bySlug.Code, bySlug.Body.String())
+			}
+			if byID.Body.String() != bySlug.Body.String() {
+				t.Fatalf("read response by ID=%s, by slug=%s", byID.Body.String(), bySlug.Body.String())
+			}
+		})
+	}
+
+	for _, route := range []struct {
+		name   string
+		method string
+		suffix string
+		body   any
+	}{
+		{name: "named version", method: http.MethodPost, suffix: "/versions", body: map[string]string{"summary": "Named version"}},
+		{name: "primary", method: http.MethodPost, suffix: "/primary"},
+		{name: "edit", method: http.MethodPost, suffix: "/edits", body: map[string]any{"ops": []any{}}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			for _, target := range []string{
+				"/api/v1/artifacts/" + upload.Artifact.ID + route.suffix,
+				"/api/v1/issues/" + issue.Key + "/artifacts/" + upload.Artifact.Slug + route.suffix,
+			} {
+				response := dispatchRequest(t, handler, route.method, target, route.body, "alice")
+				if response.Code != http.StatusOK && response.Code != http.StatusCreated {
+					t.Fatalf("%s %s: status=%d body=%s", route.method, target, response.Code, response.Body.String())
+				}
+			}
+		})
+	}
+
+	for _, target := range []string{
+		"/api/v1/issues/" + issue.Key + "/artifacts/missing",
+		"/api/v1/issues/" + otherIssue.Key + "/artifacts/" + upload.Artifact.Slug,
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice")
+		if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"ARTIFACT_NOT_FOUND"`) {
+			t.Fatalf("missing scoped artifact %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
+	mux := http.NewServeMux()
+	Register(mux, Deps{
+		Store: &store.Store{},
+		Identity: identity.HeaderIdentity{
+			Header:        "X-Dispatch-User",
+			AllowedLogins: map[string]struct{}{"alice": {}},
+		},
+	})
+
+	for _, route := range []struct {
+		name   string
+		method string
+		suffix string
+		body   any
+	}{
+		{name: "details", method: http.MethodGet},
+		{name: "text", method: http.MethodGet, suffix: "/text"},
+		{name: "version", method: http.MethodGet, suffix: "/versions/1"},
+		{name: "named version", method: http.MethodPost, suffix: "/versions", body: map[string]string{"summary": "Named version"}},
+		{name: "primary", method: http.MethodPost, suffix: "/primary"},
+		{name: "edit", method: http.MethodPost, suffix: "/edits", body: map[string]any{"ops": []any{}}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			response := dispatchRequest(t, mux, route.method, "/api/v1/artifacts/not-a-uuid"+route.suffix, route.body, "alice")
+			if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"ARTIFACT_NOT_FOUND"`) {
+				t.Fatalf("invalid UUID %s: status=%d body=%s", route.name, response.Code, response.Body.String())
+			}
+		})
 	}
 }
