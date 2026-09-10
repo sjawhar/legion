@@ -16,4 +16,5 @@ exec env \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_WEB_DIST=../dispatch/web/dist \
   DISPATCH_PORT="$DISPATCH_E2E_PORT" \
+  DISPATCH_REPO_PROJECTS=e2e/fixtures=E2E \
   go run ./cmd/dispatch
