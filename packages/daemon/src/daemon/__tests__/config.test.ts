@@ -266,6 +266,28 @@ describe("daemon config", () => {
     expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
   });
 
+  it("loads a file that omits the gates block, resolving both gates to their defaults", () => {
+    const file = loadConfigFromFile(
+      ["project: acme/7", "dispatch_project: ACME"].join("\n"),
+      "/tmp/legion-config"
+    );
+    const { config } = resolveDaemonConfig({
+      env: requiredEnv,
+      configFile: file,
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+
+    expect(config.gates).toEqual({ design: "root-issues", merge: "human" });
+  });
+
+  it("rejects a gates block that is present but not a mapping", () => {
+    expect(() =>
+      loadConfigFromFile(["project: acme/7", "gates: off"].join("\n"), "/tmp/legion-config")
+    ).toThrow("gates must be a mapping");
+  });
+
   it("loads lifecycle settings from the existing YAML loader shape", () => {
     const file = loadConfigFromFile(
       [
