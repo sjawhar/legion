@@ -32,6 +32,7 @@ interface DocEditorProps {
   artifact: Artifact;
   commentId?: string;
   highlight?: DocViewHighlight;
+  highlightTerm?: string;
   isClosed: boolean;
   issueKey?: string;
   onVersionChange?: (version: number | null) => void;
@@ -60,6 +61,7 @@ function DocEditorContent({
   artifact,
   commentId,
   highlight,
+  highlightTerm,
   isClosed,
   issueKey,
   onVersionChange,
@@ -249,13 +251,18 @@ function DocEditorContent({
               </p>
             ) : null}
             <div data-testid="version-view">
-              <DocView highlight={selectedHighlight} markdown={selectedMarkdown} />
+              <DocView
+                highlight={selectedHighlight}
+                highlightTerm={highlightTerm}
+                markdown={selectedMarkdown}
+              />
             </div>
           </section>
         )
       ) : (
         <DocView
           highlight={liveHighlight}
+          highlightTerm={highlightTerm}
           markdown={liveMarkdown}
           onSelectionChange={(next) => {
             setSelection(

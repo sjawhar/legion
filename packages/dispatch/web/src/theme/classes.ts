@@ -96,6 +96,7 @@ export const textMutedOnSurface = "text-slate-500 dark:text-slate-400";
 export const textPrimaryOnSurfaceMuted = "text-slate-900 dark:text-slate-100";
 export const textSecondaryOnSurfaceMuted = "text-slate-700 dark:text-slate-300";
 export const textMutedOnSurfaceMuted = "text-slate-600 dark:text-slate-400";
+export const textMutedOnSelectedCard = "text-slate-600 dark:text-slate-400";
 export const textDisabled = "text-slate-400 dark:text-slate-600";
 /** A dialog/composer "Close" button: secondary at rest, primary-emphasis on hover. Not
  * registered separately — both ends reuse `TEXT_SECONDARY`/`TEXT_PRIMARY`'s own checks. */
@@ -117,6 +118,7 @@ export const textMutedHoverToPrimary =
 /** `SURFACE_MUTED` used as a disabled-state background (e.g. a `<select>` that greys out rather
  * than just dimming its text). */
 export const surfaceMutedDisabledBg = "disabled:bg-slate-100 dark:disabled:bg-slate-800";
+export const kbdHint = `${surfaceMutedBg} ${textMutedOnSurfaceMuted}`;
 
 registerText("primary text on canvas", TEXT_PRIMARY, CANVAS);
 registerText("primary text on surface", TEXT_PRIMARY, SURFACE);
@@ -280,8 +282,10 @@ registerText("quote body text on surface", QUOTE_BODY_TEXT, SURFACE);
 registerText("info callout title text", CALLOUT_INFO_TITLE_TEXT, CALLOUT_INFO_BG);
 registerText("inline warning text on surface", INLINE_WARNING_TEXT, SURFACE);
 /** `CALLOUT_INFO_BG` also backs the composer form and a selected margin card (`selectedCardBg`
- * reuses its exact shades under its own name) — both hold ordinary secondary/muted/link/status
- * body text, not just the title role checked above. */
+ * reuses its exact shades under its own name), so primary, secondary, and stronger muted text
+ * roles need contrast checks.
+ */
+registerText("primary text on callout-info", TEXT_PRIMARY, CALLOUT_INFO_BG);
 registerText("secondary text on callout-info", TEXT_SECONDARY, CALLOUT_INFO_BG);
 registerText(
   "muted text (surface-muted shade) on callout-info",
@@ -320,6 +324,13 @@ registerText("suggestion-added text", SUGGESTION_ADDED_TEXT, SUGGESTION_ADDED_BG
 registerText("suggestion-removed text", SUGGESTION_REMOVED_TEXT, SUGGESTION_REMOVED_BG);
 registerText("diff-added text", DIFF_ADDED_TEXT, DIFF_ADDED_BG);
 registerText("diff-removed text", DIFF_REMOVED_TEXT, DIFF_REMOVED_BG);
+
+export const SEARCH_HIT_BG = pair(P.AMBER_100, P.AMBER_950);
+export const SEARCH_HIT_TEXT = pair(P.AMBER_950, P.AMBER_100);
+export const searchHitBg = "bg-amber-100 dark:bg-amber-950";
+export const searchHitText = "text-amber-950 dark:text-amber-100";
+
+registerText("search hit text", SEARCH_HIT_TEXT, SEARCH_HIT_BG);
 
 // ---------------------------------------------------------------------------------------------
 // Badges (urgency, primary-artifact, connection status)
