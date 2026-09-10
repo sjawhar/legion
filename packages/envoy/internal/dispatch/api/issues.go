@@ -32,6 +32,20 @@ const listIssuesQuery = `
 	order by i.updated_at desc, i.key desc
 `
 
+const listPinnedIssuesQuery = `
+	select i.key, i.title, i.status, i.labels, i.parent_key, i.updated_at, i.last_seq,
+	       count(a.id) filter (where i.closed_at is null)
+	from issues i
+	join user_issue_state s on s.issue_key = i.key and s.login = $5 and s.pinned
+	left join asks a on a.issue_key = i.key and a.state = 'open'
+	where ($1 = '' or i.project_key = $1)
+	  and ($2 = '' or i.status = $2)
+	  and ($3 = '' or i.parent_key = $3)
+	  and ($4::timestamptz is null or i.updated_at >= $4)
+	group by i.key
+	order by i.updated_at desc, i.key desc
+`
+
 const defaultIssueSpecMarkdown = `## Decisions needed
 
 _List only decisions requiring human authority, taste, or risk appetite, with options, tradeoffs, and a recommendation._
@@ -64,10 +78,18 @@ _List each considered alternative and the reason it was rejected._
 `
 
 func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
+	query := r.URL.Query()
+	pinned := query.Get("pinned") == "true"
+	login := ""
+	if pinned {
+		actor, ok := s.requireHuman(w, r)
+		if !ok {
+			return
+		}
+		login = actor.ID
+	} else if !s.requireAuthenticated(w, r) {
 		return
 	}
-	query := r.URL.Query()
 	project := strings.TrimSpace(query.Get("project"))
 	status := strings.TrimSpace(query.Get("status"))
 	parent := strings.TrimSpace(query.Get("parent"))
@@ -80,7 +102,13 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		updatedSince = &parsed
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), listIssuesQuery, project, status, parent, updatedSince)
+	listQuery := listIssuesQuery
+	arguments := []any{project, status, parent, updatedSince}
+	if pinned {
+		listQuery = listPinnedIssuesQuery
+		arguments = append(arguments, login)
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), listQuery, arguments...)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

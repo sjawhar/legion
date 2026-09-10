@@ -54,6 +54,61 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 	}
 }
 
+func TestSettleWritesArtifactOwnedEventForUnlinkedDocument(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createProjectDocument(t, database, "before")
+	broker := events.NewBroker()
+	service := New(Deps{Store: database, Events: broker, Settle: 20 * time.Millisecond})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	seedServiceText(t, service, artifactID, "before")
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+	waitForDocumentVersion(t, database, artifactID, 2)
+
+	var eventArtifactID string
+	var eventIssueKey *string
+	var lastSeq int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select e.artifact_id::text, e.issue_key, a.last_seq
+		from events e join artifacts a on a.id = e.artifact_id
+		where e.artifact_id = $1 and e.type = 'artifact.version'
+	`, artifactID).Scan(&eventArtifactID, &eventIssueKey, &lastSeq); err != nil {
+		t.Fatalf("read project document event: %v", err)
+	}
+	if eventArtifactID != artifactID || eventIssueKey != nil || lastSeq != 1 {
+		t.Fatalf("project document event artifact=%q issue=%#v last_seq=%d", eventArtifactID, eventIssueKey, lastSeq)
+	}
+}
+
+func TestUnlinkedDocumentIsAlwaysOpen(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createProjectDocument(t, database, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	seedServiceText(t, service, artifactID, "before")
+	open, err := service.issueOpen(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("check unlinked document open: %v", err)
+	}
+	if !open {
+		t.Fatal("unlinked document is closed")
+	}
+	version, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
+	if err != nil {
+		t.Fatalf("name unlinked document version: %v", err)
+	}
+	if !version.Named || version.Summary == nil || *version.Summary != "checkpoint" {
+		t.Fatalf("unlinked document version = %#v", version)
+	}
+}
+
 func TestSettleSkipsVersionWhenTreeLeavesTheSchema(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = 20 * time.Millisecond

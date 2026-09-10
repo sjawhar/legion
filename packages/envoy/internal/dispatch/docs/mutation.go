@@ -356,13 +356,9 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	_, joinedTransaction := txFromContext(ctx)
 	var version model.Version
 	err = s.withTx(ctx, func(tx pgx.Tx) error {
-		var open bool
-		if err := tx.QueryRow(ctx, `
-			select i.closed_at is null
-			from artifacts a join issues i on i.key = a.issue_key
-			where a.id = $1 for update
-		`, artifactID).Scan(&open); err != nil {
-			return fmt.Errorf("lock document artifact: %w", err)
+		_, open, err := lockArtifactOwner(ctx, tx, artifactID)
+		if err != nil {
+			return err
 		}
 		if !open {
 			return ErrIssueClosed

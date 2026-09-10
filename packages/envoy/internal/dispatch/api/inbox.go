@@ -9,12 +9,21 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
+type inboxIssue struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+}
+
+type inboxDocument struct {
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+}
+
 type inboxAsk struct {
 	model.Ask
-	Issue struct {
-		Key   string `json:"key"`
-		Title string `json:"title"`
-	} `json:"issue"`
+	Issue    *inboxIssue    `json:"issue,omitempty"`
+	Document *inboxDocument `json:"document,omitempty"`
 }
 
 func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
@@ -24,10 +33,14 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select a.id::text, a.issue_key, a.artifact_id::text, a.author, a.question, a.options, a.multiple, a.urgency,
-		       a.anchor, a.state, a.answer, a.resolution, a.created_at, i.key, i.title
+		       a.anchor, a.state, a.answer, a.resolution, a.created_at,
+		       i.key, i.title, ar.project_key, ar.slug, ar.name
 		from asks a
-		join issues i on i.key = a.issue_key
-		where a.state = 'open' and i.closed_at is null and ($1 = '' or i.project_key = $1)
+		left join issues i on i.key = a.issue_key
+		left join artifacts ar on ar.id = a.artifact_id
+		where a.state = 'open'
+		  and (i.key is null or i.closed_at is null)
+		  and ($1 = '' or coalesce(i.project_key, ar.project_key) = $1)
 		order by a.created_at desc, a.id desc
 	`, project)
 	if err != nil {
@@ -39,9 +52,11 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var ask inboxAsk
 		var author, options, anchor, answer, resolution []byte
+		var issueKey, issueTitle, documentProject, documentSlug, documentName *string
 		if err := rows.Scan(
 			&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
-			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &ask.Issue.Key, &ask.Issue.Title,
+			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt,
+			&issueKey, &issueTitle, &documentProject, &documentSlug, &documentName,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -49,6 +64,12 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		if err := decodeInboxAsk(&ask.Ask, author, options, anchor, answer, resolution); err != nil {
 			s.writeHandlerError(w, err)
 			return
+		}
+		if issueKey != nil {
+			ask.Issue = &inboxIssue{Key: *issueKey, Title: *issueTitle}
+		}
+		if documentProject != nil {
+			ask.Document = &inboxDocument{Project: *documentProject, Slug: *documentSlug, Name: *documentName}
 		}
 		asks = append(asks, ask)
 	}

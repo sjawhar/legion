@@ -20,6 +20,10 @@ const (
 )
 
 func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
+	s.createAskFor(w, r, issueOwner(r.PathValue("key")))
+}
+
+func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owner) {
 	var input struct {
 		Question string             `json:"question"`
 		Options  []model.AskOption  `json:"options"`
@@ -91,8 +95,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	issueKey := r.PathValue("key")
-	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
+	if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -101,7 +104,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, issueKey, input.Anchor, docs.MarkAsk, rowID, actor)
+	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, owner, input.Anchor, docs.MarkAsk, rowID, actor)
 	if anchor != nil {
 		evictOnFailure = true
 		evictArtifactID = anchor.ArtifactID
@@ -131,15 +134,16 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	var ask model.Ask
 	if err := tx.QueryRow(r.Context(), `
-		insert into asks (id, issue_key, author, question, options, multiple, urgency, anchor)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		returning created_at
-	`, rowID, issueKey, author, input.Question, options, multiple, urgency, anchorJSON).Scan(&ask.CreatedAt); err != nil {
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON).Scan(&ask.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	ask.ID = rowID
-	ask.IssueKey = new(issueKey)
+	ask.IssueKey = owner.IssueKey
+	ask.ArtifactID = owner.ArtifactID
 	ask.Author = actor
 	ask.Question = input.Question
 	ask.Options = input.Options
@@ -153,7 +157,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	events := []model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.appendEvent(r.Context(), tx, issueOwner(issueKey).event(
+		snapshotEvent, err := s.appendEvent(r.Context(), tx, owner.event(
 			"artifact.version",
 			actor,
 			versionEventPayload(anchor.ArtifactID, artifactName, *snapshot, nil),
@@ -164,7 +168,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 		}
 		events = append(events, snapshotEvent)
 	}
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(issueKey).event("ask.opened", actor, ask))
+	event, err := s.appendEvent(r.Context(), tx, owner.event("ask.opened", actor, ask))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -323,28 +327,33 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 
 // listIssueAsks returns every ask on an issue, filtered by state: "open" or
 // "answered" match only that state; "all" (the default) returns every ask
-// regardless of state, including resolved ones - the margin treats a
-// resolved ask like an answered one for placement, so it needs the same
-// single query to see both. There is no state=resolved filter; nothing
-// currently needs to list resolved asks on their own.
+// regardless of state, including resolved ones.
 func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	state := r.URL.Query().Get("state")
-	if state == "" {
-		state = "all"
-	}
-	if state != "all" && state != "open" && state != "answered" {
-		writeError(w, "INVALID_ASK_STATE", http.StatusBadRequest, "state must be all, open, or answered")
+	state, err := parseAskListState(r)
+	if err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
-	asks, err := s.loadIssueAsks(r.Context(), s.deps.Store.Pool, r.PathValue("key"), state)
+	asks, err := s.loadOwnerAsks(r.Context(), s.deps.Store.Pool, issueOwner(r.PathValue("key")), state)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, asks)
+}
+
+func parseAskListState(r *http.Request) (string, error) {
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		return "all", nil
+	}
+	if state != "all" && state != "open" && state != "answered" {
+		return "", errorf(http.StatusBadRequest, "INVALID_ASK_STATE", "state must be all, open, or answered")
+	}
+	return state, nil
 }
 
 func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
@@ -377,15 +386,8 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 // listIssueAsksColumns are the columns every ask-listing query selects, in scan order.
 const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at`
 
-// listIssueAsksQueryAll, listIssueAsksQueryOpen, and listIssueAsksQueryAnswered are three
-// distinct constant query strings rather than one query with a parameterized state predicate.
-// pgx caches a prepared statement per distinct SQL text and, after repeated executions,
-// Postgres may switch that statement from a custom plan (built for the bound parameter
-// values) to a cheaper generic plan that ignores them - which would let a state=$2 predicate
-// silently drop the sequential-scan-avoiding asks_open(issue_key) where state = 'open'
-// partial index for the open case. Baking the state literal into the SQL text instead means
-// the open query's plan is always eligible for that index, regardless of which plan kind
-// Postgres picks (see TestListIssueAsksOpenQueryUsesAsksOpenIndex).
+// pgx caches prepared plans by query text. State and ownership each have a fixed
+// query so the partial open-ask index remains eligible under generic plans.
 const (
 	listIssueAsksQueryAll = `select ` + listIssueAsksColumns + `
 		from asks where issue_key = $1 order by created_at, id`
@@ -393,20 +395,47 @@ const (
 		from asks where issue_key = $1 and state = 'open' order by created_at, id`
 	listIssueAsksQueryAnswered = `select ` + listIssueAsksColumns + `
 		from asks where issue_key = $1 and state = 'answered' order by created_at, id`
+	listArtifactAsksQueryAll = `select ` + listIssueAsksColumns + `
+		from asks where artifact_id = $1 order by created_at, id`
+	listArtifactAsksQueryOpen = `select ` + listIssueAsksColumns + `
+		from asks where artifact_id = $1 and state = 'open' order by created_at, id`
+	listArtifactAsksQueryAnswered = `select ` + listIssueAsksColumns + `
+		from asks where artifact_id = $1 and state = 'answered' order by created_at, id`
 )
 
 // loadIssueAsks returns an issue's asks, oldest first, filtered by state ("all",
-// "open", or "answered"). Both the open-asks-on-issue-detail loader and the
-// GET /issues/{key}/asks?state= endpoint share this one query shape.
+// "open", or "answered").
 func (s *server) loadIssueAsks(ctx context.Context, q queryer, key, state string) ([]model.Ask, error) {
-	query := listIssueAsksQueryAll
-	switch state {
-	case "open":
-		query = listIssueAsksQueryOpen
-	case "answered":
-		query = listIssueAsksQueryAnswered
+	return s.loadOwnerAsks(ctx, q, issueOwner(key), state)
+}
+
+func (s *server) loadOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, error) {
+	var query, value string
+	switch {
+	case owner.IssueKey != nil:
+		value = *owner.IssueKey
+		switch state {
+		case "open":
+			query = listIssueAsksQueryOpen
+		case "answered":
+			query = listIssueAsksQueryAnswered
+		default:
+			query = listIssueAsksQueryAll
+		}
+	case owner.ArtifactID != nil:
+		value = *owner.ArtifactID
+		switch state {
+		case "open":
+			query = listArtifactAsksQueryOpen
+		case "answered":
+			query = listArtifactAsksQueryAnswered
+		default:
+			query = listArtifactAsksQueryAll
+		}
+	default:
+		return nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
 	}
-	rows, err := q.Query(ctx, query, key)
+	rows, err := q.Query(ctx, query, value)
 	if err != nil {
 		return nil, err
 	}
