@@ -548,9 +548,12 @@ export function resolveDaemonConfig(
   if (env.DISPATCH_MCP_URL !== undefined) {
     throw new Error("DISPATCH_MCP_URL was replaced by DISPATCH_URL");
   }
+  // Trimmed, not merely trim-checked: a token with surrounding whitespace (a copy-paste artifact
+  // in whatever sets this env var) would otherwise pass this presence check but boot the daemon
+  // with a value Dispatch's own auth never matches, since Dispatch compares byte-for-byte.
   const dispatchTokenEnv =
     env.DISPATCH_TOKEN !== undefined && env.DISPATCH_TOKEN.trim().length > 0
-      ? env.DISPATCH_TOKEN
+      ? env.DISPATCH_TOKEN.trim()
       : undefined;
   if (resolvedDispatchUrl !== undefined && dispatchTokenEnv === undefined) {
     throw new Error(

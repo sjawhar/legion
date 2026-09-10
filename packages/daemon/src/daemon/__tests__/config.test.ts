@@ -167,6 +167,21 @@ describe("daemon config", () => {
     expect(config.dispatchToken).toBe("test-dispatch-token");
   });
 
+  it("trims DISPATCH_TOKEN before storing it, so a copy-paste whitespace artifact never boots the daemon with a value Dispatch's own auth would reject", () => {
+    const { config } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_BOARD_PROJECT_IDS: "PVT_x",
+        DISPATCH_URL: "http://127.0.0.1:18766",
+        DISPATCH_TOKEN: "  test-dispatch-token  \n",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(config.dispatchToken).toBe("test-dispatch-token");
+  });
+
   it("normalizes a trailing slash off the dispatch service base URL", () => {
     const { config } = resolveDaemonConfig({
       env: {
