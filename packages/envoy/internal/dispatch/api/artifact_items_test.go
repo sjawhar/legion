@@ -135,3 +135,27 @@ func TestDocumentAnchorMustTargetTheDocument(t *testing.T) {
 		t.Fatalf("cross-document anchor: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestArtifactOwnerWritesAuthenticateBeforeResolvingOwner(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	targets := []string{
+		issue.PrimaryArtifactID,
+		"00000000-0000-0000-0000-000000000001",
+	}
+	writes := []struct {
+		suffix string
+		body   map[string]string
+	}{
+		{suffix: "/asks", body: map[string]string{"question": "No identity"}},
+		{suffix: "/comments", body: map[string]string{"body": "No identity"}},
+	}
+	for _, target := range targets {
+		for _, write := range writes {
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+target+write.suffix, write.body, "")
+			if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
+				t.Fatalf("unauthenticated artifact write %s%s: status=%d body=%s", target, write.suffix, response.Code, response.Body.String())
+			}
+		}
+	}
+}

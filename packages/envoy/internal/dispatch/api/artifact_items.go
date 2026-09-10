@@ -33,6 +33,9 @@ func (s *server) listArtifactAsks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createArtifactAsk(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	owner, ok := s.documentOwnerForHandler(w, r)
 	if !ok {
 		return
@@ -57,6 +60,9 @@ func (s *server) listArtifactComments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createArtifactComment(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	owner, ok := s.documentOwnerForHandler(w, r)
 	if !ok {
 		return
