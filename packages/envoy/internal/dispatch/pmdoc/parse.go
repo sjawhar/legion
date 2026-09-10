@@ -74,15 +74,20 @@ func parseBlock(node ast.Node, source []byte) (*Node, error) {
 	case *ast.ListItem:
 		return parseListItem(current, source)
 	case *ast.FencedCodeBlock:
+		language := string(current.Language(source))
+		var value any
+		if language != "" {
+			value = language
+		}
 		return &Node{
 			Type:     "code_block",
-			Attrs:    Attrs{"language": string(current.Language(source))},
+			Attrs:    Attrs{"language": value},
 			Children: codeBlockText(current.Lines(), source),
 		}, nil
 	case *ast.CodeBlock:
 		return &Node{
 			Type:     "code_block",
-			Attrs:    Attrs{"language": ""},
+			Attrs:    Attrs{"language": nil},
 			Children: codeBlockText(current.Lines(), source),
 		}, nil
 	case *ast.ThematicBreak:
@@ -123,7 +128,7 @@ func parseList(list *ast.List, source []byte) (*Node, error) {
 }
 
 func parseListItem(item *ast.ListItem, source []byte) (*Node, error) {
-	attrs := Attrs{"label": "•", "checked": nil, "spread": false}
+	attrs := Attrs{"label": "•", "listType": "bullet", "checked": nil, "spread": false}
 	if firstBlock := item.FirstChild(); firstBlock != nil {
 		if checkbox, ok := firstBlock.FirstChild().(*extensionast.TaskCheckBox); ok {
 			attrs["checked"] = checkbox.IsChecked
@@ -186,7 +191,7 @@ func parseTableRow(row ast.Node, header bool, source []byte) (*Node, error) {
 		}
 		children = append(children, &Node{
 			Type:     cellType,
-			Attrs:    Attrs{"alignment": cell.Alignment.String()},
+			Attrs:    Attrs{"colspan": 1, "rowspan": 1, "colwidth": nil, "alignment": cell.Alignment.String()},
 			Children: content,
 		})
 	}
