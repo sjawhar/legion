@@ -24,6 +24,19 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 
 const ISSUE_REFERENCE =
   "An issue is a native KEY or external owner/repo#n reference; an external reference creates its native issue in the repository's dashboard-configured project or, failing that, the default project (DISPATCH_DEFAULT_PROJECT).";
+export const SPEC_SECTIONS = [
+  "Decisions needed",
+  "Acceptance",
+  "Requirements",
+  "Design",
+  "Errors",
+  "Testing",
+  "Rejected",
+] as const;
+
+const SPEC_WRITING_GUIDANCE =
+  `When writing a spec, use these sections in order: ${SPEC_SECTIONS.join(", ")}. ` +
+  "Every line is a fact, decision, or risk; use tables over prose; see skills/dispatch Writing a spec.";
 
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
@@ -42,7 +55,10 @@ export const dispatchToolSpecs = [
       title: z.string().describe("Concise issue title."),
       parent: z.string().describe("Optional parent issue.").optional(),
       external: z.string().describe("Optional external issue reference.").optional(),
-      spec: z.string().describe("Optional initial primary-document markdown.").optional(),
+      spec: z
+        .string()
+        .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_GUIDANCE}`)
+        .optional(),
     }),
   },
   {
@@ -149,7 +165,7 @@ export const dispatchToolSpecs = [
     name: "dispatch_doc_edit",
     description:
       "Apply deterministic text edits to a document. Do not use it for review feedback or for reading; use " +
-      `dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. ${ISSUE_REFERENCE}`,
+      `dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. ${ISSUE_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       artifact: z.string().describe("Artifact slug or id for the document."),
