@@ -40,7 +40,12 @@ import { buildRoleEnv, TokenManager } from "./github-apps";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock";
 import { loadState, saveState } from "./legion-state";
 import { createNatsTransport, type NatsTransport } from "./nats-transport";
-import { daemonCredentialHelper, ProcessManager, type ProcessManagerDeps } from "./processes";
+import {
+  daemonCredentialHelper,
+  ProcessManager,
+  type ProcessManagerDeps,
+  withOmpLaunchPrefix,
+} from "./processes";
 import { runResync } from "./resync";
 import { connectWorkerRpc } from "./worker-rpc";
 
@@ -149,6 +154,7 @@ async function publishToEnvoy(
 }
 async function verifyOmpAgentsCapability(
   ompInvocation: string,
+  ompLaunchPrefix: readonly string[],
   runner: CommandRunner
 ): Promise<void> {
   const probeDir = await mkdtemp(path.join(os.tmpdir(), "legion-omp-probe-"));
@@ -158,7 +164,7 @@ async function verifyOmpAgentsCapability(
     const result = await runner([
       "sh",
       "-c",
-      `${ompInvocation} models --no-extensions --extension "$1" --json >/dev/null`,
+      `${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --no-extensions --extension "$1" --json >/dev/null`,
       "sh",
       probePath,
     ]);
@@ -205,6 +211,7 @@ const LEGION_LOAD_PROBE = `export default function probeLegionPluginLoaded(pi) {
 // unclaimed boot token as a launch failure (see T5/T9).
 async function verifyLegionPluginLoaded(
   ompInvocation: string,
+  ompLaunchPrefix: readonly string[],
   runner: CommandRunner,
   readPluginManifest: (manifestPath: string) => Promise<string>
 ): Promise<void> {
@@ -215,7 +222,7 @@ async function verifyLegionPluginLoaded(
     const result = await runner([
       "sh",
       "-c",
-      `${ompInvocation} models --extension "$1" --json >/dev/null`,
+      `${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --extension "$1" --json >/dev/null`,
       "sh",
       probePath,
     ]);
@@ -320,8 +327,13 @@ async function startDaemonLocked(
     run: deps.runner,
   });
   const runner = createDaemonRunner(environment, deps.runner);
-  await verifyOmpAgentsCapability(environment.ompInvocation, runner);
-  await verifyLegionPluginLoaded(environment.ompInvocation, runner, deps.readPluginManifest);
+  await verifyOmpAgentsCapability(environment.ompInvocation, config.ompLaunchPrefix, runner);
+  await verifyLegionPluginLoaded(
+    environment.ompInvocation,
+    config.ompLaunchPrefix,
+    runner,
+    deps.readPluginManifest
+  );
   config.appLogins = await resolveConfiguredAppLogins(config, deps.tokenManager, owner);
   await deps.tokenManager.getToken("implement", owner);
   const stateFile = path.join(config.stateDir, "state.json");

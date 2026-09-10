@@ -199,6 +199,7 @@ function config(stateDir: string): DaemonConfig {
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
+    ompLaunchPrefix: [],
     dispatchProject: "LEGSMOKE",
     repos: ["acme/widgets"],
     repo: "acme/widgets",
@@ -916,6 +917,68 @@ describe("startDaemon", () => {
       expect(loadedState).toBeFalse();
       expect(natsCreated).toBeFalse();
     } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("prepends the configured omp_launch_prefix to both startup capability probes", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig: DaemonConfig = {
+      ...config(stateDir),
+      ompLaunchPrefix: ["secrets", "ANTHROPIC_API_KEY", "--"],
+    };
+    const nats = new FakeNats();
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const probeCommands: string[][] = [];
+
+    const daemon = await startDaemon(daemonConfig, {
+      deps: {
+        loadState: async () => state,
+        saveState: async () => {},
+        createNatsTransport: async () => nats,
+        runner: async (command) => {
+          if (command[0] === "sh") probeCommands.push(command);
+          return {
+            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+        resolveDaemonEnvironment: async () => daemonEnvironment,
+        statPrompt: async () => {},
+        readPluginManifest: async () => validLegionPluginManifest,
+        envoyPublish: async () => {},
+        dispatchClient: fakeDispatchClient(),
+        tokenManager: {
+          getToken: async () => ({
+            token: "test-token",
+            expiresAt: "2026-08-25T00:00:00.000Z",
+            gitIdentity: {
+              name: "legion-implement[bot]",
+              email: "1+legion-implement[bot]@users.noreply.github.com",
+            },
+          }),
+        },
+        setTimeout: () => 1 as never,
+        clearTimeout: () => {},
+        setInterval: () => 1 as never,
+        clearInterval: () => {},
+        onSignal: () => {},
+        exit: () => {},
+        now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+      },
+    });
+
+    try {
+      expect(probeCommands).toHaveLength(2);
+      expect(probeCommands[0]?.[2]).toStartWith(
+        'secrets ANTHROPIC_API_KEY -- /tools/omp models --no-extensions --extension "$1"'
+      );
+      expect(probeCommands[1]?.[2]).toStartWith(
+        'secrets ANTHROPIC_API_KEY -- /tools/omp models --extension "$1"'
+      );
+    } finally {
+      await daemon.stop();
+      await nats.close();
       await rm(stateDir, { recursive: true, force: true });
     }
   });

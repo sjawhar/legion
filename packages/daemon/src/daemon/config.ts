@@ -42,6 +42,12 @@ export interface DaemonConfig {
   dispatchProject: string;
   natsUrls: string[];
   ompInvocation: string;
+  /** Argv prefix prepended to every OMP invocation inside a spawned pane — root, worker, and
+   * controller alike — and to the two startup capability probes, so provider credentials (or any
+   * other wrapper the operator needs) are obtained *inside* the pane process rather than carried
+   * by the daemon itself. Never exported to the daemon's own environment or passed as tmux `-e`
+   * pairs (see `processes.ts`'s strip invariant). Empty by default — nothing is prepended. */
+  ompLaunchPrefix: string[];
   /** `owner/name` GitHub repositories the durable per-repo GitHub intake consumes; required, non-empty. */
   repos: string[];
   /** The single GitHub repository every Legion issue/tree resolves to for credential routing,
@@ -139,6 +145,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   dispatch_project: null,
   nats_urls: null,
   omp_invocation: null,
+  omp_launch_prefix: null,
   // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_project
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   board_project_ids: null,
@@ -206,6 +213,20 @@ function readStringArray(value: unknown, field: string): string[] | undefined {
   return [...new Set(value)];
 }
 
+/** Like `readStringArray`, but for an ordered argv list where position and duplicate entries are
+ * both meaningful — a launch prefix is a command line, not a set, so (unlike `readStringArray`)
+ * this never deduplicates or otherwise reorders its entries. */
+function readArgv(value: unknown, field: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((entry) => typeof entry !== "string" || entry.length === 0)
+  ) {
+    throw new Error(`${field} must be an array of non-empty strings`);
+  }
+  return [...value] as string[];
+}
+
 function readNumber(value: unknown, field: string): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -242,6 +263,69 @@ function parseCsv(value: string | undefined, field: string): string[] | undefine
     throw new Error(`${field} must contain at least one value`);
   }
   return [...new Set(values)];
+}
+
+/** Splits `LEGION_OMP_LAUNCH_PREFIX` into argv the way a POSIX shell tokenizes a command line —
+ * whitespace-separated words, `'...'`/`"..."` quoting, and backslash escapes outside single
+ * quotes — since the YAML form (`omp_launch_prefix`) is already an array and only the single-
+ * string environment form needs splitting. Order and duplicate entries are preserved (this is
+ * argv, not a set); an empty/whitespace-only value resolves to an empty prefix, not "unset". */
+function parseShellWords(value: string | undefined, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  const words: string[] = [];
+  let current = "";
+  let hasCurrent = false;
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index] as string;
+    if (quote === "'") {
+      if (char === "'") quote = undefined;
+      else current += char;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') {
+        quote = undefined;
+      } else if (
+        char === "\\" &&
+        index + 1 < value.length &&
+        '"\\$`'.includes(value[index + 1] as string)
+      ) {
+        index += 1;
+        current += value[index] as string;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      hasCurrent = true;
+      continue;
+    }
+    if (char === "\\" && index + 1 < value.length) {
+      index += 1;
+      current += value[index] as string;
+      hasCurrent = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (hasCurrent) {
+        words.push(current);
+        current = "";
+        hasCurrent = false;
+      }
+      continue;
+    }
+    current += char;
+    hasCurrent = true;
+  }
+  if (quote !== undefined) throw new Error(`${field} has an unterminated ${quote} quote`);
+  if (hasCurrent) words.push(current);
+  if (words.some((word) => word.length === 0)) {
+    throw new Error(`${field} must not contain an empty argument (e.g. a bare '' or "")`);
+  }
+  return words;
 }
 
 function requireNonEmpty(value: string, field: string): string {
@@ -485,6 +569,8 @@ export function loadConfigFromFile(
   if (ompInvocation !== undefined) {
     fields.ompInvocation = requireNonEmpty(ompInvocation, "omp_invocation");
   }
+  const ompLaunchPrefix = readArgv(config.omp_launch_prefix, "omp_launch_prefix");
+  if (ompLaunchPrefix !== undefined) fields.ompLaunchPrefix = ompLaunchPrefix;
   if (config.board_project_ids !== undefined) {
     throw new Error("board_project_ids was replaced by dispatch_project");
   }
@@ -609,6 +695,12 @@ export function resolveDaemonConfig(
     fileString(fields, "ompInvocation"),
     env.LEGION_OMP_INVOCATION,
     DEFAULT_OMP_INVOCATION
+  );
+  const ompLaunchPrefix = resolveValue(
+    opts.cliOverrides?.ompLaunchPrefix,
+    fileStringArray(fields, "ompLaunchPrefix"),
+    parseShellWords(env.LEGION_OMP_LAUNCH_PREFIX, "LEGION_OMP_LAUNCH_PREFIX"),
+    []
   );
 
   const repos = resolveValue(
@@ -766,6 +858,7 @@ export function resolveDaemonConfig(
       dispatchProject: resolvedDispatchProject,
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
+      ompLaunchPrefix: ompLaunchPrefix.value,
       repos: repos.value,
       repo,
       appLogins: appLogins.value,

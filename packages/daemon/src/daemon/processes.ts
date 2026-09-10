@@ -154,6 +154,21 @@ export function addressingFragment(
 function shellPath(value: string): string {
   return /[^A-Za-z0-9_./:-]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
 }
+
+/** Prepends the configured `omp_launch_prefix` (see `DaemonConfig.ompLaunchPrefix`) to an OMP
+ * invocation shell fragment, so provider credentials or any other launch wrapper are obtained
+ * *inside* the pane process rather than carried by the daemon itself — the daemon never exports
+ * provider keys to its own environment or to a pane's tmux `-e` argv. Each prefix element is
+ * shell-quoted independently. Used for every OMP invocation the daemon builds: spawned
+ * root/worker/controller panes (`processes.ts`) and the startup capability probes (`index.ts`) —
+ * one launch path, never duplicated. */
+export function withOmpLaunchPrefix(
+  launchPrefix: readonly string[],
+  ompInvocation: string
+): string {
+  if (launchPrefix.length === 0) return ompInvocation;
+  return `${launchPrefix.map(shellPath).join(" ")} ${ompInvocation}`;
+}
 /** Flattens an env record into repeated `-e KEY=VALUE` pairs for tmux; `undefined` values are omitted. */
 function tmuxEnv(env: Record<string, string | undefined>): string[] {
   return Object.entries(env).flatMap(([key, value]) =>
@@ -2031,7 +2046,7 @@ export class ProcessManager {
   ): Promise<WorkerLocator> {
     await (this.deps.statPrompt ?? stat)(promptPath);
     const resumeArgument = await this.computeResumeArgument(issue, resumeSessionFile, logVerb);
-    const innerCommand = `${this.deps.ompInvocation}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
     const socketPath = await this.prepareSocket(workerSocketBasename(issue, role));
     const shellCommand = this.shimmedShellCommand(workspaceDir, socketPath, innerCommand);
 
@@ -2246,7 +2261,7 @@ export class ProcessManager {
     await (this.deps.statPrompt ?? stat)(promptPath);
     await this.writeOmpConfig(controllerDir);
     const socketPath = await this.prepareSocket("controller");
-    const innerCommand = `${this.deps.ompInvocation} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
     const shellCommand = this.shimmedShellCommand(controllerDir, socketPath, innerCommand);
     const session = `legion-${this.deps.state.project}`;
     const env = tmuxEnv({

@@ -24,6 +24,7 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | `LEGION_IMPLEMENT_APP_ID` | Numeric implementation App ID. | `3202636` |
 | `LEGION_REVIEW_APP_ID` | Numeric reviewer App ID. | `3202653` |
 | `LEGION_APP_LOGINS` | Comma-separated GitHub bot logins for both Legion Apps. | `legion-implementer[bot],legion-reviewer[bot]` |
+| `SMOKE_OMP_LAUNCH_PREFIX` | Whitespace-separated argv prefix written into the generated config's `omp_launch_prefix`, so daemon-spawned panes get provider credentials from `secretsd` instead of the daemon's own environment (see the "OMP invocation" section below). Set to an empty string to disable. | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` |
 
 `LEGSMOKE` must already exist on the server named by `DISPATCH_URL` before starting the rig (project creation is human-only); it is not configurable.
 
@@ -74,6 +75,14 @@ bun run packages/daemon/src/cli/index.ts start <owner>/<board-number> --config /
 The generated configuration uses `omp_invocation: mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp`. Before accepting work, the daemon asks `mise env --json` for the complete tool environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and resolves that pinned OMP binary with `mise where`. Its tmux panes receive the resulting full `PATH` and execute the resolved OMP path directly. Startup probes that exact OMP executable for `pi.agents`; it refuses to start before opening NATS or its API if the probe or any required tool fails.
 
 Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path when a tool cannot be discovered. `omp_invocation` must use the `mise x <tool> -- omp` form; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
+
+The generated configuration also sets `omp_launch_prefix` from `SMOKE_OMP_LAUNCH_PREFIX`
+(default `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --`): the daemon prepends this
+argv to every OMP invocation it builds — root, worker, and controller panes, and the two startup
+capability probes above — so provider credentials come from `secretsd` inside the pane process
+rather than the daemon's own environment (a daemon-spawned architect otherwise has no Anthropic
+key and silently falls back to a different, possibly quota-exhausted model).
+
 ### Fail-closed OMP probe
 
 To prove the daemon rejects an OMP runtime without `pi.agents`, point `LEGION_OMP_PATH` at an **absolute path** to an older OMP binary and run the rig with `LEGION_OMP_AGENTS=missing`. The daemon must refuse before state, NATS, or its API starts.

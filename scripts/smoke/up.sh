@@ -262,6 +262,7 @@ app_installation_token() {
 }
 
 write_daemon_config() {
+  local omp_launch_prefix="${SMOKE_OMP_LAUNCH_PREFIX:-secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --}"
   cat >"${smoke_dir}/legion.yaml" <<EOF
 project: ${SMOKE_PROJECT}
 port: ${daemon_port}
@@ -279,6 +280,8 @@ max_fix_attempts: 3
 resync_interval_seconds: 600
 state_dir: ${smoke_dir}/daemon
 omp_invocation: mise x ${omp_pin} -- omp
+omp_launch_prefix:
+$(printf '%s\n' $omp_launch_prefix | sed 's/^/  - /')
 gates:
   design: root-issues
   merge: human
