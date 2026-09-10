@@ -1,5 +1,7 @@
 import {
   controllerToken,
+  DISPATCH_ISSUE_TOPIC_PREFIX,
+  dispatchIssueSubject,
   EnvelopeSchema,
   type EventType,
   type IssueKey,
@@ -36,6 +38,7 @@ const DURABLE_NAK_DELAY_MS = 30_000;
 const MAX_TERM_REASON_BYTES = 1_024;
 const TERM_REASON_ELLIPSIS = "…";
 const textEncoder = new TextEncoder();
+const DISPATCH_DURABLE_SUBJECT = dispatchIssueSubject("*", ">");
 
 const DISPATCH_EVENT_TYPES: Record<EventType, true> = {
   "issue.created": true,
@@ -818,8 +821,8 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         controllerToken(deps.state.project),
         typeof envelope.payload === "string" ? envelope.payload : "{}"
       );
-    } else if (subject.startsWith("notifications.dispatch.issue.")) {
-      const subjectKey = subject.split(".")[3];
+    } else if (subject.startsWith(DISPATCH_ISSUE_TOPIC_PREFIX)) {
+      const [subjectKey] = subject.slice(DISPATCH_ISSUE_TOPIC_PREFIX.length).split(".");
       if (!subjectKey) {
         throw new DispatchDecodeFailure(`Dispatch durable subject has no issue key: ${subject}`);
       }
@@ -1012,7 +1015,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     deps.nats.consumeDurable(
       NOTIFICATION_STREAM,
       `legion-${deps.config.dispatchProject}-dispatch`,
-      ["notifications.dispatch.issue.>"],
+      [DISPATCH_DURABLE_SUBJECT],
       (subject, data, control) => {
         runExclusive(() => processDurableMessage(subject, data, control));
       }

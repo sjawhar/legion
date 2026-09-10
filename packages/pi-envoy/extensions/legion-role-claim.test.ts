@@ -99,12 +99,21 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
       };
       registrations.push(body);
       if (registrations.length === 3) heartbeatRegistration.resolve();
-      return Response.json({ session_id: body.session_id, machine_id: "test", dir: "/tmp", topics: body.topics });
+      return Response.json({
+        session_id: body.session_id,
+        machine_id: "test",
+        dir: "/tmp",
+        topics: body.topics,
+      });
     }
     return Response.json({ session_id: sessionID, machine_id: "test", dir: "/tmp", topics: [] });
   }) as typeof fetch;
   const activeTools = ["read", "task", "hub"];
-  const property = (): ZodNumberProperty => ({ optional: property, describe: property, int: property });
+  const property = (): ZodNumberProperty => ({
+    optional: property,
+    describe: property,
+    int: property,
+  });
   const createPi = () => ({
     zod: {
       object: (shape: unknown) => shape,

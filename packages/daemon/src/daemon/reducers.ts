@@ -976,6 +976,7 @@ function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effec
 }
 
 function reduceChildStatus(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  if (!state.issues[event.key]) return [];
   const raw = asRecord(event.payload);
   const child = stringValue(raw?.child_key);
   const from = stringValue(raw?.from);
@@ -995,6 +996,7 @@ function reduceChildStatus(state: LegionState, event: DispatchIssueEvent): Effec
  * pass the per-issue seq fence, so the approval itself needs its own guard against re-emitting
  * `design-approved` a second time. */
 function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  if (!state.issues[event.key]) return [];
   const raw = asRecord(event.payload);
   const askId = stringValue(raw?.id);
   const answer = asRecord(raw?.answer);
@@ -1029,9 +1031,10 @@ function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effec
  * After a sub-reducer runs (whether or not it produced an effect — a no-op redelivered again must
  * stay a no-op), `lastAppliedSeq` is stamped to `event.seq` on `state.issues[event.key]` if that
  * node exists. `child.status`/`ask.answered` against a key this daemon has no node for skip the
- * stamp — harmless, since `reduceChildStatus`/`reduceAskAnswered` are themselves unconditional
- * no-ops without a node or a registered gate to route through, so there is nothing a redelivery
- * could corrupt.
+ * stamp: `reduceChildStatus`/`reduceAskAnswered` each start with an explicit
+ * `state.issues[event.key]` existence guard, so a schema-valid but dangling `state.gates[key]` or
+ * `state.trees[key]` record — with no corresponding issue node — can never be mutated or routed
+ * through by either reducer.
  */
 export function reduceDispatchEvent(
   state: LegionState,

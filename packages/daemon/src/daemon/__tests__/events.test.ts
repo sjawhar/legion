@@ -81,7 +81,7 @@ describe("Dispatch durable intake", () => {
       expect(nats.durableConsumers).toContainEqual({
         stream: "ENVOY_NOTIFICATIONS",
         durable: "legion-LEGSMOKE-dispatch",
-        filterSubjects: ["notifications.dispatch.issue.>"],
+        filterSubjects: ["notifications.dispatch.issue.*.>"],
       });
 
       const localCalls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };

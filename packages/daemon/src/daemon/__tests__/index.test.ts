@@ -931,7 +931,7 @@ describe("startDaemon", () => {
       expect(await response.json()).toEqual({ project: "acme1" });
       expect(nats.subscriptions.map((subscription) => subscription.subject)).toEqual([
         "notifications.github.acme.widgets.>",
-        "notifications.dispatch.issue.>",
+        "notifications.dispatch.issue.*.>",
         "notifications.slack.*.*.mention",
         "notifications.envoy.exceptions.notifications.role.>",
       ]);

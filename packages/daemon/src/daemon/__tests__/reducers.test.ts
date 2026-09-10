@@ -179,6 +179,138 @@ function effects(
   return reduceGithubEvent(state, topic, input, config);
 }
 
+/** Every Dispatch fixture that mutates state or emits an effect on its first application, paired
+ * with the state it needs to do so — one entry per fixture file under `fixtures/dispatch/`,
+ * excluding `ask-opened.json` (an event type `reduceDispatchEvent` does not switch on, so it is a
+ * true no-op: no mutation, no effect, no seq stamp). Used below to assert the at-most-once
+ * contract holds for every one of them, not just the two hand-picked in the tests above. */
+const REPLAY_ONCE_CASES: ReadonlyArray<{
+  readonly name: string;
+  readonly setup: () => LegionState;
+  readonly event: () => DispatchIssueEvent;
+}> = [
+  {
+    name: "issue.created root",
+    setup: () => newLegionState("omp", 4),
+    event: () => dispatch(issueCreatedRoot as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.created child",
+    setup: () => rootState(),
+    event: () => dispatch(issueCreatedChild as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> todo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedTodo as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated human -> todo (LEGSMOKE-3)",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      const issue = "LEGSMOKE-3" as IssueKey;
+      state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+      return state;
+    },
+    event: () => dispatch(humanTodo as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> backlog on an active tree",
+    setup: () => rootState(),
+    event: () => dispatch(issueUpdatedBacklog as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> icebox on an active tree",
+    setup: () => rootState(),
+    event: () => dispatch(issueUpdatedIcebox as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> in_progress echo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedInProgress as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> testing echo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedTesting as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> needs_review echo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedNeedsReview as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.updated -> retro echo",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      state.issues[root] = issueNode(root, "Root");
+      return state;
+    },
+    event: () => dispatch(issueUpdatedRetro as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.closed root on an active tree",
+    setup: () => rootState(),
+    event: () => dispatch(issueClosed as unknown as DispatchFixture),
+  },
+  {
+    name: "issue.closed child (last-child completion)",
+    setup: () => {
+      const state = rootState();
+      attachChild(state);
+      return state;
+    },
+    event: () => dispatchIssueWithKey(issueClosed as unknown as DispatchFixture, child),
+  },
+  {
+    name: "child.status routed to the active parent",
+    setup: () => rootState(),
+    event: () => dispatch(childStatus as unknown as DispatchFixture),
+  },
+  {
+    name: "ask.answered approves the registered design gate (legsmoke-3-ask.answered-approve.json)",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      const issue = "LEGSMOKE-3" as IssueKey;
+      state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+      state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
+      claim(state, issue, "architect");
+      state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+      return state;
+    },
+    event: () => dispatch(humanApproved as unknown as DispatchFixture),
+  },
+  {
+    name: "ask.answered approves the registered design gate (ask-answered.json)",
+    setup: () => {
+      const state = newLegionState("omp", 4);
+      const issue = "LEGSMOKE-3" as IssueKey;
+      state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+      state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
+      claim(state, issue, "architect");
+      state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+      return state;
+    },
+    event: () => dispatch(askAnswered as unknown as DispatchFixture),
+  },
+];
+
 describe("reduceDispatchEvent", () => {
   it("records a triage root and wakes the controller", () => {
     const state = newLegionState("omp", 4);
@@ -465,6 +597,52 @@ describe("reduceDispatchEvent", () => {
     ).toEqual([]);
     expect(state.issues[root]).toEqual({ ...before, lastAppliedSeq: 1 });
   });
+
+  it("ignores ask.answered against a gate with no corresponding issue node", () => {
+    const state = newLegionState("omp", 4);
+    const issue = "LEGSMOKE-3" as IssueKey;
+    // A schema-valid but dangling gate record: registered without the issue node ever existing.
+    state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+    const before = structuredClone(state.gates[issue]);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    expect(state.gates[issue]).toEqual(before);
+    expect(state.issues[issue]).toBeUndefined();
+  });
+
+  it("ignores child.status against a tree with no corresponding issue node", () => {
+    const state = newLegionState("omp", 4);
+    // A schema-valid but dangling tree record: an architect is even claimed for it, but no issue
+    // node was ever created — routeActive must never be reached for this key.
+    state.trees[root] = { root, generation: 1, status: "active", launchFailures: 0 };
+    claim(state, root, "architect");
+    const before = structuredClone(state);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(childStatus as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    expect(state).toEqual(before);
+  });
+
+  for (const { name, setup, event: buildEvent } of REPLAY_ONCE_CASES) {
+    it(`replays exactly once: ${name}`, () => {
+      const state = setup();
+      const beforeFirst = structuredClone(state);
+      const event = buildEvent();
+
+      const first = reduceDispatchEvent(state, event, config);
+      const afterFirst = structuredClone(state);
+      const mutated = JSON.stringify(afterFirst) !== JSON.stringify(beforeFirst);
+      expect(first.length > 0 || mutated).toBe(true);
+
+      // Exact redelivery: same event object, same seq. Must be a total no-op — no mutation
+      // (including no re-derived one) and no re-emitted effect.
+      expect(reduceDispatchEvent(state, event, config)).toEqual([]);
+      expect(state).toEqual(afterFirst);
+    });
+  }
 });
 
 describe("reduceGithubEvent", () => {
