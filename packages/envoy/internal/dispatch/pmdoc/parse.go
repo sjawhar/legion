@@ -45,6 +45,106 @@ func Parse(markdown string) (*Node, error) {
 	return doc, nil
 }
 
+func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
+	if width == 0 {
+		return nil, false, nil
+	}
+	fragment := strings.TrimSpace(markdown)
+	if fragment == "" {
+		return nil, false, nil
+	}
+
+	lines := strings.Split(fragment, "\n")
+	for _, line := range lines {
+		cells, ok := tableRowCells(line)
+		if !ok || tableDelimiterRow(cells) {
+			return nil, false, nil
+		}
+		if len(cells) > width {
+			return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, len(cells), width)
+		}
+	}
+
+	parsed, err := Parse(syntheticTableHeader(width) + fragment + "\n")
+	if err != nil {
+		return nil, false, err
+	}
+	if len(parsed.Children) != 1 || parsed.Children[0].Type != "table" {
+		return nil, false, nil
+	}
+	rows := parsed.Children[0].Children[1:]
+	if len(rows) != len(lines) {
+		return nil, false, nil
+	}
+	return rows, true, nil
+}
+
+func syntheticTableHeader(width int) string {
+	headers := make([]string, width)
+	delimiters := make([]string, width)
+	for index := range headers {
+		headers[index] = "header"
+		delimiters[index] = "---"
+	}
+	return "| " + strings.Join(headers, " | ") + " |\n| " + strings.Join(delimiters, " | ") + " |\n"
+}
+
+func tableRowCells(line string) ([]string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, false
+	}
+
+	cells := make([]string, 0, 2)
+	var cell strings.Builder
+	escaped := false
+	separatorCount := 0
+	endsWithSeparator := false
+	for _, char := range line {
+		switch {
+		case char == '\\':
+			cell.WriteRune(char)
+			escaped = !escaped
+			endsWithSeparator = false
+		case char == '|' && !escaped:
+			cells = append(cells, cell.String())
+			cell.Reset()
+			separatorCount++
+			endsWithSeparator = true
+		default:
+			cell.WriteRune(char)
+			escaped = false
+			endsWithSeparator = false
+		}
+	}
+	cells = append(cells, cell.String())
+	if separatorCount == 0 {
+		return nil, false
+	}
+	if line[0] == '|' {
+		cells = cells[1:]
+	}
+	if endsWithSeparator {
+		cells = cells[:len(cells)-1]
+	}
+	if len(cells) == 0 {
+		return nil, false
+	}
+	return cells, true
+}
+
+func tableDelimiterRow(cells []string) bool {
+	for _, cell := range cells {
+		value := strings.TrimSpace(cell)
+		value = strings.TrimPrefix(value, ":")
+		value = strings.TrimSuffix(value, ":")
+		if len(value) < 3 || strings.Trim(value, "-") != "" {
+			return false
+		}
+	}
+	return true
+}
+
 // parseFrontmatterBlock restores the delimited text the Goldmark extension
 // consumes before its completed AST reaches us.
 func parseFrontmatterBlock(source []byte) *Node {

@@ -208,12 +208,29 @@ to print one matching envelope from the `natsUrls` configured in `envoy.json`.
 A caller resolved by header identity without a stored GitHub token receives
 `503` with code `GITHUB_TOKEN_UNAVAILABLE` from GitHub proxy routes.
 
+## Document edit operations
+
+`POST /api/v1/artifacts/{id}/edits` accepts an `ops` array. Quote targets resolve against the
+document's plain text rather than Markdown source: inline-code and link text match without their
+syntax, and a table-cell target is its cell text.
+
+| Operation | Required fields | Behavior |
+| --- | --- | --- |
+| `replace` | `find`, `with` | Replace one plain-text target. |
+| `delete` | `find` | Delete one plain-text target. |
+| `insert` | `markdown`, exactly one of `after` or `before` | Insert a sibling block before or after a quote or heading's enclosing document block. `"start"` and `"end"` select document edges. Pipe-table row fragments at a table-cell target are the exception: they extend that table before or after the containing row. Use `replace` for inline continuation. |
+
+Table-row fragments contain body rows only: omit the table header and delimiter row. Short rows are
+padded to the table width; rows wider than the table are rejected.
+
 ## Document errors
 
 | Status / code | Meaning |
 | --- | --- |
 | `404 TARGET_NOT_FOUND` | The quote requested by an anchor or document edit is absent. |
 | `409 TARGET_AMBIGUOUS` | A quote matches more than once without an `occurrence`; the response includes candidate ranges and context. |
+| `400 TARGET_SPANS_BLOCKS` | A document edit quote crosses textblock boundaries. |
+| `400 TABLE_WIDTH` | A table-row fragment has more cells than its target table. |
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |

@@ -141,11 +141,16 @@ type EditOp = {
 };
 ```
 
-Target edits by quote: `replace` requires `find` and `with`; `delete` requires `find`; `insert`
-requires `markdown` and exactly one of `after` or `before`. An insert anchor is a quote,
-`"start"`, `"end"`, or `"heading:Title"`. Use zero-based `occurrence` for a repeated `find`.
-When a decision lands, pass `summary` to name the resulting version. Never paste progress into a
-message.
+Target `replace` and `delete` by the document's plain text: inline-code and link text match
+without Markdown syntax, and a table-cell anchor is its cell text. `replace` requires `find` and
+`with`; `delete` requires `find`; `insert` requires `markdown` and exactly one of `after` or
+`before`. An insert anchor is a quote, `"start"`, `"end"`, or `"heading:Title"`. Every insert
+creates a sibling block before or after the quote or heading's enclosing document block; `"start"`
+and `"end"` select the document edges. At a table-cell quote, pipe-table body-row fragments extend
+that table before or after the matched row; omit table header and delimiter rows, and do not exceed
+the table width. Use `replace` for inline continuation. Use zero-based `occurrence` for a repeated
+target. When a decision lands, pass `summary` to name the resulting version. Never paste progress
+into a message.
 
 ## Comments and suggestions
 

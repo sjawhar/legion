@@ -43,7 +43,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if op.Find == "" {
 			return nil, invalidOp("find")
 		}
-		r, err := pmdoc.FindQuote(tree, op.Find, op.Occurrence, nil)
+		r, err := findEditQuote(tree, op.Find, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
@@ -56,7 +56,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if op.Find == "" {
 			return nil, invalidOp("find")
 		}
-		r, err := pmdoc.FindQuote(tree, op.Find, op.Occurrence, nil)
+		r, err := findEditQuote(tree, op.Find, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
@@ -77,13 +77,29 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if !after {
 			anchor = op.Before
 		}
-		position, err := insertPosition(tree, anchor, after, op.Occurrence)
+		target, plainText, err := insertTarget(tree, anchor, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
-		with, err := inlineAware(op.Markdown)
+		if plainText && pmdoc.TargetSpansBlocks(tree, target) {
+			return nil, pmdoc.ErrTargetSpansBlocks
+		}
+		with, err := parseInput(op.Markdown)
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
+		}
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
+			return out, err
+		}
+		position := target.From
+		if after {
+			position = target.To
+		}
+		if anchor != "start" && anchor != "end" {
+			position, err = pmdoc.BlockBoundary(tree, target, after)
+			if err != nil {
+				return nil, err
+			}
 		}
 		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
 	default:
@@ -98,34 +114,37 @@ func invalidMarkdownOp(field string, err error) error {
 	return err
 }
 
-func insertPosition(tree *pmdoc.Node, anchor string, after bool, occurrence *int) (int, error) {
+func findEditQuote(tree *pmdoc.Node, quote string, occurrence *int) (pmdoc.Range, error) {
+	r, err := pmdoc.FindQuote(tree, quote, occurrence, nil)
+	if err != nil {
+		return pmdoc.Range{}, err
+	}
+	if pmdoc.TargetSpansBlocks(tree, r) {
+		return pmdoc.Range{}, pmdoc.ErrTargetSpansBlocks
+	}
+	return r, nil
+}
+
+func insertTarget(tree *pmdoc.Node, anchor string, occurrence *int) (pmdoc.Range, bool, error) {
 	switch anchor {
 	case "start":
-		return 0, nil
+		return pmdoc.Range{}, false, nil
 	case "end":
-		return pmdoc.Size(tree), nil
+		position := pmdoc.Size(tree)
+		return pmdoc.Range{From: position, To: position}, false, nil
 	}
 	if title, ok := strings.CutPrefix(anchor, "heading:"); ok {
 		if title == "" {
-			return 0, invalidOp("heading")
+			return pmdoc.Range{}, false, invalidOp("heading")
 		}
 		r, err := pmdoc.FindHeading(tree, title, occurrence)
-		if err != nil {
-			return 0, err
-		}
-		if after {
-			return r.To, nil
-		}
-		return r.From, nil
+		return r, false, err
 	}
 	r, err := pmdoc.FindQuote(tree, anchor, occurrence, nil)
 	if err != nil {
-		return 0, err
+		return pmdoc.Range{}, true, err
 	}
-	if after {
-		return r.To, nil
-	}
-	return r.From, nil
+	return r, true, nil
 }
 
 func inlineAware(markdown string) (*pmdoc.Node, error) {
@@ -133,15 +152,10 @@ func inlineAware(markdown string) (*pmdoc.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(tree.Children) != 1 || tree.Children[0].Type != "paragraph" {
+	if !isInlineDocument(tree) {
 		return tree, nil
 	}
 	paragraph := tree.Children[0]
-	for _, child := range paragraph.Children {
-		if child.Type != "text" && !isInlineLeaf(child) {
-			return tree, nil
-		}
-	}
 	leading := markdown[:len(markdown)-len(strings.TrimLeftFunc(markdown, unicode.IsSpace))]
 	trailing := markdown[len(strings.TrimRightFunc(markdown, unicode.IsSpace)):]
 	if leading == "" && trailing == "" {
@@ -171,4 +185,16 @@ func isInlineLeaf(node *pmdoc.Node) bool {
 	default:
 		return false
 	}
+}
+
+func isInlineDocument(tree *pmdoc.Node) bool {
+	if len(tree.Children) != 1 || tree.Children[0].Type != "paragraph" {
+		return false
+	}
+	for _, child := range tree.Children[0].Children {
+		if child.Type != "text" && !isInlineLeaf(child) {
+			return false
+		}
+	}
+	return true
 }
