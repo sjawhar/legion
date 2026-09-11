@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
@@ -18,6 +19,7 @@ import {
   calloutSuccessTimestampText,
   card,
   cardHoverBorder,
+  inlineWarningText,
   inputClasses,
   linkHoverText,
   linkText,
@@ -33,6 +35,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { actorLabel } from "../refs/actor";
+import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskOptionList } from "./AskOptionList";
 import { AskThread } from "./AskThread";
@@ -40,6 +43,7 @@ import { AskThread } from "./AskThread";
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
 
 export interface AskCardProps {
+  artifactSlug?: string;
   ask: Ask;
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
@@ -61,7 +65,42 @@ const URGENCY_LABELS: Record<Ask["urgency"], string> = {
   med: "Medium",
 };
 
-function AnsweredAsk({ ask }: { ask: Ask }): ReactNode {
+function OrphanedAnchorNotice({
+  artifactSlug,
+  ask,
+}: {
+  artifactSlug: string | undefined;
+  ask: Ask;
+}): ReactNode {
+  const anchor = ask.anchor;
+  if (anchor === null || !anchor.orphaned || artifactSlug === undefined) {
+    return null;
+  }
+  return (
+    <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>
+      Text changed.{" "}
+      <Link
+        className="underline"
+        to={`${buildIssuePath({
+          key: ask.issue_key,
+          kind: "artifact",
+          slug: artifactSlug,
+          version: anchor.version,
+        })}&ask=${ask.id}`}
+      >
+        View original text
+      </Link>
+    </p>
+  );
+}
+
+function AnsweredAsk({
+  artifactSlug,
+  ask,
+}: {
+  artifactSlug: string | undefined;
+  ask: Ask;
+}): ReactNode {
   const { answer } = ask;
   return (
     <article
@@ -75,6 +114,7 @@ function AnsweredAsk({ ask }: { ask: Ask }): ReactNode {
           {ask.anchor.quote}
         </blockquote>
       )}
+      <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
       <p className={`font-medium ${textPrimaryOnSuccessCallout}`}>{ask.question}</p>
       <AskOptionList
         descriptionClass={calloutSuccessBodyText}
@@ -105,6 +145,7 @@ function AnsweredAsk({ ask }: { ask: Ask }): ReactNode {
 }
 
 export function AskCard({
+  artifactSlug,
   ask,
   answerAsk: answer = answerAsk,
   createReply: reply,
@@ -157,7 +198,7 @@ export function AskCard({
   if (completed !== null) {
     return (
       <>
-        <AnsweredAsk ask={completed} />
+        <AnsweredAsk artifactSlug={artifactSlug} ask={{ ...completed, answer: completed.answer }} />
         <AskThread ask={ask} createReply={reply} getAskThread={getThread} />
       </>
     );
@@ -173,6 +214,7 @@ export function AskCard({
             {ask.anchor.quote}
           </blockquote>
         )}
+        <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className={`font-medium ${textPrimaryOnSurface}`}>{ask.question}</p>

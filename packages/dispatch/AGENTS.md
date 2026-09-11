@@ -47,13 +47,22 @@ output CSS, catching the scanner-blind-spot case those checks exist to prevent;
 background composite in its own file and asserts that pairing is registered, since a component
 can compose a text role onto a background role its own registration never checked;
 `styles-css-pin.test.ts` asserts the hand-written hex/`rgb()` literals in `styles.css` (the
-pre-hydration `:root` fallback) equal the exact OKLCH-computed value of the palette swatch their
-trailing `/* swatch-name */` comment names. Adding a new color pairing means adding a registered
-composite to `classes.ts`, not inventing a shade inline.
+pre-hydration `:root` fallback and Proof editor variables, both outside the `dark:` className
+mechanism) equal the exact OKLCH-computed value of the palette swatch their trailing
+`/* swatch-name */` comment names. Adding a new color pairing means adding a registered
+composite to `classes.ts`, not inventing a shade inline. The document editor
+(`@sjawhar/proof-editor`) themes itself through CSS variables scoped to `.proof-editor`;
+`styles.css` maps them to palette swatches under `.dispatch-doc .proof-editor` for both schemes,
+and those literals are what `styles-css-pin.test.ts` pins.
 
-The current document tab is an interim read-only rendered view over the server's
-Proof-compatible Yjs tree. It deliberately has no inline typing or collaborative
-cursor path; those return with Lane B PR 4's Proof editor integration.
+## Document editor
+
+`features/doc/` adapts `@sjawhar/proof-editor` to Dispatch: it owns the Hocuspocus/Yjs
+connection, accessible editor attributes, selected-version presentation, CSS Custom Highlight API
+search highlights, and the bridge between Proof marks and margin cards. `DocumentRuntime` supplies
+the connection and editor creation seams; happy-dom tests use its doubles from
+`web/src/__tests__/document-runtime.ts`, while `e2e/editor.ts` drives the real editor in
+Playwright. Library capability gaps belong in `sjawhar/proof-sdk`, not host-side workarounds.
 
 ## Commands
 
@@ -77,6 +86,14 @@ the production listener on port 8766. It defaults `DATABASE_URL` to
 `postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable` and
 uses trusted `X-Dispatch-User` identity for `alice` and `bob`; do not replace it
 with a fixture server.
+
+E2E builds set `VITE_DISPATCH_E2E=1`. In that build only, `ProofDocument` exposes its live
+`editor` and `view` as `window.__dispatchDocument` for Playwright state probes; production builds
+never create that property.
+
+Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
+layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
+post-update text selection; Yjs document transport and local editing remain active.
 
 `e2e/seed.ts` truncates the test database before each scenario. For a deployed
 server, set `PLAYWRIGHT_DATABASE_URL` for the same database and

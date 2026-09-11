@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import {
   createContext,
   type ReactNode,
@@ -9,8 +10,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { useLocation } from "react-router-dom";
 
+import { api } from "../../api/client";
 import type { Artifact, Ask, Comment, Event } from "../../api/types";
+import { parseIssuePath } from "../refs/routes";
 import type { MarginComposer } from "./CommentsTab";
 import type { ComposerAnchor, ComposerKind } from "./Composer";
 import { MarginSheet } from "./MarginSheet";
@@ -18,38 +22,53 @@ import {
   type MarginItem,
   type MarginItemAction,
   type MarginTab,
+  marginItemId,
+  marginItemMarkId,
   threadRootId,
   useMarginItems,
 } from "./useMarginItems";
 import { useMarginListeners } from "./useMarginListeners";
 
-export interface MarginSelection extends ComposerAnchor {
-  artifactId: string;
-  canSuggest: boolean;
-  rect: { bottom: number; left: number; right: number; top: number };
+export interface DocumentBridge {
+  focusMark(markId: string): void;
+  setActiveMarks(markIds: readonly string[]): void;
+}
+
+export interface MarkComposeRequest {
+  anchor: ComposerAnchor;
+  kind: "ask" | "comment" | "suggestion";
 }
 
 interface MarginContextValue {
-  documentText: string;
+  composeForMark(request: MarkComposeRequest): Promise<void>;
+  documentBridge: DocumentBridge | undefined;
+  focusItemForMark(markId: string): void;
+  focusRequest: { markId: string; seq: number } | undefined;
+  hoverItemForMark(markId: string | null): void;
   hoveredItemId: string | undefined;
-  selectItem: (id: string) => void;
+  hoveredMarkId: string | undefined;
+  markPositions: ReadonlyMap<string, number>;
+  pendingCompose: (MarkComposeRequest & { seq: number }) | undefined;
+  registerDocument(bridge: DocumentBridge | undefined): void;
+  replaceCompose(): void;
+  selectItem(id: string): void;
   selectedItemId: string | undefined;
-  selection: MarginSelection | undefined;
-  setDocumentText: (text: string) => void;
-  setHoveredItemId: (id: string | undefined) => void;
-  setSelection: (selection: MarginSelection | undefined) => void;
+  setHoveredItemId(id: string | undefined): void;
+  setMarkItemIds(markItemIds: ReadonlyMap<string, string>): void;
+  setMarkPositions(positions: ReadonlyMap<string, number>): void;
+  settleCompose(outcome: "saved" | "cancelled"): void;
 }
 
 export interface MarginSheetModel {
   actions: {
     closeComposer: () => void;
     onAction: (id: string, action: MarginItemAction) => void;
+    onComposerSaved: () => void;
     onReply: (comment: Comment) => void;
     onRetryAction: () => void;
     onRetryAnsweredAsk: (() => void) | undefined;
     onRetryComments: () => void;
     onRetryIssue: () => void;
-    onSelectionAction: (kind: ComposerKind, anchor: ComposerAnchor) => void;
   };
   composer: MarginComposer | undefined;
   items: {
@@ -64,8 +83,9 @@ export interface MarginSheetModel {
     issueError: boolean;
     issueKey: string | undefined;
     issuePending: boolean;
-    openAskCount: number;
     needsYou: Ask[];
+    onSelectCard: (id: string) => void;
+    openAskCount: number;
     pendingActionId: string | undefined;
     pinned: Event[];
     pinnedIds: string[];
@@ -74,7 +94,6 @@ export interface MarginSheetModel {
   selection: {
     hoveredItemId: string | undefined;
     selectedItemId: string | undefined;
-    value: MarginSelection | undefined;
   };
   sheet: {
     expanded: boolean;
@@ -86,35 +105,129 @@ export interface MarginSheetModel {
   };
 }
 
-const noMargin = () => {};
+const unavailableMargin = (): never => {
+  throw new Error("MarginProvider is required");
+};
 const MarginContext = createContext<MarginContextValue>({
-  documentText: "",
+  composeForMark: unavailableMargin,
+  documentBridge: undefined,
+  focusItemForMark: unavailableMargin,
+  focusRequest: undefined,
+  hoverItemForMark: unavailableMargin,
   hoveredItemId: undefined,
-  selectItem: noMargin,
+  hoveredMarkId: undefined,
+  markPositions: new Map(),
+  pendingCompose: undefined,
+  registerDocument: unavailableMargin,
+  replaceCompose: unavailableMargin,
+  selectItem: unavailableMargin,
   selectedItemId: undefined,
-  selection: undefined,
-  setDocumentText: noMargin,
-  setHoveredItemId: noMargin,
-  setSelection: noMargin,
+  setHoveredItemId: unavailableMargin,
+  setMarkItemIds: unavailableMargin,
+  setMarkPositions: unavailableMargin,
+  settleCompose: unavailableMargin,
 });
 
 export function MarginProvider({ children }: { children: ReactNode }): ReactNode {
-  const [documentText, setDocumentText] = useState("");
+  const [documentBridge, setDocumentBridge] = useState<DocumentBridge>();
+  const [focusRequest, setFocusRequest] = useState<{ markId: string; seq: number }>();
   const [hoveredItemId, setHoveredItemId] = useState<string>();
+  const [hoveredMarkId, setHoveredMarkId] = useState<string>();
+  const [markPositions, setMarkPositions] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const [pendingCompose, setPendingCompose] = useState<
+    (MarkComposeRequest & { seq: number }) | undefined
+  >();
   const [selectedItemId, setSelectedItemId] = useState<string>();
-  const [selection, setSelection] = useState<MarginSelection>();
+  const markItemIds = useRef<ReadonlyMap<string, string>>(new Map());
+  const sequence = useRef(0);
+  const composePromise = useRef<{ reject(reason: Error): void; resolve(): void } | undefined>(
+    undefined
+  );
+
+  const composeForMark = useCallback(
+    (request: MarkComposeRequest): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        composePromise.current?.reject(new Error("replaced by a newer composer"));
+        composePromise.current = { reject, resolve };
+        sequence.current += 1;
+        setPendingCompose({ ...request, seq: sequence.current });
+      }),
+    []
+  );
+  const settleCompose = useCallback((outcome: "saved" | "cancelled") => {
+    const pending = composePromise.current;
+    composePromise.current = undefined;
+    setPendingCompose(undefined);
+    if (pending === undefined) {
+      return;
+    }
+    if (outcome === "saved") {
+      pending.resolve();
+      return;
+    }
+    pending.reject(new Error("composer closed"));
+  }, []);
+  const replaceCompose = useCallback(() => {
+    const pending = composePromise.current;
+    composePromise.current = undefined;
+    setPendingCompose(undefined);
+    pending?.reject(new Error("replaced by a newer composer"));
+  }, []);
+  const focusItemForMark = useCallback((markId: string) => {
+    sequence.current += 1;
+    setFocusRequest({ markId, seq: sequence.current });
+  }, []);
+  const hoverItemForMark = useCallback((markId: string | null) => {
+    setHoveredMarkId(markId ?? undefined);
+    setHoveredItemId(markId === null ? undefined : markItemIds.current.get(markId));
+  }, []);
+  const selectHoveredItem = useCallback((itemId: string | undefined) => {
+    setHoveredMarkId(undefined);
+    setHoveredItemId(itemId);
+  }, []);
+  const setMarkItemIds = useCallback((nextMarkItemIds: ReadonlyMap<string, string>) => {
+    markItemIds.current = nextMarkItemIds;
+  }, []);
+  const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
+    setDocumentBridge(bridge);
+  }, []);
   const value = useMemo<MarginContextValue>(
     () => ({
-      documentText,
+      composeForMark,
+      documentBridge,
+      focusItemForMark,
+      focusRequest,
+      hoverItemForMark,
       hoveredItemId,
+      hoveredMarkId,
+      markPositions,
+      pendingCompose,
+      registerDocument,
+      replaceCompose,
       selectItem: setSelectedItemId,
       selectedItemId,
-      selection,
-      setDocumentText,
-      setHoveredItemId,
-      setSelection,
+      setHoveredItemId: selectHoveredItem,
+      setMarkItemIds,
+      setMarkPositions,
+      settleCompose,
     }),
-    [documentText, hoveredItemId, selectedItemId, selection]
+    [
+      composeForMark,
+      documentBridge,
+      focusItemForMark,
+      focusRequest,
+      hoverItemForMark,
+      hoveredItemId,
+      hoveredMarkId,
+      markPositions,
+      pendingCompose,
+      registerDocument,
+      replaceCompose,
+      selectHoveredItem,
+      selectedItemId,
+      setMarkItemIds,
+      settleCompose,
+    ]
   );
 
   return <MarginContext.Provider value={value}>{children}</MarginContext.Provider>;
@@ -126,18 +239,36 @@ export function useMargin(): MarginContextValue {
 
 function useMarginSheet(): MarginSheetModel {
   const {
-    documentText,
+    documentBridge,
+    focusRequest,
     hoveredItemId,
+    markPositions,
+    pendingCompose,
     selectItem,
     selectedItemId,
-    selection,
     setHoveredItemId,
-    setSelection,
+    setMarkItemIds,
+    settleCompose,
+    replaceCompose,
   } = useMargin();
+  const { pathname } = useLocation();
+  const route = parseIssuePath(pathname);
+  const issueKey = route?.key;
+  const routeArtifactSlug = route?.kind === "artifact" ? route.slug : undefined;
+  const routeItemId = route?.kind === "ask" || route?.kind === "comment" ? route.id : undefined;
   const [tab, setTab] = useState<MarginTab>("comments");
   const [composer, setComposer] = useState<MarginComposer>();
   const [expandedIssueKey, setExpandedIssueKey] = useState<string>();
   const marginRef = useRef<HTMLElement>(null);
+  const issue = useQuery({
+    enabled: issueKey !== undefined,
+    queryKey: ["issue", issueKey],
+    queryFn: () => api.getIssue(issueKey ?? ""),
+  });
+  const visibleArtifact =
+    routeArtifactSlug === undefined
+      ? issue.data?.artifacts.find((artifact) => artifact.id === issue.data?.primary_artifact_id)
+      : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug);
   const {
     actionErrorId,
     answeredAsksPending,
@@ -145,10 +276,6 @@ function useMarginSheet(): MarginSheetModel {
     commentsError,
     commentsPending,
     commentRecords,
-    isClosed,
-    issueError,
-    issueKey,
-    issuePending,
     items,
     marginItems,
     mutateItem,
@@ -159,12 +286,23 @@ function useMarginSheet(): MarginSheetModel {
     pinnedIds,
     retryAnsweredAsk,
     retryComments,
-    retryIssue,
     retryItem,
-    routeItemId,
-    visibleArtifact,
-  } = useMarginItems(tab, documentText);
-
+  } = useMarginItems(issueKey, tab, visibleArtifact, markPositions);
+  const markItemIds = useMemo(() => {
+    const ids = new Map<string, string>();
+    for (const item of marginItems) {
+      const markId = marginItemMarkId(item);
+      if (markId !== undefined) {
+        ids.set(markId, marginItemId(item));
+      }
+    }
+    return ids;
+  }, [marginItems]);
+  useEffect(() => {
+    setMarkItemIds(markItemIds);
+    return () => setMarkItemIds(new Map());
+  }, [markItemIds, setMarkItemIds]);
+  const isClosed = issue.data !== undefined && issue.data.closed_at !== null;
   const sheetExpanded = issueKey !== undefined && expandedIssueKey === issueKey;
   const toggleSheet = useCallback(
     (expanded?: boolean) => {
@@ -173,30 +311,118 @@ function useMarginSheet(): MarginSheetModel {
     },
     [issueKey, sheetExpanded]
   );
+  const closeComposer = useCallback(() => {
+    setComposer(undefined);
+    settleCompose("cancelled");
+  }, [settleCompose]);
+  const onComposerSaved = useCallback(() => {
+    settleCompose("saved");
+  }, [settleCompose]);
+  const openComposer = useCallback(
+    (kind: ComposerKind, anchor: ComposerAnchor | undefined, replyTo?: string) => {
+      replaceCompose();
+      setComposer({ anchor, kind, replyTo });
+    },
+    [replaceCompose]
+  );
 
   useEffect(() => {
-    if (selection !== undefined && selection.artifactId !== visibleArtifact?.id) {
-      setSelection(undefined);
+    if (pendingCompose === undefined) {
+      return;
     }
-  }, [selection, setSelection, visibleArtifact?.id]);
+    setTab("comments");
+    setComposer({ anchor: pendingCompose.anchor, kind: pendingCompose.kind });
+    if (issueKey !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
+      setExpandedIssueKey(issueKey);
+    }
+  }, [issueKey, pendingCompose]);
   useEffect(() => {
     if (
       composer !== undefined &&
       (isClosed ||
         (composer.anchor !== undefined && composer.anchor.artifact !== visibleArtifact?.id))
     ) {
-      setComposer(undefined);
+      closeComposer();
     }
-  }, [composer, isClosed, visibleArtifact?.id]);
+  }, [closeComposer, composer, isClosed, visibleArtifact?.id]);
   useEffect(() => {
     if (routeItemId !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
       setExpandedIssueKey(issueKey);
     }
   }, [issueKey, routeItemId]);
 
+  const handledFocusSequence = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (focusRequest === undefined) {
+      handledFocusSequence.current = undefined;
+      return;
+    }
+    if (handledFocusSequence.current === focusRequest.seq) {
+      return;
+    }
+    const item = marginItems.find(
+      (candidate) => marginItemMarkId(candidate) === focusRequest.markId
+    );
+    if (item === undefined) {
+      return;
+    }
+    handledFocusSequence.current = focusRequest.seq;
+    selectItem(marginItemId(item));
+    setTab("comments");
+    if (issueKey !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
+      setExpandedIssueKey(issueKey);
+    }
+  }, [focusRequest, issueKey, marginItems, selectItem]);
+  useEffect(() => {
+    const markIds = [selectedItemId, hoveredItemId]
+      .map((itemId) => {
+        const item = marginItems.find((candidate) => marginItemId(candidate) === itemId);
+        return item === undefined ? undefined : marginItemMarkId(item);
+      })
+      .filter((markId): markId is string => markId !== undefined);
+    documentBridge?.setActiveMarks([...new Set(markIds)]);
+  }, [documentBridge, hoveredItemId, marginItems, selectedItemId]);
+
+  const onAction = useCallback(
+    (id: string, action: MarginItemAction) => {
+      mutateItem({ id, kind: action });
+    },
+    [mutateItem]
+  );
+  const onSelectCard = useCallback(
+    (id: string) => {
+      selectItem(id);
+      const item = marginItems.find((candidate) => marginItemId(candidate) === id);
+      const markId = item === undefined ? undefined : marginItemMarkId(item);
+      if (markId !== undefined) {
+        documentBridge?.focusMark(markId);
+      }
+    },
+    [documentBridge, marginItems, selectItem]
+  );
+  const onReply = useCallback(
+    (comment: Comment) => {
+      openComposer("comment", undefined, threadRootId(commentRecords, comment));
+    },
+    [commentRecords, openComposer]
+  );
+  const focus =
+    focusRequest === undefined
+      ? undefined
+      : (() => {
+          const item = marginItems.find(
+            (candidate) => marginItemMarkId(candidate) === focusRequest.markId
+          );
+          return item === undefined
+            ? undefined
+            : { itemId: marginItemId(item), seq: focusRequest.seq };
+        })();
+
   useMarginListeners({
+    focus,
     items: marginItems,
     margin: marginRef,
+    onSelectCard,
     routeItemId,
     selectItem,
     setHoveredItemId,
@@ -206,39 +432,16 @@ function useMarginSheet(): MarginSheetModel {
     visibleArtifact,
   });
 
-  const openComposer = useCallback(
-    (kind: ComposerKind, anchor: ComposerAnchor | undefined, replyTo?: string) => {
-      setComposer({ anchor, kind, replyTo });
-      setSelection(undefined);
-    },
-    [setSelection]
-  );
-  const onAction = useCallback(
-    (id: string, action: MarginItemAction) => {
-      mutateItem({ id, kind: action });
-    },
-    [mutateItem]
-  );
-  const onReply = useCallback(
-    (comment: Comment) => {
-      openComposer("comment", undefined, threadRootId(commentRecords, comment));
-    },
-    [commentRecords, openComposer]
-  );
-  const closeComposer = useCallback(() => {
-    setComposer(undefined);
-  }, []);
-
   return {
     actions: {
       closeComposer,
       onAction,
+      onComposerSaved,
       onReply,
       onRetryAction: retryItem,
       onRetryAnsweredAsk: retryAnsweredAsk,
       onRetryComments: retryComments,
-      onRetryIssue: retryIssue,
-      onSelectionAction: openComposer,
+      onRetryIssue: () => void issue.refetch(),
     },
     composer,
     items: {
@@ -250,11 +453,12 @@ function useMarginSheet(): MarginSheetModel {
       commentsPending,
       marginRef,
       isClosed,
-      issueError,
+      issueError: issue.isError,
       issueKey,
-      issuePending,
-      openAskCount,
+      issuePending: issue.isPending,
       needsYou,
+      onSelectCard,
+      openAskCount,
       pendingActionId,
       pinned,
       pinnedIds,
@@ -263,7 +467,6 @@ function useMarginSheet(): MarginSheetModel {
     selection: {
       hoveredItemId,
       selectedItemId,
-      value: selection,
     },
     sheet: {
       expanded: sheetExpanded,

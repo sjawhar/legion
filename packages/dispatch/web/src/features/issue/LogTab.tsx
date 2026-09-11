@@ -80,7 +80,7 @@ export function LogTab({
   const lastRead = useRef(issueState.last_read_seq);
   const observed = useRef(new Map<Element, number>());
   const timers = useRef(new Map<Element, number>());
-  const setLogSection = usePreserveReaderPosition();
+  const { attach: setLogSection, compensate } = usePreserveReaderPosition();
   const events = eventItems(log.data);
   const items = useMemo(
     () => buildLogItems(events, issueState.dismissed, issueState.last_read_seq),
@@ -324,6 +324,7 @@ export function LogTab({
               }))
             }
             pinned={isPinnedEvent(issueState.dismissed, item.event)}
+            onRendered={compensate}
             register={(element) => {
               if (element === null) {
                 return;
@@ -419,6 +420,7 @@ function LogEvent({
   folded,
   onDismiss,
   onPin,
+  onRendered,
   pinned,
   register,
 }: {
@@ -427,6 +429,7 @@ function LogEvent({
   folded: boolean;
   onDismiss: () => void;
   onPin: () => void;
+  onRendered: () => void;
   pinned: boolean;
   register: (element: HTMLElement | null) => void;
 }): ReactNode {
@@ -441,7 +444,7 @@ function LogEvent({
           {folded ? (
             <p className={`text-sm ${textSecondaryOnSurface}`}>{eventDescription(event)}</p>
           ) : (
-            <EventBody event={event} />
+            <EventBody event={event} onRendered={onRendered} />
           )}
           {isAskEvent(event) ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>

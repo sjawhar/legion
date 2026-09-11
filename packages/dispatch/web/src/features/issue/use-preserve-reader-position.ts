@@ -68,7 +68,10 @@ function measureAnchor(root: HTMLElement): ReadingAnchor | null {
  * `useRef`'s identity never changes to signal that. A callback ref fires exactly when the section
  * actually attaches or detaches, however many renders that takes.
  */
-export function usePreserveReaderPosition(): (node: HTMLElement | null) => void {
+export function usePreserveReaderPosition(): {
+  attach(node: HTMLElement | null): void;
+  compensate(): void;
+} {
   const root = useRef<HTMLElement | null>(null);
   const anchor = useRef<ReadingAnchor | null>(null);
   const detach = useRef<(() => void) | null>(null);
@@ -103,7 +106,7 @@ export function usePreserveReaderPosition(): (node: HTMLElement | null) => void 
     };
   }, []);
 
-  useLayoutEffect(() => {
+  const compensate = useCallback(() => {
     const current = root.current;
     const previous = anchor.current;
     if (current === null || previous === null || window.scrollY <= 0) {
@@ -117,7 +120,11 @@ export function usePreserveReaderPosition(): (node: HTMLElement | null) => void 
     if (delta !== 0) {
       window.scrollBy(0, delta);
     }
+  }, []);
+
+  useLayoutEffect(() => {
+    compensate();
   });
 
-  return attach;
+  return { attach, compensate };
 }

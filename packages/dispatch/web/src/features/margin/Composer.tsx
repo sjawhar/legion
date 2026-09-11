@@ -65,7 +65,7 @@ export interface ComposerReference {
 
 export interface ComposerAnchor {
   artifact: string;
-  occurrence?: number;
+  mark_id: string;
   quote: string;
 }
 
@@ -116,6 +116,7 @@ interface ComposerProps {
   kind: ComposerKind;
   issueKey: string;
   onClose: () => void;
+  onSaved?: () => void;
   replyTo?: string;
 }
 
@@ -208,6 +209,7 @@ export function Composer({
   kind,
   issueKey,
   onClose,
+  onSaved,
   replyTo,
 }: ComposerProps): ReactNode {
   const queryClient = useQueryClient();
@@ -270,13 +272,7 @@ export function Composer({
   const save = useMutation({
     mutationFn: async () => {
       const selection =
-        anchor === undefined
-          ? undefined
-          : {
-              artifact: anchor.artifact,
-              ...(anchor.occurrence === undefined ? {} : { occurrence: anchor.occurrence }),
-              quote: anchor.quote,
-            };
+        anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
       if (kind === "message") {
         return api.createMessage(issueKey, { body: body.trim() });
       }
@@ -292,7 +288,7 @@ export function Composer({
       const comment = {
         body: kind === "suggestion" && body.trim() === "" ? "Suggested replacement." : body.trim(),
         reply_to: replyTo,
-        suggestion: kind === "suggestion" ? { replace_with: replacement } : undefined,
+        ...(kind === "suggestion" ? { suggestion: { replace_with: replacement } } : {}),
       };
       return api.createComment(
         issueKey,
@@ -303,6 +299,7 @@ export function Composer({
       submitGuard.release();
     },
     onSuccess: () => {
+      onSaved?.();
       void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
       void queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
@@ -611,7 +608,7 @@ export function Composer({
           message={
             save.error instanceof ApiError &&
             save.error.status === 409 &&
-            save.error.code === "ANCHOR_STALE"
+            save.error.code === "ANCHOR_MISSING"
               ? save.error.message
               : "Could not save this item."
           }

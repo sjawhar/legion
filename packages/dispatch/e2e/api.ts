@@ -19,7 +19,7 @@ import type {
 
 const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
 const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${e2ePort}`;
-const agentToken = process.env.E2E_AGENT_TOKEN ?? "e2e-token";
+export const e2eAgentToken = process.env.E2E_AGENT_TOKEN ?? "e2e-token";
 const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 
 interface ApiOptions {
@@ -44,7 +44,7 @@ async function request<T>(
         : body;
 
   if (as === "agent") {
-    headers.Authorization = `Bearer ${agentToken}`;
+    headers.Authorization = `Bearer ${e2eAgentToken}`;
   } else {
     headers["X-Dispatch-User"] = options.login ?? "alice";
   }

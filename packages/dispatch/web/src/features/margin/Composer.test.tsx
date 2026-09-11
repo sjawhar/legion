@@ -37,7 +37,7 @@ test("Composer uploads dropped files and inserts their references", async () => 
     const view = render(
       <QueryClientProvider client={queryClient}>
         <Composer
-          anchor={{ artifact: "document-1", quote: "text" }}
+          anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "text" }}
           issueKey="CORE-1"
           kind="comment"
           onClose={() => {}}
@@ -66,7 +66,7 @@ function renderComposer(kind: "ask" | "comment" | "suggestion") {
   return render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", occurrence: 1, quote: "selected" }}
+        anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
         issueKey="CORE-1"
         kind={kind}
         onClose={() => {}}
@@ -75,10 +75,10 @@ function renderComposer(kind: "ask" | "comment" | "suggestion") {
   );
 }
 
-test("Composer sends only the selected quote occurrence for asks, comments, and suggestions", async () => {
+test("Composer sends the browser mark id for asks, comments, and suggestions", async () => {
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
-  const anchor = { artifact: "document-1", occurrence: 1, quote: "selected" };
+  const anchor = { artifact: "document-1", mark_id: "mark-1", quote: "selected" };
 
   try {
     const ask = renderComposer("ask");
@@ -87,17 +87,12 @@ test("Composer sends only the selected quote occurrence for asks, comments, and 
     await waitFor(() => expect(createAsk).toHaveBeenCalledTimes(1));
     const askPayload = createAsk.mock.calls[0]?.[1];
     expect(askPayload).toMatchObject({
-      anchor,
       multiple: false,
       options: [],
       question: "Why this text?",
       urgency: "med",
     });
-    expect(
-      askPayload === undefined || askPayload.anchor === undefined
-        ? true
-        : "from" in askPayload.anchor
-    ).toBe(false);
+    expect(askPayload?.anchor).toEqual({ artifact: anchor.artifact, mark_id: anchor.mark_id });
     ask.unmount();
 
     const comment = renderComposer("comment");
@@ -105,15 +100,8 @@ test("Composer sends only the selected quote occurrence for asks, comments, and 
     fireEvent.click(screen.getByRole("button", { name: "Comment" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     const commentPayload = createComment.mock.calls[0]?.[1];
-    expect(commentPayload).toMatchObject({
-      anchor,
-      body: "Please revise.",
-    });
-    expect(
-      commentPayload === undefined || commentPayload.anchor === undefined
-        ? true
-        : "from" in commentPayload.anchor
-    ).toBe(false);
+    expect(commentPayload).toMatchObject({ body: "Please revise." });
+    expect(commentPayload?.anchor).toEqual({ artifact: anchor.artifact, mark_id: anchor.mark_id });
     comment.unmount();
 
     const suggestion = renderComposer("suggestion");
@@ -122,15 +110,13 @@ test("Composer sends only the selected quote occurrence for asks, comments, and 
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
     const suggestionPayload = createComment.mock.calls[1]?.[1];
     expect(suggestionPayload).toMatchObject({
-      anchor,
       body: "Suggested replacement.",
       suggestion: { replace_with: "replacement" },
     });
-    expect(
-      suggestionPayload === undefined || suggestionPayload.anchor === undefined
-        ? true
-        : "from" in suggestionPayload.anchor
-    ).toBe(false);
+    expect(suggestionPayload?.anchor).toEqual({
+      artifact: anchor.artifact,
+      mark_id: anchor.mark_id,
+    });
     suggestion.unmount();
   } finally {
     createAsk.mockRestore();
@@ -140,7 +126,7 @@ test("Composer sends only the selected quote occurrence for asks, comments, and 
 
 test("Composer submits the configured ask options, multiple selection, and urgency", async () => {
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
-  const anchor = { artifact: "document-1", occurrence: 1, quote: "selected" };
+  const anchor = { artifact: "document-1", mark_id: "mark-1", quote: "selected" };
 
   try {
     const composer = renderComposer("ask");
@@ -161,7 +147,7 @@ test("Composer submits the configured ask options, multiple selection, and urgen
 
     await waitFor(() =>
       expect(createAsk).toHaveBeenCalledWith("CORE-1", {
-        anchor,
+        anchor: { artifact: anchor.artifact, mark_id: anchor.mark_id },
         multiple: true,
         options: [{ description: "Proceed now", label: "Ship" }, { label: "Hold" }],
         question: "Which path?",
@@ -196,7 +182,7 @@ test("Escape after typing only an ask option prompts before discarding", async (
   const view = render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", occurrence: 1, quote: "selected" }}
+        anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
         issueKey="CORE-1"
         kind="ask"
         onClose={() => {
@@ -218,17 +204,23 @@ test("Escape after typing only an ask option prompts before discarding", async (
   }
 });
 
-test("Composer shows the server's stale anchor error", async () => {
+test("Composer shows the server's missing-anchor error and keeps the draft", async () => {
   const createComment = spyOn(api, "createComment").mockRejectedValue(
-    new ApiError(409, { code: "ANCHOR_STALE", error: 'anchor quote "selected" is stale' })
+    new ApiError(409, { code: "ANCHOR_MISSING", error: "anchor mark is not in the document" })
   );
 
   try {
     const composer = renderComposer("comment");
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
+    const comment = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(comment, { target: { value: "Please revise." } });
     fireEvent.click(screen.getByRole("button", { name: "Comment" }));
 
-    await waitFor(() => expect(screen.getByText('anchor quote "selected" is stale')).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText("anchor mark is not in the document")).toBeTruthy()
+    );
+    expect(comment.value).toBe("Please revise.");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
     composer.unmount();
   } finally {
     createComment.mockRestore();
@@ -243,7 +235,7 @@ test("Escape on a suggestion with only a replacement shows the discard prompt in
   const view = render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", occurrence: 1, quote: "selected" }}
+        anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
         issueKey="CORE-1"
         kind="suggestion"
         onClose={() => {
@@ -291,7 +283,7 @@ test("Escape from the composer while its reference picker opens closes only the 
   const view = render(
     <QueryClientProvider client={queryClient}>
       <Composer
-        anchor={{ artifact: "document-1", occurrence: 1, quote: "selected" }}
+        anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
         issueKey="CORE-1"
         kind="comment"
         onClose={() => {
@@ -371,5 +363,33 @@ test("Enter in the reference picker's filter inserts the top match instead of su
     createComment.mockRestore();
     getIssue.mockRestore();
     listIssues.mockRestore();
+  }
+});
+
+test("Composer reports onSaved before onClose", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const calls: string[] = [];
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Composer
+        anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
+        issueKey="CORE-1"
+        kind="comment"
+        onClose={() => calls.push("closed")}
+        onSaved={() => calls.push("saved")}
+      />
+    </QueryClientProvider>
+  );
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(calls).toEqual(["saved", "closed"]));
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
   }
 });

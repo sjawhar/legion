@@ -23,8 +23,8 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
         actions: {
           closeComposer: () => {},
           onAction: () => {},
+          onComposerSaved: () => {},
           onReply: () => {},
-          onSelectionAction: () => {},
           onRetryAction: () => {},
           onRetryAnsweredAsk: undefined,
           onRetryComments: () => {},
@@ -48,12 +48,12 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           pinned: [],
           pendingActionId: undefined,
           pinnedIds: [],
+          onSelectCard: () => {},
           visibleArtifact: specArtifact,
         },
         selection: {
           hoveredItemId: undefined,
           selectedItemId: undefined,
-          value: undefined,
         },
         sheet: {
           expanded: false,
