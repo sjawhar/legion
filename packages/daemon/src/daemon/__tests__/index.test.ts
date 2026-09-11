@@ -114,7 +114,10 @@ function matches(pattern: string, subject: string): boolean {
   return patternTokens.length === subjectTokens.length;
 }
 
-function controllerException(project: string): string {
+function controllerException(
+  project: string,
+  reason: "no_holder" | "delivery_failed" = "no_holder"
+): string {
   const controller = controllerToken(project);
   return JSON.stringify({
     event_id: "controller-exception",
@@ -127,7 +130,7 @@ function controllerException(project: string): string {
     payload: JSON.stringify({
       original_topic: roleTopic(controller),
       event_id: "lost-triage",
-      reason: "no_holder",
+      reason,
       payload: JSON.stringify({
         type: "triage",
         issue: "WIDGETS-42",
@@ -690,6 +693,91 @@ describe("startDaemon", () => {
       expect((await ready()).status).toBe(200);
       const afterReady = await fetch(`http://127.0.0.1:${second.server.port}/legion/v1/state`);
       expect(await afterReady.json()).toMatchObject({ project: daemonConfig.project });
+    } finally {
+      await first?.stop();
+      await second?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("forces a fresh anomaly resync every time a controller claims its role after a delivery_failed exception, never trusting the resync interval to have elapsed", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const untriagedRoot = "WIDGETS-42";
+    state.issues[untriagedRoot] = {
+      key: untriagedRoot,
+      title: "Untriaged root",
+      status: "triage",
+      children: [],
+    };
+    const firstNats = new FakeNats();
+    const secondNats = new FakeNats();
+    const publications: Array<{ topic: string; payload: unknown }> = [];
+    let controllerSecret: string | undefined;
+    let first: daemonIndex.DaemonHandle | undefined;
+    let second: daemonIndex.DaemonHandle | undefined;
+    const resyncPayload = {
+      type: "resync",
+      anomalies: [
+        {
+          kind: "untriaged-open",
+          issue: untriagedRoot,
+          detail: "tracked triage issue has no Legion tree or admission entry",
+        },
+      ],
+      healed: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
+    };
+
+    try {
+      const firstOptions = daemonTestDependencies(firstNats, publications, (secret) => {
+        controllerSecret = secret;
+      });
+      first = await startDaemon(daemonConfig, {
+        deps: { ...firstOptions.deps, loadState: async () => state, saveState: async () => {} },
+      });
+
+      const controller = controllerToken(daemonConfig.project);
+      // "delivery_failed" (a live-but-dying controller Envoy could not reach), not the
+      // "no_holder" reason the sibling test above exercises: `handleException` routes both
+      // reasons through the same `ensureController` recovery (see processes.ts).
+      firstNats.emit(
+        `notifications.envoy.exceptions.notifications.role.${controller}`,
+        controllerException(daemonConfig.project, "delivery_failed")
+      );
+      await first.drain();
+      expect(controllerSecret).toBeString();
+      await first.stop();
+      first = undefined;
+
+      const secondOptions = daemonTestDependencies(secondNats, publications, () => {});
+      second = await startDaemon(daemonConfig, {
+        deps: { ...secondOptions.deps, loadState: async () => state, saveState: async () => {} },
+      });
+
+      const ready = () =>
+        fetch(`http://127.0.0.1:${second?.server.port}/legion/v1/controller/ready`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ secret: controllerSecret, sessionId: "ses-controller" }),
+        });
+
+      expect((await ready()).status).toBe(200);
+      expect(publications).toContainEqual({
+        topic: roleTopic(controller),
+        payload: resyncPayload,
+      });
+
+      publications.length = 0;
+      // `now()` is fixed by the test harness, so a second `/controller/ready` at the exact same
+      // clock reading would come back with the throttled empty report if this resync weren't
+      // forced — proving `onControllerReady` never trusts `resyncIntervalMs` to have elapsed.
+      expect((await ready()).status).toBe(200);
+      expect(publications).toContainEqual({
+        topic: roleTopic(controller),
+        payload: resyncPayload,
+      });
     } finally {
       await first?.stop();
       await second?.stop();

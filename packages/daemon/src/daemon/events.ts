@@ -443,13 +443,25 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    * died), recovered by that worker's own catch-up on resume, never by holding or retrying the
    * event. Inside one (`recoveries` supplied by `applyDurableEvent`) it only records the info;
    * the recovery itself runs once, best-effort, after that transaction's own save commits (see
-   * `applyDurableEvent`). Anything else propagates: for a durable transaction (Dispatch issue
-   * events and GitHub check settlement alike) the caller's dispatch-then-save transaction treats
-   * it as fatal (this effect is not yet durable, and continuing with a live-state mutation whose
-   * full effect set didn't get applied would leave dirty memory serving other events); for a
-   * local caller (resync, or any other effect dispatched outside a durable transaction) it
-   * simply fails that caller's own request. Shared by every source - there is no separate
-   * held/retry path.
+   * `applyDurableEvent`). A controller-kind effect additionally records a `ControllerPendingNotice`
+   * before that recovery fires, exactly like `publishControllerDirect`'s own Slack-mention
+   * handling — except for a `triage` payload, which resync's `reportRootAnomalies` fully
+   * regenerates on every `/controller/ready` (an untriaged root re-emits this same wake — see
+   * resync.ts); recording that one too would double-deliver it, once from the drain and once
+   * from the forced resync `onControllerReady` also runs. `closed-tree-activity` is the only
+   * other controller payload `reduceDispatchEvent`/`reduceGithubEvent` produce today
+   * (`routeActive` in reducers.ts), and it carries data resync cannot reconstruct from current
+   * state (the wrapped `event` for GitHub/Dispatch activity on an already-closed tree), so it
+   * must survive a 404. Inside a durable transaction the notice push lands in memory only,
+   * persisted by that transaction's own save immediately after `dispatch()` returns (before any
+   * deferred recovery runs); outside one, this saves state itself first, so a crash between the
+   * 404 and the controller's own claim can never lose it. Anything else propagates: for a durable
+   * transaction (Dispatch issue events and GitHub check settlement alike) the caller's
+   * dispatch-then-save transaction treats it as fatal (this effect is not yet durable, and
+   * continuing with a live-state mutation whose full effect set didn't get applied would leave
+   * dirty memory serving other events); for a local caller (resync, or any other effect
+   * dispatched outside a durable transaction) it simply fails that caller's own request. Shared
+   * by every source - there is no separate held/retry path.
    */
   const publisher = (
     eventId: string,
@@ -460,12 +472,17 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     const publishOrThrow = async (
       role: string,
       payloadJson: string,
-      kind: "publish" | "controller"
+      kind: "publish" | "controller",
+      recordPendingNotice: boolean
     ): Promise<void> => {
       try {
         await deps.envoyPublish(roleTopic(role), payloadJson);
       } catch (error) {
         if (isNoHolderError(error)) {
+          if (recordPendingNotice) {
+            deps.state.controllerPendingNotices.push({ payloadJson, eventId });
+            if (!recoveries) await deps.saveState();
+          }
           await notifyUndeliverable(role, eventId, envelope, subject, kind, recoveries);
           return;
         }
@@ -473,23 +490,30 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       }
     };
     return {
-      publishRole: (role, payload) => publishOrThrow(role, JSON.stringify(payload), "publish"),
+      publishRole: (role, payload) =>
+        publishOrThrow(role, JSON.stringify(payload), "publish", false),
       publishController: (payload) =>
-        publishOrThrow(controllerToken(deps.state.project), JSON.stringify(payload), "controller"),
+        publishOrThrow(
+          controllerToken(deps.state.project),
+          JSON.stringify(payload),
+          "controller",
+          payload.type !== "triage"
+        ),
     };
   };
 
   /** Publishes directly to the controller role outside any effect dispatch (a Slack mention, or
-   * `publishControllerEvent`'s resync/API-triggered controller wake). Unlike `publisher`'s own
-   * no-holder handling — every one of *its* effects is reducer-derived and fully recoverable
-   * from current state, so nothing needs to survive the 404 itself — a Slack mention's specific
-   * text has no other source of truth (see `ControllerPendingNotice`'s doc comment): it is
-   * recorded into durable state and saved BEFORE `ensureController` even runs, so a crash
-   * between this 404 and the controller's own claim can never lose it. (The resync/API caller's
-   * own payload is redundant with the fresh resync `onControllerReady` already re-emits on
-   * ready, so recording it too is a harmless no-op, not a behavior change worth special-casing
-   * away.) Drained, in order, exactly once each, by `drainControllerNotices` on
-   * `/controller/ready`. */
+   * `publishControllerEvent`'s resync/API-triggered controller wake). `publisher`'s own no-holder
+   * handling now records a pending notice too for every controller effect except `triage` (see
+   * its doc comment) — the one reducer-derived payload resync's `reportRootAnomalies` fully
+   * regenerates on `/controller/ready`, so nothing needs to survive that specific 404. A Slack
+   * mention's specific text, and every payload passed through this function, has no such
+   * resync-derived source of truth (see `ControllerPendingNotice`'s doc comment): it is recorded
+   * into durable state and saved BEFORE `ensureController` even runs, so a crash between this 404
+   * and the controller's own claim can never lose it. (The resync/API caller's own payload here
+   * is redundant with the fresh resync `onControllerReady` already re-emits on ready, so
+   * recording it too is a harmless no-op, not a behavior change worth special-casing away.)
+   * Drained, in order, exactly once each, by `drainControllerNotices` on `/controller/ready`. */
   const publishControllerDirect = async (
     payloadJson: string,
     envelope: EnvelopeJson
