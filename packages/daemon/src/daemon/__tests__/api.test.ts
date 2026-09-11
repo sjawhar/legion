@@ -2713,6 +2713,128 @@ describe("Legion HTTP API", () => {
     expect(state.phases[child]).toBeUndefined();
   });
 
+  it("returns the issue to in_progress instead of retro when a reviewer completes with changes requested", async () => {
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    await start({
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+    const token = roleToken(state.project, root, "reviewer");
+    state.roles[token] = {
+      issue: root,
+      role: "reviewer",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/reviewer.sock",
+      },
+    };
+    state.prs["acme/widgets#9"] = {
+      key: root,
+      repo: "acme/widgets",
+      number: 9,
+      headSha: "head-sha",
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 0,
+      ciCheckRuns: null,
+      ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciReconciled: false,
+      fixAttempts: 0,
+      reviewDecision: "changes_requested",
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "reviewer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "reviewer",
+      bootToken,
+      sessionId: "ses_reviewer",
+      agentId: "agt_reviewer",
+      ompSessionFile: "/tmp/reviewer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "reviewer", sessionId: "ses_reviewer" };
+    const grantId = await mintGrant(root, "ses_reviewer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Requested changes",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+  });
+
+  it("advances the issue to retro when a reviewer completes with an approved review", async () => {
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    await start({
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+    const token = roleToken(state.project, root, "reviewer");
+    state.roles[token] = {
+      issue: root,
+      role: "reviewer",
+      generation: 1,
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/reviewer.sock",
+      },
+    };
+    state.prs["acme/widgets#9"] = {
+      key: root,
+      repo: "acme/widgets",
+      number: 9,
+      headSha: "head-sha",
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 0,
+      ciCheckRuns: null,
+      ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciReconciled: false,
+      fixAttempts: 0,
+      reviewDecision: "approved",
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "reviewer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "reviewer",
+      bootToken,
+      sessionId: "ses_reviewer",
+      agentId: "agt_reviewer",
+      ompSessionFile: "/tmp/reviewer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "reviewer", sessionId: "ses_reviewer" };
+    const grantId = await mintGrant(root, "ses_reviewer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Approved",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(statusWrites).toEqual([{ issue: root, status: "retro" }]);
+  });
+
   it("rejects a duplicate phase/complete once the architect has reassigned the issue to a later phase", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
