@@ -1212,6 +1212,28 @@ describe("reduceGithubEvent", () => {
     ]);
     expect(state.prs[`${repo}#${prNumber}`]?.reviewDecision).toBeUndefined();
   });
+
+  it("retains a changes-requested verdict delivered against an earlier commit of the same head", () => {
+    const state = rootState();
+    attachChild(state);
+    claim(state, child, "implementer");
+    addPr(state, {
+      headSha: "current-sha",
+    });
+
+    effects(state, {
+      action: "submitted",
+      pull_request: { number: prNumber, head: { sha: "current-sha" } },
+      review: {
+        user: { login: "legion-reviewer" },
+        state: "changes_requested",
+        commit_id: "implementation-sha",
+        body: "C1 and C2 block",
+      },
+    });
+
+    expect(state.prs[`${repo}#${prNumber}`]?.reviewDecision).toBe("changes_requested");
+  });
 });
 
 describe("reduceCiEmission", () => {
