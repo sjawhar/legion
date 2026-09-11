@@ -37,7 +37,8 @@ The localhost-only Legion API lives in `api.ts`.
 | `resync.ts` | Low-frequency: retries failed daemon-owned Dispatch status writes, heals Dispatch status drift this daemon's own durable consumer missed, reconciles unsettled PR check rollups, and reports root-issue anomalies. |
 | `dispatch-client.ts` | Thin HTTP client for Dispatch's native-tool API (`listIssues`/`getIssue`/`setStatus`) and `writeStatus`, the one helper every daemon-owned lifecycle status write goes through — a PATCH failure is logged and recorded on `state.pendingStatusWrites` for `resync.ts` to retry, never thrown back at the caller. |
 | `worker-rpc.ts` | Minimal OMP RPC protocol v2 client (`negotiate_protocol`/`prompt`/`get_state`/`shutdown`) reached through a worker's `legion worker-shim` unix socket rather than a spawned process's stdio. |
-| `tmux.ts` | Pure tmux command construction/parsing (open/split a window, probe pane liveness and pid, kill a window or a single pane, list a session's unknown owned windows and its unrecorded worker-shim panes) over an injected `run` callback — no daemon state. |
+| `tmux.ts` | Pure tmux command construction/parsing (open/split a window, probe pane liveness and pid, kill a window or a single pane, list a session's unknown owned windows and its unrecorded worker-shim panes) over an injected `run` callback, every argv prefixed `tmux -L legion-<project>` (`TmuxServer`) — no daemon state. |
+| `secrets.ts` | `<state_dir>/secrets` primitives: 0700 directory, 0600 files, and the listing prune `index.ts` runs at boot; `ProcessManager.persist()` prunes the files it wrote itself without listing. |
 
 ## Operational invariants
 
@@ -75,14 +76,40 @@ process: the prefix's own exec — `secrets KEY... -- <omp invocation>` — reso
 pane, never on the daemon's environment or a pane's tmux `-e` argv. Empty by default (nothing is
 prepended). See `withOmpLaunchPrefix` in `processes.ts`.
 
-Every root, worker, and controller pane also receives `DISPATCH_URL` and `DISPATCH_TOKEN` when
+Every root, worker, and controller pane also receives `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` when
 `dispatch_url` is configured: `DISPATCH_URL` is the configured service base URL (no `/mcp` suffix),
-and `DISPATCH_TOKEN` is read from the `DISPATCH_TOKEN` environment variable (required whenever
-`dispatch_url` is set — `resolveDaemonConfig` refuses to start otherwise) so each pane's native
-dispatch tool can authenticate and register. Neither variable is exported when `dispatch_url` is
-unset; those panes fall back to their own `envoy.json` dispatch config. The daemon never emits the
-retired `DISPATCH_MCP_URL` alias and strips it from every child process it spawns, pane or
-otherwise.
+and `DISPATCH_TOKEN_FILE` is `<state_dir>/secrets/dispatch-token`, a 0600 file the daemon writes at
+startup from the `DISPATCH_TOKEN` environment variable (required whenever `dispatch_url` is set —
+`resolveDaemonConfig` refuses to start otherwise; an fs failure writing the file refuses startup
+too). Neither variable is exported when `dispatch_url` is unset; those panes fall back to their own
+`envoy.json` dispatch config. The daemon never emits the retired `DISPATCH_MCP_URL` alias and strips
+it — with `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, and `DISPATCH_URL` — from every child process it
+spawns, pane or otherwise.
+
+No secret is ever a tmux `-e KEY=VALUE` value (a transient tmux client's argv is world-readable via
+`/proc/<pid>/cmdline`). Boot tokens and the controller secret travel the same way as the Dispatch
+bearer: `LEGION_BOOT_TOKEN_FILE` / `LEGION_CONTROLLER_SECRET_FILE` name a 0600 file
+`<state_dir>/secrets/<role token>` (`legion-<project>-<key>-<role>`,
+`legion-<project>-controller`) written immediately before that pane launches, overwritten on a
+respawn of the same role, and removed by the prune `ProcessManager.persist()` runs once no live
+locator references it — the steady-state prune walks only the names this process wrote (no
+directory listing per save); the one listing prune `index.ts` runs at boot reaps anything a crash
+left behind. A boot token doubles as the pane's recovery token after a daemon restart, so its file
+lives exactly as long as the pane's locator. Consumers (`@legion/envoy-client`
+`resolveDispatchConfig`, the pi-envoy extension, `legion status`) resolve `X_FILE` — trimmed
+contents — ahead of `X`, and a set-but-unreadable or blank file is an error naming the variable and
+path, never a fallback.
+
+Every tmux command the daemon runs targets its own private server: `tmux -L legion-<project>`
+(`TmuxServer` in `tmux.ts`; the socket name equals the session name). That server is forked by the
+daemon's first tmux command and therefore inherits the runner's stripped `paneEnv`, never an
+operator shell that may carry `DISPATCH_TOKEN`; Legion panes never appear in the operator's own
+`tmux list-sessions`. Attach with `tmux -L legion-<project> attach -t legion-<project>`. A
+`kill-pane` that reports `no server running` counts as the pane being gone — no server on the
+daemon's own socket means no Legion pane exists. **Upgrading a live box from a default-socket
+daemon:** stop the daemon, `tmux kill-session -t legion-<project>` on the default server once, start
+the new daemon; `reconnectWorkers` finds every recorded socket dead and roots resurrect (`--resume`)
+onto the private server. No migration code.
 
 Before loading state, opening core NATS, or serving the API, the daemon probes the exact resolved OMP executable with an isolated extension and refuses startup unless it confirms `pi.agents`. Both this probe and the plugin-load probe below run through the same configured `omp_launch_prefix` as a spawned pane — one launch path, never a probe-only shortcut that could pass with credentials a real pane would lack. It also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 
