@@ -20,6 +20,7 @@ import { colorForLogin } from "./connection";
 import type { EditorHandle, StoredMark } from "./editor";
 import type { Highlight } from "./highlight";
 import { composerKindFor, markPlacements, setActiveMarkClass } from "./marks";
+import { NameVersionDialog } from "./NameVersionDialog";
 import { DocumentRuntime } from "./runtime";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
@@ -31,7 +32,6 @@ import { VersionView } from "./VersionView";
 export interface DocumentToolbar {
   connection: ConnectionState;
   isNamingVersion: boolean;
-  nameVersionError: boolean;
   requestNamedVersion(): void;
   versions: Version[];
 }
@@ -150,6 +150,7 @@ export function ProofDocument({
     queryKey: ["artifact", artifact.id, "version", version],
     queryFn: () => api.getArtifactVersion(artifact.id, version ?? 0),
   });
+  const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
   const nameVersion = useMutation({
     mutationFn: (summary: string) => api.createArtifactVersion(artifact.id, { summary }),
     onSuccess: (created) => {
@@ -161,6 +162,7 @@ export function ProofDocument({
         };
       });
       onVersionChange(created.number);
+      setIsNameDialogOpen(false);
     },
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
@@ -179,28 +181,17 @@ export function ProofDocument({
   userRef.current = user;
 
   const requestNamedVersion = useCallback(() => {
-    const summary = window.prompt("What changed in this version?");
-    if (summary?.trim()) {
-      nameVersion.mutate(summary.trim());
-    }
-  }, [nameVersion.mutate]);
+    setIsNameDialogOpen(true);
+  }, []);
 
   useEffect(() => {
     onToolbarChange?.({
       connection,
       isNamingVersion: nameVersion.isPending,
-      nameVersionError: nameVersion.isError,
       requestNamedVersion,
       versions,
     });
-  }, [
-    connection,
-    nameVersion.isError,
-    nameVersion.isPending,
-    onToolbarChange,
-    requestNamedVersion,
-    versions,
-  ]);
+  }, [connection, nameVersion.isPending, onToolbarChange, requestNamedVersion, versions]);
 
   // Separate from the reporting effect above (whose cleanup would otherwise fire — and
   // transiently clear the parent's toolbar — on every dependency change, not just on unmount).
@@ -360,8 +351,17 @@ export function ProofDocument({
 
   return (
     <section aria-label="Document editor" className="space-y-4">
+      <NameVersionDialog
+        error={nameVersion.isError}
+        onClose={() => {
+          nameVersion.reset();
+          setIsNameDialogOpen(false);
+        }}
+        onSave={(summary) => nameVersion.mutate(summary)}
+        open={isNameDialogOpen}
+        saving={nameVersion.isPending}
+      />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
-      {nameVersion.isError ? <p role="alert">Could not name this version.</p> : null}
       <article
         aria-label="Document"
         className="dispatch-doc"
