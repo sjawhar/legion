@@ -63,7 +63,7 @@ test("a reader scrolled up keeps their Conversation viewport when a new turn arr
   }
 });
 
-test("a reader at the Conversation bottom follows a new turn", async ({ browser }) => {
+test("a reader at the Conversation top follows a new turn", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Attention test" });
   for (let index = 0; index < 30; index += 1) {
@@ -75,11 +75,11 @@ test("a reader at the Conversation bottom follows a new turn", async ({ browser 
     const page = await context.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
     await expect(page.getByText("Existing message 29")).toBeVisible();
-    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await page.evaluate(() => window.scrollTo(0, 0));
 
-    await createMessage(issue.key, { body: "Arrived at the bottom" }, session);
+    await createMessage(issue.key, { body: "Arrived at the top" }, session);
 
-    const arrived = page.getByText("Arrived at the bottom", { exact: true });
+    const arrived = page.getByText("Arrived at the top", { exact: true });
     await expect(arrived).toBeVisible();
     const box = await arrived.boundingBox();
     expect(box).not.toBeNull();
@@ -105,7 +105,7 @@ test("loading older Conversation turns keeps the reader anchor", async ({ browse
     await page.goto(`/issues/${issue.key}/conversation`);
     const loadOlder = page.getByRole("button", { name: "Load older" });
     await expect(loadOlder).toBeVisible();
-    await page.evaluate(() => window.scrollTo(0, 32));
+    await loadOlder.scrollIntoViewIfNeeded();
     await page.evaluate(
       () =>
         new Promise<void>((resolve) => {

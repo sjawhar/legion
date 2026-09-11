@@ -77,7 +77,7 @@ export function ConversationComposer({
   return (
     <form
       aria-label="Message composer"
-      className={`sticky bottom-16 z-10 -mx-2 mt-auto border-t px-2 pt-3 pb-3 xl:bottom-0 ${borderDefault} ${surfaceBg}`}
+      className={`sticky top-0 z-10 -mx-2 border-b px-2 pt-2 pb-2 ${borderDefault} ${surfaceBg}`}
       onSubmit={onSubmit}
     >
       <textarea
@@ -90,7 +90,7 @@ export function ConversationComposer({
         rows={1}
         value={body}
       />
-      <div className="mt-2 flex min-h-11 items-center justify-between gap-3">
+      <div className="mt-1 flex min-h-11 items-center justify-between gap-3">
         <div className="min-w-0">{recipientSlot}</div>
         <button
           className={`min-h-11 rounded-lg px-4 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}

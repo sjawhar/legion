@@ -56,6 +56,50 @@ function tab(
   );
 }
 
+// The sticky composer sits at document top 0; the newest turn (topmost `[data-event-seq]` match)
+// sits below it. `useFollowLatest` reads both elements' `getBoundingClientRect()` to decide
+// whether the reader is pinned to the newest turn and where to scroll them back to, so these
+// tests fake a minimal two-element layout rather than exercising a real browser layout engine.
+const COMPOSER_HEIGHT = 140;
+const NEWEST_TURN_DOC_TOP = 300;
+const RESTING_SCROLL_Y = NEWEST_TURN_DOC_TOP - COMPOSER_HEIGHT;
+
+function installScrollLayoutMocks(): { restore: () => void } {
+  const rectSpy = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: Element
+  ) {
+    const isComposer = this.getAttribute("aria-label") === "Message composer";
+    const isTurn = this.hasAttribute("data-event-seq");
+    const docTop = isComposer ? 0 : isTurn ? NEWEST_TURN_DOC_TOP : 0;
+    const height = isComposer ? COMPOSER_HEIGHT : isTurn ? 50 : 0;
+    const top = docTop - window.scrollY;
+    return {
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 100,
+      toJSON: () => ({}),
+      top,
+      width: 100,
+      x: 0,
+      y: top,
+    };
+  });
+  const originalScrollTo = window.scrollTo;
+  window.scrollTo = (options?: ScrollToOptions | number, y?: number) => {
+    const top = typeof options === "number" ? y : options?.top;
+    if (top !== undefined) {
+      Object.defineProperty(window, "scrollY", { configurable: true, value: top, writable: true });
+    }
+  };
+  return {
+    restore: () => {
+      rectSpy.mockRestore();
+      window.scrollTo = originalScrollTo;
+    },
+  };
+}
+
 test("observes message rows only while the Conversation panel is visible", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
@@ -137,7 +181,7 @@ test("retry replays every pin operation rejected by the state-write queue", asyn
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
     await waitFor(() =>
-      expect(writes.at(-1)).toEqual(["pinned_items:event:1", "pinned_items:event:2"])
+      expect(writes.at(-1)).toEqual(["pinned_items:event:2", "pinned_items:event:1"])
     );
   } finally {
     unmount?.();
@@ -181,7 +225,10 @@ test("a scroll event measures the reader position in O(1) rect reads", async () 
     rectSpy.mockClear();
     window.dispatchEvent(new Event("scroll"));
 
-    expect(rectSpy.mock.calls.length).toBeLessThanOrEqual(3);
+    // 1 from usePreserveReaderPosition's anchor re-measure, 2 from useFollowLatest's
+    // pinnedToTop() (the composer and the newest turn) — a fixed cost independent of how many
+    // turns are loaded, not the O(n) rect scan this budget guards against.
+    expect(rectSpy.mock.calls.length).toBeLessThanOrEqual(4);
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -284,32 +331,34 @@ test("renders a message composer for an open issue but not a closed one", async 
   }
 });
 
-test("shows Jump to latest until the reader returns to the bottom", async () => {
+test("shows Jump to latest until the reader returns to the top", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
-  const innerHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
-  const scrollHeight = Object.getOwnPropertyDescriptor(document.documentElement, "scrollHeight");
   const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
-  const originalScrollTo = window.scrollTo;
+  const layout = installScrollLayoutMocks();
   const queryClient = newQueryClient();
   let unmount: (() => void) | undefined;
 
   try {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 500 });
-    Object.defineProperty(document.documentElement, "scrollHeight", {
-      configurable: true,
-      value: 5_000,
-    });
-    Object.defineProperty(window, "scrollY", { configurable: true, value: 0, writable: true });
-    window.scrollTo = () => {};
     api.getIssueEvents = async () => [message(1)];
     api.listAgents = async () => [];
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
 
     await screen.findByText("A message");
-    expect(screen.getByTestId("jump-to-latest")).toBeTruthy();
+    await waitFor(() => expect(window.scrollY).toBe(RESTING_SCROLL_Y));
+    expect(screen.queryByTestId("jump-to-latest")).toBeNull();
 
     Object.defineProperty(window, "scrollY", { configurable: true, value: 4_500, writable: true });
+    act(() => {
+      window.dispatchEvent(new Event("scroll"));
+    });
+    expect(screen.getByTestId("jump-to-latest")).toBeTruthy();
+
+    Object.defineProperty(window, "scrollY", {
+      configurable: true,
+      value: RESTING_SCROLL_Y,
+      writable: true,
+    });
     act(() => {
       window.dispatchEvent(new Event("scroll"));
     });
@@ -319,17 +368,7 @@ test("shows Jump to latest until the reader returns to the bottom", async () => 
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
-    window.scrollTo = originalScrollTo;
-    if (innerHeight === undefined) {
-      Reflect.deleteProperty(window, "innerHeight");
-    } else {
-      Object.defineProperty(window, "innerHeight", innerHeight);
-    }
-    if (scrollHeight === undefined) {
-      Reflect.deleteProperty(document.documentElement, "scrollHeight");
-    } else {
-      Object.defineProperty(document.documentElement, "scrollHeight", scrollHeight);
-    }
+    layout.restore();
     if (scrollY === undefined) {
       Reflect.deleteProperty(window, "scrollY");
     } else {
@@ -338,43 +377,24 @@ test("shows Jump to latest until the reader returns to the bottom", async () => 
   }
 });
 
-test("follows an incoming turn when the reader was pinned to the bottom", async () => {
+test("a reader pinned to the top stays pinned when a new turn arrives", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
-  const innerHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
-  const scrollHeight = Object.getOwnPropertyDescriptor(document.documentElement, "scrollHeight");
   const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
-  const originalScrollTo = window.scrollTo;
+  const layout = installScrollLayoutMocks();
   const queryClient = newQueryClient();
   let unmount: (() => void) | undefined;
 
   try {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 500 });
-    Object.defineProperty(document.documentElement, "scrollHeight", {
-      configurable: true,
-      value: 500,
-    });
     Object.defineProperty(window, "scrollY", { configurable: true, value: 0, writable: true });
-    window.scrollTo = (options?: ScrollToOptions | number, y?: number) => {
-      const top = typeof options === "number" ? y : options?.top;
-      if (top !== undefined) {
-        Object.defineProperty(window, "scrollY", {
-          configurable: true,
-          value: top,
-          writable: true,
-        });
-      }
-    };
     api.getIssueEvents = async () => [message(1)];
     api.listAgents = async () => [];
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
 
     await screen.findByText("A message");
-    Object.defineProperty(window, "scrollY", { configurable: true, value: 0, writable: true });
-    Object.defineProperty(document.documentElement, "scrollHeight", {
-      configurable: true,
-      value: 5_000,
-    });
+    await waitFor(() => expect(window.scrollY).toBe(RESTING_SCROLL_Y));
+    expect(screen.queryByTestId("jump-to-latest")).toBeNull();
+
     act(() => {
       queryClient.setQueryData(["events", "CORE-1"], {
         pageParams: [null],
@@ -383,22 +403,18 @@ test("follows an incoming turn when the reader was pinned to the bottom", async 
     });
 
     await screen.findByText("Incoming message");
-    await waitFor(() => expect(window.scrollY).toBe(5_000));
+    const turns = document.querySelectorAll("[data-turn]");
+    expect(Array.from(turns).map((turn) => turn.getAttribute("data-turn"))).toEqual([
+      "message:2",
+      "message:1",
+    ]);
+    expect(screen.queryByTestId("jump-to-latest")).toBeNull();
+    expect(window.scrollY).toBe(RESTING_SCROLL_Y);
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
-    window.scrollTo = originalScrollTo;
-    if (innerHeight === undefined) {
-      Reflect.deleteProperty(window, "innerHeight");
-    } else {
-      Object.defineProperty(window, "innerHeight", innerHeight);
-    }
-    if (scrollHeight === undefined) {
-      Reflect.deleteProperty(document.documentElement, "scrollHeight");
-    } else {
-      Object.defineProperty(document.documentElement, "scrollHeight", scrollHeight);
-    }
+    layout.restore();
     if (scrollY === undefined) {
       Reflect.deleteProperty(window, "scrollY");
     } else {
@@ -410,83 +426,32 @@ test("follows an incoming turn when the reader was pinned to the bottom", async 
 test("Jump to latest keeps the reader at the newest turn", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
-  const innerHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
-  const scrollHeight = Object.getOwnPropertyDescriptor(document.documentElement, "scrollHeight");
   const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
-  const originalScrollBy = window.scrollBy;
-  const originalScrollTo = window.scrollTo;
-  const rectSpy = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(() => ({
-    bottom: 500 - window.scrollY,
-    height: 500,
-    left: 0,
-    right: 100,
-    toJSON: () => ({}),
-    top: -window.scrollY,
-    width: 100,
-    x: 0,
-    y: -window.scrollY,
-  }));
-  const elementFromPointSpy = spyOn(document, "elementFromPoint").mockImplementation(() =>
-    document.querySelector("[data-event-seq]")
-  );
+  const layout = installScrollLayoutMocks();
   const queryClient = newQueryClient();
-  let allowScroll = false;
   let unmount: (() => void) | undefined;
 
   try {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 500 });
-    Object.defineProperty(document.documentElement, "scrollHeight", {
-      configurable: true,
-      value: 5_000,
-    });
-    Object.defineProperty(window, "scrollY", { configurable: true, value: 0, writable: true });
-    window.scrollTo = (options?: ScrollToOptions | number, y?: number) => {
-      const top = typeof options === "number" ? y : options?.top;
-      if (allowScroll && top !== undefined) {
-        Object.defineProperty(window, "scrollY", {
-          configurable: true,
-          value: top,
-          writable: true,
-        });
-      }
-    };
-    window.scrollBy = (options?: ScrollToOptions | number, y?: number) => {
-      const top = typeof options === "number" ? y : options?.top;
-      if (top !== undefined) {
-        Object.defineProperty(window, "scrollY", {
-          configurable: true,
-          value: window.scrollY + top,
-          writable: true,
-        });
-      }
-    };
     api.getIssueEvents = async () => [message(1)];
     api.listAgents = async () => [];
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
 
+    await screen.findByText("A message");
+    await waitFor(() => expect(window.scrollY).toBe(RESTING_SCROLL_Y));
+
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 4_500, writable: true });
+    act(() => {
+      window.dispatchEvent(new Event("scroll"));
+    });
     await screen.findByTestId("jump-to-latest");
-    allowScroll = true;
     fireEvent.click(screen.getByTestId("jump-to-latest"));
 
-    await waitFor(() => expect(window.scrollY).toBe(5_000));
+    await waitFor(() => expect(window.scrollY).toBe(RESTING_SCROLL_Y));
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
-    window.scrollBy = originalScrollBy;
-    window.scrollTo = originalScrollTo;
-    rectSpy.mockRestore();
-    elementFromPointSpy.mockRestore();
-    if (innerHeight === undefined) {
-      Reflect.deleteProperty(window, "innerHeight");
-    } else {
-      Object.defineProperty(window, "innerHeight", innerHeight);
-    }
-    if (scrollHeight === undefined) {
-      Reflect.deleteProperty(document.documentElement, "scrollHeight");
-    } else {
-      Object.defineProperty(document.documentElement, "scrollHeight", scrollHeight);
-    }
+    layout.restore();
     if (scrollY === undefined) {
       Reflect.deleteProperty(window, "scrollY");
     } else {
