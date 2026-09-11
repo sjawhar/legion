@@ -37,19 +37,21 @@ export async function writeSecretFile(
 }
 
 /** Removes every entry of `<stateDir>/secrets` whose name is not in `keep`, returning the removed
- * names. A missing directory is an empty one. */
+ * names and the ones that stayed (both sorted). A missing directory is an empty one. */
 export async function pruneSecretFiles(
   stateDir: string,
   keep: ReadonlySet<string>
-): Promise<string[]> {
+): Promise<{ removed: string[]; kept: string[] }> {
   let names: string[];
   try {
     names = await readdir(secretsDir(stateDir));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: [], kept: [] };
     throw error;
   }
-  const removed = names.filter((name) => !keep.has(name)).sort();
+  names.sort();
+  const removed = names.filter((name) => !keep.has(name));
+  const kept = names.filter((name) => keep.has(name));
   await Promise.all(removed.map((name) => rm(secretFilePath(stateDir, name), { force: true })));
-  return removed;
+  return { removed, kept };
 }

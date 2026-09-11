@@ -1,4 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -836,6 +837,57 @@ describe("ProcessManager", () => {
 
     expect((await readdir(dir)).sort()).toEqual(["legion-omp-controller"]);
   });
+  it("reaps a secret file inherited from a previous daemon process once its locator clears, not only at the next boot", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+      },
+    };
+    // Files a previous daemon process wrote: the architect's and the tester's are still
+    // referenced by locators; the planner's is a leftover from a locator that cleared right
+    // before that process died.
+    const dir = path.join(stateDir, "secrets");
+    await mkdir(dir, { recursive: true });
+    for (const name of [
+      roleToken("omp", root, "architect"),
+      token,
+      roleToken("omp", root, "planner"),
+      "dispatch-token",
+    ]) {
+      await writeFile(path.join(dir, name), `secret-${name}`);
+    }
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+
+    await processes.pruneSecretFiles();
+    expect((await readdir(dir)).sort()).toEqual(
+      [roleToken("omp", root, "architect"), token, "dispatch-token"].sort()
+    );
+
+    // The tester's socket is dead: its locator clears, and the file this process never wrote
+    // itself must go with it on that same persist.
+    await processes.reconnectWorkers();
+
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.locator).toBeUndefined();
+    expect((await readdir(dir)).sort()).toEqual(
+      [roleToken("omp", root, "architect"), "dispatch-token"].sort()
+    );
+  });
   it("writes the tree's Dispatch status to in_progress on a successful spawn, then to done on close", async () => {
     const stateDir = await temporaryDir();
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
@@ -1070,11 +1122,14 @@ describe("ProcessManager", () => {
     state.admission.active.push(root);
     const firstLaunchStarted = Promise.withResolvers<void>();
     const releaseFirstLaunch = Promise.withResolvers<void>();
+    const secondLaunchSplitting = Promise.withResolvers<void>();
+    const releaseSecondLaunch = Promise.withResolvers<void>();
     const commands: string[][] = [];
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       sleep: async () => {},
+      mintBootToken: async (_issue, generation) => `boot-gen-${generation}`,
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
       },
@@ -1091,6 +1146,8 @@ describe("ProcessManager", () => {
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
         if (command[0] === "tmux" && command[3] === "split-window") {
+          secondLaunchSplitting.resolve();
+          await releaseSecondLaunch.promise;
           return { stdout: "%2 54321\n", exitCode: 0 };
         }
         if (
@@ -1124,10 +1181,25 @@ describe("ProcessManager", () => {
     state.issues[root].status = "todo";
     expect(processes.admit(root)).toBe("spawned");
 
+    // Generation 2 writes its boot token to the shared `legion-omp-<root>-architect` secret file
+    // before its launch queues behind generation 1's still-open tmux call; wait until that write
+    // has landed so the older generation settles *after* the newer one already depends on it.
+    const architectFile = path.join(stateDir, "secrets", roleToken("omp", root, "architect"));
+    await flushEventLoopUntil(
+      () => existsSync(architectFile) && readFileSync(architectFile, "utf8") === "boot-gen-2"
+    );
+
     // Only now does the older, generation-1 launch's tmux call finally resolve; generation 2's
     // queued launch runs immediately after it, splitting a second pane into the same window.
+    // Generation 2's split is held open until generation 1's whole spawnRoot — its stale-pane
+    // retirement AND the persist (with its secret-file prune) that follows — has settled, so
+    // the prune runs while generation 2's pane launch is still in flight with no locator in
+    // state: exactly the window in which the in-flight exemption must keep the shared secret
+    // file alive for the pane that is about to read it.
     releaseFirstLaunch.resolve();
     await firstSpawn;
+    await secondLaunchSplitting.promise;
+    releaseSecondLaunch.resolve();
     await processes.drainSpawns();
 
     expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
@@ -1137,6 +1209,12 @@ describe("ProcessManager", () => {
       locator: { tmuxWindowId: "@42", tmuxPaneId: "%2" },
     });
     expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
+    // The surviving pane's boot token is still on disk, and it is generation 2's — the older
+    // generation's settle neither removed the file nor left its own stale token behind.
+    expect(await readFile(architectFile, "utf8")).toBe("boot-gen-2");
+    expect(await readdir(path.join(stateDir, "secrets"))).toEqual([
+      roleToken("omp", root, "architect"),
+    ]);
   });
 
   it("resurrects a dead root whose Dispatch status is in_progress instead of treating it as a human park", async () => {

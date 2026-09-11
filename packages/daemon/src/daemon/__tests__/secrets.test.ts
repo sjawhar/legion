@@ -43,23 +43,26 @@ describe("writeSecretFile", () => {
 });
 
 describe("pruneSecretFiles", () => {
-  it("removes every file not in keep and reports the removed names", async () => {
+  it("removes every file not in keep and reports the removed and the kept names", async () => {
     await writeSecretFile(stateDir, DISPATCH_TOKEN_SECRET, "dispatch");
     await writeSecretFile(stateDir, "legion-omp-legion-42-architect", "root");
     await writeSecretFile(stateDir, "legion-omp-legion-43-tester", "stale");
 
-    const removed = await pruneSecretFiles(
+    const result = await pruneSecretFiles(
       stateDir,
-      new Set([DISPATCH_TOKEN_SECRET, "legion-omp-legion-42-architect"])
+      new Set([DISPATCH_TOKEN_SECRET, "legion-omp-legion-42-architect", "never-written"])
     );
 
-    expect(removed).toEqual(["legion-omp-legion-43-tester"]);
+    expect(result).toEqual({
+      removed: ["legion-omp-legion-43-tester"],
+      kept: [DISPATCH_TOKEN_SECRET, "legion-omp-legion-42-architect"],
+    });
     expect((await readdir(secretsDir(stateDir))).sort()).toEqual(
       [DISPATCH_TOKEN_SECRET, "legion-omp-legion-42-architect"].sort()
     );
   });
 
   it("is a no-op when the secrets directory does not exist yet", async () => {
-    expect(await pruneSecretFiles(stateDir, new Set())).toEqual([]);
+    expect(await pruneSecretFiles(stateDir, new Set())).toEqual({ removed: [], kept: [] });
   });
 });
