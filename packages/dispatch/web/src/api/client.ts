@@ -27,6 +27,7 @@ import type {
   IssueReferences,
   IssueSummary,
   Message,
+  MessageRead,
   Project,
   RepoProject,
   SearchResponse,
@@ -278,6 +279,10 @@ export class DispatchApiClient {
 
   createMessage(key: string, input: CreateMessageInput): Promise<Message> {
     return this.post<Message>(`/api/v1/issues/${pathSegment(key)}/messages`, input);
+  }
+
+  getMessage(key: string, id: string): Promise<MessageRead> {
+    return this.json<MessageRead>(`/api/v1/issues/${pathSegment(key)}/messages/${pathSegment(id)}`);
   }
 
   listArtifacts(key: string): Promise<Artifact[]> {

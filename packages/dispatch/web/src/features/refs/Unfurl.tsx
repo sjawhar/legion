@@ -32,12 +32,18 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
   const route = parseDispatchReference(reference.reference);
   const issueKey = route === undefined || isProjectRoute(route) ? undefined : route.key;
   const document = route?.kind === "document" ? route : undefined;
+  const message = route?.kind === "message" ? route : undefined;
   const version =
     route?.kind === "artifact" || route?.kind === "document" ? route.version : undefined;
   const issue = useQuery({
-    enabled: issueKey !== undefined,
+    enabled: issueKey !== undefined && message === undefined,
     queryKey: ["issue", issueKey],
     queryFn: () => api.getIssue(issueKey ?? ""),
+  });
+  const messageQuery = useQuery({
+    enabled: message !== undefined,
+    queryKey: ["issue", message?.key, "message", message?.id],
+    queryFn: () => api.getMessage(message?.key ?? "", message?.id ?? ""),
   });
   const projectArtifact = useQuery({
     enabled: document !== undefined,
@@ -63,6 +69,25 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
     text.data !== undefined && "markdown" in text.data ? text.data.markdown : undefined;
   const description =
     excerpt(markdown) ?? (artifact === undefined ? issue.data?.status : undefined);
+
+  if (message !== undefined) {
+    const firstLine = messageQuery.data?.message.body.split("\n")[0];
+    return (
+      <a
+        className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault} ${cardHoverBorder}`}
+        href={reference.href}
+      >
+        <span className={`block font-medium ${linkText}`}>
+          {messageQuery.data === undefined
+            ? reference.reference
+            : `${messageQuery.data.message.author.kind} ${messageQuery.data.message.author.id}`}
+        </span>
+        {firstLine === undefined ? null : (
+          <span className={`mt-1 block ${textSecondaryOnSurface}`}>{firstLine}</span>
+        )}
+      </a>
+    );
+  }
 
   if (document !== undefined) {
     return (

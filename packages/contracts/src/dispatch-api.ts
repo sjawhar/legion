@@ -205,8 +205,15 @@ export interface Message {
   readonly issue_key: string;
   readonly author: Actor;
   readonly body: string;
+  readonly reply_to: string | null;
   readonly created_at: string;
 }
+
+export interface MessageEventPayload extends Message {
+  /** First 160 characters of the reply target's body (Message.reply_to); empty otherwise. */
+  readonly reply_body?: string;
+}
+
 export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
 
 export interface SearchIssueRef {
@@ -364,7 +371,10 @@ export type DispatchEvent =
       readonly type: "suggestion.rejected";
       readonly payload: CommentEventPayload;
     })
-  | (DispatchEventBase & { readonly type: "message.created"; readonly payload: Message })
+  | (DispatchEventBase & {
+      readonly type: "message.created";
+      readonly payload: MessageEventPayload;
+    })
   | (DispatchEventBase & {
       readonly type: "child.status";
       readonly payload: ChildStatusEventPayload;
@@ -465,6 +475,7 @@ export interface EditCommentInput {
 
 export interface CreateMessageInput {
   readonly body: string;
+  readonly reply_to?: string;
   readonly actor?: Actor;
 }
 
@@ -506,6 +517,11 @@ export interface CommentRead {
 export interface AskRead {
   readonly ask: Ask;
   readonly replies: Comment[];
+}
+
+export interface MessageRead {
+  readonly message: Message;
+  readonly replies: Message[];
 }
 
 export interface IssueRead {
@@ -647,6 +663,8 @@ export const CommentEventPayloadSchema = z.object({
 export const MessageEventPayloadSchema = z.object({
   id: z.string().optional(),
   body: z.string().optional(),
+  reply_to: z.string().nullish(),
+  reply_body: z.string().optional(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
 });
 

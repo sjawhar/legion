@@ -144,6 +144,17 @@ function dispatchAskQuestion(event: DispatchEvent): string | undefined {
   return parsed.success && parsed.data.ask_question !== "" ? parsed.data.ask_question : undefined;
 }
 
+// A message.created reply to another message carries a 160-character preview of the
+// parent's body (reply_body) alongside the id-shaped in_reply_to, so the TOON's "re:"
+// line reads as a snippet, not an opaque UUID.
+function dispatchMessageReplyPreview(event: DispatchEvent): string | undefined {
+  if (event.type !== "message.created") return undefined;
+  const parsed = MessagePayloadSchema.safeParse(event.payload);
+  return parsed.success && parsed.data.reply_body !== undefined && parsed.data.reply_body !== ""
+    ? parsed.data.reply_body
+    : undefined;
+}
+
 // A Dispatch bus frame's JSON payload either matches the wire contract documented
 // above (`event`) or it doesn't — invalid JSON, or a JSON value that disagrees with
 // `DispatchEventSchema` — in which case the raw parsed value (object or string) is
@@ -210,6 +221,7 @@ export function renderInbound(
   let dispatchEvent: unknown;
   let dispatchIssue: string | undefined;
   let askQuestion: string | undefined;
+  let messageReplyPreview: string | undefined;
   const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
   if (envelope.source === "dispatch") {
     if (envelope.payload === undefined) {
@@ -227,6 +239,7 @@ export function renderInbound(
           return { skip: true, content: "", envelope };
         }
         askQuestion = dispatchAskQuestion(frame.event);
+        messageReplyPreview = dispatchMessageReplyPreview(frame.event);
         dispatchEvent = {
           owner: dispatchOwner(frame.event, subject ?? envelope.topic),
           ...(frame.event.issue_key === null
@@ -312,7 +325,9 @@ export function renderInbound(
     ...(envelope.expires_at === undefined ? {} : { by: inboundTimestamp(envelope.expires_at) }),
     ...(envelope.urgency === undefined ? {} : { urgency: envelope.urgency }),
     ...(envelope.expects_reply === undefined ? {} : { expects_reply: envelope.expects_reply }),
-    ...(envelope.in_reply_to === undefined ? {} : { re: askQuestion ?? envelope.in_reply_to }),
+    ...(envelope.in_reply_to === undefined
+      ? {}
+      : { re: askQuestion ?? messageReplyPreview ?? envelope.in_reply_to }),
     ...(envelope.supersedes === undefined ? {} : { supersedes: envelope.supersedes }),
     ...(reply === undefined ? {} : { reply_with: reply }),
     ...(role === undefined

@@ -179,7 +179,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 // question, started the thread, or is the thread's own root author never learns about the
 // human's reply, resolution, reopening, or edit.
 func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) {
-	var askID, replyTo, commentID string
+	var askID, replyTo, commentID, messageReplyTo string
 	switch event.Type {
 	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
 		askID = payloadString(event.Payload, "ask_id")
@@ -187,6 +187,8 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope
 		commentID = payloadString(event.Payload, "id")
 	case "ask.resolved":
 		askID = payloadString(event.Payload, "id")
+	case "message.created":
+		messageReplyTo = payloadString(event.Payload, "reply_to")
 	default:
 		return
 	}
@@ -216,6 +218,9 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope
 	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
 		consider(loadRootCommentAuthor(ctx, deps, commentID))
 	}
+	if messageReplyTo != "" {
+		consider(loadMessageAuthor(ctx, deps, messageReplyTo))
+	}
 
 	for _, author := range targets {
 		routed := item
@@ -233,6 +238,15 @@ func loadAskAuthor(ctx context.Context, deps Deps, askID string) (model.Actor, b
 		return model.Actor{}, false
 	}
 	return decodeAuthor(authorJSON, "ask", askID)
+}
+
+func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.Actor, bool) {
+	var authorJSON []byte
+	if err := deps.Store.Pool.QueryRow(ctx, `select author from messages where id = $1`, messageID).Scan(&authorJSON); err != nil {
+		slog.Error("dispatch outbox: load message author", "message_id", messageID, "error", err)
+		return model.Actor{}, false
+	}
+	return decodeAuthor(authorJSON, "message", messageID)
 }
 
 func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool) {
@@ -338,6 +352,13 @@ func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 		// correlates to the ask, so the agent's TOON renders "re: <ask id>".
 		if askID := payloadString(event.Payload, "ask_id"); askID != "" {
 			item.InReplyTo = askID
+		}
+	}
+	if event.Type == "message.created" {
+		// A message replying to another message correlates the same way, so the agent's
+		// TOON renders "re: <preview>" via MessageEventPayload.ReplyBody.
+		if replyTo := payloadString(event.Payload, "reply_to"); replyTo != "" {
+			item.InReplyTo = replyTo
 		}
 	}
 	if strings.HasPrefix(event.Type, "ask.") {

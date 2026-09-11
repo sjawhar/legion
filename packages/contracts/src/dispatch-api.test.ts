@@ -224,6 +224,25 @@ test("keeps the comment id, author, and message id when parsing event payloads",
   ).toMatchObject({ id: "message-1", author: actor });
 });
 
+test("parses a message reply's reply_to and reply_body preview", () => {
+  const actor: Actor = { id: "bob", kind: "user" };
+  expect(
+    MessageEventPayloadSchema.parse({
+      id: "message-2",
+      issue_key: "DSP-1",
+      author: actor,
+      body: "Sounds good.",
+      reply_to: "message-1",
+      reply_body: "The build is green.",
+      created_at: "2026-09-10T00:00:01Z",
+    })
+  ).toMatchObject({ reply_to: "message-1", reply_body: "The build is green." });
+  expect(
+    MessageEventPayloadSchema.parse({ id: "message-1", author: actor, body: "Root message." })
+      .reply_to
+  ).toBeUndefined();
+});
+
 test("preserves ask edit history in the event payload", () => {
   const payload = {
     opened_event_id: 7,

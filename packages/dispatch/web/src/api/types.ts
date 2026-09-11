@@ -50,6 +50,8 @@ export type {
   IssueReferences,
   IssueSummary,
   Message,
+  MessageEventPayload,
+  MessageRead,
   Project,
   ReferencedBy,
   RepoProject,

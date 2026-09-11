@@ -27,6 +27,7 @@ import type {
   IssueReferences,
   IssueSummary,
   Message,
+  MessageRead,
   ResolveAskInput,
   SearchResponse,
   Version,
@@ -223,6 +224,17 @@ export class DispatchClient {
       ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"],
       input
     );
+  }
+
+  async getMessage(issue: string, id: string): Promise<MessageRead> {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "messages",
+      id,
+    ]);
   }
 
   async artifact(

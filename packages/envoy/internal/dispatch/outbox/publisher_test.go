@@ -309,6 +309,40 @@ func TestRunRoutesHumanReplyToCommentAuthor(t *testing.T) {
 	}
 }
 
+func TestRunRoutesHumanReplyToMessageAuthor(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	rootID := seedMessage(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
+	replyID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.MessageEventPayload{
+			Message:   model.Message{ID: replyID, IssueKey: "T-1", Body: "Looks great, ship it.", ReplyTo: &rootID},
+			ReplyBody: "Draft done.",
+		},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	// The root author is not subscribed to the issue's route (there is none here), so
+	// without a direct author route the session that wrote the root message never
+	// learns a human replied to it.
+	waitFor(t, time.Second, "message author route publication", func() bool {
+		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if items[0].InReplyTo != rootID {
+		t.Fatalf("message reply in_reply_to = %q, want %q", items[0].InReplyTo, rootID)
+	}
+	if items[1].Topic != "notifications.agent.session-writer" {
+		t.Fatalf("message author route topic = %q, want %q", items[1].Topic, "notifications.agent.session-writer")
+	}
+}
+
 func TestRunRoutesReplyToReplyToBothTheRootAndParentAuthors(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()
@@ -771,6 +805,21 @@ func seedComment(t *testing.T, database *store.Store, issueKey string, author mo
 		insert into comments (issue_key, author, body, reply_to) values ($1, $2, $3, $4) returning id::text
 	`, issueKey, authorJSON, body, replyTo).Scan(&id); err != nil {
 		t.Fatalf("create comment: %v", err)
+	}
+	return id
+}
+
+func seedMessage(t *testing.T, database *store.Store, issueKey string, author model.Actor, body string, replyTo *string) string {
+	t.Helper()
+	authorJSON, err := json.Marshal(author)
+	if err != nil {
+		t.Fatalf("encode message author: %v", err)
+	}
+	var id string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into messages (issue_key, author, body, reply_to) values ($1, $2, $3, $4) returning id::text
+	`, issueKey, authorJSON, body, replyTo).Scan(&id); err != nil {
+		t.Fatalf("create message: %v", err)
 	}
 	return id
 }

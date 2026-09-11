@@ -353,6 +353,44 @@ describe("renderInbound dispatch events", () => {
     expect(decoded.envoy.re).toBe("Which API should we ship?");
   });
 
+  test("renders a message.created reply as 're: <preview>', not the raw message id", () => {
+    const rootID = "message-1";
+    const raw = JSON.stringify(
+      envelope({
+        event_id: "dispatch-3",
+        source: "dispatch",
+        source_event_id: "3",
+        topic: "notifications.agent.session-writer",
+        payload_summary: "DSP-1 message created",
+        in_reply_to: rootID,
+        payload: JSON.stringify({
+          id: 3,
+          issue_key: "DSP-1",
+          seq: 9,
+          type: "message.created",
+          actor: { kind: "user", id: "alice" },
+          notify: true,
+          created_at: "2026-09-09T00:00:00Z",
+          payload: {
+            id: "message-2",
+            issue_key: "DSP-1",
+            author: { kind: "user", id: "alice" },
+            body: "Sounds good.",
+            reply_to: rootID,
+            reply_body: "Ship the build tonight.",
+            created_at: "2026-09-09T00:00:00Z",
+          },
+        }),
+      })
+    );
+
+    const decoded = decode(renderInbound(raw, reader).content) as {
+      envoy: Record<string, unknown>;
+    };
+
+    expect(decoded.envoy.re).toBe("Ship the build tonight.");
+  });
+
   test("types each Dispatch event's nested payload by its wire-contract schema", () => {
     const cases: Array<{ type: string; payload: object; expectedPayload: unknown }> = [
       { type: "issue.updated", payload: issue, expectedPayload: issue },
@@ -459,6 +497,25 @@ describe("renderInbound dispatch events", () => {
           created_at: "2026-09-09T00:00:00Z",
         },
         expectedPayload: { id: "message-1", author: actor, body: "The build is green." },
+      },
+      {
+        type: "message.created",
+        payload: {
+          id: "message-2",
+          issue_key: "DSP-1",
+          author: actor,
+          body: "Sounds good.",
+          reply_to: "message-1",
+          reply_body: "The build is green.",
+          created_at: "2026-09-09T00:00:00Z",
+        },
+        expectedPayload: {
+          id: "message-2",
+          author: actor,
+          body: "Sounds good.",
+          reply_to: "message-1",
+          reply_body: "The build is green.",
+        },
       },
       {
         type: "child.status",

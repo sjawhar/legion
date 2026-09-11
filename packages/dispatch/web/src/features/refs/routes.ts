@@ -8,7 +8,8 @@ export type IssueRoute =
   | { key: string; kind: "artifacts" }
   | { key: string; kind: "artifact"; slug: string; version?: number }
   | { key: string; kind: "ask"; id: string }
-  | { key: string; kind: "comment"; id: string };
+  | { key: string; kind: "comment"; id: string }
+  | { key: string; kind: "message"; id: string };
 
 export type ProjectRoute =
   | { kind: "project"; project: string }
@@ -156,12 +157,16 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   if (artifact !== null) {
     return artifactRoute(key, artifact[1] ?? "", artifact[2]);
   }
-  const item = target.match(/^(ask|comment)\/([^/?#\s]+)$/);
+  const item = target.match(/^(ask|comment|message)\/([^/?#\s]+)$/);
   const id = item?.[2] === undefined ? undefined : decodedSegment(item[2]);
   if (item === null || id === undefined) {
     return undefined;
   }
-  return { id, key, kind: item[1] === "ask" ? "ask" : "comment" };
+  return {
+    id,
+    key,
+    kind: item[1] === "ask" ? "ask" : item[1] === "comment" ? "comment" : "message",
+  };
 }
 
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
@@ -226,12 +231,16 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   if (artifact !== null) {
     return artifactRoute(key, artifact[1] ?? "", new URLSearchParams(search).get("v"));
   }
-  const item = target.match(/^(asks|comments)\/([^/?#\s]+)$/);
+  const item = target.match(/^(asks|comments|messages)\/([^/?#\s]+)$/);
   const id = item?.[2] === undefined ? undefined : decodedSegment(item[2]);
   if (item === null || id === undefined) {
     return undefined;
   }
-  return { id, key, kind: item[1] === "asks" ? "ask" : "comment" };
+  return {
+    id,
+    key,
+    kind: item[1] === "asks" ? "ask" : item[1] === "comments" ? "comment" : "message",
+  };
 }
 
 export function parseProjectPath(pathname: string, search = ""): ProjectRoute | undefined {
@@ -317,7 +326,9 @@ export function buildIssuePath(route: IssueRoute): string {
     const artifact = `${issue}/artifacts/${encodeURIComponent(route.slug)}`;
     return route.version === undefined ? artifact : `${artifact}?v=${route.version}`;
   }
-  return `${issue}/${route.kind === "ask" ? "asks" : "comments"}/${encodeURIComponent(route.id)}`;
+  const segment =
+    route.kind === "ask" ? "asks" : route.kind === "comment" ? "comments" : "messages";
+  return `${issue}/${segment}/${encodeURIComponent(route.id)}`;
 }
 
 export function buildProjectPath(route: ProjectRoute): string {

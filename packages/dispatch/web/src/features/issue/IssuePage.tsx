@@ -607,7 +607,9 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const isPrimaryArtifactRoute = isPrimaryDocumentArtifactRoute(route, selectedArtifact);
   const activeTab = issueTabForRoute(route, selectedArtifact);
   const conversationFocusItemId =
-    route.kind === "ask" || route.kind === "comment" ? route.id : undefined;
+    route.kind === "ask" || route.kind === "comment" || route.kind === "message"
+      ? route.id
+      : undefined;
   const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
   const [specShowDiff, setSpecShowDiff] = useState(false);
   const [specToolbar, setSpecToolbar] = useState<DocumentToolbar | undefined>(undefined);

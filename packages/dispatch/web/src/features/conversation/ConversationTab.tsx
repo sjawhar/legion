@@ -110,6 +110,7 @@ function MessageTurn({
   author,
   current,
   disabled,
+  issueKey,
   item,
   onPin,
   pinned,
@@ -118,11 +119,13 @@ function MessageTurn({
   author: Author;
   current: boolean;
   disabled: boolean;
+  issueKey: string;
   item: Extract<ConversationItem, { kind: "message" | "comment" }>;
   onPin: () => void;
   pinned: boolean;
   register: (element: HTMLElement | null) => void;
 }): ReactNode {
+  const replyTo = item.kind === "message" ? item.event.payload.reply_to : null;
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -139,6 +142,16 @@ function MessageTurn({
             <span className="font-semibold">{author.label}</span>
             <Timestamp at={item.at} />
           </p>
+        )}
+        {replyTo === null || replyTo === undefined ? null : (
+          <Link
+            className={`mb-1 block truncate border-l-2 pl-2 text-xs ${secondaryButtonBorder} ${textMutedOnCanvas} ${linkHoverText}`}
+            to={buildIssuePath({ id: replyTo, key: issueKey, kind: "message" })}
+          >
+            {item.kind === "message" && item.event.payload.reply_body
+              ? item.event.payload.reply_body
+              : "Replying to a message"}
+          </Link>
         )}
         <EventBody event={item.event} />
       </div>
@@ -191,7 +204,8 @@ export function ConversationTab({
         : shown.find(
             (item) =>
               (item.kind === "ask" && item.ask.id === focusItemId) ||
-              (item.kind === "comment" && item.event.payload.id === focusItemId)
+              (item.kind === "comment" && item.event.payload.id === focusItemId) ||
+              (item.kind === "message" && item.event.payload.id === focusItemId)
           )?.id,
     [focusItemId, shown]
   );
@@ -540,6 +554,7 @@ export function ConversationTab({
             return (
               <MessageTurn
                 author={resolveAuthor(item.author, titles)}
+                issueKey={issueKey}
                 current={item.id === targetTurnId}
                 disabled={hasFailedOps}
                 item={item}

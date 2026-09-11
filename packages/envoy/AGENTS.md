@@ -91,12 +91,12 @@ caller must provide a field.
 - Dispatch issue events use `notifications.dispatch.issue.<KEY>.<type>`, carry every event, and
   are retained in JetStream; `notify` only controls agent wake and routing the same envelope to
   `notifications.role.<role>` or `notifications.agent.<session_id>` (the issue's route, which also
-  applies to a comment or ask anchored on the issue's own artifact). A notifying ask or
-  comment-thread event additionally publishes an author route straight to each involved session's
-  `notifications.agent.<session_id>`, regardless of the issue's route: the ask's author; a reply's
-  thread-root author and its direct parent author when different; and, for a bare resolve or
-  reopen, the resolved comment's own root author. An author route is skipped for a human author
-  and for a session replying to its own thread.
+  applies to a comment or ask anchored on the issue's own artifact). A notifying ask, comment-thread,
+  or message-reply event additionally publishes an author route straight to each involved session's
+  `notifications.agent.<session_id>`, regardless of the issue's route: the ask's author; a comment
+  reply's thread-root author and its direct parent author when different; a message reply's direct
+  parent author; and, for a bare resolve or reopen, the resolved comment's own root author. An
+  author route is skipped for a human author and for a session replying to its own thread.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and
   are retained in JetStream. Consumers subscribe or tail that document topic directly; a document
   has no delivery route, so the same author routes above are the only way an involved session
