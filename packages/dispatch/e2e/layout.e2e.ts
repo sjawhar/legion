@@ -8,7 +8,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("tablet keeps the log readable and exposes the review sheet", async ({
+test("tablet keeps the Conversation readable and exposes the review sheet", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -30,12 +30,14 @@ test("tablet keeps the log readable and exposes the review sheet", async ({
   try {
     const page = await context.newPage();
     await page.setViewportSize({ height: 1024, width: 800 });
-    await page.goto(`/issues/${issue.key}/log`);
+    await page.goto(`/issues/${issue.key}/conversation`);
 
     await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
     await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
-    const logBounds = await page.getByRole("tabpanel", { name: "Log" }).boundingBox();
-    expect(logBounds?.width ?? 0).toBeGreaterThanOrEqual(400);
+    const conversationBounds = await page
+      .getByRole("tabpanel", { name: "Conversation" })
+      .boundingBox();
+    expect(conversationBounds?.width ?? 0).toBeGreaterThanOrEqual(400);
     const tabletScreenshot = testInfo.outputPath("tablet-800.png");
     await page.screenshot({ path: tabletScreenshot, fullPage: true });
     await testInfo.attach("tablet layout (800px)", {

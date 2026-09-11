@@ -95,6 +95,7 @@ export interface AskThreadProps {
   ask: Ask;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   getAskThread?: (id: string) => Promise<AskRead>;
+  showResolution?: boolean;
 }
 
 /**
@@ -107,6 +108,7 @@ export function AskThread({
   ask,
   createReply: reply = createReply,
   getAskThread: getThread = getAskThread,
+  showResolution = true,
 }: AskThreadProps): ReactNode {
   // Each AskThread instance owns its reply field label so transient duplicate
   // mounts during a responsive transition cannot share an ask-id-derived id.
@@ -124,13 +126,13 @@ export function AskThread({
       className={`mt-4 space-y-3 border-t pt-4 ${borderDefault}`}
       data-testid={`thread-${ask.id}`}
     >
-      {resolution === null ? null : (
+      {showResolution && resolution !== null ? (
         <p
           className={`rounded-lg px-3 py-2 text-sm ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
         >
           {resolution}
         </p>
-      )}
+      ) : null}
       {replies.length === 0 ? null : (
         <ul className="space-y-2">
           {replies.map((comment) => (

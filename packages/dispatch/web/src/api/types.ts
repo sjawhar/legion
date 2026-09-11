@@ -1,6 +1,7 @@
 export type {
   Actor,
   ActorOrigin,
+  Agent,
   Anchor,
   AnchorInput,
   AnswerAskInput,

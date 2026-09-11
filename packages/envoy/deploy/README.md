@@ -112,6 +112,7 @@ available. Host adapters use the same file or the `DISPATCH_URL` and
 | `DISPATCH_REPO_PROJECTS` | no | Optional boot seed for repository-to-project settings (`owner/repo=KEY,...`). Existing dashboard settings are not overwritten. |
 | `DISPATCH_DEFAULT_PROJECT` | no | Native Dispatch project for external repositories without a stored mapping. |
 | `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS; otherwise `natsUrls` in `envoy.json` is required. |
+| `ENVOY_URL` | no | Envoy listener base URL for live agent titles; defaults to `http://127.0.0.1:9020` (set it when `ENVOY_LISTENER_PORT` changes). |
 | `DISPATCH_URL` | no | Host-adapter override for the Dispatch base URL; use with `DISPATCH_TOKEN`. |
 | `DISPATCH_TOKEN` | host adapters | Bearer token paired with `DISPATCH_URL`. |
 | `DISPATCH_APP_CLIENT_ID` / `DISPATCH_APP_CLIENT_SECRET` | OAuth | GitHub OAuth credentials. The GitHub proxy needs a stored user token. |

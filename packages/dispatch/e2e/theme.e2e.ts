@@ -113,7 +113,7 @@ test("the inbox renders the dark palette in dark mode and the light palette in l
   }
 });
 
-test("an issue's spec and log tabs render the dark palette in dark mode and the light palette in light mode", async ({
+test("an issue's spec and Conversation tabs render the dark palette in dark mode and the light palette in light mode", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -145,17 +145,17 @@ test("an issue's spec and log tabs render the dark palette in dark mode and the 
     await expectBorderColor(header, C.BORDER_DEFAULT.dark);
     await attachScreenshot(page, testInfo, "issue-spec-dark");
 
-    const logCard = page.getByRole("tabpanel", { name: "Log" }).locator("article").first();
+    const dock = page.getByRole("form", { name: "Message composer" });
 
     await page.emulateMedia({ colorScheme: "light" });
-    await page.getByRole("tab", { name: "Log" }).click();
-    await expect(logCard).toBeVisible();
-    await expectBackgroundColor(logCard, C.SURFACE.light);
-    await attachScreenshot(page, testInfo, "issue-log-light");
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    await expect(dock).toBeVisible();
+    await expectBackgroundColor(dock, C.SURFACE.light);
+    await attachScreenshot(page, testInfo, "issue-conversation-light");
 
     await page.emulateMedia({ colorScheme: "dark" });
-    await expectBackgroundColor(logCard, C.SURFACE.dark);
-    await attachScreenshot(page, testInfo, "issue-log-dark");
+    await expectBackgroundColor(dock, C.SURFACE.dark);
+    await attachScreenshot(page, testInfo, "issue-conversation-dark");
   } finally {
     await alice.close();
   }

@@ -122,6 +122,8 @@ export interface Ask {
   readonly state: "open" | "answered" | "resolved";
   readonly answer: AskAnswer | null;
   readonly resolution?: AskResolution;
+  /** The canonical event ID of this ask's opening turn. */
+  readonly opened_event_id: number;
   readonly created_at: string;
   readonly issue?: Pick<Issue, "key" | "title">;
 }
@@ -214,6 +216,16 @@ export interface DuplicateCandidate {
   readonly snippet: string;
   readonly shared_terms: number;
   readonly href: string;
+}
+
+export interface Agent {
+  readonly session_id: string;
+  readonly title: string;
+  readonly dir: string;
+  readonly machine_id: string;
+  readonly roles: string[];
+  readonly capabilities: string[];
+  readonly last_seen: number;
 }
 
 export interface ReferencedBy {
@@ -503,6 +515,7 @@ export const ArtifactVersionEventPayloadSchema = z.object({
 });
 
 export const AskEventPayloadSchema = z.object({
+  opened_event_id: z.number().int().positive(),
   question: z.string().optional(),
   options: z.array(z.object({ label: z.string().optional() })).nullish(),
   answer: z

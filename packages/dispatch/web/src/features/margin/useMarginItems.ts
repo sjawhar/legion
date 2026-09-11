@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { api } from "../../api/client";
 import type { Artifact, Ask, Comment, Event } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { pinnedEventIds } from "../issue/log-model";
+import { pinnedEventIds } from "../issue/pins";
 import { useAnsweredAsks } from "./useAnsweredAsks";
 
 export type MarginTab = "comments" | "pinned";
@@ -55,6 +55,27 @@ function withoutAskThreadReplies(comments: Comment[]): Comment[] {
     }
   }
   return comments.filter((comment) => !askThreadIds.has(comment.id));
+}
+/**
+ * Comments whose thread root is anchored to `artifactId`: the roots themselves and every reply
+ * chained to one.
+ */
+export function anchoredThreadComments(
+  comments: Comment[],
+  artifactId: string | undefined
+): Comment[] {
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  return comments.filter((comment) => {
+    let root = comment;
+    while (root.reply_to !== null) {
+      const parent = byId.get(root.reply_to);
+      if (parent === undefined) {
+        break;
+      }
+      root = parent;
+    }
+    return root.anchor?.artifact_id === artifactId;
+  });
 }
 
 export function threadRootId(comments: readonly Comment[], comment: Comment): string {
@@ -161,12 +182,11 @@ export function useMarginItems(
     () => answeredAsks.asks.filter((ask) => ask.state !== "open"),
     [answeredAsks.asks]
   );
+  /** Issue-level (unanchored) comments belong to the Conversation tab; the margin shows document-anchored review. */
   const items = useMemo<MarginItem[]>(() => {
     const anchoredItems = anchoredAsks.map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
     const visibleComments = withoutAskThreadReplies(
-      (comments.data ?? []).filter(
-        (comment) => comment.anchor === null || comment.anchor.artifact_id === visibleArtifact?.id
-      )
+      anchoredThreadComments(comments.data ?? [], visibleArtifact?.id)
     );
     const roots: MarginItem[][] = [
       ...anchoredItems.map((ask) => [ask]),
@@ -198,6 +218,10 @@ export function useMarginItems(
           leftRoot.kind === "ask" ? leftRoot.ask.created_at : leftRoot.comment.created_at;
         const rightCreatedAt =
           rightRoot.kind === "ask" ? rightRoot.ask.created_at : rightRoot.comment.created_at;
+        // Every anchored ask is always anchored (unanchored asks never enter this list, see
+        // useAnsweredAsks), while the comment filter admits only document-anchored threads.
+        // This puts document review in reading order; an item whose text has changed sorts
+        // after found anchors.
         if (leftAnchor !== null && rightAnchor !== null) {
           return leftCreatedAt.localeCompare(rightCreatedAt);
         }

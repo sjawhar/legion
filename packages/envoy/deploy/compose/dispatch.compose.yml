@@ -46,6 +46,7 @@ services:
       DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}
       DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}
       DISPATCH_NATS_DISABLED: ${DISPATCH_NATS_DISABLED:-}
+      ENVOY_URL: ${ENVOY_URL:-http://127.0.0.1:9020}
       # Optional boot seed for mappings absent from the dashboard. Stored
       # repository mappings are authoritative; DISPATCH_DEFAULT_PROJECT catches
       # external repositories with no stored mapping.

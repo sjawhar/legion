@@ -51,6 +51,7 @@ const openIssueAsk: Ask = {
   id: "ask-open",
   issue_key: "CORE-1",
   multiple: false,
+  opened_event_id: 1,
   options: [],
   question: "Should this ship?",
   state: "open",
@@ -128,7 +129,7 @@ test("IssuePage reads newest events when looking for active sessions", async () 
     };
 
     const view = render(
-      <MemoryRouter initialEntries={["/issues/CORE-1/log"]}>
+      <MemoryRouter initialEntries={["/issues/CORE-1/conversation"]}>
         <QueryClientProvider client={queryClient}>
           <MarginProvider>
             <Routes>
@@ -231,7 +232,7 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
 
   try {
     await screen.findByRole("tab", { name: "Spec", selected: true });
-    expect(screen.getByRole("tab", { name: "Log", selected: false })).toBeDefined();
+    expect(screen.getByRole("tab", { name: "Conversation", selected: false })).toBeDefined();
     expect(screen.getByRole("tab", { name: "Children", selected: false })).toBeDefined();
     expect(screen.queryByLabelText("Issue board")).toBeNull();
   } finally {
@@ -281,8 +282,8 @@ test("IssuePage keeps the Spec mounted across tabs", async () => {
       )
     );
 
-    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
-    await screen.findByRole("tab", { name: "Log", selected: true });
+    fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+    await screen.findByRole("tab", { name: "Conversation", selected: true });
     fireEvent.click(screen.getByRole("tab", { name: "Spec" }));
     await screen.findByRole("tab", { name: "Spec", selected: true });
 
@@ -297,24 +298,41 @@ test("IssuePage keeps the Spec mounted across tabs", async () => {
   }
 });
 
-test("IssuePage preserves an in-progress Log composer draft across a tab round-trip", async () => {
+test("IssuePage preserves an in-progress Conversation composer draft across a tab round-trip", async () => {
   const restore = stubIssuePage(issue);
-  const view = renderIssuePage("/issues/CORE-1/log");
+  const view = renderIssuePage("/issues/CORE-1/conversation");
 
   try {
-    await screen.findByRole("tab", { name: "Log", selected: true });
-    const composer = (await screen.findByLabelText("Comment")) as HTMLTextAreaElement;
+    await screen.findByRole("tab", { name: "Conversation", selected: true });
+    const composer = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "Draft in progress" } });
     expect(composer.value).toBe("Draft in progress");
 
     fireEvent.click(screen.getByRole("tab", { name: "Spec" }));
     await screen.findByRole("tab", { name: "Spec", selected: true });
-    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
-    await screen.findByRole("tab", { name: "Log", selected: true });
+    fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+    await screen.findByRole("tab", { name: "Conversation", selected: true });
 
-    expect((screen.getByLabelText("Comment") as HTMLTextAreaElement).value).toBe(
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
       "Draft in progress"
     );
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage replaces the retired /log path with /conversation", async () => {
+  const restore = stubIssuePage(issue);
+  const view = renderIssuePage("/issues/CORE-1/log?x=1");
+
+  try {
+    await waitFor(() =>
+      expect(screen.getByTestId("current-route").textContent).toBe(
+        "/issues/CORE-1/conversation?x=1"
+      )
+    );
+    await screen.findByRole("tab", { name: "Conversation", selected: true });
   } finally {
     view.unmount();
     restore();

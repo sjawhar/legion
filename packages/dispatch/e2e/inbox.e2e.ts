@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   createAsk,
+  createComment,
   createIssue,
   createProject,
   getAsk,
@@ -103,6 +104,11 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   await expect(shipOption).toBeChecked();
   await newestAskCard.getByRole("button", { name: "Submit answer" }).click();
   await expect(newestAskCard).toHaveCount(0);
+  await expect
+    .poll(() => getAsk(newestAsk.id))
+    .toMatchObject({
+      ask: { answer: { selected: ["Ship"], user: "alice" }, state: "answered" },
+    });
   await alicePage.goto("/");
   await expect(inboxCards).toHaveCount(2);
   if (testInfo.project.name === "iphone") {
@@ -112,11 +118,6 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Close navigation" }).click();
   }
-  await expect
-    .poll(() => getAsk(newestAsk.id))
-    .toMatchObject({
-      ask: { answer: { selected: ["Ship"], user: "alice" }, state: "answered" },
-    });
 
   await alicePage.goto(`/issues/${firstIssue.key}`);
   const activeSessions = alicePage.getByRole("region", { name: "Active sessions" });
@@ -162,16 +163,10 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
       .getByRole("tabpanel")
       .getByRole("link", { name: `${childIssue.key} · Child decision` })
   ).toBeVisible();
-  await alicePage.getByRole("tab", { name: "Log" }).click();
-  const logAsk = alicePage
-    .getByRole("region", { name: "Issue log" })
-    .locator("[data-event-seq]")
-    .filter({ hasText: "Newest ask" });
-  await expect(logAsk).toHaveCount(1);
-  await expect(logAsk).toContainText("Opened");
-  await expect(logAsk).toContainText("alice");
-  await expect(logAsk.getByRole("list", { name: "Answer options" })).toContainText("Ship");
-  await expect(logAsk.getByRole("list", { name: "Answer options" })).toContainText("Hold");
+  await alicePage.getByRole("tab", { name: "Conversation" }).click();
+  const conversationAsk = alicePage.getByTestId(`ask-${newestAsk.id}`);
+  await expect(conversationAsk).toHaveCount(1);
+  await expect(conversationAsk).toContainText("Answered by");
   await alicePage.screenshot({ path: testInfo.outputPath("issue-page.png"), fullPage: true });
 
   const inboxContext = await asUser(browser, "alice");
@@ -236,24 +231,22 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   await alice.close();
 });
 
-test("posting an issue-level comment with no selection reaches the Log and Margin", async ({
+test("an unanchored issue-level comment reaches Conversation, not document review", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Untouched issue" });
+  await createComment(issue.key, { body: "No selection needed to comment." }, session);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
 
   try {
-    await page.goto(`/issues/${issue.key}/log`);
-    const composer = page.getByRole("form", { name: "Comment composer" });
-    await expect(composer).toBeVisible();
-    await composer.getByLabel("Comment").fill("No selection needed to comment.");
-    await composer.getByRole("button", { exact: true, name: "Comment" }).click();
-
+    await page.goto(`/issues/${issue.key}/conversation`);
     await expect(
-      page.locator("article[data-event-seq]").getByText("No selection needed to comment.")
+      page
+        .getByRole("list", { name: "Conversation turns" })
+        .getByText("No selection needed to comment.")
     ).toBeVisible();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
@@ -266,9 +259,9 @@ test("posting an issue-level comment with no selection reaches the Log and Margi
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: /Open review panel/ }).click();
     }
-    await expect(
-      page.getByLabel("Margin review items").getByText("No selection needed to comment.")
-    ).toBeVisible();
+    await expect(page.getByLabel("Margin review items")).not.toContainText(
+      "No selection needed to comment."
+    );
   } finally {
     await alice.close();
   }

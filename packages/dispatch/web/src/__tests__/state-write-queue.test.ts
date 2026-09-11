@@ -37,24 +37,31 @@ test("issue-state queue applies rapid operations against server state and publis
   };
 
   const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
-  const second = queue.enqueue("CORE-1", { id: "event:2", op: "dismiss" }, worker);
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
   const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
 
   await started[0]?.promise;
   expect(writes).toEqual([["pinned_items:event:1"]]);
   responseGates[0]?.release();
   await started[1]?.promise;
-  expect(writes).toEqual([["pinned_items:event:1"], ["pinned_items:event:1", "event:2"]]);
+  expect(writes).toEqual([
+    ["pinned_items:event:1"],
+    ["pinned_items:event:1", "pinned_items:event:2"],
+  ]);
   expect(published).toEqual([]);
   responseGates[1]?.release();
   await started[2]?.promise;
-  expect(writes[2]).toEqual(["pinned_items:event:1", "event:2", "pinned_items:event:3"]);
+  expect(writes[2]).toEqual([
+    "pinned_items:event:1",
+    "pinned_items:event:2",
+    "pinned_items:event:3",
+  ]);
   expect(published).toEqual([]);
   responseGates[2]?.release();
 
   await Promise.all([first, second, third]);
   expect(published).toEqual([
-    issueState(["pinned_items:event:1", "event:2", "pinned_items:event:3"]),
+    issueState(["pinned_items:event:1", "pinned_items:event:2", "pinned_items:event:3"]),
   ]);
 });
 
@@ -67,7 +74,7 @@ test("issue-state queue drains operations enqueued by completion callbacks", asy
     fetchState: async () => issueState([]),
     onDrained: (issueKey) => {
       if (second === undefined) {
-        second = queue.enqueue(issueKey, { id: "event:2", op: "dismiss" }, worker);
+        second = queue.enqueue(issueKey, { id: "event:2", op: "pin" }, worker);
         second.then(() => {
           secondResolved = true;
         });
@@ -80,13 +87,13 @@ test("issue-state queue drains operations enqueued by completion callbacks", asy
     },
   };
 
-  await queue.enqueue("CORE-1", { id: "event:1", op: "dismiss" }, worker);
+  await queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
   for (let microtask = 0; microtask < 10; microtask++) {
     await Promise.resolve();
   }
 
   expect(secondResolved).toBe(true);
-  expect(writes).toEqual([["event:1"], ["event:2"]]);
+  expect(writes).toEqual([["pinned_items:event:1"], ["pinned_items:event:2"]]);
 });
 
 test("retries a failed operation from fetched state and keeps an operation queued during failure", async () => {
@@ -114,7 +121,7 @@ test("retries a failed operation from fetched state and keeps an operation queue
   };
 
   const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
-  const second = queue.enqueue("CORE-1", { id: "event:2", op: "dismiss" }, worker);
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
   await secondStarted.promise;
   const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
   failSecond.release();
@@ -122,12 +129,12 @@ test("retries a failed operation from fetched state and keeps an operation queue
   await Promise.all([first, second, third]);
   expect(writes).toEqual([
     ["pinned_items:event:1"],
-    ["pinned_items:event:1", "event:2"],
-    ["pinned_items:event:1", "event:2"],
-    ["pinned_items:event:1", "event:2", "pinned_items:event:3"],
+    ["pinned_items:event:1", "pinned_items:event:2"],
+    ["pinned_items:event:1", "pinned_items:event:2"],
+    ["pinned_items:event:1", "pinned_items:event:2", "pinned_items:event:3"],
   ]);
   expect(published).toEqual([
-    issueState(["pinned_items:event:1", "event:2", "pinned_items:event:3"]),
+    issueState(["pinned_items:event:1", "pinned_items:event:2", "pinned_items:event:3"]),
   ]);
   expect(errors).toEqual([]);
 });
@@ -163,7 +170,7 @@ test("a second failed write rejects queued operations, restores fetched state, a
   };
 
   const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
-  const second = queue.enqueue("CORE-1", { id: "event:2", op: "dismiss" }, worker);
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
   const secondResult = second.then(
     () => undefined,
     (error) => error
@@ -182,12 +189,12 @@ test("a second failed write rejects queued operations, restores fetched state, a
   expect(thirdError).toBe(secondError);
   expect(writes).toEqual([
     ["pinned_items:event:1"],
-    ["pinned_items:event:1", "event:2"],
-    ["pinned_items:event:1", "event:2"],
+    ["pinned_items:event:1", "pinned_items:event:2"],
+    ["pinned_items:event:1", "pinned_items:event:2"],
   ]);
   expect(published).toEqual([]);
   expect(errors).toEqual([issueState(["pinned_items:event:1"])]);
 
-  await queue.enqueue("CORE-1", { id: "event:4", op: "dismiss" }, worker);
-  expect(writes.at(-1)).toEqual(["pinned_items:event:1", "event:4"]);
+  await queue.enqueue("CORE-1", { id: "event:4", op: "pin" }, worker);
+  expect(writes.at(-1)).toEqual(["pinned_items:event:1", "pinned_items:event:4"]);
 });

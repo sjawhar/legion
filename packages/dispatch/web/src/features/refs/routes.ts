@@ -3,14 +3,14 @@ import type { Artifact } from "../../api/types";
 export type DispatchRoute =
   | { key: string; kind: "issue" }
   | { key: string; kind: "spec" }
-  | { key: string; kind: "log" }
+  | { key: string; kind: "conversation" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
   | { key: string; kind: "artifact"; slug: string; version?: number }
   | { key: string; kind: "ask"; id: string }
   | { key: string; kind: "comment"; id: string };
 
-export type IssueTab = "spec" | "log" | "children" | "artifacts";
+export type IssueTab = "spec" | "conversation" | "children" | "artifacts";
 
 export function isPrimaryDocumentArtifactRoute(
   route: DispatchRoute,
@@ -26,8 +26,8 @@ export function issueTabForRoute(
   if (route.kind === "children") {
     return "children";
   }
-  if (route.kind === "log") {
-    return "log";
+  if (route.kind === "conversation") {
+    return "conversation";
   }
   if (route.kind === "artifacts") {
     return "artifacts";
@@ -35,10 +35,19 @@ export function issueTabForRoute(
   if (route.kind === "artifact") {
     return isPrimaryDocumentArtifactRoute(route, artifact) ? "spec" : "artifacts";
   }
-  return route.kind === "issue" || route.kind === "spec" ? "spec" : "log";
+  return route.kind === "issue" || route.kind === "spec" ? "spec" : "conversation";
 }
 
 const issueKeyPattern = "[A-Z][A-Z0-9-]*";
+
+const legacyLogPathPattern = new RegExp(`^/issues/${issueKeyPattern}/log/?$`);
+const legacyLogReferencePattern = /^log$/;
+const legacyLogPathSegmentPattern = /^log\/?$/;
+
+/** The pre-Conversation browser path; IssuePage replaces it with buildIssuePath's canonical form. */
+export function isLegacyLogPath(pathname: string): boolean {
+  return legacyLogPathPattern.test(pathname);
+}
 
 function decodedSegment(value: string): string | undefined {
   try {
@@ -87,8 +96,8 @@ export function parseDispatchReference(value: string): DispatchRoute | undefined
   if (target === "spec") {
     return { key, kind: "spec" };
   }
-  if (target === "log") {
-    return { key, kind: "log" };
+  if (legacyLogReferencePattern.test(target) || target === "conversation") {
+    return { key, kind: "conversation" };
   }
   if (target === "children") {
     return { key, kind: "children" };
@@ -124,8 +133,8 @@ export function parseIssuePath(pathname: string, search = ""): DispatchRoute | u
   if (target === "spec") {
     return { key, kind: "spec" };
   }
-  if (target === "log") {
-    return { key, kind: "log" };
+  if (legacyLogPathSegmentPattern.test(target) || target === "conversation") {
+    return { key, kind: "conversation" };
   }
   if (target === "children") {
     return { key, kind: "children" };
@@ -153,7 +162,8 @@ export function buildDispatchReference(route: DispatchRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec`;
   }
-  if (route.kind === "log") {
+  if (route.kind === "conversation") {
+    // dispatch_read's grammar (envoy-client dispatch-execute.ts) knows the conversation as "log"
     return `${issue}/log`;
   }
   if (route.kind === "children") {
@@ -178,8 +188,8 @@ export function buildIssuePath(route: DispatchRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec`;
   }
-  if (route.kind === "log") {
-    return `${issue}/log`;
+  if (route.kind === "conversation") {
+    return `${issue}/conversation`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;

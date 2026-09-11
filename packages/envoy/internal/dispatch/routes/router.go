@@ -63,6 +63,7 @@ type AppContextOptions struct {
 	RepoProjects     string
 	DefaultProject   string
 	ServerURL        string
+	EnvoyURL         string
 	Docs             docs.API
 	Events           *events.Broker
 	App              *auth.AppConfig
@@ -88,6 +89,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		RepoProjectsRaw:  opts.RepoProjects,
 		DefaultProject:   opts.DefaultProject,
 		ServerURL:        opts.ServerURL,
+		EnvoyURL:         opts.EnvoyURL,
 		Docs:             opts.Docs,
 		Events:           opts.Events,
 		TestHooksEnabled: opts.TestHooksEnabled,

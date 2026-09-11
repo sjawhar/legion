@@ -193,7 +193,7 @@ test("the rail Search control opens the palette and Escape returns focus to it",
   }
 });
 
-test("phone search rows are at least 44px, do not overflow, and a comment result opens the comment", async ({
+test("phone search rows are at least 44px, do not overflow, and a comment result opens Conversation", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -225,7 +225,10 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     await expect(page).toHaveURL(
       new RegExp(`/issues/${fixture.commentIssueKey}/comments/${fixture.commentID}$`)
     );
-    await expect(page.getByTestId("margin-sheet")).toContainText("Move the astrolabe diagram.");
+    await expect(
+      page.getByRole("region", { name: "Conversation" }).getByText("Move the astrolabe diagram.")
+    ).toBeVisible();
+    await expect(page.getByTestId("margin-sheet")).not.toContainText("Move the astrolabe diagram.");
   } finally {
     await context.close();
   }

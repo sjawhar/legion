@@ -1,17 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
+import type { ReactNode } from "react";
 
-import { api } from "../../api/client";
-import type { Event, UserState } from "../../api/types";
-import {
-  borderDefault,
-  linkHoverText,
-  linkText,
-  textMutedOnSurface,
-  textSecondaryOnSurface,
-} from "../../theme/classes";
+import type { Event } from "../../api/types";
+import { borderDefault, textMutedOnSurface } from "../../theme/classes";
 import { EventBody, isAskEvent } from "../issue/EventBody";
-import { dismissedEventIds, eventDescription } from "../issue/log-model";
 import { actorLabel } from "../refs/actor";
 
 interface PinnedTabProps {
@@ -20,36 +11,7 @@ interface PinnedTabProps {
   pinnedIds: string[];
 }
 
-export function PinnedTab({ events, issueKey, pinnedIds }: PinnedTabProps): ReactNode {
-  const queryClient = useQueryClient();
-  const [showDismissed, setShowDismissed] = useState(false);
-  const userState = useQuery({
-    enabled: issueKey !== undefined,
-    queryKey: ["user-state"],
-    queryFn: () => api.getMyState(),
-  });
-  const dismissedIds = dismissedEventIds(userState.data?.[issueKey ?? ""]?.dismissed ?? []);
-  const dismissedEvents = useQuery({
-    enabled: issueKey !== undefined && showDismissed && dismissedIds.length > 0,
-    queryKey: ["events", issueKey, "margin-dismissed", dismissedIds],
-    queryFn: () => api.getIssueEvents(issueKey ?? "", { ids: dismissedIds }),
-  });
-  const undismiss = useMutation({
-    mutationFn: (id: number) => {
-      const marker = `event:${id}`;
-      const current = userState.data?.[issueKey ?? ""]?.dismissed ?? [];
-      return api.putIssueState(issueKey ?? "", {
-        dismissed: current.filter((item) => item !== marker),
-      });
-    },
-    onSuccess: (next) => {
-      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-        ...current,
-        [issueKey ?? ""]: next,
-      }));
-    },
-  });
-
+export function PinnedTab({ events, pinnedIds }: PinnedTabProps): ReactNode {
   return (
     <div className="pt-3">
       {events.map((event) => (
@@ -62,37 +24,6 @@ export function PinnedTab({ events, issueKey, pinnedIds }: PinnedTabProps): Reac
       ))}
       {pinnedIds.length === 0 ? (
         <p className={`text-sm ${textMutedOnSurface}`}>No pinned items.</p>
-      ) : null}
-      <label className={`mt-3 flex items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-        <input
-          checked={showDismissed}
-          onChange={(event) => setShowDismissed(event.target.checked)}
-          type="checkbox"
-        />
-        Show dismissed
-      </label>
-      {showDismissed ? (
-        <div className="mt-2 space-y-2">
-          {(dismissedEvents.data ?? []).map((event) => (
-            <article
-              className={`flex items-center justify-between gap-3 rounded-lg border p-3 text-sm ${borderDefault}`}
-              key={event.id}
-            >
-              <span>{eventDescription(event)}</span>
-              <button
-                className={`shrink-0 ${linkText} ${linkHoverText}`}
-                disabled={undismiss.isPending}
-                onClick={() => undismiss.mutate(event.id)}
-                type="button"
-              >
-                Restore
-              </button>
-            </article>
-          ))}
-          {dismissedIds.length === 0 ? (
-            <p className={`text-sm ${textMutedOnSurface}`}>No dismissed items.</p>
-          ) : null}
-        </div>
       ) : null}
     </div>
   );

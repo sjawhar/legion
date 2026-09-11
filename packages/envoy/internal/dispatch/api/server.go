@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -41,6 +42,7 @@ type Deps struct {
 	DefaultProject   string
 	ServerURL        string
 	Docs             docs.API
+	Envoy            *envoy.Client
 	Events           *events.Broker
 	TestHooksEnabled bool
 }
@@ -53,6 +55,7 @@ type DepsInput struct {
 	RepoProjectsRaw  string
 	DefaultProject   string
 	ServerURL        string
+	EnvoyURL         string
 	Docs             docs.API
 	Events           *events.Broker
 	TestHooksEnabled bool
@@ -79,6 +82,10 @@ func NewDeps(input DepsInput) (Deps, error) {
 			ServerURL:  input.ServerURL,
 		})
 	}
+	var envoyClient *envoy.Client
+	if envoyURL := strings.TrimSpace(input.EnvoyURL); envoyURL != "" {
+		envoyClient = envoy.New(envoyURL)
+	}
 	return Deps{
 		Store:            input.Store,
 		Identity:         input.Identity,
@@ -86,6 +93,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		DefaultProject:   defaultProject,
 		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:             input.Docs,
+		Envoy:            envoyClient,
 		Events:           input.Events,
 		TestHooksEnabled: input.TestHooksEnabled,
 	}, nil
@@ -149,6 +157,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("POST /api/v1/issues/{key}/messages", s.createMessage)
 	mux.HandleFunc("GET /api/v1/inbox", s.listInbox)
 	mux.HandleFunc("GET /api/v1/search", s.search)
+	mux.HandleFunc("GET /api/v1/agents", s.listAgents)
 	mux.HandleFunc("POST /api/v1/issues/{key}/asks", s.createAsk)
 	mux.HandleFunc("GET /api/v1/issues/{key}/asks", s.listIssueAsks)
 	mux.HandleFunc("GET /api/v1/asks/{id}", s.getAsk)

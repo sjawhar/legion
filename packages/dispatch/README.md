@@ -14,7 +14,7 @@ repository-to-project settings page at `/settings`; TanStack Query and SSE keep
 the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content
-has Spec, Log, Children, and Artifacts tabs; the Spec document renders and edits through
+has Spec, Conversation, Children, and Artifacts tabs; the Spec document renders and edits through
 `@sjawhar/proof-editor`, with Yjs presence and margin-linked marks. The margin holds Comments and
 Pinned. Below the `xl` breakpoint, navigation is a drawer and the margin is a bottom sheet.
 Controls use 44 px minimum touch targets.
@@ -41,7 +41,9 @@ server and Postgres. The harness starts `e2e/run-server.sh` unless
 `PLAYWRIGHT_BASE_URL` selects a deployed server. Its local defaults are
 `DISPATCH_E2E_PORT=8777`, `DATABASE_URL` pointing at `dispatch_c`, trusted
 `X-Dispatch-User` identity for `alice` and `bob`, and
-`DISPATCH_NATS_DISABLED=1`.
+`DISPATCH_NATS_DISABLED=1`. The harness starts `e2e/fake-envoy.ts` on
+`FAKE_ENVOY_PORT` (default `9021`), passes its URL as `ENVOY_URL`, and tests
+seed its live sessions with `setLiveSessions` from `e2e/agents.ts`.
 
 Run the local harness with its isolated database available:
 
@@ -79,7 +81,8 @@ with iPhone 13 viewport, touch, and user-agent emulation.
 ## Phone check
 
 Browser emulation covers responsive layout. A phone acceptance check runs against
-a tailnet-reachable Dispatch server: configure `DISPATCH_LISTEN_HOST=0.0.0.0`, use
-the host's tailnet address and `DISPATCH_PORT`, open the Inbox from the phone, and
-answer an open ask. Set `DISPATCH_INSECURE_COOKIE=1` only for HTTP; HTTPS keeps the
-normal secure cookie setting.
+a tailnet-reachable Dispatch server: configure `DISPATCH_LISTEN_HOST` with the
+host's Tailscale IPv4 address (`tailscale ip -4`), use that tailnet address and
+`DISPATCH_PORT`, open the Inbox from the phone, and answer an open ask. Set
+`DISPATCH_INSECURE_COOKIE=1` only for HTTP; HTTPS keeps the normal secure cookie
+setting.

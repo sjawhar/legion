@@ -104,8 +104,8 @@ dispatch_resolve_ask({
 })
 ```
 Use `retracted` when the question is obsolete and `resolved` when you found the answer. Include the
-reason because the question remains in its issue log and reply thread. Resolution is not an answer:
-it never records a human decision, and an answered ask cannot be resolved.
+reason because the question remains in its Conversation card and reply thread. Resolution is not an
+answer: it never records a human decision, and an answered ask cannot be resolved.
 
 An ask is a thread, not a dead end: a human can reply to it before or after answering, and you
 (the asker) can reply too — e.g. acknowledging a clarifying question, or following up after the

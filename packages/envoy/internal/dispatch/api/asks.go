@@ -174,6 +174,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
+	ask.OpenedEventID = &event.ID
+	event.Payload = ask
 	events = append(events, event)
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
@@ -378,10 +380,17 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
-	return scanAsk(q.QueryRow(ctx, `
+	ask, err := scanAsk(q.QueryRow(ctx, `
 		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
 		from asks where id = $1
 	`, id))
+	if err != nil {
+		return model.Ask{}, err
+	}
+	if err := s.attachOpenedEventIDs(ctx, q, []*model.Ask{&ask}); err != nil {
+		return model.Ask{}, err
+	}
+	return ask, nil
 }
 
 // listIssueAsksColumns are the columns every ask-listing query selects, in scan order.
@@ -449,14 +458,82 @@ func (s *server) loadOwnerAsks(ctx context.Context, q queryer, owner owner, stat
 		}
 		asks = append(asks, ask)
 	}
-	return asks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	askPointers := make([]*model.Ask, len(asks))
+	for index := range asks {
+		askPointers[index] = &asks[index]
+	}
+	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
+		return nil, err
+	}
+	return asks, nil
 }
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
-	return scanAsk(tx.QueryRow(ctx, `
+	ask, err := scanAsk(tx.QueryRow(ctx, `
 		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
 		from asks where id = $1 for update
 	`, id))
+	if err != nil {
+		return model.Ask{}, err
+	}
+	if err := s.attachOpenedEventIDs(ctx, tx, []*model.Ask{&ask}); err != nil {
+		return model.Ask{}, err
+	}
+	return ask, nil
+}
+
+func (s *server) attachOpenedEventIDs(
+	ctx context.Context,
+	q queryer,
+	asks []*model.Ask,
+) error {
+	askIDs := make([]string, 0, len(asks))
+	seen := make(map[string]struct{}, len(asks))
+	for _, ask := range asks {
+		if _, exists := seen[ask.ID]; !exists {
+			seen[ask.ID] = struct{}{}
+			askIDs = append(askIDs, ask.ID)
+		}
+	}
+	if len(askIDs) == 0 {
+		return nil
+	}
+
+	rows, err := q.Query(ctx, `
+		select payload->>'id', min(id)
+		from events
+		where type in ('ask.opened', 'ask.answered', 'ask.resolved')
+		  and payload->>'id' = any($1)
+		group by payload->>'id'
+	`, askIDs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	openedEventIDs := make(map[string]int64, len(askIDs))
+	for rows.Next() {
+		var askID string
+		var eventID int64
+		if err := rows.Scan(&askID, &eventID); err != nil {
+			return err
+		}
+		openedEventIDs[askID] = eventID
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, ask := range asks {
+		openedEventID, ok := openedEventIDs[ask.ID]
+		if !ok {
+			return fmt.Errorf("ask %q has no event", ask.ID)
+		}
+		ask.OpenedEventID = new(int64)
+		*ask.OpenedEventID = openedEventID
+	}
+	return nil
 }
 
 func scanAsk(row pgx.Row) (model.Ask, error) {

@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   buildDispatchReference,
   buildIssuePath,
+  isLegacyLogPath,
   issueTabForRoute,
   parseDispatchReference,
   parseIssuePath,
@@ -62,9 +63,11 @@ test("issue routes select Spec and artifact routes select Artifacts unless prima
     )
   ).toBe("spec");
   expect(issueTabForRoute({ key: "CORE-1", kind: "issue" }, undefined)).toBe("spec");
-  expect(issueTabForRoute({ id: "ask-1", key: "CORE-1", kind: "ask" }, undefined)).toBe("log");
+  expect(issueTabForRoute({ id: "ask-1", key: "CORE-1", kind: "ask" }, undefined)).toBe(
+    "conversation"
+  );
   expect(issueTabForRoute({ key: "CORE-1", kind: "spec" }, undefined)).toBe("spec");
-  expect(issueTabForRoute({ key: "CORE-1", kind: "log" }, undefined)).toBe("log");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "conversation" }, undefined)).toBe("conversation");
   expect(issueTabForRoute({ key: "CORE-1", kind: "children" }, undefined)).toBe("children");
   expect(issueTabForRoute({ key: "CORE-1", kind: "artifacts" }, undefined)).toBe("artifacts");
   expect(
@@ -80,4 +83,33 @@ test("reference builders preserve dispatch version syntax while emitting canonic
 
   expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/artifact/design@v3");
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/artifacts/design?v=3"));
+});
+
+test("the conversation owns the /conversation path and still answers the retired /log path", () => {
+  expect(parseIssuePath("/issues/CORE-1/conversation")).toEqual({
+    key: "CORE-1",
+    kind: "conversation",
+  });
+  expect(parseIssuePath("/issues/CORE-1/log")).toEqual({ key: "CORE-1", kind: "conversation" });
+  expect(buildIssuePath({ key: "CORE-1", kind: "conversation" })).toBe(
+    "/issues/CORE-1/conversation"
+  );
+  expect(isLegacyLogPath("/issues/CORE-1/log")).toBe(true);
+  expect(isLegacyLogPath("/issues/CORE-1/log/")).toBe(true);
+  expect(isLegacyLogPath("/issues/CORE-1/conversation")).toBe(false);
+  expect(isLegacyLogPath("/issues/CORE-1/artifacts/log")).toBe(false);
+});
+
+test("agent references keep the dispatch://KEY/log grammar for the conversation", () => {
+  expect(parseDispatchReference("dispatch://CORE-1/log")).toEqual({
+    key: "CORE-1",
+    kind: "conversation",
+  });
+  expect(parseDispatchReference("dispatch://CORE-1/conversation")).toEqual({
+    key: "CORE-1",
+    kind: "conversation",
+  });
+  expect(buildDispatchReference({ key: "CORE-1", kind: "conversation" })).toBe(
+    "dispatch://CORE-1/log"
+  );
 });

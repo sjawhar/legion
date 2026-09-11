@@ -116,16 +116,19 @@ test("live: answering an ask moves the issue out of Needs you immediately", asyn
   await alice.close();
 });
 
-test("live: new events on the open issue appear in the Log and mark it read as they are viewed", async ({
+test("live: new events on the open issue appear in Conversation and mark it read as they are viewed", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Log target" });
+  const issue = await createIssue({ project: "CORE", title: "Conversation target" });
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  await page.goto(`/issues/${issue.key}/log`);
-  await expect(page.getByRole("tab", { name: "Log" })).toHaveAttribute("aria-selected", "true");
+  await page.goto(`/issues/${issue.key}/conversation`);
+  await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  );
 
   await createMessage(issue.key, { body: "Live message from bob" }, bob);
 
@@ -198,7 +201,7 @@ test("live: a forced server disconnect reconnects from the last event id, not fr
     }
   });
 
-  await page.goto(`/issues/${issue.key}/log`);
+  await page.goto(`/issues/${issue.key}/conversation`);
   await expect(page.getByText("Before disconnect")).toBeVisible();
   // A live message the client actually observes before the outage — the cold
   // connect itself resolves its head internally without reporting it back, so
@@ -247,7 +250,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
     }
   });
 
-  await page.goto(`/issues/${issue.key}/log`);
+  await page.goto(`/issues/${issue.key}/conversation`);
   await expect(page.getByText("Backlog message 4")).toBeVisible();
 
   const streamRequest = apiRequestUrls.find((url) => /\/api\/v1\/events(\?|$)/.test(url));
@@ -259,18 +262,15 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 10 on desktop (chromium) for this fixture: whoami, issues,
-  // me/state, issue detail, the shared inbox query for the margin's open-ask
-  // count, the stream connection, two active-sessions/log event reads, the
-  // primary artifact's comments, and the margin's own issue-asks list (+1:
-  // the margin lists the issue's asks so answered anchored asks render for
-  // every viewer, not only a tab that watched one get answered live).
-  // The phone project (iphone) never fetches the bare `/api/v1/issues` list —
-  // its sidebar sits behind a drawer that starts closed — so its budget is 9.
-  // Asserted exactly (not a ceiling) so a panel that starts eagerly fetching
-  // before its tab is ever opened — e.g. Spec's ProofDocument or Children — trips
-  // this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 9 : 10);
+  // Exactly 11 on desktop (chromium): whoami, issues, me/state, issue detail, the shared inbox
+  // query for the margin's open-ask count, the stream connection, two active-sessions/Conversation
+  // event reads, the primary artifact's comments, the margin's own issue-asks list, and
+  // Conversation's live-agent query. The phone project (iphone) does not fetch the bare
+  // `/api/v1/issues` list because its closed drawer has no sidebar, so it uses 10. Asserted exactly
+  // (not a ceiling) so a panel that starts eagerly fetching before its tab is ever opened — e.g.
+  // Spec's ProofDocument or Children — trips this immediately instead of only breaking some looser
+  // upper bound.
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 10 : 11);
 
   await alice.close();
 });

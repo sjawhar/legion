@@ -1,24 +1,20 @@
 import type { UserIssueState } from "../../api/types";
 
-export type DismissedStateOperation =
-  | { id: string; op: "dismiss" }
-  | { id: string; op: "undismiss" }
-  | { id: string; op: "pin" }
-  | { id: string; op: "unpin" };
+export type PinStateOperation = { id: string; op: "pin" | "unpin" };
 
 export interface IssueStateWriteWorker {
   fetchState: (issueKey: string) => Promise<UserIssueState>;
   onDrained: (issueKey: string, state: UserIssueState) => void;
   onError: (
     issueKey: string,
-    operations: DismissedStateOperation[],
+    operations: PinStateOperation[],
     state: UserIssueState | undefined
   ) => void;
   putState: (issueKey: string, dismissed: string[]) => Promise<UserIssueState>;
 }
 
 interface PendingOperation {
-  operation: DismissedStateOperation;
+  operation: PinStateOperation;
   reject: (error: unknown) => void;
   resolve: () => void;
 }
@@ -28,24 +24,16 @@ interface PendingIssueOperations {
   worker: IssueStateWriteWorker;
 }
 
-export function applyDismissedStateOperation(
+export function applyPinStateOperation(
   dismissed: string[],
-  operation: DismissedStateOperation
+  operation: PinStateOperation
 ): string[] {
-  switch (operation.op) {
-    case "dismiss":
-      return dismissed.includes(operation.id) ? dismissed : [...dismissed, operation.id];
-    case "undismiss":
-      return dismissed.filter((item) => item !== operation.id);
-    case "pin": {
-      const marker = `pinned_items:${operation.id}`;
-      return dismissed.includes(marker) ? dismissed : [...dismissed, marker];
-    }
-    case "unpin": {
-      const marker = `pinned_items:${operation.id}`;
-      return dismissed.filter((item) => item !== marker);
-    }
-  }
+  const marker = `pinned_items:${operation.id}`;
+  return operation.op === "pin"
+    ? dismissed.includes(marker)
+      ? dismissed
+      : [...dismissed, marker]
+    : dismissed.filter((item) => item !== marker);
 }
 
 export class IssueStateWriteQueue {
@@ -54,7 +42,7 @@ export class IssueStateWriteQueue {
 
   enqueue(
     issueKey: string,
-    operation: DismissedStateOperation,
+    operation: PinStateOperation,
     worker: IssueStateWriteWorker
   ): Promise<void> {
     const queued = this.pending.get(issueKey);
@@ -96,14 +84,14 @@ export class IssueStateWriteQueue {
         try {
           state = await queued.worker.putState(
             issueKey,
-            applyDismissedStateOperation(state.dismissed, next.operation)
+            applyPinStateOperation(state.dismissed, next.operation)
           );
         } catch {
           try {
             state = await queued.worker.fetchState(issueKey);
             state = await queued.worker.putState(
               issueKey,
-              applyDismissedStateOperation(state.dismissed, next.operation)
+              applyPinStateOperation(state.dismissed, next.operation)
             );
           } catch (error) {
             this.rejectPending(issueKey, queued, error, state);

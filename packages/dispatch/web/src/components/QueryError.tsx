@@ -10,8 +10,8 @@ export interface QueryErrorProps {
 }
 
 /**
- * A retryable error state for a failed query or write, matching the affordance
- * the issue log's pin/dismiss queue already had.
+ * A retryable error state for a failed query or write, matching the Conversation
+ * pin-state queue's affordance.
  */
 export function QueryError({ message, onRetry, retrying = false }: QueryErrorProps): ReactNode {
   return (

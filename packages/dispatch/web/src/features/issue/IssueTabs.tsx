@@ -10,13 +10,13 @@ import { buildIssuePath, type IssueTab } from "../refs/routes";
 
 const tabs: { id: IssueTab; label: string }[] = [
   { id: "spec", label: "Spec" },
-  { id: "log", label: "Log" },
+  { id: "conversation", label: "Conversation" },
   { id: "children", label: "Children" },
   { id: "artifacts", label: "Artifacts" },
 ];
 
 /**
- * The Spec/Log/Children/Artifacts tablist. Follows the WAI-ARIA tabs pattern:
+ * The Spec/Conversation/Children/Artifacts tablist. Follows the WAI-ARIA tabs pattern:
  * a labelled tablist, roving tabindex, and Left/Right/Home/End move and
  * activate the adjacent tab. Selecting a tab navigates to its route segment
  * (see `../refs/routes`), so the active tab is part of the URL rather than
@@ -35,7 +35,7 @@ export function IssueTabs({
   const tabRefs = useRef<Record<IssueTab, HTMLButtonElement | null>>({
     artifacts: null,
     children: null,
-    log: null,
+    conversation: null,
     spec: null,
   });
   const pointerCapturedScroll = useRef(false);

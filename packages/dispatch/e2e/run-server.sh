@@ -8,6 +8,7 @@ export DATABASE_URL
 export DISPATCH_E2E_PORT
 
 export DISPATCH_NATS_DISABLED=1
+export ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:${FAKE_ENVOY_PORT:-9021}}"
 
 cd "$(dirname "$0")/../../envoy"
 exec env \

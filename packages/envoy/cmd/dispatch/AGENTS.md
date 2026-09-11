@@ -85,6 +85,7 @@ the table says human only.
 | `/api/v1/issues/{key}/events` | GET | user or bearer | Read events by forward cursor, descending page, or exact IDs. |
 | `/api/v1/issues/{key}/references` | GET | user or bearer | Read the eight-hop artifact reference closure; matching `If-None-Match` returns `304`. |
 | `/api/v1/inbox` | GET | user or bearer | List open asks, newest first. |
+| `/api/v1/agents` | GET | human only | List live Envoy sessions, newest first. `api/agents.go` proxies the listener through `internal/dispatch/envoy`; unavailable listener responses are `503 ENVOY_UNAVAILABLE`. |
 | `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. |
 | `/api/v1/issues/{key}/asks?state=` | GET | user or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | user or bearer | Read an ask. |

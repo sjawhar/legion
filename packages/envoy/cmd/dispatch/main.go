@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -39,6 +40,7 @@ type bootConfig struct {
 	AgentToken       string
 	RepoProjects     string
 	DefaultProject   string
+	EnvoyURL         string
 	IdentityHeader   string
 	AllowedLogins    map[string]struct{}
 	NATSDisabled     bool
@@ -167,6 +169,7 @@ func main() {
 		RepoProjects:   boot.RepoProjects,
 		DefaultProject: boot.DefaultProject,
 		ServerURL:      serverURL,
+		EnvoyURL:       boot.EnvoyURL,
 		Docs:           documentService,
 		Events:         broker,
 		App:            appCfg,
@@ -324,6 +327,16 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)
 	}
+	envoyURL := strings.TrimSpace(getenv("ENVOY_URL"))
+	if envoyURL == "" {
+		envoyURL = "http://127.0.0.1:9020"
+	}
+	parsed, err := url.Parse(envoyURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return bootConfig{}, fmt.Errorf("ENVOY_URL=%q (expected an absolute http(s) URL)", envoyURL)
+	}
+	boot.EnvoyURL = strings.TrimSuffix(envoyURL, "/")
+
 	return boot, nil
 }
 

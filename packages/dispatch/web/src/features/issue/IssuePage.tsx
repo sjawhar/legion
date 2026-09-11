@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
@@ -50,11 +50,13 @@ import {
 } from "../../theme/classes";
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
+import { ConversationTab } from "../conversation/ConversationTab";
 import { actorLabel } from "../refs/actor";
 import {
   buildIssuePath,
   type DispatchRoute,
   type IssueTab,
+  isLegacyLogPath,
   isPrimaryDocumentArtifactRoute,
   issueTabForRoute,
   parseIssuePath,
@@ -64,7 +66,6 @@ import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
 import { IssueTabs } from "./IssueTabs";
-import { LogTab } from "./LogTab";
 import { useIssueDrafts } from "./useIssueDrafts";
 
 const issueStatuses = [
@@ -506,6 +507,9 @@ export function IssuePage(): ReactNode {
   if (route === undefined) {
     return <NotFoundPage />;
   }
+  if (isLegacyLogPath(pathname)) {
+    return <Navigate replace to={`${buildIssuePath(route)}${search}`} />;
+  }
   // key={route.key}: switching to a different issue remounts IssueDetail
   // fresh (discarding any unsaved local drafts); switching tabs within the
   // same issue keeps route.key unchanged, so it only re-renders.
@@ -535,6 +539,8 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
       : issue.data?.artifacts?.find(({ slug }) => slug === artifactRouteSlug);
   const isPrimaryArtifactRoute = isPrimaryDocumentArtifactRoute(route, selectedArtifact);
   const activeTab = issueTabForRoute(route, selectedArtifact);
+  const conversationFocusItemId =
+    route.kind === "ask" || route.kind === "comment" ? route.id : undefined;
   const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
 
   useLayoutEffect(() => {
@@ -545,14 +551,13 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
   }, [activeTab]);
 
   // Once a panel's tab has ever been active, keep rendering its content even
-  // while hidden — that is what keeps the Spec document connected and the Log
-  // observer's state alive across tab switches (see the `hidden` panels
-  // below). A panel the user has never opened stays unmounted, so a fresh
-  // page load doesn't pay for panels it never shows.
+  // while hidden — that is what keeps the Spec document connected and the Conversation's read
+  // observer alive across tab switches (see the `hidden` panels below). A panel the user has
+  // never opened stays unmounted, so a fresh page load doesn't pay for panels it never shows.
   const [activatedTabs, setActivatedTabs] = useState<Record<IssueTab, boolean>>(() => ({
     artifacts: activeTab === "artifacts",
     children: activeTab === "children",
-    log: activeTab === "log",
+    conversation: activeTab === "conversation",
     spec: activeTab === "spec",
   }));
   if (!activatedTabs[activeTab]) {
@@ -658,19 +663,19 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
         ) : null}
       </div>
       <div
-        aria-hidden={activeTab !== "log"}
-        aria-labelledby="issue-log-tab"
-        hidden={activeTab !== "log"}
-        id="issue-log-panel"
+        aria-hidden={activeTab !== "conversation"}
+        aria-labelledby="issue-conversation-tab"
+        hidden={activeTab !== "conversation"}
+        id="issue-conversation-panel"
         role="tabpanel"
       >
-        {activatedTabs.log ? (
-          <LogTab
+        {activatedTabs.conversation ? (
+          <ConversationTab
+            focusItemId={conversationFocusItemId}
             isClosed={isClosed}
             issueKey={issueKey}
-            route={issue.data.route}
             state={state.data}
-            visible={activeTab === "log"}
+            visible={activeTab === "conversation"}
           />
         ) : null}
       </div>

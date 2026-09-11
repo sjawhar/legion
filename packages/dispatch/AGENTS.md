@@ -6,8 +6,9 @@ production build from `web/dist`.
 
 ## Layout
 
-- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The issue main column has Spec, Log, Children, and Artifacts tabs; a bare issue route opens the primary Spec document. The margin holds historical Comments and Pinned, with open anchored and issue-level asks in a Needs you group before comments. The three-column layout begins at the `xl` breakpoint (1280px), where the margin is a sticky, full-viewport-height column with its own scrollbar; compact and tablet widths use the navigation drawer and margin bottom sheet, whose review toggle exposes the open-ask count.
+- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The issue main column has Spec, Conversation, Children, and Artifacts tabs; a bare issue route opens the primary Spec document. The margin holds historical Comments and Pinned, with open anchored and issue-level asks in a Needs you group before comments. The three-column layout begins at the `xl` breakpoint (1280px), where the margin is a sticky, full-viewport-height column with its own scrollbar; compact and tablet widths use the navigation drawer and margin bottom sheet, whose review toggle exposes the open-ask count.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
+- `web/src/features/conversation/` owns the issue's Conversation tab: messages, issue-level comments, and coalesced ask cards from `GET /issues/{key}/events`, with agent titles from `GET /api/v1/agents`.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
   browser API boundary.
 - `web/src/api/sse.ts` opens the issue event stream and invalidates TanStack
@@ -15,7 +16,7 @@ production build from `web/dist`.
 - `web/src/main.tsx` installs React Router and the shared Query client.
 - `web/src/features/search/` owns the global palette, rail `Search` control, and `Ctrl/Cmd+K` shortcut. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node.
 
-Resolved asks leave the Inbox and open-ask badges, but their thread and log entry remain available with the actor and reason. The Log renders Markdown text bodies and coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
+Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. The Conversation renders Markdown text bodies and coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
 
 `AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the GitHub
 sign-in link at `/auth/start`. Authenticated humans can create native projects
@@ -94,6 +95,10 @@ never create that property.
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
 post-update text selection; Yjs document transport and local editing remain active.
+
+`e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
+`FAKE_ENVOY_PORT` (default `9021`) and wires through `ENVOY_URL`; tests seed
+live sessions with `setLiveSessions` from `e2e/agents.ts`.
 
 `e2e/seed.ts` truncates the test database before each scenario. For a deployed
 server, set `PLAYWRIGHT_DATABASE_URL` for the same database and

@@ -277,7 +277,46 @@ func (s *server) readEventRows(ctx context.Context, query string, arguments ...a
 		}
 		events = append(events, event)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.attachAskOpenedEventIDs(ctx, events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func (s *server) attachAskOpenedEventIDs(ctx context.Context, events []model.Event) error {
+	asks := []model.Ask{}
+	payloads := []map[string]any{}
+	for index := range events {
+		switch events[index].Type {
+		case "ask.opened", "ask.answered", "ask.resolved":
+		default:
+			continue
+		}
+		payload, ok := events[index].Payload.(map[string]any)
+		if !ok {
+			return fmt.Errorf("decode %s payload: expected object", events[index].Type)
+		}
+		askID, ok := payload["id"].(string)
+		if !ok || askID == "" {
+			return fmt.Errorf("decode %s payload: ask id missing", events[index].Type)
+		}
+		asks = append(asks, model.Ask{ID: askID})
+		payloads = append(payloads, payload)
+	}
+	askPointers := make([]*model.Ask, len(asks))
+	for index := range asks {
+		askPointers[index] = &asks[index]
+	}
+	if err := s.attachOpenedEventIDs(ctx, s.deps.Store.Pool, askPointers); err != nil {
+		return err
+	}
+	for index, payload := range payloads {
+		payload["opened_event_id"] = *asks[index].OpenedEventID
+	}
+	return nil
 }
 
 func writeSSEEvent(w http.ResponseWriter, event model.Event) error {

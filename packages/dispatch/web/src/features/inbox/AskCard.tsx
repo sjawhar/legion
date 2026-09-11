@@ -1,9 +1,16 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
+import type {
+  AnswerAskInput,
+  Ask,
+  AskRead,
+  AskResolution,
+  Comment,
+  CreateCommentInput,
+} from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -34,17 +41,18 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { actorLabel } from "../refs/actor";
+import { actorLabel, describeAskResolution } from "../refs/actor";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskOptionList } from "./AskOptionList";
-import { AskThread } from "./AskThread";
+import { AskThread, type AskThreadProps } from "./AskThread";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
 
 export interface AskCardProps {
   artifactSlug?: string;
   ask: Ask;
+  thread?: "inline" | "collapsed";
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
   getAskThread?: (id: string) => Promise<AskRead>;
@@ -116,37 +124,105 @@ function AnsweredAsk({
       )}
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
       <p className={`font-medium ${textPrimaryOnSuccessCallout}`}>{ask.question}</p>
-      <AskOptionList
-        descriptionClass={calloutSuccessBodyText}
-        labelClass={textPrimaryOnSuccessCallout}
-        options={ask.options}
-        selected={answer?.selected ?? []}
-      />
-      {answer === null ? null : (
-        <>
-          <p className="mt-2">
-            <span className="font-semibold">{answer.user}</span> answered
-          </p>
-          {answer.text === null || answer.text === "" ? null : (
-            <p className="mt-1 whitespace-pre-wrap">{answer.text}</p>
-          )}
-        </>
+      <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
+      <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
+      {answer === null || answer.text === null || answer.text === "" ? null : (
+        <p className="mt-1 whitespace-pre-wrap">{answer.text}</p>
       )}
-      <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
-        Opened <Timestamp at={ask.created_at} />
-      </p>
-      {answer === null ? null : (
-        <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>
-          Answered <Timestamp at={answer.at} />
+      {answer === null ? (
+        <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
+          Asked <Timestamp at={ask.created_at} />
+        </p>
+      ) : (
+        <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
+          Asked <Timestamp at={ask.created_at} /> · Answered by{" "}
+          <span className="font-semibold">{answer.user}</span> <Timestamp at={answer.at} />
         </p>
       )}
     </article>
   );
 }
 
+function ResolvedAsk({ ask }: { ask: Ask & { resolution: AskResolution } }): ReactNode {
+  const { resolution } = ask;
+  return (
+    <article className={`rounded-xl p-4 text-sm ${card}`} data-testid={`ask-${ask.id}`}>
+      {ask.anchor === null ? null : (
+        <blockquote className={`mb-2 border-l-2 pl-3 ${quoteAccentBorder} ${quoteBodyText}`}>
+          {ask.anchor.quote}
+        </blockquote>
+      )}
+      <p className={`font-medium ${textPrimaryOnSurface}`}>{ask.question}</p>
+      <span
+        className={`mt-2 inline-block rounded-full px-2.5 py-1 text-xs font-medium ${badgeLow.bg} ${badgeLow.text}`}
+        data-testid="ask-resolution-badge"
+      >
+        {resolution.kind === "retracted" ? "Retracted" : "Resolved"}
+      </span>
+      <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(ask.author)}</p>
+      <AskOptionList options={ask.options} selected={[]} />
+      <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
+        Asked <Timestamp at={ask.created_at} /> · {describeAskResolution(resolution)}
+      </p>
+    </article>
+  );
+}
+
+function AskThreadDisclosure(props: AskThreadProps): ReactNode {
+  const [open, setOpen] = useState(false);
+  const thread = useQuery({
+    queryKey: ["ask-thread", props.ask.id],
+    queryFn: () =>
+      props.getAskThread === undefined
+        ? api.getAsk(props.ask.id)
+        : props.getAskThread(props.ask.id),
+  });
+
+  if (thread.isError) {
+    const message =
+      thread.error instanceof Error ? thread.error.message : "Unable to load replies.";
+    return (
+      <button
+        aria-expanded="false"
+        className={`mt-3 min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
+        onClick={() => {
+          void thread.refetch();
+        }}
+        title={message}
+        type="button"
+      >
+        Replies unavailable — retry
+      </button>
+    );
+  }
+
+  const count = thread.data?.replies.length ?? 0;
+  return (
+    <>
+      <button
+        aria-controls={`thread-${props.ask.id}`}
+        aria-expanded={open}
+        className={`mt-3 min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
+        onClick={() => {
+          setOpen((current) => !current);
+        }}
+        type="button"
+      >
+        {count === 0 ? "Reply" : count === 1 ? "1 reply" : `${count} replies`}
+      </button>
+      {open ? (
+        <div id={`thread-${props.ask.id}`}>
+          <AskThread {...props} showResolution={false} />
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 export function AskCard({
   artifactSlug,
   ask,
+  thread = "inline",
   answerAsk: answer = answerAsk,
   createReply: reply,
   getAskThread: getThread,
@@ -194,12 +270,28 @@ export function AskCard({
   const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
 
   const completed = justAnswered ?? (ask.state === "open" ? null : ask);
+  const threadNode =
+    thread === "collapsed" ? (
+      <AskThreadDisclosure ask={ask} createReply={reply} getAskThread={getThread} />
+    ) : (
+      <AskThread ask={ask} createReply={reply} getAskThread={getThread} showResolution={false} />
+    );
 
   if (completed !== null) {
+    if (completed.state === "resolved") {
+      if (completed.resolution === undefined)
+        throw new Error("resolved ask is missing its resolution");
+      return (
+        <>
+          <ResolvedAsk ask={{ ...completed, resolution: completed.resolution }} />
+          {threadNode}
+        </>
+      );
+    }
     return (
       <>
         <AnsweredAsk artifactSlug={artifactSlug} ask={{ ...completed, answer: completed.answer }} />
-        <AskThread ask={ask} createReply={reply} getAskThread={getThread} />
+        {threadNode}
       </>
     );
   }
@@ -308,7 +400,7 @@ export function AskCard({
           ) : null}
         </form>
       </article>
-      <AskThread ask={ask} createReply={reply} getAskThread={getThread} />
+      {threadNode}
     </>
   );
 }

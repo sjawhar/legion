@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -14,6 +14,7 @@ function ask(overrides: Partial<Ask> = {}): Ask {
     id: "ask-1",
     issue_key: "CORE-1",
     multiple: false,
+    opened_event_id: 1,
     options: [],
     question: "Which option should ship?",
     state: "open",
@@ -193,8 +194,31 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
   }
 });
 
-test("AskCard renders who answered, what was selected, and when, in place of the form", async () => {
-  const now = spyOn(Date, "now").mockReturnValue(new Date("2026-09-09T00:06:00Z").getTime());
+test("an answered ask lists every option, marks the selection, and shows when it was asked and answered", () => {
+  const input = ask({
+    created_at: "2026-09-10T09:00:00Z",
+    options: [{ label: "Ship" }, { description: "Wait for QA", label: "Hold" }],
+  });
+  const { view } = renderCard(
+    <AskCard ask={answered(input, ["Ship"])} getAskThread={emptyThread(input)} />
+  );
+
+  try {
+    const options = within(view.getByRole("list", { name: "Options" })).getAllByRole("listitem");
+    expect(options.map((option) => option.dataset.selected)).toEqual(["true", "false"]);
+    expect(within(options[0] as HTMLElement).getByLabelText("Selected")).toBeTruthy();
+    expect(options[1]?.textContent).toContain("Wait for QA");
+
+    const card = view.getByTestId("ask-ask-1");
+    expect(card.textContent).toMatch(/Asked .* · Answered by alice/);
+    expect(card.querySelectorAll("time")).toHaveLength(2);
+    expect(card.textContent).toContain("session-1");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard shows submitted free text in its answered card", async () => {
   const input = ask({
     options: [
       { description: "Ship immediately", label: "Ship" },
@@ -213,23 +237,14 @@ test("AskCard renders who answered, what was selected, and when, in place of the
     fireEvent.click(view.getByRole("radio", { name: /^Ship/ }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
-    await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
-    expect(view.getByTestId("ask-ask-1").textContent).toContain("alice answered");
-    const options = within(view.getByTestId("ask-ask-1")).getByRole("list", {
-      name: "Answer options",
-    });
-    expect(options.textContent).toContain("✓");
-    expect(options.textContent).toContain("Ship immediately");
-    expect(options.textContent).toContain("Wait for review");
+    await waitFor(() => expect(view.getByText(/Answered by/)).toBeTruthy());
+    const card = view.getByTestId("ask-ask-1");
+    expect(card.textContent).toMatch(/Asked .* · Answered by alice/);
+    expect(card.querySelectorAll("time")).toHaveLength(2);
+    expect(within(card).getAllByRole("listitem")[0]?.dataset.selected).toBe("true");
     expect(view.getByText("Proceed.")).toBeTruthy();
-    expect(view.getByText("6 minutes ago")).toBeTruthy();
-    expect(view.getByText("1 minute ago")).toBeTruthy();
-    expect(view.getByText("1 minute ago").closest("time")?.getAttribute("dateTime")).toBe(
-      "2026-09-09T00:05:00Z"
-    );
     expect(view.queryByRole("button", { name: "Submit answer" })).toBeNull();
   } finally {
-    now.mockRestore();
     view.unmount();
   }
 });
@@ -257,7 +272,7 @@ test("AskCard retries a failed answer without losing its form", async () => {
     await view.findByRole("alert");
     fireEvent.click(view.getByRole("button", { name: "Retry" }));
 
-    await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
+    await waitFor(() => expect(view.getByText(/Answered by/)).toBeTruthy());
     expect(attempts).toBe(2);
   } finally {
     view.unmount();
@@ -284,7 +299,7 @@ test("AskCard ignores a same-task duplicate answer submit", async () => {
     fireEvent.click(submit);
     fireEvent.click(submit);
 
-    await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
+    await waitFor(() => expect(view.getByText(/Answered by/)).toBeTruthy());
     expect(attempts).toBe(1);
   } finally {
     view.unmount();
@@ -329,7 +344,7 @@ test("AskCard keeps the thread and reply composer visible after the ask is answe
     fireEvent.click(view.getByRole("radio", { name: "Ship" }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
-    await waitFor(() => expect(view.getByText(/answered/)).toBeTruthy());
+    await waitFor(() => expect(view.getByText(/Answered by/)).toBeTruthy());
     // Answering is a distinct event, not the end of the conversation: the
     // thread section (and its composer) stays mounted below the answer.
     expect(view.getByRole("button", { name: "Reply" })).toBeTruthy();
@@ -398,42 +413,86 @@ test("AskCard surfaces a retryable error when posting a reply fails", async () =
   }
 });
 
-test("AskCard shows a resolved ask's options and selection", async () => {
+test("a resolved ask keeps its question and options and carries a resolution badge", () => {
   const input = {
     ...ask({
-      answer: {
-        at: "2026-09-10T00:01:00Z",
-        selected: ["Ship"],
-        text: "Proceed.",
-        user: "alice",
-      },
       options: [{ label: "Ship" }, { label: "Hold" }],
     }),
     resolution: {
-      actor: { kind: "session", id: "session-1" },
-      at: "2026-09-10T00:02:00Z",
+      actor: { id: "session-1", kind: "session" },
+      at: "2026-09-10T09:30:00Z",
       kind: "retracted",
-      reason: "A newer question supersedes this one.",
+      reason: "Superseded.",
     },
     state: "resolved",
   } as unknown as Ask;
   const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
 
   try {
-    await waitFor(() =>
-      expect(
-        view.getByText("Retracted by session-1 - A newer question supersedes this one.")
-      ).toBeTruthy()
-    );
-    const options = within(view.getByTestId("ask-ask-1")).getByRole("list", {
-      name: "Answer options",
-    });
-    expect(options.textContent).toContain("✓");
-    expect(options.textContent).toContain("Ship");
-    expect(options.textContent).toContain("Hold");
-    expect(view.queryByRole("button", { name: "Submit answer" })).toBeNull();
+    expect(view.getByText(input.question)).toBeTruthy();
+    expect(view.getByRole("list", { name: "Options" }).children).toHaveLength(2);
+    expect(view.getByTestId("ask-resolution-badge").textContent).toBe("Retracted");
+    const resolution = "Retracted by session-1 - Superseded.";
+    expect(view.getByTestId("ask-ask-1").textContent).toContain(resolution);
+    expect(view.getByTestId("thread-ask-1").textContent).not.toContain(resolution);
     expect(view.queryByRole("button", { name: "Reply" })).toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+test("a collapsed thread shows the reply count and expands to the thread on demand", async () => {
+  const input = ask();
+  const thread = async () => ({
+    ask: input,
+    replies: [reply({ body: "Any update?" }), reply({ body: "Soon.", id: "c2" })],
+  });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={thread} thread="collapsed" />);
+
+  try {
+    const trigger = await view.findByRole("button", { name: "2 replies" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(view.queryByText("Any update?")).toBeNull();
+
+    fireEvent.click(trigger);
+    await waitFor(() => expect(view.getByText("Any update?")).toBeTruthy());
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(view.getByLabelText("Reply")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a collapsed thread with no replies offers Reply, and a failed thread fetch offers a retry", async () => {
+  const input = ask();
+  const { view } = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} thread="collapsed" />
+  );
+  let attempts = 0;
+  const failedInput = ask({ id: "ask-2" });
+  const { view: failed } = renderCard(
+    <AskCard
+      ask={failedInput}
+      getAskThread={async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("boom");
+        return { ask: failedInput, replies: [] };
+      }}
+      thread="collapsed"
+    />
+  );
+
+  try {
+    const first = within(view.container);
+    const failedCard = within(failed.container);
+    await first.findByRole("button", { name: "Reply" });
+    const retry = await failedCard.findByRole("button", { name: "Replies unavailable — retry" });
+    expect(retry.getAttribute("title")).toBe("boom");
+
+    fireEvent.click(retry);
+    await failedCard.findByRole("button", { name: "Reply" });
+  } finally {
+    view.unmount();
+    failed.unmount();
   }
 });

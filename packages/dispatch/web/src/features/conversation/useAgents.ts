@@ -1,0 +1,28 @@
+import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+
+import { api } from "../../api/client";
+import type { Agent } from "../../api/types";
+
+const EMPTY_AGENTS: readonly Agent[] = [];
+
+export function useAgents(enabled: boolean): {
+  agents: readonly Agent[];
+  titles: ReadonlyMap<string, string>;
+} {
+  const { data } = useQuery({
+    enabled,
+    queryFn: () => api.listAgents(),
+    queryKey: ["agents"],
+    refetchInterval: enabled ? 30_000 : false,
+    retry: false,
+    staleTime: 10_000,
+  });
+  const agents = data ?? EMPTY_AGENTS;
+  const titles = useMemo(
+    () => new Map(agents.map((agent) => [agent.session_id, agent.title])),
+    [agents]
+  );
+
+  return useMemo(() => ({ agents, titles }), [agents, titles]);
+}
