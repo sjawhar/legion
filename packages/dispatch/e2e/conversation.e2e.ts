@@ -73,6 +73,11 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
+    if (!process.env.PLAYWRIGHT_BASE_URL) {
+      const activeSessions = page.getByRole("region", { name: "Active sessions" });
+      await expect(activeSessions.getByText("Planner (e2e)", { exact: true })).toBeVisible();
+      await expect(activeSessions.getByText("ghost-session-0000", { exact: true })).toHaveCount(0);
+    }
 
     await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
       "aria-selected",

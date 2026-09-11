@@ -5,7 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api, type ListEventsOptions } from "../../api/client";
-import type { Ask, IssueDetails } from "../../api/types";
+import type { Agent, Ask, Event, IssueDetails } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/Margin";
 import { IssuePage } from "./IssuePage";
@@ -44,6 +44,38 @@ const issue: IssueDetails = {
   updated_at: "2026-09-09T00:00:00Z",
 };
 
+function sessionMessage(id: number, sessionId: string): Event {
+  const actor = { id: sessionId, kind: "session" as const };
+  return {
+    actor,
+    created_at: "2026-09-11T00:00:00Z",
+    id,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      author: actor,
+      body: `Message from ${sessionId}`,
+      created_at: "2026-09-11T00:00:00Z",
+      id: `message-${id}`,
+      issue_key: "CORE-1",
+    },
+    seq: id,
+    type: "message.created",
+  };
+}
+
+function liveAgent(sessionId: string, title: string): Agent {
+  return {
+    capabilities: [],
+    dir: "/workspace",
+    last_seen: 1,
+    machine_id: "machine-1",
+    roles: [],
+    session_id: sessionId,
+    title,
+  };
+}
+
 const openIssueAsk: Ask = {
   anchor: null,
   answer: null,
@@ -64,20 +96,28 @@ function issueWithExternalLink(url: string): IssueDetails {
   return { ...issue, external_links: [{ url }] };
 }
 
-function stubIssuePage(nextIssue: IssueDetails, inbox: Ask[] = []): () => void {
+function stubIssuePage(
+  nextIssue: IssueDetails,
+  inbox: Ask[] = [],
+  events: Event[] = [],
+  agents: Agent[] = []
+): () => void {
   const originalGetIssue = api.getIssue;
   const originalGetIssueEvents = api.getIssueEvents;
   const originalGetInbox = api.getInbox;
   const originalGetMyState = api.getMyState;
+  const originalListAgents = api.listAgents;
   api.getIssue = async () => nextIssue;
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false } });
-  api.getIssueEvents = async () => [];
+  api.getIssueEvents = async () => events;
+  api.listAgents = async () => agents;
   return () => {
     api.getIssue = originalGetIssue;
     api.getIssueEvents = originalGetIssueEvents;
     api.getInbox = originalGetInbox;
     api.getMyState = originalGetMyState;
+    api.listAgents = originalListAgents;
   };
 }
 
@@ -86,11 +126,15 @@ function CurrentRoute() {
   return <output data-testid="current-route">{`${location.pathname}${location.search}`}</output>;
 }
 
-function renderIssuePage(path = "/issues/CORE-1", navigateTo?: string, seedText?: string) {
-  const runtime = fakeDocumentRuntime({ text: seedText });
-  const queryClient = new QueryClient({
+function renderIssuePage(
+  path = "/issues/CORE-1",
+  navigateTo?: string,
+  seedText?: string,
+  queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
-  });
+  })
+) {
+  const runtime = fakeDocumentRuntime({ text: seedText });
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
   const view = render(
     <MemoryRouter initialEntries={[path]}>
@@ -150,6 +194,116 @@ test("IssuePage reads newest events when looking for active sessions", async () 
     api.getIssueEvents = originalGetIssueEvents;
     api.getInbox = originalGetInbox;
     api.getMyState = originalGetMyState;
+  }
+});
+
+test("IssuePage shows only live event sessions by their Envoy titles", async () => {
+  const liveSession = "0123456789abcdef";
+  const historicalSession = "fedcba9876543210";
+  const restore = stubIssuePage(
+    issue,
+    [],
+    [sessionMessage(1, liveSession), sessionMessage(2, historicalSession)],
+    [liveAgent(liveSession, "Planner (live)")]
+  );
+  const view = renderIssuePage();
+
+  try {
+    const active = await screen.findByRole("region", { name: "Active sessions" });
+    const planner = within(active).getByText("Planner (live)");
+    expect(planner.getAttribute("title")).toBe(liveSession);
+    expect(within(active).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(active).queryByText(historicalSession)).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage shortens a live session id when its Envoy title is blank", async () => {
+  const liveSession = "0123456789abcdef";
+  const restore = stubIssuePage(
+    issue,
+    [],
+    [sessionMessage(1, liveSession)],
+    [liveAgent(liveSession, " ")]
+  );
+  const view = renderIssuePage();
+
+  try {
+    const active = await screen.findByRole("region", { name: "Active sessions" });
+    const label = within(active).getByText("session:01234567…");
+    expect(label.getAttribute("title")).toBe(liveSession);
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage hides the active-sessions header when no event session is live", async () => {
+  const restore = stubIssuePage(issue, [], [sessionMessage(1, "not-live-01234567")]);
+  let agentsRequested = false;
+  api.listAgents = async () => {
+    agentsRequested = true;
+    return [];
+  };
+  const view = renderIssuePage();
+
+  try {
+    await waitFor(() => expect(agentsRequested).toBe(true));
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Active sessions" })).toBeNull()
+    );
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage hides the active-sessions header when live-agent lookup fails", async () => {
+  const restore = stubIssuePage(issue, [], [sessionMessage(1, "unavailable-012345")]);
+  let agentsRequested = false;
+  api.listAgents = async () => {
+    agentsRequested = true;
+    throw new Error("Envoy unavailable");
+  };
+  const view = renderIssuePage();
+
+  try {
+    await waitFor(() => expect(agentsRequested).toBe(true));
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Active sessions" })).toBeNull()
+    );
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage hides cached live sessions after agent refresh fails", async () => {
+  const liveSession = "0123456789abcdef";
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData<Agent[]>(["agents"], [liveAgent(liveSession, "Planner (cached)")], {
+    updatedAt: 0,
+  });
+  const restore = stubIssuePage(issue, [], [sessionMessage(1, liveSession)]);
+  let agentsRequested = false;
+  api.listAgents = async () => {
+    agentsRequested = true;
+    throw new Error("Envoy unavailable");
+  };
+  const view = renderIssuePage(undefined, undefined, undefined, queryClient);
+
+  try {
+    await waitFor(() => expect(agentsRequested).toBe(true));
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Active sessions" })).toBeNull()
+    );
+  } finally {
+    view.unmount();
+    restore();
   }
 });
 

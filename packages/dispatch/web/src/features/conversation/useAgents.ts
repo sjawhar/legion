@@ -8,9 +8,10 @@ const EMPTY_AGENTS: readonly Agent[] = [];
 
 export function useAgents(enabled: boolean): {
   agents: readonly Agent[];
+  isError: boolean;
   titles: ReadonlyMap<string, string>;
 } {
-  const { data } = useQuery({
+  const { data, isError } = useQuery({
     enabled,
     queryFn: () => api.listAgents(),
     queryKey: ["agents"],
@@ -24,5 +25,5 @@ export function useAgents(enabled: boolean): {
     [agents]
   );
 
-  return useMemo(() => ({ agents, titles }), [agents, titles]);
+  return useMemo(() => ({ agents, isError, titles }), [agents, isError, titles]);
 }
