@@ -7,7 +7,7 @@ import {
   roleTopic,
 } from "@legion/contracts";
 import { writeStatus } from "../../dispatch-client";
-import type { IssueStatus, WorkerRoleClaim } from "../../legion-state";
+import type { IssueStatus, LegionState, WorkerRoleClaim } from "../../legion-state";
 import { equalSecretHash, secretHash, spawnCapabilityKey } from "../auth";
 import { type RouteContext, rootForIssue, treeContains } from "../context";
 import { appRoleForLegionRole } from "../github";
@@ -20,14 +20,33 @@ import {
   validateContractResponse,
 } from "../http";
 
-/** Statuses the daemon owns off a phase's own completion, keyed by the role that just finished —
- * `planner`/`merger` completions never PATCH a status here: planning still reads as
- * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. */
-const PHASE_COMPLETE_STATUS: Partial<Record<LegionRole, IssueStatus>> = {
-  implementer: "testing",
-  tester: "needs_review",
-  reviewer: "retro",
-};
+/** The status the daemon PATCHes off a phase's own completion, keyed by the role that just
+ * finished. `planner`/`merger` completions never PATCH a status here: planning still reads as
+ * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. A reviewer
+ * completion checks the review verdict the `review` reducer already recorded on the issue's PR
+ * (`state.prs[...].reviewDecision`, set for a review at the PR's current head): changes requested
+ * returns the issue to `in_progress` for a corrective implementer instead of advancing to
+ * `retro`. */
+function phaseCompleteStatus(
+  state: LegionState,
+  issue: IssueKey,
+  role: LegionRole
+): IssueStatus | undefined {
+  switch (role) {
+    case "implementer":
+      return "testing";
+    case "tester":
+      return "needs_review";
+    case "reviewer":
+      return Object.values(state.prs).some(
+        (pr) => pr.key === issue && pr.reviewDecision === "changes_requested"
+      )
+        ? "in_progress"
+        : "retro";
+    default:
+      return undefined;
+  }
+}
 
 export async function handleWorkerSession(
   ctx: RouteContext,
@@ -318,7 +337,7 @@ export async function handlePhaseComplete(
   // Capture and clear the phase synchronously, before the publish await below.
   delete ctx.deps.state.phases[grant.issue];
 
-  const nextStatus = PHASE_COMPLETE_STATUS[grant.role];
+  const nextStatus = phaseCompleteStatus(ctx.deps.state, grant.issue, grant.role);
   if (nextStatus) {
     await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, grant.issue, nextStatus);
   }
