@@ -80,8 +80,8 @@ test("renders the header, the document, versions, and Referenced by for an unlin
     expect(screen.getByRole("link", { name: "Project CORE" }).getAttribute("href")).toBe(
       "/projects/CORE/documents"
     );
-    expect(screen.queryByRole("combobox", { name: /^Version$/ })).toBeNull();
-    expect(screen.getByRole("combobox", { name: "Artifact version" })).not.toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Artifact version" })).toBeNull();
+    expect(screen.getByRole("combobox", { name: "Version" })).not.toBeNull();
     const referencedBy = screen.getByRole("region", { name: "Referenced by" });
     expect(referencedBy.textContent).toContain("Comment · CORE-1");
     expect(

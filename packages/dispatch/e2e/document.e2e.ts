@@ -49,12 +49,8 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
     await bobPage.goto("/projects/CORE/documents/design-notes");
     await expect(documentEditor(alicePage)).toContainText("Design notes");
     await expect(documentEditor(bobPage)).toContainText("Design notes");
-    await expect(
-      alicePage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
-    await expect(
-      bobPage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
+    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
 
     await typeAtEnd(alicePage, "Alice wrote this.");
     await expect(documentEditor(bobPage)).toContainText("Alice wrote this.", { timeout: 1000 });
@@ -67,7 +63,7 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
       .toBeGreaterThan(1);
     const versionCount = await getArtifact(artifact.id).then((current) => current.versions.length);
     await expect(
-      alicePage.getByRole("combobox", { name: "Artifact version" }).locator("option")
+      alicePage.getByRole("combobox", { name: "Version" }).locator("option")
     ).toHaveCount(versionCount + 1);
     await alicePage.screenshot({
       path: testInfo.outputPath("project-document-live.png"),

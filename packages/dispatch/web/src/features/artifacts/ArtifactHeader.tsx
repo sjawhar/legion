@@ -11,11 +11,16 @@ import {
   inputClasses,
   linkHoverText,
   linkText,
+  secondaryButtonBorder,
+  secondaryButtonHoverBorder,
+  secondaryButtonText,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { ConnectionDot } from "../doc/ConnectionDot";
+import type { DocumentToolbar } from "../doc/ProofDocument";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
@@ -44,18 +49,28 @@ export function ArtifactHeader({
   artifact,
   children,
   highlight,
+  isClosed = false,
+  onShowDiffChange,
+  showDiff = false,
   showVersionPicker,
+  toolbar,
   version,
 }: {
   artifact: Artifact;
   children: ReactNode;
   highlight: boolean;
+  isClosed?: boolean;
+  onShowDiffChange?(next: boolean): void;
+  showDiff?: boolean;
   showVersionPicker: boolean;
+  toolbar?: DocumentToolbar;
   version: number | undefined;
 }): ReactNode {
   const [highlighted, setHighlighted] = useState(highlight);
   const navigate = useNavigate();
-  const versions = [...artifact.versions].sort((left, right) => right.number - left.number);
+  const versions = [...(toolbar?.versions ?? artifact.versions)].sort(
+    (left, right) => right.number - left.number
+  );
 
   useEffect(() => {
     if (!highlight) {
@@ -88,58 +103,84 @@ export function ArtifactHeader({
             {artifact.name}
           </h2>
         </div>
-        {showVersionPicker ? (
-          <label
-            className={`flex min-h-11 min-w-0 items-center gap-2 text-sm font-medium ${textSecondaryOnSurface}`}
-          >
-            Version
-            <select
-              aria-label="Artifact version"
-              className={`min-h-11 min-w-0 max-w-56 truncate rounded border px-2 py-2 font-normal ${inputClasses(true)}`}
-              onChange={(event) => {
-                const nextVersion = event.target.value;
-                navigate(
-                  artifact.issue_key === null
-                    ? buildProjectPath(
-                        nextVersion === ""
-                          ? {
-                              kind: "document",
-                              project: artifact.project,
-                              slug: artifact.slug,
-                            }
-                          : {
-                              kind: "document",
-                              project: artifact.project,
-                              slug: artifact.slug,
-                              version: Number(nextVersion),
-                            }
-                      )
-                    : buildIssuePath(
-                        nextVersion === ""
-                          ? {
-                              key: artifact.issue_key,
-                              kind: "artifact",
-                              slug: artifact.slug,
-                            }
-                          : {
-                              key: artifact.issue_key,
-                              kind: "artifact",
-                              slug: artifact.slug,
-                              version: Number(nextVersion),
-                            }
-                      )
-                );
-              }}
-              value={version ?? ""}
-            >
-              <option value="">Current</option>
-              {versions.map((item) => (
-                <option key={item.number} value={item.number}>
-                  {versionLabel(item)}
-                </option>
-              ))}
-            </select>
-          </label>
+        {showVersionPicker || toolbar !== undefined ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            {showVersionPicker ? (
+              <label
+                className={`flex min-h-11 min-w-0 items-center gap-2 text-sm font-medium ${textSecondaryOnSurface}`}
+              >
+                Version
+                <select
+                  aria-label="Version"
+                  className={`min-h-11 min-w-0 max-w-56 truncate rounded border px-2 py-2 font-normal ${inputClasses(true)}`}
+                  onChange={(event) => {
+                    const nextVersion = event.target.value;
+                    navigate(
+                      artifact.issue_key === null
+                        ? buildProjectPath(
+                            nextVersion === ""
+                              ? {
+                                  kind: "document",
+                                  project: artifact.project,
+                                  slug: artifact.slug,
+                                }
+                              : {
+                                  kind: "document",
+                                  project: artifact.project,
+                                  slug: artifact.slug,
+                                  version: Number(nextVersion),
+                                }
+                          )
+                        : buildIssuePath(
+                            nextVersion === ""
+                              ? {
+                                  key: artifact.issue_key,
+                                  kind: "artifact",
+                                  slug: artifact.slug,
+                                }
+                              : {
+                                  key: artifact.issue_key,
+                                  kind: "artifact",
+                                  slug: artifact.slug,
+                                  version: Number(nextVersion),
+                                }
+                          )
+                    );
+                  }}
+                  value={version ?? ""}
+                >
+                  <option value="">Current</option>
+                  {versions.map((item) => (
+                    <option key={item.number} value={item.number}>
+                      {versionLabel(item)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            {toolbar === undefined ? null : (
+              <>
+                <button
+                  className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+                  disabled={isClosed || toolbar.isNamingVersion}
+                  onClick={toolbar.requestNamedVersion}
+                  type="button"
+                >
+                  Name version
+                </button>
+                {version === undefined ? null : (
+                  <button
+                    className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+                    onClick={() => onShowDiffChange?.(!showDiff)}
+                    type="button"
+                  >
+                    {showDiff ? "Show version" : "Diff vs current"}
+                  </button>
+                )}
+                <ConnectionDot connection={toolbar.connection} />
+              </>
+            )}
+          </div>
         ) : null}
       </header>
       {children}

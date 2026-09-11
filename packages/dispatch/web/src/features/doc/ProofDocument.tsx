@@ -1,5 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -7,7 +15,8 @@ import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
 import { useMargin } from "../margin/Margin";
 import type { MarginOwner } from "../margin/useMarginItems";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
-import { type ConnectionState, colorForLogin } from "./connection";
+import type { ConnectionState } from "./connection";
+import { colorForLogin } from "./connection";
 import type { EditorHandle, StoredMark } from "./editor";
 import type { Highlight } from "./highlight";
 import { composerKindFor, markPlacements, setActiveMarkClass } from "./marks";
@@ -15,20 +24,29 @@ import { DocumentRuntime } from "./runtime";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
 
+/** The document chrome (version picker, Name version, Diff toggle, connection dot) used to
+ * render inside this component; it now renders in the page's own header, one bar with the
+ * title. `ProofDocument` reports the state that chrome needs through this bag instead of
+ * rendering it itself, so the header can sit above the tabs while the document stays below. */
+export interface DocumentToolbar {
+  connection: ConnectionState;
+  isNamingVersion: boolean;
+  nameVersionError: boolean;
+  requestNamedVersion(): void;
+  versions: Version[];
+}
+
 export interface ProofDocumentProps {
   artifact: Artifact;
   highlight: Highlight | undefined;
   highlightTerm?: string;
   isClosed: boolean;
   owner: MarginOwner;
-  showVersionPicker?: boolean;
+  showDiff: boolean;
+  onToolbarChange?(toolbar: DocumentToolbar | undefined): void;
   onVersionChange(version: number | null): void;
   user: AuthenticatedUser;
   version?: number;
-}
-
-function connectionLabel(connection: ConnectionState): string {
-  return connection === "connecting" ? "Connecting to the document…" : connection;
 }
 
 function removeMarkFromDocument(editor: EditorHandle, markId: string): void {
@@ -87,8 +105,9 @@ export function ProofDocument({
   highlightTerm = "",
   isClosed,
   owner,
+  onToolbarChange,
   onVersionChange,
-  showVersionPicker = true,
+  showDiff,
   user,
   version,
 }: ProofDocumentProps): ReactNode {
@@ -98,7 +117,6 @@ export function ProofDocument({
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
-  const [showDiff, setShowDiff] = useState(false);
   const { connect, createEditor } = useContext(DocumentRuntime);
   const {
     composeForMark,
@@ -143,7 +161,6 @@ export function ProofDocument({
         };
       });
       onVersionChange(created.number);
-      setShowDiff(false);
     },
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
@@ -151,11 +168,48 @@ export function ProofDocument({
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
       : undefined;
-  const versions = [...(artifactQuery.data?.versions ?? artifact.versions)].sort(
-    (left, right) => right.number - left.number
+  const versions = useMemo(
+    () =>
+      [...(artifactQuery.data?.versions ?? artifact.versions)].sort(
+        (left, right) => right.number - left.number
+      ),
+    [artifactQuery.data?.versions, artifact.versions]
   );
   isClosedRef.current = isClosed;
   userRef.current = user;
+
+  const requestNamedVersion = useCallback(() => {
+    const summary = window.prompt("What changed in this version?");
+    if (summary?.trim()) {
+      nameVersion.mutate(summary.trim());
+    }
+  }, [nameVersion.mutate]);
+
+  useEffect(() => {
+    onToolbarChange?.({
+      connection,
+      isNamingVersion: nameVersion.isPending,
+      nameVersionError: nameVersion.isError,
+      requestNamedVersion,
+      versions,
+    });
+  }, [
+    connection,
+    nameVersion.isError,
+    nameVersion.isPending,
+    onToolbarChange,
+    requestNamedVersion,
+    versions,
+  ]);
+
+  // Separate from the reporting effect above (whose cleanup would otherwise fire — and
+  // transiently clear the parent's toolbar — on every dependency change, not just on unmount).
+  // This one's only job is telling the parent there is no longer a toolbar to show once this
+  // artifact's instance is gone, so switching documents can't leave the header holding a stale
+  // `requestNamedVersion` that would name a version on the artifact the user navigated away from.
+  useEffect(() => {
+    return () => onToolbarChange?.(undefined);
+  }, [onToolbarChange]);
 
   useEffect(() => {
     const parent = root.current;
@@ -304,63 +358,8 @@ export function ProofDocument({
     }
   }, [highlightTerm]);
 
-  const requestNamedVersion = () => {
-    const summary = window.prompt("What changed in this version?");
-    if (summary?.trim()) {
-      nameVersion.mutate(summary.trim());
-    }
-  };
-
   return (
     <section aria-label="Document editor" className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            className="min-h-11"
-            disabled={isClosed || nameVersion.isPending}
-            onClick={requestNamedVersion}
-            type="button"
-          >
-            Name version
-          </button>
-          {version === undefined ? null : (
-            <button
-              className="min-h-11"
-              onClick={() => setShowDiff((visible) => !visible)}
-              type="button"
-            >
-              {showDiff ? "Show version" : "Diff vs current"}
-            </button>
-          )}
-        </div>
-        {showVersionPicker ? (
-          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
-            <span role="status">{connectionLabel(connection)}</span>
-            <label className="flex min-h-11 items-center gap-2">
-              Version
-              <select
-                aria-label="Version"
-                className="min-h-11"
-                onChange={(event) => {
-                  onVersionChange(event.target.value === "" ? null : Number(event.target.value));
-                  setShowDiff(false);
-                }}
-                value={version ?? ""}
-              >
-                <option value="">Current</option>
-                {versions.map((item: Version) => (
-                  <option key={item.number} value={item.number}>
-                    Version {item.number}
-                    {item.named && item.summary !== null ? ` — ${item.summary}` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        ) : (
-          <span role="status">{connectionLabel(connection)}</span>
-        )}
-      </div>
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
       {nameVersion.isError ? <p role="alert">Could not name this version.</p> : null}
       <article

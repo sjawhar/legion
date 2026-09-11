@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, render, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
@@ -10,7 +10,7 @@ import type { Artifact } from "../../api/types";
 import { MarginProvider, useMargin } from "../margin/Margin";
 import type { MarkPlacement } from "../margin/useMarginItems";
 import { colorForLogin } from "./connection";
-import { ProofDocument } from "./ProofDocument";
+import { type DocumentToolbar, ProofDocument } from "./ProofDocument";
 import { DocumentRuntime } from "./runtime";
 
 const artifact: Artifact = {
@@ -38,6 +38,7 @@ function renderProofDocument({
   highlightTerm,
   isClosed = false,
   queryClient = createQueryClient(),
+  showDiff = false,
   version,
 }: {
   document?: Artifact;
@@ -45,6 +46,7 @@ function renderProofDocument({
   highlightTerm?: string;
   isClosed?: boolean;
   queryClient?: QueryClient;
+  showDiff?: boolean;
   version?: number;
 } = {}) {
   const margin = {
@@ -67,13 +69,17 @@ function renderProofDocument({
         }
       | undefined,
   };
+  const toolbar: { current: DocumentToolbar | undefined } = { current: undefined };
+  const onToolbarChange = (next: DocumentToolbar) => {
+    toolbar.current = next;
+  };
   const onVersionChange = (_version: number | null) => {};
   const MarginProbe = () => {
     margin.current = useMargin();
     return null;
   };
   const renderDocument = (
-    next: { highlightTerm?: string; isClosed?: boolean; version?: number } = {}
+    next: { highlightTerm?: string; isClosed?: boolean; showDiff?: boolean; version?: number } = {}
   ) => (
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -85,8 +91,10 @@ function renderProofDocument({
               highlight={undefined}
               highlightTerm={next.highlightTerm ?? highlightTerm}
               isClosed={next.isClosed ?? isClosed}
+              onToolbarChange={onToolbarChange}
               owner={{ key: "CORE-1", kind: "issue" }}
               onVersionChange={onVersionChange}
+              showDiff={next.showDiff ?? showDiff}
               user={{ kind: "user", login: "alice" }}
               version={next.version ?? version}
             />
@@ -99,20 +107,24 @@ function renderProofDocument({
   return {
     ...fake,
     margin,
-    rerender(next: { highlightTerm?: string; isClosed?: boolean; version?: number }) {
+    rerender(next: {
+      highlightTerm?: string;
+      isClosed?: boolean;
+      showDiff?: boolean;
+      version?: number;
+    }) {
       view.rerender(renderDocument(next));
     },
+    toolbar,
     view,
   };
 }
 
 test("ProofDocument creates the editor on the synced document as the signed-in user", async () => {
-  const { connections, editors, sync, view } = renderProofDocument();
+  const { connections, editors, sync, toolbar, view } = renderProofDocument();
 
   try {
-    expect(within(view.container).getByRole("status").textContent).toBe(
-      "Connecting to the document…"
-    );
+    expect(toolbar.current?.connection).toBe("connecting");
     expect(connections).toHaveLength(1);
     sync();
     await waitFor(() => expect(editors).toHaveLength(1));
@@ -130,6 +142,14 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
   } finally {
     view.unmount();
   }
+});
+
+test("ProofDocument clears the parent's toolbar bag on unmount", () => {
+  const { toolbar, view } = renderProofDocument();
+
+  expect(toolbar.current).not.toBeUndefined();
+  view.unmount();
+  expect(toolbar.current).toBeUndefined();
 });
 
 test("ProofDocument highlights a routed search term again after route and document changes", async () => {
@@ -194,16 +214,16 @@ test("ProofDocument highlights a routed search term again after route and docume
   }
 });
 
-test("ProofDocument reflects connection status and read-only state", async () => {
-  const { editors, rerender, status, sync, view } = renderProofDocument();
+test("ProofDocument reports connection status through the toolbar bag and enforces read-only state", async () => {
+  const { editors, rerender, status, sync, toolbar, view } = renderProofDocument();
 
   try {
     sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     act(() => status("connected"));
-    expect(within(view.container).getByRole("status").textContent).toBe("connected");
+    await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
     act(() => status("offline"));
-    expect(within(view.container).getByRole("status").textContent).toBe("offline");
+    await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));
     rerender({ isClosed: true });
     expect(editors[0]?.readOnly).toBe(true);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
@@ -261,7 +281,7 @@ test("ProofDocument keeps the live editor mounted while a version is shown and d
   expect(connections[0]?.destroyed).toBe(true);
 });
 
-test("ProofDocument compares a selected version with the current settled text", async () => {
+test("ProofDocument compares a selected version with the current settled text when showDiff is true", async () => {
   const document = {
     ...artifact,
     versions: [
@@ -288,11 +308,10 @@ test("ProofDocument compares a selected version with the current settled text", 
     summary: null,
   });
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
-  const { sync, view } = renderProofDocument({ document, queryClient, version: 1 });
+  const { sync, view } = renderProofDocument({ document, queryClient, showDiff: true, version: 1 });
 
   try {
     sync();
-    fireEvent.click(within(view.container).getByRole("button", { name: "Diff vs current" }));
     await waitFor(() => {
       const diff = within(view.container).getByTestId("version-diff");
       expect(diff.querySelector("del")?.textContent).toContain("SQLite");

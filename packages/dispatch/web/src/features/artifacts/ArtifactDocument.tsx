@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import type { Highlight } from "../doc/highlight";
-import { ProofDocument } from "../doc/ProofDocument";
+import { type DocumentToolbar, ProofDocument } from "../doc/ProofDocument";
 import type { MarginOwner } from "../margin/useMarginItems";
 
 export function ArtifactDocument({
@@ -14,8 +14,9 @@ export function ArtifactDocument({
   highlightTerm,
   isClosed,
   owner,
+  onToolbarChange,
   onVersionChange,
-  showVersionPicker,
+  showDiff,
   version,
 }: {
   artifact: Artifact;
@@ -24,7 +25,8 @@ export function ArtifactDocument({
   highlightTerm?: string;
   isClosed: boolean;
   owner: MarginOwner;
-  showVersionPicker?: boolean;
+  showDiff: boolean;
+  onToolbarChange?(toolbar: DocumentToolbar | undefined): void;
   onVersionChange: (version: number | null) => void;
   version: number | undefined;
 }): ReactNode {
@@ -76,8 +78,9 @@ export function ArtifactDocument({
       highlight={highlight}
       highlightTerm={highlightTerm}
       isClosed={isClosed}
+      onToolbarChange={onToolbarChange}
       owner={owner}
-      showVersionPicker={showVersionPicker}
+      showDiff={showDiff}
       key={artifact.id}
       onVersionChange={onVersionChange}
       user={user.data}

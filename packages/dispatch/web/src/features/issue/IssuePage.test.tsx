@@ -826,8 +826,10 @@ test("IssuePage opens a non-spec document at its version route", async () => {
   try {
     await screen.findByRole("tab", { name: "Artifacts", selected: true });
     expect(screen.getByRole("heading", { name: "design.md" })).not.toBeNull();
-    expect(screen.queryByLabelText("Artifact version")).toBeNull();
-    fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
+    expect(screen.getAllByRole("combobox", { name: "Version" })).toHaveLength(1);
+    fireEvent.change(screen.getByRole("combobox", { name: "Version" }), {
+      target: { value: "1" },
+    });
     await waitFor(() =>
       expect(screen.getByTestId("current-route").textContent).toBe(
         "/issues/CORE-1/artifacts/design?v=1"
@@ -955,6 +957,34 @@ test("IssuePage encodes primary-document version selection in the artifact route
         "/issues/CORE-1/artifacts/spec?v=1"
       )
     );
+  } finally {
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage renders exactly one Version combobox on the Spec tab", async () => {
+  const primaryArtifact = issue.artifacts[0];
+  if (primaryArtifact === undefined) {
+    throw new Error("IssuePage test fixture needs a primary document.");
+  }
+  const restore = stubIssuePage(issue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...primaryArtifact,
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Primary",
+    version: 1,
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByRole("combobox", { name: "Version" });
+    expect(screen.getAllByRole("combobox", { name: "Version" })).toHaveLength(1);
+    expect(screen.queryByTestId("artifact-header")).toBeNull();
   } finally {
     view.unmount();
     getArtifact.mockRestore();
