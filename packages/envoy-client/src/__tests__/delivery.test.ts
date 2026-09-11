@@ -122,6 +122,7 @@ describe("renderInbound dispatch events", () => {
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
         payload: {
+          id: "ask-1",
           opened_event_id: 7,
           question: "Which API?",
           options: [{ label: "JSON" }, { label: "MCP" }],
@@ -155,6 +156,7 @@ describe("renderInbound dispatch events", () => {
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
         payload: {
+          id: "ask-1",
           opened_event_id: 7,
           question: "Which API?",
           options: [{ label: "JSON" }, { label: "MCP" }],
@@ -188,6 +190,7 @@ describe("renderInbound dispatch events", () => {
       type: "ask.resolved",
       actor: { kind: "session", id: "session-1" },
       payload: {
+        id: "ask-1",
         opened_event_id: 7,
         question: "Which API?",
         options: [{ label: "JSON" }, { label: "MCP" }],
@@ -230,6 +233,7 @@ describe("renderInbound dispatch events", () => {
       type: "ask.edited",
       actor: { kind: "session", id: "session-1" },
       payload: {
+        id: "ask-1",
         opened_event_id: 7,
         question: "Which transport should we implement?",
         options: [{ label: "REST" }, { label: "gRPC" }],
@@ -353,9 +357,20 @@ describe("renderInbound dispatch events", () => {
     const cases: Array<{ type: string; payload: object; expectedPayload: unknown }> = [
       { type: "issue.updated", payload: issue, expectedPayload: issue },
       {
+        type: "ask.answered",
+        payload: answeredAsk,
+        expectedPayload: {
+          id: "ask-1",
+          opened_event_id: 7,
+          question: "Which API?",
+          options: [{ label: "JSON" }, { label: "MCP" }],
+          answer: { selected: ["JSON"], text: "Use JSON HTTP." },
+        },
+      },
+      {
         type: "artifact.created",
-        payload: { artifact: { id: "artifact-1", name: "spec.md" } },
-        expectedPayload: { artifact: { name: "spec.md" } },
+        payload: { artifact: { id: "artifact-1", slug: "spec-md", name: "spec.md" } },
+        expectedPayload: { artifact: { id: "artifact-1", slug: "spec-md", name: "spec.md" } },
       },
       {
         type: "artifact.version",
@@ -372,6 +387,7 @@ describe("renderInbound dispatch events", () => {
           diff: "@@ -1 +1 @@\n-MCP\n+JSON",
         },
         expectedPayload: {
+          artifact_id: "artifact-1",
           name: "spec.md",
           version: { number: 3, summary: "Clarify transport" },
           diff: "@@ -1 +1 @@\n-MCP\n+JSON",

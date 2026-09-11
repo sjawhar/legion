@@ -406,10 +406,19 @@ async function resolveArtifact(
     } catch (error) {
       // The project artifact route resolves only by slug; a caller that supplied the
       // filename (as shown in the dispatch_artifact upload result) falls back to a
-      // name match against the project's artifact list.
+      // name match against the project's unlinked documents. Issue-attached artifacts
+      // in the same project are excluded: a name match there would silently read or
+      // mutate an issue's artifact instead of the intended project document.
       if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
-      const artifacts = await client.listProjectArtifacts(owner.project);
-      const artifact = artifacts.find((candidate) => candidate.name === artifactReference);
+      const artifacts = await client.listProjectArtifacts(owner.project, true);
+      const matches = artifacts.filter((candidate) => candidate.name === artifactReference);
+      if (matches.length > 1) {
+        throw new Error(
+          `artifact name ${artifactReference} is ambiguous in project ${owner.project}; ` +
+            `${matches.length} documents share it — use its slug instead`
+        );
+      }
+      const artifact = matches[0];
       if (!artifact) throw error;
       return { owner, artifact };
     }
