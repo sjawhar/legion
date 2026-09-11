@@ -12,7 +12,7 @@ import { AskCard } from "../inbox/AskCard";
 import { Unfurl } from "../refs/Unfurl";
 import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
 import { ThreadList } from "./ThreadList";
-import type { MarginItemAction, MarkPlacement, Thread } from "./useMarginItems";
+import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
 
 export interface MarginComposer {
   anchor: ComposerAnchor | undefined;
@@ -33,7 +33,7 @@ interface CommentsTabProps {
   hoveredItemId: string | undefined;
   hoveredMarkId: string | undefined;
   isClosed: boolean;
-  issueKey: string;
+  owner: MarginOwner;
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
@@ -91,7 +91,7 @@ export function CommentsTab({
   hoveredItemId,
   hoveredMarkId,
   isClosed,
-  issueKey,
+  owner,
   markPlacements,
   needsYou,
   onAction,
@@ -113,12 +113,14 @@ export function CommentsTab({
 }: CommentsTabProps): ReactNode {
   return (
     <div className="space-y-3 pt-3">
-      {composer === undefined || isClosed ? null : (
+      {composer === undefined ||
+      isClosed ||
+      (owner.kind === "document" && composer.kind === "message") ? null : (
         <Composer
           anchor={composer.anchor}
           autoFocus
           kind={composer.kind}
-          issueKey={issueKey}
+          owner={owner}
           onClose={onCloseComposer}
           onSaved={onComposerSaved}
           replyTo={composer.replyTo}
@@ -177,6 +179,7 @@ export function CommentsTab({
               pendingActionId={pendingActionId}
               resolvedThreads={resolvedThreads}
               showResolved={showResolved}
+              owner={owner}
               threads={threads}
               viewerLogin={viewerLogin}
             />

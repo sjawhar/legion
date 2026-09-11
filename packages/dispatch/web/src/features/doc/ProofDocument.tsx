@@ -5,7 +5,8 @@ import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
 import { useMargin } from "../margin/Margin";
-import { buildIssuePath } from "../refs/routes";
+import type { MarginOwner } from "../margin/useMarginItems";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { type ConnectionState, colorForLogin } from "./connection";
 import type { EditorHandle, StoredMark } from "./editor";
 import type { Highlight } from "./highlight";
@@ -19,7 +20,8 @@ export interface ProofDocumentProps {
   highlight: Highlight | undefined;
   highlightTerm?: string;
   isClosed: boolean;
-  issueKey: string;
+  owner: MarginOwner;
+  showVersionPicker?: boolean;
   onVersionChange(version: number | null): void;
   user: AuthenticatedUser;
   version?: number;
@@ -84,8 +86,9 @@ export function ProofDocument({
   highlight,
   highlightTerm = "",
   isClosed,
-  issueKey,
+  owner,
   onVersionChange,
+  showVersionPicker = true,
   user,
   version,
 }: ProofDocumentProps): ReactNode {
@@ -313,6 +316,7 @@ export function ProofDocument({
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3">
         <div className="flex flex-wrap items-center gap-2">
           <button
+            className="min-h-11"
             disabled={isClosed || nameVersion.isPending}
             onClick={requestNamedVersion}
             type="button"
@@ -320,33 +324,42 @@ export function ProofDocument({
             Name version
           </button>
           {version === undefined ? null : (
-            <button onClick={() => setShowDiff((visible) => !visible)} type="button">
+            <button
+              className="min-h-11"
+              onClick={() => setShowDiff((visible) => !visible)}
+              type="button"
+            >
               {showDiff ? "Show version" : "Diff vs current"}
             </button>
           )}
         </div>
-        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
+        {showVersionPicker ? (
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
+            <span role="status">{connectionLabel(connection)}</span>
+            <label className="flex min-h-11 items-center gap-2">
+              Version
+              <select
+                aria-label="Version"
+                className="min-h-11"
+                onChange={(event) => {
+                  onVersionChange(event.target.value === "" ? null : Number(event.target.value));
+                  setShowDiff(false);
+                }}
+                value={version ?? ""}
+              >
+                <option value="">Current</option>
+                {versions.map((item: Version) => (
+                  <option key={item.number} value={item.number}>
+                    Version {item.number}
+                    {item.named && item.summary !== null ? ` — ${item.summary}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : (
           <span role="status">{connectionLabel(connection)}</span>
-          <label>
-            Version
-            <select
-              aria-label="Version"
-              onChange={(event) => {
-                onVersionChange(event.target.value === "" ? null : Number(event.target.value));
-                setShowDiff(false);
-              }}
-              value={version ?? ""}
-            >
-              <option value="">Current</option>
-              {versions.map((item: Version) => (
-                <option key={item.number} value={item.number}>
-                  Version {item.number}
-                  {item.named && item.summary !== null ? ` — ${item.summary}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+        )}
       </div>
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
       {nameVersion.isError ? <p role="alert">Could not name this version.</p> : null}
@@ -365,13 +378,19 @@ export function ProofDocument({
           </p>
           <Link
             to={
-              artifact.primary
-                ? buildIssuePath({ key: issueKey, kind: "spec" })
-                : buildIssuePath({
-                    key: issueKey,
-                    kind: "artifact",
-                    slug: artifact.slug,
+              owner.kind === "document"
+                ? buildProjectPath({
+                    kind: "document",
+                    project: owner.project,
+                    slug: owner.slug,
                   })
+                : artifact.primary
+                  ? buildIssuePath({ key: owner.key, kind: "spec" })
+                  : buildIssuePath({
+                      key: owner.key,
+                      kind: "artifact",
+                      slug: artifact.slug,
+                    })
             }
           >
             View current version

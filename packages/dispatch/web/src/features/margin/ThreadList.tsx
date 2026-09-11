@@ -1,8 +1,13 @@
 import { type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { ThreadCard } from "./ThreadCard";
-import type { MarginItemAction, MarkPlacement, Thread } from "./useMarginItems";
-import { threadMarkId } from "./useMarginItems";
+import {
+  type MarginItemAction,
+  type MarginOwner,
+  type MarkPlacement,
+  type Thread,
+  threadMarkId,
+} from "./useMarginItems";
 
 interface ThreadListProps {
   actionErrorId: string | undefined;
@@ -11,6 +16,7 @@ interface ThreadListProps {
   hoveredItemId: string | undefined;
   hoveredMarkId: string | undefined;
   isClosed: boolean;
+  owner: MarginOwner;
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   onAction(id: string, action: MarginItemAction): void;
   onEdit(id: string, body: string): Promise<unknown>;
@@ -47,6 +53,7 @@ export function ThreadList({
   onSelect,
   onToggle,
   onToggleResolved,
+  owner,
   pendingActionId,
   resolvedThreads,
   showResolved,
@@ -118,6 +125,7 @@ export function ThreadList({
       onRetryAction={onRetryAction}
       onSelect={() => onSelect(thread.key)}
       onToggle={() => onToggle(thread.key)}
+      owner={owner}
       pendingAction={pendingActionId === thread.key}
       thread={thread}
       viewerLogin={viewerLogin}

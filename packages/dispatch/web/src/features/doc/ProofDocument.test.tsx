@@ -85,7 +85,7 @@ function renderProofDocument({
               highlight={undefined}
               highlightTerm={next.highlightTerm ?? highlightTerm}
               isClosed={next.isClosed ?? isClosed}
-              issueKey="CORE-1"
+              owner={{ key: "CORE-1", kind: "issue" }}
               onVersionChange={onVersionChange}
               user={{ kind: "user", login: "alice" }}
               version={next.version ?? version}

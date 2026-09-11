@@ -1,12 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
-import { ArtifactsTab } from "./ArtifactsTab";
+import { ArtifactsTab, ReferencedBy } from "./ArtifactsTab";
 
 const artifact: Artifact = {
   created_at: "2026-09-09T00:00:00Z",
@@ -134,5 +134,100 @@ test("artifacts tab renders no make-primary control", async () => {
   } finally {
     listArtifacts.mockRestore();
     getArtifact.mockRestore();
+  }
+});
+test("References lists closure members with chip, via, and depth, names truncation, and renders an artifact source without an issue key", async () => {
+  const referencedDocument: Artifact = {
+    ...artifact,
+    id: "artifact-notes",
+    issue_key: null,
+    kind: "doc",
+    name: "Design notes",
+    primary: false,
+    slug: "design-notes",
+  };
+  const listArtifacts = spyOn(api, "listArtifacts").mockResolvedValue([artifact]);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...artifact,
+    referenced_by: [
+      {
+        excerpt: "Design notes links here",
+        id: "artifact-notes",
+        issue_key: null,
+        kind: "artifact",
+        project: "CORE",
+        ref_key: "CORE/design-notes",
+      },
+    ],
+  });
+  const getIssueReferences = spyOn(api, "getIssueReferences").mockResolvedValue({
+    members: [
+      {
+        artifact: referencedDocument,
+        depth: 1,
+        via: { id: "comment-1", kind: "comment" },
+      },
+    ],
+    truncated: true,
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "artifacts" })]}>
+      <QueryClientProvider client={queryClient}>
+        <ArtifactsTab />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    const references = await within(view.container).findByRole("region", { name: "References" });
+    expect(
+      within(references).getByRole("link", { name: "Design notes" }).getAttribute("href")
+    ).toBe("/projects/CORE/documents/design-notes");
+    expect(references.textContent).toContain("CORE");
+    expect(references.textContent).toContain("via comment");
+    expect(references.textContent).toContain("depth 1");
+    expect(references.textContent).toContain("more references beyond 8 hops");
+
+    const referencedBy = within(view.container).getByRole("region", { name: "Referenced by" });
+    expect(
+      within(referencedBy)
+        .getByRole("link", { name: "Artifact · CORE/design-notes" })
+        .getAttribute("href")
+    ).toBe("/projects/CORE/documents/design-notes");
+  } finally {
+    view.unmount();
+    getArtifact.mockRestore();
+    getIssueReferences.mockRestore();
+    listArtifacts.mockRestore();
+  }
+});
+
+test("Referenced by renders an artifact source with an issue key through its artifact path", () => {
+  const view = render(
+    <MemoryRouter>
+      <ReferencedBy
+        references={[
+          {
+            excerpt: "Source artifact",
+            id: "artifact-source",
+            issue_key: "CORE-1",
+            kind: "artifact",
+            project: "CORE",
+            ref_key: "CORE-1/source-doc",
+          },
+        ]}
+      />
+    </MemoryRouter>
+  );
+
+  try {
+    expect(screen.getByRole("link", { name: "Artifact · CORE-1" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/artifacts/source-doc"
+    );
+  } finally {
+    view.unmount();
   }
 });

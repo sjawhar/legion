@@ -44,7 +44,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           historicalAsks: [],
           marginRef: { current: null },
           isClosed: false,
-          issueKey: "CORE-1",
+          owner: { key: "CORE-1", kind: "issue" },
           issuePending: false,
           openAskCount: 3,
           onSelectCard: () => {},
@@ -102,6 +102,86 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
         .map((tab) => tab.textContent)
     ).toEqual(["Comments", "Pinned"]);
     expect(within(view.container).queryByRole("tab", { name: "Artifacts" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+test("a document owner shows the Comments tab only and no message composer", () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <MarginSheet
+        model={{
+          actions: {
+            closeComposer: () => {},
+            onAction: () => {},
+            onComposerSaved: () => {},
+            onEdit: async () => undefined,
+            onRetryAction: () => {},
+            onRetryAnsweredAsk: undefined,
+            onRetryComments: () => {},
+            onRetryIssue: () => {},
+            onToggleResolved: () => {},
+            onToggleThread: () => {},
+          },
+          composer: { anchor: undefined, kind: "message" },
+          items: {
+            actionErrorId: undefined,
+            answeredAsksPending: false,
+            asksPending: false,
+            commentsError: false,
+            commentsPending: false,
+            historicalAsks: [],
+            isClosed: false,
+            issueError: false,
+            issuePending: false,
+            marginRef: { current: null },
+            needsYou: [],
+            onSelectCard: () => {},
+            openAskCount: 0,
+            owner: {
+              artifactId: "artifact-1",
+              kind: "document",
+              project: "CORE",
+              slug: "design-notes",
+            },
+            pendingActionId: undefined,
+            pinned: [],
+            pinnedIds: [],
+            resolvedThreads: [],
+            threads: [],
+            viewerLogin: "alice",
+            visibleArtifact: {
+              ...specArtifact,
+              issue_key: null,
+              primary: false,
+              slug: "design-notes",
+            },
+          },
+          placement: { markPlacements: new Map() },
+          selection: {
+            expandedThreadKey: undefined,
+            hoveredItemId: undefined,
+            hoveredMarkId: undefined,
+            selectedItemId: undefined,
+            showResolved: false,
+          },
+          sheet: { closeThread: () => {}, expanded: true, threadKey: undefined, toggle: () => {} },
+          tab: { set: () => {}, value: "comments" },
+        }}
+      />
+    </QueryClientProvider>
+  );
+
+  try {
+    expect(
+      within(view.container)
+        .getAllByRole("tab")
+        .map((tab) => tab.textContent)
+    ).toEqual(["Comments"]);
+    expect(screen.queryByRole("form", { name: "Message composer" })).toBeNull();
   } finally {
     view.unmount();
   }
@@ -172,7 +252,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
             historicalAsks: [],
             isClosed: false,
             issueError: false,
-            issueKey: "CORE-1",
+            owner: { key: "CORE-1", kind: "issue" },
             issuePending: false,
             marginRef: { current: null },
             needsYou: [],

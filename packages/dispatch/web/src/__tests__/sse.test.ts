@@ -259,7 +259,7 @@ test("a resolved ask refreshes the inbox, issue count, and its reply thread", ()
   ]);
 });
 
-test("a document event invalidates the artifact, its project's documents, projects, and the inbox for asks", () => {
+test("a document event invalidates the artifact, document route, project's documents, projects, and the inbox for asks", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -275,6 +275,7 @@ test("a document event invalidates the artifact, its project's documents, projec
 
   expect(invalidated).toEqual([
     ["artifact", "artifact-1"],
+    ["artifact-ref"],
     ["project", "CORE", "artifacts"],
     ["projects"],
     ["inbox"],

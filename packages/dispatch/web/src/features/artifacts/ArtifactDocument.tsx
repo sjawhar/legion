@@ -5,6 +5,7 @@ import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import type { Highlight } from "../doc/highlight";
 import { ProofDocument } from "../doc/ProofDocument";
+import type { MarginOwner } from "../margin/useMarginItems";
 
 export function ArtifactDocument({
   artifact,
@@ -12,8 +13,9 @@ export function ArtifactDocument({
   commentId,
   highlightTerm,
   isClosed,
-  issueKey,
+  owner,
   onVersionChange,
+  showVersionPicker,
   version,
 }: {
   artifact: Artifact;
@@ -21,20 +23,32 @@ export function ArtifactDocument({
   commentId?: string;
   highlightTerm?: string;
   isClosed: boolean;
-  issueKey: string;
+  owner: MarginOwner;
+  showVersionPicker?: boolean;
   onVersionChange: (version: number | null) => void;
   version: number | undefined;
 }): ReactNode {
   const user = useQuery({ queryKey: ["whoami"], queryFn: () => api.whoAmI() });
   const comments = useQuery({
     enabled: commentId !== undefined,
-    queryKey: ["comments", issueKey, artifact.id],
-    queryFn: () => api.listComments(issueKey, artifact.id),
+    queryKey:
+      owner.kind === "issue"
+        ? ["comments", owner.key, artifact.id]
+        : ["artifact", owner.artifactId, "comments"],
+    queryFn: () =>
+      owner.kind === "issue"
+        ? api.listComments(owner.key, artifact.id)
+        : api.listArtifactComments(owner.artifactId),
   });
   const ask = useQuery({
     enabled: askId !== undefined,
     queryKey: ["ask", askId],
-    queryFn: () => api.getAsk(askId ?? ""),
+    queryFn: () => {
+      if (askId === undefined) {
+        throw new Error("Selected ask query requires an ask id.");
+      }
+      return api.getAsk(askId);
+    },
   });
   const selectedItem =
     commentId === undefined ? ask.data?.ask : comments.data?.find((item) => item.id === commentId);
@@ -62,7 +76,8 @@ export function ArtifactDocument({
       highlight={highlight}
       highlightTerm={highlightTerm}
       isClosed={isClosed}
-      issueKey={issueKey}
+      owner={owner}
+      showVersionPicker={showVersionPicker}
       key={artifact.id}
       onVersionChange={onVersionChange}
       user={user.data}

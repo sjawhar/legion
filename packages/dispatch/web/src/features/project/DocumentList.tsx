@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
@@ -18,11 +18,10 @@ import {
   secondaryButtonText,
   surfaceMutedBg,
   textMutedOnCanvas,
-  textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { Upload } from "../artifacts/Upload";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
 function documentUpdatedAt(document: Artifact): string {
@@ -37,9 +36,16 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
     >
       <div className="min-w-0">
         {document.issue_key === null ? (
-          <span className={`block truncate font-medium ${textPrimaryOnCanvas}`}>
+          <Link
+            className={`block truncate font-medium ${linkText} ${linkHoverText}`}
+            to={buildProjectPath({
+              kind: "document",
+              project: document.project,
+              slug: document.slug,
+            })}
+          >
             {document.name}
-          </span>
+          </Link>
         ) : (
           <Link
             className={`block truncate font-medium ${linkText} ${linkHoverText}`}
@@ -75,6 +81,7 @@ export function DocumentList({ project }: { project: string }): ReactNode {
   const [duplicateName, setDuplicateName] = useState<string | undefined>();
   const queryClient = useQueryClient();
   const submitGuard = useSubmitGuard();
+  const navigate = useNavigate();
   const documents = useQuery({
     queryKey: ["project", project, "artifacts"],
     queryFn: () => api.listProjectArtifacts(project, true),
@@ -82,10 +89,11 @@ export function DocumentList({ project }: { project: string }): ReactNode {
   const create = useMutation({
     mutationFn: (name: string) => api.uploadArtifact({ project }, { content: `# ${name}\n`, name }),
     onSettled: () => submitGuard.release(),
-    onSuccess: () => {
+    onSuccess: ({ artifact }) => {
       setCreating(false);
       setTitle("");
       void queryClient.invalidateQueries({ queryKey: ["project", project, "artifacts"] });
+      navigate(buildProjectPath({ kind: "document", project, slug: artifact.slug }));
     },
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {

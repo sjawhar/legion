@@ -1,9 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { api } from "../../api/client";
 import type { Artifact, Comment, Event } from "../../api/types";
 import {
   anchoredThreadComments,
@@ -122,7 +123,7 @@ test("unanchored comments and their replies leave the margin; replies to anchore
 
 function OrderedItems() {
   const { items } = useMarginItems(
-    "CORE-1",
+    { key: "CORE-1", kind: "issue" },
     "comments",
     artifact,
     new Map([
@@ -174,7 +175,12 @@ test("useMarginItems orders found and missing document anchors while excluding u
 });
 
 function ThreadItems() {
-  const { resolvedThreads, threads } = useMarginItems("CORE-1", "comments", artifact, new Map());
+  const { resolvedThreads, threads } = useMarginItems(
+    { key: "CORE-1", kind: "issue" },
+    "comments",
+    artifact,
+    new Map()
+  );
   return createElement(
     "output",
     { "aria-label": "Margin thread groups" },
@@ -219,5 +225,90 @@ test("useMarginItems groups replies flat under their root and separates resolved
     );
   } finally {
     view.unmount();
+  }
+});
+function DocumentItems() {
+  const items = useMarginItems(
+    {
+      artifactId: "artifact-1",
+      kind: "document",
+      project: "CORE",
+      slug: "design-notes",
+    },
+    "comments",
+    { ...artifact, issue_key: null, primary: false, slug: "design-notes" },
+    new Map()
+  );
+  return createElement(
+    "output",
+    { "aria-label": "Document margin state" },
+    JSON.stringify({
+      closed: items.isClosed,
+      itemIds: items.items.map(marginItemId),
+      pinned: items.pinnedIds,
+    })
+  );
+}
+
+test("a document owner loads asks and comments from the artifact routes, hides pinned, and is never closed", async () => {
+  const documentComment = {
+    ...comment("comment-1", "m-1", "2026-09-09T00:00:00Z"),
+    issue_key: null,
+  };
+  const listArtifactAsks = spyOn(api, "listArtifactAsks").mockResolvedValue([
+    {
+      anchor: {
+        artifact_id: "artifact-1",
+        mark_id: "ask-mark",
+        orphaned: false,
+        quote: "Design",
+        version: 1,
+      },
+      answer: null,
+      artifact_id: "artifact-1",
+      author: { id: "session-1", kind: "session" as const },
+      created_at: "2026-09-09T00:00:00Z",
+      edited_at: null,
+      id: "ask-1",
+      issue_key: null,
+      multiple: false,
+      opened_event_id: 1,
+      options: [],
+      question: "Should this ship?",
+      state: "open" as const,
+      urgency: "med" as const,
+    },
+  ]);
+  const listArtifactComments = spyOn(api, "listArtifactComments").mockResolvedValue([
+    documentComment,
+  ]);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const view = render(
+    createElement(
+      MemoryRouter,
+      { initialEntries: ["/projects/CORE/documents/design-notes"] },
+      createElement(QueryClientProvider, { client: queryClient }, createElement(DocumentItems))
+    )
+  );
+
+  try {
+    await waitFor(() => expect(listArtifactAsks).toHaveBeenCalledWith("artifact-1", "all"));
+    await waitFor(() => expect(listArtifactComments).toHaveBeenCalledWith("artifact-1"));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Document margin state").textContent).toContain("comment-1")
+    );
+    expect(screen.getByLabelText("Document margin state").textContent).toContain('"closed":false');
+    expect(screen.getByLabelText("Document margin state").textContent).toContain('"pinned":[]');
+    expect(getMyState).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listArtifactAsks.mockRestore();
+    listArtifactComments.mockRestore();
   }
 });

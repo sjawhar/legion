@@ -58,14 +58,16 @@ function renderList(artifacts: Artifact[]) {
   return { listProjectArtifacts, view };
 }
 
-test("Documents requests unlinked project artifacts and lists their kind and update", async () => {
+test("Documents requests unlinked project artifacts and links a document to its project page", async () => {
   const { listProjectArtifacts, view } = renderList([document()]);
 
   try {
     const unlinked = await screen.findByRole("listitem", { name: /Design notes/ });
     expect(unlinked.textContent).toContain("doc");
-    expect(unlinked.querySelector("a")).toBeNull();
     expect(unlinked.querySelector("time")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Design notes" }).getAttribute("href")).toBe(
+      "/projects/CORE/documents/design-notes"
+    );
     expect(listProjectArtifacts).toHaveBeenCalledWith("CORE", true);
   } finally {
     view.unmount();
@@ -73,7 +75,7 @@ test("Documents requests unlinked project artifacts and lists their kind and upd
   }
 });
 
-test("New document posts the title as an H1 and keeps the list route until the document page exists", async () => {
+test("New document opens its document page", async () => {
   const { listProjectArtifacts, view } = renderList([]);
   const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue(uploadResponse());
 
@@ -91,7 +93,9 @@ test("New document posts the title as an H1 and keeps the list route until the d
         { content: "# Design notes\n", name: "Design notes" }
       )
     );
-    expect(screen.getByTestId("location").textContent).toBe("/");
+    expect(screen.getByTestId("location").textContent).toBe(
+      "/projects/CORE/documents/design-notes"
+    );
   } finally {
     view.unmount();
     listProjectArtifacts.mockRestore();

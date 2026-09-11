@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import type { Artifact, Version } from "../../api/types";
 import {
@@ -16,7 +16,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
 export function artifactVersionUrl(artifactID: string, version: number): string {
@@ -42,14 +42,12 @@ function versionLabel(version: Version): string {
 
 export function ArtifactHeader({
   artifact,
-  issueKey,
   children,
   highlight,
   showVersionPicker,
   version,
 }: {
   artifact: Artifact;
-  issueKey: string;
   children: ReactNode;
   highlight: boolean;
   showVersionPicker: boolean;
@@ -78,6 +76,14 @@ export function ArtifactHeader({
         data-testid="artifact-header"
       >
         <div className="min-w-0">
+          {artifact.issue_key === null ? (
+            <Link
+              to={buildProjectPath({ kind: "documents", project: artifact.project })}
+              className={`inline-flex min-h-11 items-center text-sm font-semibold ${linkText} ${linkHoverText}`}
+            >
+              Project {artifact.project}
+            </Link>
+          ) : null}
           <h2 className={`truncate text-lg font-semibold ${textPrimaryOnSurface}`}>
             {artifact.name}
           </h2>
@@ -93,16 +99,35 @@ export function ArtifactHeader({
               onChange={(event) => {
                 const nextVersion = event.target.value;
                 navigate(
-                  buildIssuePath(
-                    nextVersion === ""
-                      ? { key: issueKey, kind: "artifact", slug: artifact.slug }
-                      : {
-                          key: issueKey,
-                          kind: "artifact",
-                          slug: artifact.slug,
-                          version: Number(nextVersion),
-                        }
-                  )
+                  artifact.issue_key === null
+                    ? buildProjectPath(
+                        nextVersion === ""
+                          ? {
+                              kind: "document",
+                              project: artifact.project,
+                              slug: artifact.slug,
+                            }
+                          : {
+                              kind: "document",
+                              project: artifact.project,
+                              slug: artifact.slug,
+                              version: Number(nextVersion),
+                            }
+                      )
+                    : buildIssuePath(
+                        nextVersion === ""
+                          ? {
+                              key: artifact.issue_key,
+                              kind: "artifact",
+                              slug: artifact.slug,
+                            }
+                          : {
+                              key: artifact.issue_key,
+                              kind: "artifact",
+                              slug: artifact.slug,
+                              version: Number(nextVersion),
+                            }
+                      )
                 );
               }}
               value={version ?? ""}

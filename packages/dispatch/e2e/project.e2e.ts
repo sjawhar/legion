@@ -2,9 +2,11 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   createAsk,
+  createComment,
   createIssue,
   createIssueArtifact,
   createProject,
+  createProjectDocument,
   getIssue,
   patchIssue,
   putIssueState,
@@ -115,8 +117,12 @@ test("project page groups issues by status in board order; filters narrow issues
     await page.getByRole("button", { name: "New document" }).click();
     await page.getByRole("textbox", { name: "Title" }).fill("Design notes");
     await page.getByRole("button", { name: "Create" }).click();
-    await expect(page.getByText("Design notes", { exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Design notes", exact: true })).toHaveCount(0);
+    await expect(page).toHaveURL("/projects/CORE/documents/design-notes");
+    await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
+      "Design notes"
+    );
+    await page.goto("/projects/CORE/documents");
+    await expect(page.getByRole("link", { name: "Design notes", exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("project-documents.png"), fullPage: true });
     await expect(page.getByText("Issue-only document", { exact: true })).toHaveCount(0);
 
@@ -131,6 +137,60 @@ test("project page groups issues by status in board order; filters narrow issues
       await expectTouchTarget(page.getByRole("button", { name: "Unread" }));
       await expectNoHorizontalOverflow(page);
     }
+  } finally {
+    await context.close();
+  }
+});
+
+test("an issue's Artifacts tab lists its reference closure and a document page lists its referrers", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reference source" });
+  const related = await createIssue({ project: "CORE", title: "Referenced artifact" });
+  await createIssueArtifact(issue.key, {
+    content: "See dispatch://CORE/artifact/design-notes",
+    name: "Source doc",
+  });
+  await createIssueArtifact(related.key, { content: "diagram", name: "Diagram" });
+  await createProjectDocument("CORE", {
+    content: `See dispatch://${related.key}/artifact/diagram`,
+    name: "Design notes",
+  });
+  await createComment(issue.key, { body: "See dispatch://CORE/artifact/design-notes" }, session);
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/artifacts`);
+    const references = page.getByRole("region", { name: "References" });
+    await expect(references.getByRole("link", { name: "Design notes" })).toHaveAttribute(
+      "href",
+      "/projects/CORE/documents/design-notes"
+    );
+    await expect(references).toContainText("via artifact");
+    await expect(references).toContainText("depth 1");
+    await expect(references).toContainText("depth 2");
+    await expect(page.getByRole("main").getByRole("tab")).toHaveText([
+      "Spec",
+      "Conversation",
+      "Children",
+      "Artifacts",
+    ]);
+    await expect(page.getByRole("button", { name: /make primary/i })).toHaveCount(0);
+    await page.getByRole("link", { name: "Design notes" }).click();
+    await expect(page).toHaveURL("/projects/CORE/documents/design-notes");
+    await expect(page.getByRole("region", { name: "Referenced by" })).toContainText(
+      `Comment · ${issue.key}`
+    );
+    await expect(page.getByRole("link", { name: `Artifact · ${issue.key}` })).toHaveAttribute(
+      "href",
+      `/issues/${issue.key}/artifacts/source-doc`
+    );
+    await page.screenshot({
+      path: testInfo.outputPath("project-document-references.png"),
+      fullPage: true,
+    });
   } finally {
     await context.close();
   }

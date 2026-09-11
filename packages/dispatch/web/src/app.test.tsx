@@ -95,7 +95,7 @@ test("signing out shows the sign-in page without a reload and tears down the eve
   }
 });
 
-test("project routes render the project page while the future document route is not found", async () => {
+test("project routes render the project page and a project document route", async () => {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -116,6 +116,19 @@ test("project routes render the project page while the future document route is 
     { created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
   ]);
   const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
+  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue({
+    created_at: "2026-09-10T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    id: "artifact-1",
+    issue_key: null,
+    kind: "doc" as const,
+    name: "Design notes",
+    primary: false,
+    project: "CORE",
+    referenced_by: [],
+    slug: "design-notes",
+    versions: [],
+  });
   function streamFetch(_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
     return new Promise<Response>(() => {});
   }
@@ -146,12 +159,16 @@ test("project routes render the project page while the future document route is 
     );
     documents.unmount();
 
-    const unavailableDocument = renderRoute("/projects/CORE/documents/design-notes");
-    await screen.findByRole("heading", { name: "Page not found" });
-    unavailableDocument.unmount();
+    const document = renderRoute("/projects/CORE/documents/design-notes");
+    await screen.findByTestId("artifact-header");
+    expect(screen.getByRole("link", { name: "Project CORE" }).getAttribute("href")).toBe(
+      "/projects/CORE/documents"
+    );
+    document.unmount();
   } finally {
     fetchSpy.mockRestore();
     getInbox.mockRestore();
+    getProjectArtifact.mockRestore();
     getMyState.mockRestore();
     listIssues.mockRestore();
     listProjectArtifacts.mockRestore();

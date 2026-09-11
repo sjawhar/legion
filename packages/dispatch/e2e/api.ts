@@ -16,6 +16,7 @@ import type {
   EditAskInput,
   Event,
   Issue,
+  IssueReferences,
   Project,
   UpdateIssueInput,
   UserIssueState,
@@ -171,6 +172,17 @@ export function getProjectArtifact(
     options
   );
 }
+export function getIssueReferences(
+  key: string,
+  options: ApiOptions = {}
+): Promise<IssueReferences> {
+  return request<IssueReferences>(
+    `/api/v1/issues/${encodeURIComponent(key)}/references`,
+    "GET",
+    undefined,
+    options
+  );
+}
 
 export function createArtifactAsk(
   artifactID: string,
@@ -179,6 +191,19 @@ export function createArtifactAsk(
 ): Promise<Ask> {
   return request<Ask>(
     `/api/v1/artifacts/${encodeURIComponent(artifactID)}/asks`,
+    "POST",
+    input,
+    options
+  );
+}
+
+export function createArtifactComment(
+  artifactID: string,
+  input: CreateCommentInput,
+  options: ApiOptions = {}
+): Promise<Comment> {
+  return request<Comment>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/comments`,
     "POST",
     input,
     options

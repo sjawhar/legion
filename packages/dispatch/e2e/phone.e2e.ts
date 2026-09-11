@@ -1,6 +1,13 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { createAsk, createIssue, createMessage, createProject, getAsk } from "./api";
+import {
+  createAsk,
+  createIssue,
+  createMessage,
+  createProject,
+  createProjectDocument,
+  getAsk,
+} from "./api";
 import { actionBar, barAction, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -170,6 +177,43 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
     const margin = page.getByTestId("margin-sheet");
     await expect(margin.getByText(pinnedMessage)).toBeVisible();
     await expect(margin.getByText(/^Event \d+$/)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a project document has no horizontal overflow, 44px controls, and a Comments margin sheet", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProjectDocument("CORE", {
+    content: "# Design notes\\n\\nProject document body.",
+    name: "Design notes",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto("/projects/CORE/documents/design-notes");
+    await expect(documentEditor(page)).toContainText("Project document body.");
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth
+      )
+    ).toBe(true);
+    if (testInfo.project.name === "iphone") {
+      const controls = await page
+        .getByRole("main")
+        .locator("button:visible, a:visible, select:visible")
+        .all();
+      for (const control of controls) {
+        const box = await control.boundingBox();
+        expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+      }
+      await page.getByRole("button", { name: /Open review panel/ }).click();
+      await expect(page.getByRole("tab", { name: "Comments" })).toBeVisible();
+      await expect(page.getByRole("tab", { name: "Pinned" })).toHaveCount(0);
+    }
   } finally {
     await alice.close();
   }
