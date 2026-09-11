@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +85,26 @@ func TestParsePreservesLiteralEscapesInsideCodeSpan(t *testing.T) {
 	}}}}}
 	if !got.Equal(want) {
 		t.Fatalf("Parse(code span) = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseJoinsSoftLineBreaksWithSpaces(t *testing.T) {
+	got, err := Parse("First soft line\ncontinues in the same paragraph.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
+		Type: "text",
+		Text: "First soft line continues in the same paragraph.",
+	}}}}}
+	if !got.Equal(want) {
+		t.Fatalf("Parse(soft break) = %#v, want %#v", got, want)
+	}
+	md, _, err := Render(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.TrimSuffix(md, "\n"), "\n") {
+		t.Fatalf("Render(soft break) re-wrapped the paragraph: %q", md)
 	}
 }

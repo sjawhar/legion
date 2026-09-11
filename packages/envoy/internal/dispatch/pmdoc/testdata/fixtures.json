@@ -296,14 +296,14 @@
           "content": [
             {
               "type": "text",
-              "text": "literal **not bold** and `not code` and [not link](x)\nTom & Jerry and *not emphasis* and <tag> and | pipe"
+              "text": "literal **not bold** and `not code` and [not link](x) Tom & Jerry and *not emphasis* and <tag> and | pipe"
             }
           ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQFpbGl0ZXJhbCAqKm5vdCBib2xkKiogYW5kIGBub3QgY29kZWAgYW5kIFtub3QgbGlua10oeCkKVG9tICYgSmVycnkgYW5kICpub3QgZW1waGFzaXMqIGFuZCA8dGFnPiBhbmQgfCBwaXBlAA==",
-    "rendered_by_milkdown": "literal \\*\\*not bold\\*\\* and \\`not code\\` and \\[not link]\\(x)\nTom & Jerry and \\*not emphasis\\* and \\<tag> and | pipe\n"
+    "yjs_update_v1_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQFpbGl0ZXJhbCAqKm5vdCBib2xkKiogYW5kIGBub3QgY29kZWAgYW5kIFtub3QgbGlua10oeCkgVG9tICYgSmVycnkgYW5kICpub3QgZW1waGFzaXMqIGFuZCA8dGFnPiBhbmQgfCBwaXBlAA==",
+    "rendered_by_milkdown": "literal \\*\\*not bold\\*\\* and \\`not code\\` and \\[not link]\\(x) Tom & Jerry and \\*not emphasis\\* and \\<tag> and | pipe\n"
   },
   {
     "name": "explicit-url-space",
@@ -1827,14 +1827,14 @@
           "content": [
             {
               "type": "text",
-              "text": "1. not a list\n2) also not a list"
+              "text": "1. not a list 2) also not a list"
             }
           ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEgMS4gbm90IGEgbGlzdAoyKSBhbHNvIG5vdCBhIGxpc3QA",
-    "rendered_by_milkdown": "1\\. not a list\n2\\) also not a list\n"
+    "yjs_update_v1_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEgMS4gbm90IGEgbGlzdCAyKSBhbHNvIG5vdCBhIGxpc3QA",
+    "rendered_by_milkdown": "1\\. not a list 2) also not a list\n"
   },
   {
     "name": "paragraphs",
@@ -1886,14 +1886,14 @@
           "content": [
             {
               "type": "text",
-              "text": "First soft line\ncontinues in the same paragraph."
+              "text": "First soft line continues in the same paragraph."
             }
           ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEwRmlyc3Qgc29mdCBsaW5lCmNvbnRpbnVlcyBpbiB0aGUgc2FtZSBwYXJhZ3JhcGguAA==",
-    "rendered_by_milkdown": "First soft line\ncontinues in the same paragraph.\n"
+    "yjs_update_v1_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEwRmlyc3Qgc29mdCBsaW5lIGNvbnRpbnVlcyBpbiB0aGUgc2FtZSBwYXJhZ3JhcGguAA==",
+    "rendered_by_milkdown": "First soft line continues in the same paragraph.\n"
   },
   {
     "name": "table",

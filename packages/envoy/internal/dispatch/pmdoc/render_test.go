@@ -218,8 +218,13 @@ func TestRenderEscapesOrderedListLookingParagraphs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !back.Equal(doc) {
-		t.Fatalf("Parse(Render()) = %#v, want %#v", back, doc)
+	// The newline inside the text node renders as a soft break, which parses back as a space.
+	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
+		Type: "text",
+		Text: "1. not a list 2) also not a list",
+	}}}}}
+	if !back.Equal(want) {
+		t.Fatalf("Parse(Render()) = %#v, want %#v", back, want)
 	}
 }
 

@@ -425,7 +425,9 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 				children = append(children, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
 			}
 			if current.SoftLineBreak() {
-				appendText(&children, "\n", active)
+				// A soft break is a space, as CommonMark renders it; the browser editor's
+				// white-space: break-spaces would show a literal newline as a line break.
+				appendText(&children, " ", active)
 			}
 		case *ast.String:
 			appendText(&children, parseTextValue(current.Value, active), active)

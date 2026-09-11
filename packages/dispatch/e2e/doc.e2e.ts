@@ -208,8 +208,11 @@ test("named versions, the version picker, and the diff stay current across users
       )
       .toMatchObject({ named: false, number: 2, summary: null });
 
-    page.once("dialog", (dialog) => dialog.accept("Decided Postgres"));
     await page.getByRole("button", { name: "Name version" }).click();
+    const nameDialog = page.getByRole("dialog", { name: "Name this version" });
+    await nameDialog.getByLabel("What changed?").fill("Decided Postgres");
+    await nameDialog.getByRole("button", { name: "Save" }).click();
+    await expect(nameDialog).toHaveCount(0);
     await expect
       .poll(
         () =>
