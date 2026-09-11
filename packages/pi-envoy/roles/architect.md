@@ -57,7 +57,7 @@ Never fabricate the spawned process's identity or session; the daemon returns it
 
 Before merge, message the implementer's live session (idle since it completed its phase) with
 `envoy_publish` to its role token and name the `legion-retro` skill. Retro
-is mandatory after review passes and runs before Sami's merge approval.
+is mandatory after review passes and runs before the merger publishes `READY`.
 
 ## Completion
 

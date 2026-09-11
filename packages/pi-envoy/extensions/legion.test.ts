@@ -459,11 +459,11 @@ describe("Legion OMP extension", () => {
           secret: "recovered-root-secret",
         });
       }
-      if (url.pathname === "/legion/v1/merge-gate") {
+      if (url.pathname === "/legion/v1/waves/release") {
         if (body?.secret === "root-secret") {
           return Response.json({ error: "Invalid session secret" }, { status: 403 });
         }
-        return Response.json({ approved: true, pr: 17, headSha: "recovered-head" });
+        return Response.json({ released: ["REPO-43"] });
       }
       return Response.json({
         session_id: body?.session_id,
@@ -484,7 +484,7 @@ describe("Legion OMP extension", () => {
     if (legionTool === undefined) throw new Error("Legion root tool was not registered");
     const result = await legionTool.execute(
       "call-root-recovery",
-      { op: "merge_gate", pr: 17 },
+      { op: "release_wave", issues: ["REPO-43"] },
       undefined,
       undefined,
       context
@@ -508,12 +508,12 @@ describe("Legion OMP extension", () => {
         body: { tree, sessionId: "ses_root", secret: "root-secret", generation: 3 },
       },
       {
-        path: "/legion/v1/merge-gate",
+        path: "/legion/v1/waves/release",
         body: {
           tree,
           sessionId: "ses_root",
           secret: "root-secret",
-          pr: 17,
+          issues: ["REPO-43"],
         },
       },
       {
@@ -521,12 +521,12 @@ describe("Legion OMP extension", () => {
         body: { sessionId: "ses_root", recoveryToken: "root-recovery" },
       },
       {
-        path: "/legion/v1/merge-gate",
+        path: "/legion/v1/waves/release",
         body: {
           tree,
           sessionId: "ses_root",
           secret: "recovered-root-secret",
-          pr: 17,
+          issues: ["REPO-43"],
         },
       },
     ]);
@@ -1902,8 +1902,6 @@ describe("Legion OMP extension", () => {
         });
       }
       if (url.pathname === "/legion/v1/waves/release") return Response.json({ released: [issue] });
-      if (url.pathname === "/legion/v1/merge-gate")
-        return Response.json({ approved: true, pr: 17, headSha: "approved-head" });
       if (url.pathname === "/legion/v1/worker/spawn")
         return Response.json({ status: "spawned", roleToken: "role-token-implementer" });
       if (url.pathname.startsWith("/legion/v1/")) return Response.json({});
@@ -1929,19 +1927,6 @@ describe("Legion OMP extension", () => {
       readonly request: { readonly path: string; readonly body: unknown };
       readonly details: Record<string, unknown>;
     }[] = [
-      {
-        input: { op: "merge_gate", pr: 17 },
-        request: {
-          path: "/legion/v1/merge-gate",
-          body: {
-            tree,
-            pr: 17,
-            sessionId: "ses_architect",
-            secret: "root-secret",
-          },
-        },
-        details: { approved: true, pr: 17, headSha: "approved-head" },
-      },
       {
         input: { op: "release_wave", issues: [issue] },
         request: {
@@ -2029,13 +2014,13 @@ describe("Legion OMP extension", () => {
     expect(
       await legion.execute(
         "call-extra-field",
-        { op: "merge_gate", pr: 17, issue },
+        { op: "release_wave", issues: [issue], issue },
         undefined,
         undefined,
         context
       )
     ).toEqual({
-      content: [{ type: "text", text: 'merge_gate does not accept field "issue"' }],
+      content: [{ type: "text", text: 'release_wave does not accept field "issue"' }],
       details: {},
       isError: true,
     });

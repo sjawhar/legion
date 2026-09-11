@@ -1,11 +1,9 @@
 import type { IssueKey } from "@legion/contracts";
 import { type CiFetchFailure, type CiFetchResult, isCiFetchFailure } from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
-import type { SetApprovalStatusOutcome } from "./approval-check";
 import type { DaemonConfig } from "./config";
 import type { DispatchClient } from "./dispatch-client";
 import { retryPendingWrite } from "./dispatch-client";
-import { applyApprovalStatusOutcome } from "./events";
 import type { LegionState } from "./legion-state";
 import {
   acceptGitHubFence,
@@ -45,14 +43,6 @@ export interface RunResyncDeps {
   saveState(): Promise<void>;
   fetchCiStatusBatch(prRefs: Record<string, GitHubPRRef>): Promise<Record<string, CiFetchResult>>;
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
-  /** Reissues one human-approval backstop status write (`approval-check.ts`'s
-   * `setApprovalStatus`) for `retryApprovalStatusPending`; wired to the same App-token deps the
-   * durable dispatch path uses (see `index.ts`). */
-  setApprovalStatus(effect: {
-    repo: string;
-    pr: number;
-    sha: string;
-  }): Promise<SetApprovalStatusOutcome>;
   now(): number;
 }
 
@@ -222,26 +212,6 @@ async function retryPendingStatusWrites(deps: RunResyncDeps): Promise<void> {
   }
 }
 
-/** Retries each daemon-owned human-approval backstop status write that failed its GitHub POST
- * (`approval-check.ts`'s `setApprovalStatus`, recorded on `state.approvalStatusPending` by
- * `events.ts`'s `applyApprovalStatusOutcome`) -- unlike `retryPendingStatusWrites`'s remote-read
- * CAS, there is no cheaper "did it already land" read for a GitHub commit status, so this always
- * reissues the write and lets `applyApprovalStatusOutcome` reconcile the result. Retried every
- * cycle regardless of whether the last failure was permanent: a permission-denied write can only
- * be fixed by a human granting the App the missing scope out of band, which this state cannot
- * detect on its own, so resync keeps retrying until the write actually succeeds. */
-async function retryApprovalStatusPending(deps: RunResyncDeps): Promise<void> {
-  for (const [key, pending] of Object.entries(deps.state.approvalStatusPending)) {
-    const separator = key.lastIndexOf("#");
-    const repo = key.slice(0, separator);
-    const pr = Number(key.slice(separator + 1));
-    const effect = { kind: "approval-status" as const, repo, pr, sha: pending.sha };
-    const outcome = await deps.setApprovalStatus(effect);
-    applyApprovalStatusOutcome(deps.state, effect, outcome);
-    await deps.saveState();
-  }
-}
-
 /** Replays every Dispatch issue whose status differs from this daemon's last-applied one through
  * the matching live reducer path, fenced by the summary's per-issue `last_seq`. Dispatch exposes
  * `updated_since`, but contracts has no typed query option at this head, so this reads the full list.
@@ -384,7 +354,6 @@ export async function runResync(
   lastRunAt.set(deps.state, now);
   const healed = await healStatusDrift(deps, now);
   await retryPendingStatusWrites(deps);
-  await retryApprovalStatusPending(deps);
   const ciFetchFailureDetails = await reconcilePrs(deps, now);
   const anomalies = await reportRootAnomalies(deps, now);
   const probesEmitted = await probeActiveRoots(deps, now);

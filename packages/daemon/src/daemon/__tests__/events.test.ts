@@ -39,11 +39,10 @@ function deps(
   nats: FakeNats,
   envoyPublish: (topic: string, payloadJson: string) => Promise<void>,
   onException: EventPumpDeps["onException"] = async () => {},
-  handlers: Pick<EventPumpDeps, "onLinger" | "onProbe" | "onApprovalStatus" | "onAdmit"> = {
+  handlers: Pick<EventPumpDeps, "onLinger" | "onProbe" | "onAdmit"> = {
     onLinger: async () => {},
     onProbe: async () => {},
     onAdmit: () => {},
-    onApprovalStatus: async () => ({ written: true }),
   }
 ): EventPumpDeps {
   return {
@@ -479,13 +478,11 @@ describe("core-NATS event pump", () => {
     const nats = new FakeNats();
     const acks: string[] = [];
     const published: Array<{ topic: string; payloadJson: string }> = [];
-    const approvalStatusCalls: unknown[] = [];
     const saveState = vi.fn(async () => {
-      // A review approving the PR's current, green head derives three
-      // effects (pr-review publish, approval-status, pr-ready publish);
-      // save must not run until every one of them has dispatched.
+      // A review approving the PR's current, green head derives two
+      // effects (pr-review publish, pr-ready publish); save must not run
+      // until both of them have dispatched.
       expect(published).toHaveLength(2);
-      expect(approvalStatusCalls).toHaveLength(1);
       expect(acks).toEqual([]);
     });
     const pump = startEventPump({
@@ -501,11 +498,6 @@ describe("core-NATS event pump", () => {
           onLinger: async () => {},
           onProbe: async () => {},
           onAdmit: () => {},
-          onApprovalStatus: async (effect) => {
-            expect(acks).toEqual([]);
-            approvalStatusCalls.push(effect);
-            return { written: true };
-          },
         }
       ),
       saveState,
@@ -547,92 +539,9 @@ describe("core-NATS event pump", () => {
           payloadJson: JSON.stringify({ type: "pr-ready", pr: 7 }),
         },
       ]);
-      expect(approvalStatusCalls).toEqual([
-        { kind: "approval-status", repo: "acme/widgets", pr: 7, sha: "head-1" },
-      ]);
       expect(saveState).toHaveBeenCalledTimes(1);
       expect(acks).toEqual(["ack-1"]);
     } finally {
-      pump.stop();
-    }
-  });
-
-  it("never fatals the durable lane on a permanent approval-status failure, records the pending entry, then clears it once a retry succeeds", async () => {
-    const { state, issue } = stateForIssue();
-    state.phases[issue] = { phase: "implementer", sessionId: "worker-session" };
-    state.prs["acme/widgets#7"] = checkPr(issue, { verdict: "green" });
-    const nats = new FakeNats();
-    const fatalCalls: unknown[] = [];
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    let approvalOutcome: {
-      written: boolean;
-      permanent?: boolean;
-      reason?: string;
-    } = {
-      written: false,
-      permanent: true,
-      reason:
-        "GitHub status write to acme/widgets@head-1 failed permanently (HTTP 403): gh: Resource not accessible by integration (HTTP 403) -- grant the App `Commit statuses: Read and write` and accept the installation permission update.",
-    };
-    const reviewPayload = {
-      action: "submitted",
-      repository: { full_name: "acme/widgets" },
-      pull_request: { number: 7, head: { sha: "head-1" } },
-      review: {
-        user: { login: "sami" },
-        state: "approved",
-        commit_id: "head-1",
-        body: "Looks good",
-      },
-    };
-    const pump = startEventPump({
-      ...deps(state, nats, async () => {}, undefined, {
-        onLinger: async () => {},
-        onProbe: async () => {},
-        onAdmit: () => {},
-        onApprovalStatus: async () => approvalOutcome as never,
-      }),
-      fatal: async (error) => {
-        fatalCalls.push(error);
-      },
-    });
-
-    try {
-      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
-      nats.emit(
-        "notifications.github.acme.widgets.pull_request_review.submitted",
-        envelope(reviewPayload, "review-1"),
-        undefined,
-        calls
-      );
-      await pump.drain();
-
-      // A permanent 403 never fatals the durable lane: the message still acks (dispatch never
-      // threw), and the failure is recorded for resync to retry instead.
-      expect(fatalCalls).toEqual([]);
-      expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
-      expect(state.approvalStatusPending["acme/widgets#7"]).toMatchObject({
-        sha: "head-1",
-        attempts: 1,
-      });
-      expect(warn).toHaveBeenCalledWith(approvalOutcome.reason);
-
-      // A later retry for the same sha succeeds (e.g. once a human grants the App's missing
-      // permission) and clears the pending entry.
-      approvalOutcome = { written: true };
-      nats.emit(
-        "notifications.github.acme.widgets.pull_request_review.submitted",
-        envelope(reviewPayload, "review-2"),
-        undefined,
-        calls
-      );
-      await pump.drain();
-
-      expect(state.approvalStatusPending["acme/widgets#7"]).toBeUndefined();
-      expect(fatalCalls).toEqual([]);
-      expect(calls).toEqual({ acks: 2, naks: [], terms: [] });
-    } finally {
-      warn.mockRestore();
       pump.stop();
     }
   });

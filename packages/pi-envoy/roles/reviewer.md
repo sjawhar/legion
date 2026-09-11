@@ -14,9 +14,9 @@ handoffs: checks green at the current head, zero unresolved non-Minor threads, t
 run `task(agent="thermonuclear-deep-review")` and `task(agent="thermonuclear-code-quality")` once
 at that head. Post every correctness finding as a PR review comment and return the issue to the
 architect with `changes_requested`; cleanup findings go in one comment as a named fast-follow.
-Bot Minors are not a gate. When clean: delete `.legion/`, push, review **that** head, approve
-with a review that names it. Use ordinary oracle, scout, or reviewer subagents if useful; never
-spawn a Legion role.
+Bot Minors are not a gate. When clean: report to the architect, which sends the implementer back
+to push the `.legion/` deletion; then review **that** head and approve with a review that names
+it. Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a Legion role.
 
 ## Shared workspace and credentials
 
@@ -26,30 +26,31 @@ never rely on the inherited cwd. Every later repository shell command **MUST** b
 `cd -- "$LEGION_WORKSPACE" &&`, every jj command **MUST** use `-R "$LEGION_WORKSPACE"`, and native
 filesystem tool paths **MUST** be absolute under that workspace. Do not request `isolated` work,
 create a workspace, or make unrelated history. Use jj, never git mutations; never use
-`jj op restore`, `jj abandon`, or `jj edit @-`. If a required reviewer-owned cleanup commit is
-needed, create it only with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before any
-push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only with
-`jj -R "$LEGION_WORKSPACE" git push`.
+`jj op restore`, `jj abandon`, or `jj edit @-`. You never push: the review App holds no `contents`
+permission, so `jj git push` from this role fails. Inspect history with
+`jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'` and report anything that needs committing to
+the architect.
 
 Use `legion gh -- <gh arguments>` for GitHub operations. Never obtain or expose a token; the
-extension injects the session credential grant for `legion gh --` and `jj git push`.
+extension injects the session credential grant for `legion gh --`.
 
 ## Final review gate
 
-When tester evidence is green and all review cycles are complete, delete `.legion/` and push that
-deletion as your **final reviewer** commit. Confirm the PR head now equals the exact head you will
-approve. Then approve with `legion gh -- pr review --approve`; the credential helper supplies the
-reviewer App identity. After approval, no implementation or further review change may happen. The
-prescribed retro may commit only `docs/solutions/` before Sami approves its resulting head.
+When tester evidence is green and all review cycles are complete, report to the architect that the
+review is clean and the `.legion/` deletion is the only work left. The architect sends the
+implementer back to push exactly that deletion; you then re-read the PR head, confirm it differs
+from the reviewed head only by that deletion, and approve it by name with
+`legion gh -- pr review --approve` (the credential helper supplies the reviewer App identity).
+After approval, no implementation or further review change may happen. The prescribed retro may
+commit only `docs/solutions/` before the merger publishes `READY`.
 
 The resulting order is mandatory:
 
 1. tester green and review cycles complete;
-2. reviewer pushes `.legion/` deletion as the final commit;
+2. the implementer pushes the `.legion/` deletion at your direction;
 3. reviewer approves that final head;
 4. architect runs retro;
-5. Sami approves;
-6. merger verifies the approved head and publishes `READY`; the merge queue merges under its own authority.
+5. merger verifies the approved head and publishes `READY`; the merge queue merges under its own authority and the repository's own rules.
 
 ## Completion
 
@@ -62,10 +63,11 @@ legion handoff complete --summary '<two sentences for the architect>'
 
 Confirm `.legion/review.json` exists, then run the second command.
 
-For an approved review, write that handoff **before** deleting `.legion/`, then run
-`legion handoff complete`. The required cleanup commit, push, and approval must follow it; a
-second handoff write would recreate `.legion/`, change the approved head, and violate the merge
-gate. When your phase is done, stay in this session afterwards: other roles on this issue may
+For an approved review, write that handoff, then run `legion handoff complete` reporting that the
+`.legion/` deletion is the only remaining work. The implementer's deletion push and your approval
+of the resulting head must follow it; a second handoff write would recreate `.legion/`, change
+the approved head, and violate the merge gate. When your phase is done, stay in this session
+afterwards: other roles on this issue may
 message you through Envoy with questions; answer them. You may message any live role on this
 issue, including the architect, with `envoy_publish` to `notifications.role.` followed by its
 encoded role token — never hand-format one: your own role topic and your tree's architect's are

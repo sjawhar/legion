@@ -9,8 +9,6 @@ import {
   type GrantResponse,
   type IssueStatusInput,
   LegionDaemonApi,
-  type MergeGateInput,
-  type MergeGateResponse,
   type ProcessExitInput,
   type ProcessReadyInput,
   type ProcessStartedInput,
@@ -38,7 +36,6 @@ export interface LegionDaemonClient {
   readonly workerStarted: (input: WorkerStartedInput) => Promise<WorkerStartedResponse>;
   readonly workerReady: (input: WorkerReadyInput) => Promise<void>;
   readonly spawnWorker: (input: SpawnWorkerInput) => Promise<SpawnWorkerResponse>;
-  readonly mergeGate: (input: MergeGateInput) => Promise<MergeGateResponse>;
   readonly provisioningCredential: (
     input: ProvisioningCredentialInput
   ) => Promise<ProvisioningCredentialResponse>;
@@ -171,7 +168,6 @@ export function createLegionDaemonClient(
       noContent("/legion/v1/worker/ready", input, LegionDaemonApi.WorkerReady.response),
     spawnWorker: (input) =>
       post("/legion/v1/worker/spawn", input, LegionDaemonApi.SpawnWorker.response),
-    mergeGate: (input) => post("/legion/v1/merge-gate", input, LegionDaemonApi.MergeGate.response),
     releaseWave: (input) =>
       post("/legion/v1/waves/release", input, LegionDaemonApi.WaveRelease.response),
     provisioningCredential: (input) =>

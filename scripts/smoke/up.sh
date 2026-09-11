@@ -16,8 +16,6 @@ LEGION_IMPLEMENT_APP_ID="${LEGION_IMPLEMENT_APP_ID:-3202636}"
 readonly LEGION_IMPLEMENT_APP_ID
 LEGION_REVIEW_APP_ID="${LEGION_REVIEW_APP_ID:-3202653}"
 readonly LEGION_REVIEW_APP_ID
-LEGION_APP_LOGINS="${LEGION_APP_LOGINS:-legion-implementer[bot],legion-reviewer[bot]}"
-readonly LEGION_APP_LOGINS
 readonly webhook_events="${SMOKE_WEBHOOK_EVENTS:-issues,issue_comment,sub_issues,pull_request,pull_request_review,check_run}"
 readonly webhook_forwarder_url="https://webhook-forwarder.github.com/hook"
 # Identifies this rig as the acting session on every Dispatch write it makes directly (bearer
@@ -280,8 +278,6 @@ nats_urls:
 dispatch_project: ${smoke_dispatch_project}
 repos:
   - ${SMOKE_REPO}
-app_logins:
-$(printf '%s\n' "$LEGION_APP_LOGINS" | tr ',' '\n' | sed 's/^/  - /')
 admission_cap: 4
 worker_cap: 6
 max_recursion_depth: 8
@@ -378,68 +374,6 @@ configure_branch_protection() {
   printf 'GREEN branch protection requires one approving review\n'
 }
 
-add_human_approval_check() {
-  local endpoint="repos/${SMOKE_REPO}/branches/main/protection/required_status_checks"
-  local current
-  local payload
-
-  current="$(gh api "$endpoint")"
-  payload="$(jq -nc --argjson current "$current" '{
-    strict: ($current.strict // true),
-    contexts: (($current.contexts // []) + ["legion-human-approval"] | unique)
-  }')"
-  gh api -X PATCH "$endpoint" --input - <<<"$payload" >/dev/null
-  printf 'GREEN branch protection requires legion-human-approval\n'
-}
-
-measure_app_approval() {
-  local existing_pr=""
-  local branch
-  local timestamp
-  local base_sha
-  local reviewer_token
-  local review_decision
-
-  if [[ -r "${smoke_dir}/protection-probe-pr" ]]; then
-    existing_pr="$(<"${smoke_dir}/protection-probe-pr")"
-    if gh pr view "$existing_pr" -R "$SMOKE_REPO" --json number >/dev/null 2>&1; then
-      printf 'REUSED App-approval probe PR #%s\n' "$existing_pr"
-      review_decision="$(gh pr view "$existing_pr" -R "$SMOKE_REPO" --json reviewDecision --jq '.reviewDecision')"
-      printf '%s\n' "$review_decision" >"${smoke_dir}/protection-probe-review-decision"
-      if [[ "$review_decision" == "APPROVED" ]]; then
-        add_human_approval_check
-      fi
-      return
-    fi
-  fi
-
-  timestamp="$(date +%s)"
-  branch="legion-smoke-approval-${timestamp}"
-  base_sha="$(gh api "repos/${SMOKE_REPO}/git/ref/heads/main" --jq '.object.sha')"
-  gh api -X POST "repos/${SMOKE_REPO}/git/refs" -f "ref=refs/heads/${branch}" -f "sha=${base_sha}" >/dev/null
-  gh api -X PUT "repos/${SMOKE_REPO}/contents/.legion-smoke/approval-${timestamp}.txt" \
-    -f "message=chore(smoke): app approval probe" \
-    -f "content=$(printf 'approval probe %s\n' "$timestamp" | base64 -w 0)" \
-    -f "branch=${branch}" >/dev/null
-
-  gh pr create -R "$SMOKE_REPO" --base main --head "$branch" \
-    --title 'chore(smoke): app approval probe' \
-    --body 'Disposable branch-protection capability probe.' >/dev/null
-  existing_pr="$(gh pr view "$branch" -R "$SMOKE_REPO" --json number --jq '.number')"
-  printf '%s\n' "$existing_pr" >"${smoke_dir}/protection-probe-pr"
-  printf '%s\n' "$branch" >"${smoke_dir}/protection-probe-branch"
-
-  reviewer_token="$(app_installation_token "$LEGION_REVIEW_APP_ID" GH_REVIEW_APP_PRIVATE_KEY_B64)"
-  GH_TOKEN="$reviewer_token" gh api -X POST "repos/${SMOKE_REPO}/pulls/${existing_pr}/reviews" -f event=APPROVE >/dev/null
-  review_decision="$(gh pr view "$existing_pr" -R "$SMOKE_REPO" --json reviewDecision --jq '.reviewDecision')"
-  printf '%s\n' "$review_decision" >"${smoke_dir}/protection-probe-review-decision"
-
-  if [[ "$review_decision" == "APPROVED" ]]; then
-    add_human_approval_check
-  else
-    printf 'GREEN reviewer-App approval result: %s; legion-human-approval is not required\n' "$review_decision"
-  fi
-}
 remove_recorded_forwarder_hook() {
   local name="$1"
   local hook_file="${smoke_dir}/${name}.hook"
@@ -645,10 +579,9 @@ main() {
   case "${SMOKE_BRANCH_PROTECTION:-}" in
     1)
       configure_branch_protection
-      measure_app_approval
       ;;
     "")
-      printf 'SKIPPED-BLOCKED merge gate: set SMOKE_BRANCH_PROTECTION=1 only after branch protection/ruleset is available\n'
+      printf 'SKIPPED-BLOCKED branch protection: set SMOKE_BRANCH_PROTECTION=1 only after branch protection/ruleset is available\n'
       ;;
     *)
       fail "SMOKE_BRANCH_PROTECTION must be 1 when set"

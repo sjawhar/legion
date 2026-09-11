@@ -226,7 +226,7 @@ function config(stateDir: string): DaemonConfig {
     dispatchProject: "LEGSMOKE",
     repos: ["acme/widgets"],
     repo: "acme/widgets",
-    appLogins: ["legion-implement[bot]", "legion-review[bot]"],
+
     admissionCap: 4,
     workerCap: 6,
     maxRecursionDepth: 8,
@@ -238,7 +238,7 @@ function config(stateDir: string): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
-    gates: { design: "root-issues", merge: "human" },
+    gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     stateDir,
   };
@@ -596,7 +596,9 @@ describe("startDaemon", () => {
           tokenManager: {
             getToken: async () => {
               tokenCalls += 1;
-              if (tokenCalls > 2) throw new Error("GitHub App token request failed");
+              // Boot takes one implement-role lease (the startup probe); every later lease
+              // belongs to the resync CI fetch under test.
+              if (tokenCalls > 1) throw new Error("GitHub App token request failed");
               return {
                 token: "test-token",
                 expiresAt: "2026-08-25T00:00:00.000Z",

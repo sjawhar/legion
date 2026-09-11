@@ -24,7 +24,6 @@ export type Effect =
   | { kind: "controller"; payload: LegionEventPayload }
   | { kind: "probe"; tree: IssueKey }
   | { kind: "linger"; tree: IssueKey }
-  | { kind: "approval-status"; repo: string; pr: number; sha: string }
   | { kind: "admit"; issue: IssueKey };
 
 export interface EnvelopeJson {
@@ -36,7 +35,6 @@ export interface EnvelopeJson {
 }
 
 export interface ReducerConfig {
-  appLogins: readonly string[];
   maxFixAttempts: number;
 }
 
@@ -476,14 +474,6 @@ function openChildren(state: LegionState, parent: IssueNode): number {
   return parent.children.filter((key) => state.issues[key]?.status !== "done").length;
 }
 
-function filtered(comment: JsonRecord, config: ReducerConfig): boolean {
-  const author = stringValue(asRecord(comment.user)?.login) ?? stringValue(comment.author);
-  return (
-    (stringValue(comment.body) ?? "").includes("<!-- legion:") ||
-    (author !== undefined && config.appLogins.includes(author))
-  );
-}
-
 export function issueForBranch(branch: string): IssueKey | undefined {
   const match = /^legion\/([A-Z][A-Z0-9]*-[0-9]+)$/.exec(branch);
   return match?.[1];
@@ -623,7 +613,7 @@ function issueComment(
   state: LegionState,
   payload: JsonRecord,
   envelope: EnvelopeJson,
-  config: ReducerConfig
+  _config: ReducerConfig
 ): Effect[] | undefined {
   const rawIssue = asRecord(payload.issue);
   const comment = asRecord(payload.comment);
@@ -631,7 +621,8 @@ function issueComment(
   const repo = repository(payload);
   const number = numberValue(rawIssue.number);
   if (!repo || number === undefined) return [];
-  if (payload.action !== "created" || filtered(comment, config)) return [];
+  if (payload.action !== "created" || (stringValue(comment.body) ?? "").includes("<!-- legion:"))
+    return [];
   if (rawIssue.pull_request === undefined) return [];
   const pr = state.prs[`${repo}#${number}`];
   if (!pr) return [];
@@ -652,14 +643,19 @@ function reviewComment(
   state: LegionState,
   payload: JsonRecord,
   envelope: EnvelopeJson,
-  config: ReducerConfig
+  _config: ReducerConfig
 ): Effect[] | undefined {
   const pullRequest = asRecord(payload.pull_request);
   const comment = asRecord(payload.comment);
   if (!pullRequest || !comment || asRecord(payload.issue)) return undefined;
   const repo = repository(payload);
   const number = numberValue(pullRequest.number);
-  if (!repo || number === undefined || payload.action !== "created" || filtered(comment, config))
+  if (
+    !repo ||
+    number === undefined ||
+    payload.action !== "created" ||
+    (stringValue(comment.body) ?? "").includes("<!-- legion:")
+  )
     return [];
   const pr = state.prs[`${repo}#${number}`];
   if (!pr) return [];
@@ -693,8 +689,8 @@ function review(
   const decision = (stringValue(rawReview.state) ?? "").toLowerCase();
   const isCurrentHead = stringValue(rawReview.commit_id) === pr.headSha;
   const prior = pr.reviewDecision;
-  // Approval is head-gated: it feeds `pr-ready` and the merge gate, which must only ever act on
-  // an approval of the exact commit that would merge. Changes requested is not — a reviewer
+  // Approval is head-gated: it feeds `pr-ready`, which must only ever fire for an approval of
+  // the exact commit that would merge. Changes requested is not — a reviewer
   // legitimately pins its review to the implementation commit it read rather than to a later
   // handoff commit, and any such verdict still means the PR is not reviewer-clean. Safe to
   // record from any commit because `resetPrHead` drops the decision on every new head, so a
@@ -713,7 +709,6 @@ function review(
     },
     envelope
   );
-  result.push({ kind: "approval-status", repo, pr: number, sha: pr.headSha });
   if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.verdict === "green") {
     result.push(...routeActive(state, pr.key, { type: "pr-ready", pr: number }, envelope));
   }
@@ -770,7 +765,7 @@ function pullRequest(
         pr.headUpdatedAt = headUpdatedAt;
         pr.headUpdatedAtSource = source;
       }
-      return [{ kind: "approval-status", repo, pr: number, sha }];
+      return [];
     }
     resetPrHead(pr, sha);
     if (headUpdatedAt === undefined) {
@@ -780,7 +775,7 @@ function pullRequest(
       pr.headUpdatedAt = headUpdatedAt;
       pr.headUpdatedAtSource = source;
     }
-    return [{ kind: "approval-status", repo, pr: number, sha }];
+    return [];
   }
   if (payload.action === "closed" && payload.merged === "false") {
     delete state.prs[prKey];

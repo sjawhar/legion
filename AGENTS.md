@@ -12,7 +12,7 @@ verdict changes each role needs. Root processes run in tmux; phase workers are h
 `legion worker-shim`.
 
 - **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
-  credential grants, resync, recovery, and human-gate backstops.
+  credential grants, resync, and recovery.
 - **OMP extension** — injects the Legion tool and event delivery into active OMP sessions and
   provisions issue workspaces. Phase workers (planner/implementer/tester/reviewer/merger, and
   sub-architects for child issues) are headless `omp --mode rpc` processes the daemon spawns
@@ -99,15 +99,17 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
                     (urgent + clear)
 
 **Phase roles:** architect → plan → implement → test → review → merge
-**Retro:** runs after reviewer cleanup and before human approval.
+**Retro:** runs after the reviewer approves the cleaned head and before the merger publishes `READY`.
 
 Statuses above are native Dispatch issue statuses, not GitHub labels — the daemon owns every
 `in_progress`/`testing`/`needs_review`/`retro`/`done` write via `DispatchClient.setStatus`, and a
 human or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispatch dashboard or
 `legion status <issue> <status>`.
 
-**Gates:** design gate = the architect's `dispatch_ask` on the root issue with an `Approve`
-option; merge gate = a human `APPROVED` PR review at the head commit (unchanged, GitHub-native).
+**Gate:** the design gate is the architect's `dispatch_ask` on the root issue with an `Approve`
+option. Whether a human must approve a pull request before it merges is the repository's own
+branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. The merger publishes
+`READY` to the merge queue, which merges under its own authority and the repository's rules.
 No lifecycle labels exist; GitHub issues are never read or written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are

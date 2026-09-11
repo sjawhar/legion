@@ -83,20 +83,6 @@ terminate_process_group_file() {
 }
 
 
-close_protection_probe() {
-  local pr_file="${smoke_dir}/protection-probe-pr"
-  local pr
-
-  [[ -n "${SMOKE_REPO:-}" && -r "$pr_file" ]] || return 0
-  command -v gh >/dev/null 2>&1 || {
-    warn "gh is unavailable; left the disposable branch-protection probe open"
-    return 0
-  }
-  pr="$(<"$pr_file")"
-  [[ "$pr" =~ ^[0-9]+$ ]] || return 0
-  gh pr close "$pr" -R "$SMOKE_REPO" --delete-branch >/dev/null 2>&1 ||
-    warn "could not close disposable branch-protection probe #${pr}"
-}
 remove_webhook_forwarder() {
   local name="$1"
   local hook_file="${smoke_dir}/${name}.hook"
@@ -147,8 +133,6 @@ main() {
     docker rm -f "$nats_name" >/dev/null
     printf 'STOPPED NATS container %s\n' "$nats_name"
   fi
-
-  close_protection_probe
   printf 'RIG DOWN\n'
 }
 

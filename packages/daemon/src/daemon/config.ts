@@ -56,7 +56,6 @@ export interface DaemonConfig {
    * source of that mapping; more than one configured repo has no way to pick one per issue and
    * is rejected at config load instead of guessing). */
   repo: `${string}/${string}`;
-  appLogins: string[];
   admissionCap: number;
   workerCap: number;
   maxRecursionDepth: number;
@@ -89,7 +88,7 @@ export interface DaemonConfig {
    * already responded — small by default, raised only under measured load sensitivity, never a
    * substitute for those routes responding before they dial back into the caller's own socket. */
   workerRpcTimeoutSeconds: number;
-  gates: { design: "root-issues" | "off"; merge: "human" | "off" };
+  gates: { design: "root-issues" | "off" };
   githubApps: GitHubAppsConfig;
   stateDir: string;
 }
@@ -158,6 +157,8 @@ const CONFIG_SCHEMA: ConfigSchema = {
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   board_project_ids: null,
   repos: null,
+  // Recognized (not an "unknown key") so setting it surfaces the specific removed-setting error
+  // below instead of the generic "Unknown config key" message. Never mapped to a field.
   app_logins: null,
   admission_cap: null,
   worker_cap: null,
@@ -174,6 +175,9 @@ const CONFIG_SCHEMA: ConfigSchema = {
   worker_boot_registration_deadline_intervals: null,
   worker_rpc_timeout_seconds: null,
   state_dir: null,
+  // `merge` is recognized (not an "unknown key") so setting it surfaces the specific
+  // removed-setting error `parseGates` throws below instead of the generic "Unknown config key"
+  // message. Never mapped to a field.
   gates: { design: null, merge: null },
   github_apps: {
     implement: {
@@ -484,22 +488,25 @@ function loadGitHubApps(value: unknown, resolveSecrets: boolean): GitHubAppsConf
   return apps;
 }
 
-/** `gates` is optional in the file: absent means the `DaemonConfig` defaults
- * (`design: root-issues`, `merge: human`), applied by `resolveDaemonConfig`. A present block
- * must be a mapping; each key inside it is individually optional. */
+/** `gates` is optional in the file: absent means the `DaemonConfig` default (`design:
+ * root-issues`), applied by `resolveDaemonConfig`. A present block must be a mapping; `design`
+ * is individually optional, and a present `merge` key is rejected -- human approval of a pull
+ * request is the repository's own branch protection or CODEOWNERS rule, which Legion never
+ * reads or writes. */
 function parseGates(value: unknown, field: string): DaemonConfig["gates"] | undefined {
   if (value === undefined) return undefined;
   const parsed = UnknownRecordSchema.safeParse(value);
   if (!parsed.success) throw new Error(`${field} must be a mapping`);
+  if (parsed.data.merge !== undefined) {
+    throw new Error(
+      "gates.merge is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes"
+    );
+  }
   const design = readString(parsed.data.design, `${field}.design`) ?? "root-issues";
-  const merge = readString(parsed.data.merge, `${field}.merge`) ?? "human";
   if (design !== "root-issues" && design !== "off") {
     throw new Error(`${field}.design must be 'root-issues' or 'off'`);
   }
-  if (merge !== "human" && merge !== "off") {
-    throw new Error(`${field}.merge must be 'human' or 'off'`);
-  }
-  return { design, merge };
+  return { design };
 }
 
 function fileString(fields: Record<string, unknown>, key: string): string | undefined {
@@ -592,8 +599,11 @@ export function loadConfigFromFile(
   }
   const repos = readStringArray(config.repos, "repos");
   if (repos !== undefined) fields.repos = repos.map((repo) => validateRepoSlug(repo, "repos"));
-  const appLogins = readStringArray(config.app_logins, "app_logins");
-  if (appLogins !== undefined) fields.appLogins = appLogins;
+  if (config.app_logins !== undefined) {
+    throw new Error(
+      "app_logins is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes"
+    );
+  }
 
   for (const [fileKey, configKey] of [
     ["admission_cap", "admissionCap"],
@@ -696,6 +706,11 @@ export function resolveDaemonConfig(
   if (env.LEGION_BOARD_PROJECT_IDS !== undefined) {
     throw new Error("LEGION_BOARD_PROJECT_IDS was replaced by DISPATCH_PROJECT");
   }
+  if (env.LEGION_APP_LOGINS !== undefined) {
+    throw new Error(
+      "app_logins is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes"
+    );
+  }
   const natsUrls = resolveValue(
     opts.cliOverrides?.natsUrls,
     fileStringArray(fields, "natsUrls"),
@@ -744,12 +759,6 @@ export function resolveDaemonConfig(
   const resolvedDispatchProject = validateDispatchProject(
     dispatchProject.value,
     "DISPATCH_PROJECT"
-  );
-  const appLogins = resolveValue(
-    opts.cliOverrides?.appLogins,
-    fileStringArray(fields, "appLogins"),
-    parseCsv(env.LEGION_APP_LOGINS, "LEGION_APP_LOGINS"),
-    []
   );
   const admissionCap = resolveValue(
     opts.cliOverrides?.admissionCap,
@@ -854,7 +863,6 @@ export function resolveDaemonConfig(
 
   const gates = resolveValue(opts.cliOverrides?.gates, fileGates(fields), undefined, {
     design: "root-issues",
-    merge: "human",
   } as const);
   const parsedGates = parseGates(gates.value, "gates");
   if (!parsedGates) throw new Error("gates must be configured");
@@ -864,9 +872,6 @@ export function resolveDaemonConfig(
     undefined,
     {}
   );
-  if (parsedGates.merge === "human" && Object.keys(githubApps.value).length === 0) {
-    throw new Error("gates.merge=human requires at least one configured GitHub App login");
-  }
   const stateDir = resolveValue(
     opts.cliOverrides?.stateDir,
     fileString(fields, "stateDir"),
@@ -888,7 +893,6 @@ export function resolveDaemonConfig(
       ompLaunchPrefix: ompLaunchPrefix.value,
       repos: repos.value,
       repo,
-      appLogins: appLogins.value,
       admissionCap: admissionCap.value,
       workerCap: workerCap.value,
       maxRecursionDepth: maxRecursionDepth.value,

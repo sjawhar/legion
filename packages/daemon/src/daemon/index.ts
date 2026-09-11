@@ -20,9 +20,8 @@ import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
-import { type SetApprovalStatusOutcome, setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
-import { type DaemonConfig, type GitHubAppRole, loadConfig } from "./config";
+import { type DaemonConfig, loadConfig } from "./config";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
 import {
   createDaemonRunner,
@@ -106,24 +105,6 @@ export interface DaemonHandle {
 function repoOwner(repo: `${string}/${string}`): string {
   const [owner] = repo.split("/") as [string, string];
   return owner;
-}
-
-async function resolveConfiguredAppLogins(
-  config: DaemonConfig,
-  tokenManager: Pick<TokenManager, "getToken">,
-  owner: string
-): Promise<string[]> {
-  const roles = Object.keys(config.githubApps) as GitHubAppRole[];
-  if (config.gates.merge === "human" && roles.length === 0) {
-    throw new Error("gates.merge=human requires at least one configured GitHub App login");
-  }
-  const logins = await Promise.all(
-    roles.map(async (role) => (await tokenManager.getToken(role, owner)).gitIdentity.name)
-  );
-  if (config.gates.merge === "human" && logins.some((login) => login.length === 0)) {
-    throw new Error("gates.merge=human requires at least one configured GitHub App login");
-  }
-  return [...new Set(logins)];
 }
 
 export function createCiStatusFetcher(
@@ -359,7 +340,6 @@ async function startDaemonLocked(
     runner,
     deps.readPluginManifest
   );
-  config.appLogins = await resolveConfiguredAppLogins(config, deps.tokenManager, owner);
   await deps.tokenManager.getToken("implement", owner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
@@ -448,21 +428,6 @@ async function startDaemonLocked(
     }
   };
 
-  // Shared by the durable dispatch path (`eventDeps.onApprovalStatus`) and resync's own retry
-  // (`emitResync`'s `setApprovalStatus`) so a failed human-approval backstop write is reissued
-  // with the exact same App-token deps regardless of which caller retries it.
-  const dispatchApprovalStatus = (effect: {
-    repo: string;
-    pr: number;
-    sha: string;
-  }): Promise<SetApprovalStatusOutcome> =>
-    setApprovalStatus(effect, {
-      runner,
-      tokenManager: deps.tokenManager,
-      appLogins: config.appLogins,
-      gatesMerge: config.gates.merge,
-    });
-
   const eventDeps: EventPumpDeps = {
     nats,
     envoyPublish: deps.envoyPublish,
@@ -476,7 +441,6 @@ async function startDaemonLocked(
     onAdmit: (issue) => {
       processManager.admit(issue);
     },
-    onApprovalStatus: dispatchApprovalStatus,
     onUndeliverable,
     config,
   };
@@ -519,7 +483,6 @@ async function startDaemonLocked(
           saveState: save,
           fetchCiStatusBatch,
           applyEffects: eventPump.applyEffects,
-          setApprovalStatus: dispatchApprovalStatus,
           now: deps.now,
         },
         options
@@ -573,7 +536,6 @@ async function startDaemonLocked(
       hostname: "127.0.0.1",
       repo: config.repo,
       gates: config.gates,
-      appLogins: config.appLogins,
     },
     apiDeps
   );

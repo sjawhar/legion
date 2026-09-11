@@ -54,7 +54,6 @@ function startCiPump(state: LegionState) {
     onLinger: async () => {},
     onAdmit: () => {},
     onProbe: async () => {},
-    onApprovalStatus: async () => ({ written: true }),
   });
   return { nats, published, pump };
 }
@@ -96,7 +95,6 @@ async function resyncWith(
     applyEffects: async (effects) => {
       applied.push(effects);
     },
-    setApprovalStatus: async () => ({ written: true }),
     now: () => resyncClock,
   });
 }
@@ -142,7 +140,6 @@ it("routes an approved PR's settled checks and ready signal to the tree's archit
     onLinger: async () => {},
     onAdmit: () => {},
     onProbe: async () => {},
-    onApprovalStatus: async () => ({ written: true }),
   });
 
   nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(settledChecks()));
@@ -694,7 +691,6 @@ it("does not apply a fetched green rollup after a live red settlement advances C
       applyEffects: async (effects) => {
         resyncEffects.push(effects);
       },
-      setApprovalStatus: async () => ({ written: true }),
       now: () => 3,
     });
     await fetchStarted.promise;
@@ -760,7 +756,6 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
     applyEffects: async (effects) => {
       resyncEffects.push(effects);
     },
-    setApprovalStatus: async () => ({ written: true }),
     now: () => 3,
   });
   await fetchStarted.promise;
