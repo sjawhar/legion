@@ -42,21 +42,13 @@ const LEGION_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
   register_gate: ["issue", "askId"],
   release_wave: ["issues"],
   escalate: ["kind", "context"],
-  merge_gate: ["pr"],
   spawn_worker: ["issue", "role", "task"],
 };
 
 function legionToolSchema(pi: PiApi): unknown {
   const z = pi.zod;
   return z.object({
-    op: z.enum([
-      "set_status",
-      "register_gate",
-      "release_wave",
-      "escalate",
-      "merge_gate",
-      "spawn_worker",
-    ]),
+    op: z.enum(["set_status", "register_gate", "release_wave", "escalate", "spawn_worker"]),
     issue: z.string().optional(),
     status: z.enum(LIFECYCLE_STATUSES).optional(),
     askId: z.string().optional(),
@@ -64,7 +56,6 @@ function legionToolSchema(pi: PiApi): unknown {
     context: z.unknown().optional(),
     issues: z.array(z.string()).optional(),
     rationale: z.string().optional(),
-    pr: z.number().optional(),
     role: z.enum(LEGION_ROLES).optional(),
     task: z.string().optional(),
   });
@@ -100,13 +91,6 @@ export function createLegionTool(deps: {
             throw new Error(`${String(parameters.op)} requires ${name}`);
           return value;
         };
-        const numberInput = (name: string): number => {
-          const value = parameters[name];
-          if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
-            throw new Error(`${String(parameters.op)} requires a positive integer ${name}`);
-          }
-          return value;
-        };
         const op = String(parameters.op);
         const allowedFields = LEGION_OP_FIELDS[op];
         if (allowedFields) {
@@ -117,15 +101,6 @@ export function createLegionTool(deps: {
           }
         }
         switch (parameters.op) {
-          case "merge_gate":
-            return jsonSuccess(
-              await daemon.mergeGate({
-                tree: architect.tree,
-                pr: numberInput("pr"),
-                sessionId,
-                secret: architect.secret,
-              })
-            );
           case "set_status": {
             const status = parameters.status;
             if (typeof status !== "string" || !isLifecycleStatus(status)) {

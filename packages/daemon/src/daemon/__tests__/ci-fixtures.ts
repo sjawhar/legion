@@ -147,7 +147,6 @@ export function config(): DaemonConfig {
     dispatchProject: "LEGSMOKE",
     repos: ["acme/widgets"],
     repo: "acme/widgets",
-    appLogins: ["legion[bot]"],
     admissionCap: 4,
     workerCap: 6,
     maxRecursionDepth: 8,
@@ -159,7 +158,7 @@ export function config(): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
-    gates: { design: "root-issues", merge: "human" },
+    gates: { design: "root-issues" },
     githubApps: {},
     stateDir: "/state",
   };

@@ -1,6 +1,6 @@
 # State Support Module
 
-This directory provides GitHub artifact access shared by the daemon's resync, approval, and catch-up paths. It does not own daemon lifecycle state or worker orchestration.
+This directory provides GitHub artifact access shared by the daemon's resync and catch-up paths. It does not own daemon lifecycle state or worker orchestration.
 
 ## Files
 

@@ -21,7 +21,6 @@ function daemonConfig(stateDir: string): DaemonConfig {
     dispatchProject: "LEGSMOKE",
     repo: "sjawhar/legion",
     repos: ["sjawhar/legion"],
-    appLogins: [],
     admissionCap: 1,
     workerCap: 5,
     maxRecursionDepth: 8,
@@ -33,7 +32,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
-    gates: { design: "root-issues", merge: "human" },
+    gates: { design: "root-issues" },
     githubApps: {},
     stateDir,
   };

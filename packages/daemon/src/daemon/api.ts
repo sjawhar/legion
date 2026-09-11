@@ -31,7 +31,6 @@ import {
   handleIssueStatus,
   handleWaveRelease,
 } from "./api/routes/issues";
-import { handleMergeGate } from "./api/routes/merge-gate";
 import { handleProcessExit, handleProcessReady, handleProcessStarted } from "./api/routes/process";
 import {
   handlePhaseComplete,
@@ -47,14 +46,11 @@ import { StopFailed, TreeClosingError } from "./processes";
 
 const GRANT_TTL_MS = 60_000;
 
-type MergeGateSetting = "human" | "off";
-
 export interface LegionApiConfig {
   port: number;
   hostname?: string;
   repo: `${string}/${string}`;
-  gates: { design: "root-issues" | "off"; merge: MergeGateSetting };
-  appLogins?: string[];
+  gates: { design: "root-issues" | "off" };
   now?: () => number;
 }
 
@@ -138,7 +134,6 @@ const ROUTES: Record<string, RouteEntry> = {
     request: LegionDaemonApi.ProcessExit.request,
     handler: handleProcessExit,
   },
-  "/legion/v1/merge-gate": { request: LegionDaemonApi.MergeGate.request, handler: handleMergeGate },
   "/legion/v1/waves/release": {
     request: LegionDaemonApi.WaveRelease.request,
     handler: handleWaveRelease,
@@ -189,10 +184,6 @@ const ROUTES: Record<string, RouteEntry> = {
 };
 
 export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): LegionApi {
-  if (config.gates.merge === "human" && (!config.appLogins || config.appLogins.length === 0)) {
-    throw new Error("gates.merge=human requires at least one configured GitHub App login");
-  }
-
   const runner = deps.runner ?? defaultRunner;
   const now = config.now ?? Date.now;
   const save = async (): Promise<void> => {

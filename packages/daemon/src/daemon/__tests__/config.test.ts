@@ -15,7 +15,6 @@ describe("daemon config", () => {
       env: {
         ...requiredEnv,
         LEGION_DAEMON_PORT: "14000",
-        LEGION_APP_LOGINS: "legion-implement[bot],legion-review[bot]",
         LEGION_MAX_FIX_ATTEMPTS: "5",
         LEGION_ADMISSION_CAP: "7",
         LEGION_MAX_RECURSION_DEPTH: "11",
@@ -37,7 +36,6 @@ describe("daemon config", () => {
       envoyUrl: "http://127.0.0.1:9020",
       natsUrls: ["nats://one:4222", "nats://two:4222"],
       dispatchProject: "ACME",
-      appLogins: ["legion-implement[bot]", "legion-review[bot]"],
       maxFixAttempts: 5,
       admissionCap: 7,
       maxRecursionDepth: 11,
@@ -46,7 +44,7 @@ describe("daemon config", () => {
       workerStopTimeoutSeconds: 15,
       treeStopTimeoutSeconds: 90,
       resyncIntervalMs: 600_000,
-      gates: { design: "root-issues", merge: "human" },
+      gates: { design: "root-issues" },
       ompInvocation: "custom-omp-from-env",
     });
     expect(config.stateDir).toEndWith(path.join(".legion", "acme42"));
@@ -137,9 +135,7 @@ describe("daemon config", () => {
   it("rejects the retired worker_budget key from the YAML loader shape with a helpful message", () => {
     expect(() =>
       loadConfigFromFile(
-        ["project: acme/7", "worker_budget: 6", "gates:", "  design: off", "  merge: off"].join(
-          "\n"
-        ),
+        ["project: acme/7", "worker_budget: 6", "gates:", "  design: off"].join("\n"),
         "/tmp/legion-config"
       )
     ).toThrow("worker_budget was replaced by worker_cap");
@@ -249,13 +245,9 @@ describe("daemon config", () => {
 
   it("accepts dispatch_url from the YAML loader shape without an unknown-key warning", () => {
     const file = loadConfigFromFile(
-      [
-        "project: acme/7",
-        "dispatch_url: http://127.0.0.1:18766",
-        "gates:",
-        "  design: off",
-        "  merge: off",
-      ].join("\n"),
+      ["project: acme/7", "dispatch_url: http://127.0.0.1:18766", "gates:", "  design: off"].join(
+        "\n"
+      ),
       "/tmp/legion-config"
     );
     const { config } = resolveDaemonConfig({
@@ -266,7 +258,7 @@ describe("daemon config", () => {
     expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
   });
 
-  it("loads a file that omits the gates block, resolving both gates to their defaults", () => {
+  it("loads a file that omits the gates block, resolving the design gate to its default", () => {
     const file = loadConfigFromFile(
       ["project: acme/7", "dispatch_project: ACME"].join("\n"),
       "/tmp/legion-config"
@@ -279,13 +271,43 @@ describe("daemon config", () => {
       },
     });
 
-    expect(config.gates).toEqual({ design: "root-issues", merge: "human" });
+    expect(config.gates).toEqual({ design: "root-issues" });
   });
 
   it("rejects a gates block that is present but not a mapping", () => {
     expect(() =>
       loadConfigFromFile(["project: acme/7", "gates: off"].join("\n"), "/tmp/legion-config")
     ).toThrow("gates must be a mapping");
+  });
+
+  it("rejects a gates.merge key: human approval is the repository's rule, not Legion's", () => {
+    expect(() =>
+      loadConfigFromFile(
+        ["project: acme/7", "gates:", "  design: off", "  merge: human"].join("\n"),
+        "/tmp/legion-config"
+      )
+    ).toThrow(
+      "gates.merge is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes"
+    );
+  });
+
+  it("rejects an app_logins key from the file and from LEGION_APP_LOGINS alike", () => {
+    const message =
+      "app_logins is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes";
+    expect(() =>
+      loadConfigFromFile(
+        ["project: acme/7", "app_logins:", "  - legion-implement[bot]"].join("\n"),
+        "/tmp/legion-config"
+      )
+    ).toThrow(message);
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_APP_LOGINS: "legion-implement[bot]" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(message);
   });
 
   it("loads lifecycle settings from the existing YAML loader shape", () => {
@@ -299,8 +321,6 @@ describe("daemon config", () => {
         "  - nats://one:4222",
         "repos:",
         "  - acme/widgets",
-        "app_logins:",
-        "  - legion-implement[bot]",
         "max_fix_attempts: 4",
         "admission_cap: 3",
         "max_recursion_depth: 6",
@@ -314,7 +334,6 @@ describe("daemon config", () => {
         "state_dir: ./state",
         "gates:",
         "  design: off",
-        "  merge: off",
       ].join("\n"),
       "/tmp/legion-config"
     );
@@ -327,7 +346,6 @@ describe("daemon config", () => {
       envoyUrl: "http://listener:9020",
       natsUrls: ["nats://one:4222"],
       repos: ["acme/widgets"],
-      appLogins: ["legion-implement[bot]"],
       maxFixAttempts: 4,
       admissionCap: 3,
       maxRecursionDepth: 6,
@@ -338,7 +356,7 @@ describe("daemon config", () => {
       resyncIntervalMs: 120_000,
       workerBootTimeoutSeconds: 90,
       stateDir: "/tmp/legion-config/state",
-      gates: { design: "off", merge: "off" },
+      gates: { design: "off" },
       ompInvocation: "mise x github:acme/oh-my-pi@18.0.3 -- omp",
     });
   });
@@ -353,12 +371,9 @@ describe("daemon config", () => {
         "  - nats://one:4222",
         "repos:",
         "  - acme/widgets",
-        "app_logins:",
-        "  - legion-implement[bot]",
         "worker_boot_timeout_seconds: 90",
         "gates:",
         "  design: off",
-        "  merge: off",
       ].join("\n"),
       "/tmp/legion-config"
     );
@@ -404,12 +419,9 @@ describe("daemon config", () => {
         "  - nats://one:4222",
         "repos:",
         "  - acme/widgets",
-        "app_logins:",
-        "  - legion-implement[bot]",
         "worker_rpc_timeout_seconds: 20",
         "gates:",
         "  design: off",
-        "  merge: off",
       ].join("\n"),
       "/tmp/legion-config"
     );
@@ -455,12 +467,9 @@ describe("daemon config", () => {
         "dispatch_project: LEGION",
         "repos:",
         "  - acme/widgets",
-        "app_logins:",
-        "  - legion-implement[bot]",
         "worker_boot_registration_deadline_intervals: 5",
         "gates:",
         "  design: off",
-        "  merge: off",
       ].join("\n"),
       "/tmp/legion-config"
     );
@@ -506,15 +515,12 @@ describe("daemon config", () => {
         "  - nats://one:4222",
         "repos:",
         "  - acme/widgets",
-        "app_logins:",
-        "  - legion-implement[bot]",
         "omp_launch_prefix:",
         "  - secrets",
         "  - ANTHROPIC_API_KEY",
         "  - --",
         "gates:",
         "  design: off",
-        "  merge: off",
       ].join("\n"),
       "/tmp/legion-config"
     );
@@ -595,7 +601,6 @@ describe("daemon config", () => {
           "dispatch_mcp_url: http://127.0.0.1:18766/mcp",
           "gates:",
           "  design: off",
-          "  merge: off",
         ].join("\n"),
         "/tmp/legion-config"
       )
@@ -629,7 +634,6 @@ describe("daemon config", () => {
           '    private_key_command: "env"',
           "gates:",
           "  design: off",
-          "  merge: off",
         ].join("\n"),
         "/tmp/legion-config"
       );

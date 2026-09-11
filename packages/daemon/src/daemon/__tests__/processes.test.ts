@@ -166,7 +166,6 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     dispatchProject: "LEGSMOKE",
     repo: "sjawhar/legion",
     repos: ["sjawhar/legion"],
-    appLogins: [],
     admissionCap: 1,
     workerCap: 5,
     maxRecursionDepth: 8,
@@ -178,7 +177,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
-    gates: { design: "root-issues", merge: "human" },
+    gates: { design: "root-issues" },
     githubApps: {},
     stateDir,
     ...overrides,
@@ -9463,7 +9462,6 @@ describe("ProcessManager", () => {
         config: {
           resyncIntervalMs: 600_000,
           dispatchProject: "LEGSMOKE",
-          appLogins: [],
           maxFixAttempts: 3,
         },
         dispatchClient: fakeDispatchClient(),
@@ -9478,7 +9476,6 @@ describe("ProcessManager", () => {
               await processes.resurrect(effect.tree);
           }
         },
-        setApprovalStatus: async () => ({ written: true }),
       },
       { force: true }
     );

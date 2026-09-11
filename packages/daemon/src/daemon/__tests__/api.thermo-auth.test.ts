@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type IssueKey, roleToken } from "@legion/contracts";
-import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { type LegionState, newLegionState } from "../legion-state";
-import { reduceGithubEvent } from "../reducers";
-import { config, fakeDispatchClient } from "./ci-fixtures";
+import { fakeDispatchClient } from "./ci-fixtures";
 
 const root = "WIDGETS-1" as IssueKey;
 
@@ -28,42 +26,15 @@ function stateWithRoot(): LegionState {
   return state;
 }
 
-function response(command: string[]): { stdout: string; stderr: string; exitCode: number } {
-  if (command.some((part) => part.endsWith("/pulls/17"))) {
-    return {
-      stdout: JSON.stringify({
-        number: 17,
-        head: { ref: "legion/issue-1", sha: "live-head" },
-        updated_at: "2026-09-07T03:00:00Z",
-      }),
-      stderr: "",
-      exitCode: 0,
-    };
-  }
-  if (command.some((part) => part.endsWith("/reviews"))) {
-    return {
-      stdout: JSON.stringify([
-        { user: { login: "sami" }, state: "APPROVED", commit_id: "live-head" },
-      ]),
-      stderr: "",
-      exitCode: 0,
-    };
-  }
-  return { stdout: "{}", stderr: "", exitCode: 0 };
-}
-
 function startApi(
   state: LegionState,
   options: {
-    runner?: CommandRunner;
     markProcessDead?: () => void;
-    unresolvedAppLogins?: boolean;
   } = {}
 ): LegionApi {
   const deps: LegionApiDeps = {
     state,
     saveState: async () => {},
-    runner: options.runner ?? (async (command) => response(command)),
     tokenManager: {
       getToken: async () => ({
         token: "test-token",
@@ -100,8 +71,7 @@ function startApi(
       port: 0,
       hostname: "127.0.0.1",
       repo: "acme/widgets",
-      gates: { design: "root-issues", merge: "human" },
-      ...(options.unresolvedAppLogins ? {} : { appLogins: ["legion-implementer[bot]"] }),
+      gates: { design: "root-issues" },
     },
     deps
   );
@@ -137,23 +107,6 @@ describe("thermonuclear API regressions", () => {
   let api: LegionApi | undefined;
 
   afterEach(() => api?.stop());
-
-  it("refuses a human merge gate without resolved GitHub App logins", () => {
-    const state = stateWithRoot();
-    let unresolvedApi: LegionApi | undefined;
-    let startupError: unknown;
-    try {
-      unresolvedApi = startApi(state, { unresolvedAppLogins: true });
-    } catch (error) {
-      startupError = error;
-    } finally {
-      unresolvedApi?.stop();
-    }
-    expect(startupError).toBeInstanceOf(Error);
-    expect((startupError as Error).message).toBe(
-      "gates.merge=human requires at least one configured GitHub App login"
-    );
-  });
 
   it("exposes an established role's session on GET /legion/v1/state but never its recovery token or capability secret, and still requires the token to recover it", async () => {
     const state = stateWithRoot();
@@ -194,196 +147,6 @@ describe("thermonuclear API regressions", () => {
     });
     expect(recovered.status).toBe(200);
     expect(await recovered.json()).toMatchObject({ tree: root, issue: root, role: "architect" });
-  });
-
-  it("refreshes a cached PR to its live head before evaluating human approval", async () => {
-    const state = stateWithRoot();
-    state.prs["acme/widgets#17"] = {
-      key: root,
-      repo: "acme/widgets",
-      number: 17,
-      headSha: "cached-head",
-      headUpdatedAt: Date.parse("2026-09-07T02:00:00Z"),
-      verdict: "red",
-      failing: ["unit"],
-      failingStatuses: [],
-      ciSettledAt: 1,
-      ciCheckRuns: [{ name: "build", id: 1 }],
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      reviewDecision: "approved",
-      fixAttempts: 1,
-    };
-    api = startApi(state);
-    const rootSession = await startRoot(api);
-
-    const gate = await post(api, "/legion/v1/merge-gate", {
-      tree: root,
-      pr: 17,
-      sessionId: rootSession.sessionId,
-      secret: rootSession.secret,
-    });
-
-    expect(gate.status).toBe(200);
-    expect(await gate.json()).toEqual({ approved: true, pr: 17, headSha: "live-head" });
-    // The lifecycle clock moves with the head, so a delayed older synchronize cannot rewind it.
-    expect(state.prs["acme/widgets#17"]).toMatchObject({
-      headSha: "live-head",
-      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
-      verdict: null,
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: null,
-      ciCheckRuns: null,
-      fixAttempts: 2,
-    });
-    expect(state.prs["acme/widgets#17"]?.reviewDecision).toBeUndefined();
-  });
-
-  it("a same-head merge-gate read advances the lifecycle clock so a delayed intervening-head synchronize is rejected", async () => {
-    const state = stateWithRoot();
-    state.prs["acme/widgets#17"] = {
-      key: root,
-      repo: "acme/widgets",
-      number: 17,
-      headSha: "live-head",
-      headUpdatedAt: Date.parse("2026-09-07T01:00:00Z"),
-      verdict: "green",
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: 1,
-      ciCheckRuns: [{ name: "build", id: 1 }],
-      ciSettlementGeneration: 1,
-      ciSnapshot: "hash-a",
-      ciReconciled: false,
-      reviewDecision: "approved",
-      fixAttempts: 0,
-    };
-    api = startApi(state);
-    const rootSession = await startRoot(api);
-
-    // GitHub confirms live-head at 03:00 (it was briefly elsewhere in between).
-    const gate = await post(api, "/legion/v1/merge-gate", {
-      tree: root,
-      pr: 17,
-      sessionId: rootSession.sessionId,
-      secret: rootSession.secret,
-    });
-    expect(gate.status).toBe(200);
-    expect(state.prs["acme/widgets#17"]).toMatchObject({
-      headSha: "live-head",
-      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
-      verdict: "green",
-      ciSettlementGeneration: 1,
-    });
-
-    // The delayed synchronize for the intervening head at 02:00 is older: rejected.
-    reduceGithubEvent(
-      state,
-      "notifications.github.acme.widgets.pull_request.synchronize",
-      {
-        event_id: "delayed-intervening",
-        issued_at: Date.parse("2026-09-07T02:00:00Z"),
-        payload: {
-          kind: "pr",
-          action: "synchronize",
-          repo: "acme/widgets",
-          number: "17",
-          head_sha: "intervening-head",
-          updated_at: "2026-09-07T02:00:00Z",
-        },
-      },
-      config()
-    );
-    expect(state.prs["acme/widgets#17"]).toMatchObject({
-      headSha: "live-head",
-      verdict: "green",
-      ciSettlementGeneration: 1,
-    });
-  });
-
-  it("a fetched head older than a lifecycle update that landed during the read does not rewind the PR", async () => {
-    // A -> B -> A: GitHub is briefly at B when the gate reads; A comes back at
-    // t3 and its synchronize lands while the read is outstanding.
-    const state = stateWithRoot();
-    state.prs["acme/widgets#17"] = {
-      key: root,
-      repo: "acme/widgets",
-      number: 17,
-      headSha: "head-a",
-      headUpdatedAt: Date.parse("2026-09-07T01:00:00Z"),
-      verdict: "green",
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: 1,
-      ciCheckRuns: [{ name: "build", id: 1 }],
-      ciSettlementGeneration: 1,
-      ciSnapshot: "hash-a",
-      ciReconciled: false,
-      reviewDecision: "approved",
-      fixAttempts: 0,
-    };
-    const before = structuredClone(state.prs["acme/widgets#17"]);
-    api = startApi(state, {
-      runner: async (command) => {
-        if (command.some((part) => part.endsWith("/pulls/17"))) {
-          reduceGithubEvent(
-            state,
-            "notifications.github.acme.widgets.pull_request.synchronize",
-            {
-              event_id: "back-to-a",
-              issued_at: Date.parse("2026-09-07T03:00:00Z"),
-              payload: {
-                kind: "pr",
-                action: "synchronize",
-                repo: "acme/widgets",
-                number: "17",
-                head_sha: "head-a",
-                updated_at: "2026-09-07T03:00:00Z",
-              },
-            },
-            config()
-          );
-          return {
-            stdout: JSON.stringify({
-              number: 17,
-              head: { ref: "legion/issue-1", sha: "head-b" },
-              updated_at: "2026-09-07T02:00:00Z",
-            }),
-            stderr: "",
-            exitCode: 0,
-          };
-        }
-        if (command.some((part) => part.endsWith("/reviews"))) {
-          return {
-            stdout: JSON.stringify([
-              { user: { login: "sami" }, state: "APPROVED", commit_id: "head-a" },
-            ]),
-            stderr: "",
-            exitCode: 0,
-          };
-        }
-        return { stdout: "{}", stderr: "", exitCode: 0 };
-      },
-    });
-    const rootSession = await startRoot(api);
-
-    const gate = await post(api, "/legion/v1/merge-gate", {
-      tree: root,
-      pr: 17,
-      sessionId: rootSession.sessionId,
-      secret: rootSession.secret,
-    });
-
-    // The older fetched head B is ignored; A's CI state and approval survive.
-    expect(gate.status).toBe(200);
-    expect(await gate.json()).toEqual({ approved: true, pr: 17, headSha: "head-a" });
-    expect(state.prs["acme/widgets#17"]).toEqual({
-      ...before,
-      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
-      headUpdatedAtSource: "webhook",
-    });
   });
 
   it("rejects an invalid contract before process exit can mutate lifecycle state", async () => {

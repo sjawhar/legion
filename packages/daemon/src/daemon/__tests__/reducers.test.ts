@@ -34,7 +34,6 @@ const childBranch = `legion/${child}`;
 
 const prNumber = 17;
 const config: ReducerConfig = {
-  appLogins: ["legion-author[bot]", "legion-reviewer[bot]"],
   maxFixAttempts: 3,
 };
 
@@ -751,7 +750,7 @@ describe("reduceGithubEvent", () => {
         head_ref: childBranch,
         head_sha: "recovered-head",
       })
-    ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "recovered-head" }]);
+    ).toEqual([]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       key: child,
       headSha: "recovered-head",
@@ -781,7 +780,7 @@ describe("reduceGithubEvent", () => {
         head_ref: childBranch,
         head_sha: "new-sha",
       })
-    ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "new-sha" }]);
+    ).toEqual([]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       headSha: "new-sha",
       verdict: null,
@@ -811,7 +810,7 @@ describe("reduceGithubEvent", () => {
         head_sha: "head-b",
         updated_at: "2026-09-07T03:02:00Z",
       })
-    ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "head-b" }]);
+    ).toEqual([]);
     Object.assign(state.prs[`${repo}#${prNumber}`], {
       verdict: "green",
       failing: [],
@@ -904,7 +903,6 @@ describe("reduceGithubEvent", () => {
           body: "Looks good",
         },
       },
-      { kind: "approval-status", repo, pr: prNumber, sha: "old-sha" },
       {
         kind: "publish",
         role: implementer,
@@ -945,7 +943,6 @@ describe("reduceGithubEvent", () => {
           body: "Looks good",
         },
       },
-      { kind: "approval-status", repo, pr: prNumber, sha: "old-sha" },
       {
         kind: "publish",
         role: architect,
@@ -1208,7 +1205,6 @@ describe("reduceGithubEvent", () => {
           body: "Approved an earlier head",
         },
       },
-      { kind: "approval-status", repo, pr: prNumber, sha: "current-sha" },
     ]);
     expect(state.prs[`${repo}#${prNumber}`]?.reviewDecision).toBeUndefined();
   });
