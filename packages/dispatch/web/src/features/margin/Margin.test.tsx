@@ -814,7 +814,11 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
   queryClient.setQueryData(["asks", issue.key], [anchoredAsk]);
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], [askReply]);
-  const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask: anchoredAsk, replies: [askReply] });
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask: anchoredAsk,
+    edits: [],
+    replies: [askReply],
+  });
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>

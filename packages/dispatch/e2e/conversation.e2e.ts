@@ -161,8 +161,9 @@ test("Conversation updates an open ask in place after an agent edit and preserve
     await expect(
       page.locator('[data-kind="activity"]', { hasText: 'edited the question "Which transport' })
     ).toBeVisible();
-    await card.getByText("Show previous question").click();
+    await card.getByText("Show 1 previous version").click();
     await expect(card.getByText("Which implementation?")).toBeVisible();
+    await expect(card.getByText(/Reworded by /)).toBeVisible();
     await expect(card.getByRole("list", { name: "Options" })).toContainText("REST");
     await expect(card.getByRole("list", { name: "Options" })).toContainText("gRPC");
 

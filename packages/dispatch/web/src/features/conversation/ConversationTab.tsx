@@ -576,7 +576,7 @@ export function ConversationTab({
                 ref={registerObserved}
               >
                 <div className="min-w-0 flex-1">
-                  <AskCard ask={item.ask} events={events} thread="collapsed" />
+                  <AskCard ask={item.ask} thread="collapsed" />
                 </div>
                 <PinButton disabled={hasFailedOps} onPin={onPin} pinned={pinned} />
               </li>

@@ -105,9 +105,11 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await expect(card.locator("strong")).toHaveText("change");
   const thread = margin.getByTestId(`thread-${ask.id}`);
 
-  // Alice replies before answering - the question is a thread from the start.
-  await thread.getByLabel("Reply").fill("Any blockers first?");
-  await thread.getByRole("button", { name: "Reply" }).click();
+  // Alice replies before answering - the question is a thread from the start, and the
+  // composer on an open ask says so: this is a clarification, not an answer.
+  await expect(thread.getByText("Replying does not answer the question.")).toBeVisible();
+  await thread.getByLabel("Ask for clarification").fill("Any blockers first?");
+  await thread.getByRole("button", { name: "Send" }).click();
   await expect(thread.getByText("Any blockers first?")).toBeVisible();
 
   // Alice answers - a distinct, first-class event.

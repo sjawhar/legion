@@ -45,6 +45,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
       created_at: "2026-09-09T00:00:00Z",
       edited_at: null,
     },
+    edits: [],
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -112,6 +113,7 @@ test("two references in one body each resolve their own inline link and title", 
       created_at: "2026-09-09T00:00:00Z",
       edited_at: null,
     },
+    edits: [],
     replies: [],
   };
   const projectArtifact: ArtifactDetails = {
@@ -184,6 +186,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
       created_at: "2026-09-09T00:00:00Z",
       edited_at: null,
     },
+    edits: [],
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);

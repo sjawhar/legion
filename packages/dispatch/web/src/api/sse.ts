@@ -138,7 +138,12 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     event.type === "ask.resolved"
   ) {
     keys.push(["asks", event.issue_key], ["projects"]);
-    if (event.type === "ask.resolved" && typeof event.payload.id === "string") {
+    // The ask's own read (`GET /asks/{id}`) carries its resolution and every rewording, so a
+    // card showing either must refetch it.
+    if (
+      (event.type === "ask.edited" || event.type === "ask.resolved") &&
+      typeof event.payload.id === "string"
+    ) {
       keys.push(["ask-thread", event.payload.id]);
     }
     return keys;

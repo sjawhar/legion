@@ -523,10 +523,55 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	edits, err := s.loadAskEdits(r.Context(), s.deps.Store.Pool, ask.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, struct {
 		Ask     model.Ask       `json:"ask"`
 		Replies []model.Comment `json:"replies"`
-	}{Ask: ask, Replies: replies})
+		Edits   []model.AskEdit `json:"edits"`
+	}{Ask: ask, Replies: replies, Edits: edits})
+}
+
+// loadAskEdits reads every rewording of an ask back from its ask.edited events,
+// oldest first, so a reader can see each version the question went through.
+func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]model.AskEdit, error) {
+	rows, err := q.Query(ctx, `
+		select payload->'previous', payload->'edited_by', created_at
+		from events
+		where type = 'ask.edited' and payload->>'id' = $1
+		order by id asc
+	`, askID)
+	if err != nil {
+		return nil, fmt.Errorf("load ask edits: %w", err)
+	}
+	defer rows.Close()
+	edits := []model.AskEdit{}
+	for rows.Next() {
+		var previous, editedBy []byte
+		var at time.Time
+		if err := rows.Scan(&previous, &editedBy, &at); err != nil {
+			return nil, fmt.Errorf("scan ask edit: %w", err)
+		}
+		var edit model.AskEdit
+		if err := json.Unmarshal(previous, &edit.Previous); err != nil {
+			return nil, fmt.Errorf("decode ask edit previous: %w", err)
+		}
+		if edit.Previous.Options == nil {
+			edit.Previous.Options = []model.AskOption{}
+		}
+		if err := json.Unmarshal(editedBy, &edit.EditedBy); err != nil {
+			return nil, fmt.Errorf("decode ask edit editor: %w", err)
+		}
+		edit.At = *askTimestamp(at)
+		edits = append(edits, edit)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load ask edits: %w", err)
+	}
+	return edits, nil
 }
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
