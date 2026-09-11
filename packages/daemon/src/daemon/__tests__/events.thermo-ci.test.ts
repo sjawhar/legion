@@ -11,6 +11,7 @@ import {
   FakeNats,
   fakeDispatchClient,
   prPayload,
+  reviewPayload,
   settledChecks,
   stateForCi,
 } from "./ci-fixtures";
@@ -111,17 +112,7 @@ it("routes an approved PR's settled checks and ready signal to the tree's archit
     {
       event_id: "review-1",
       issued_at: 0,
-      payload: {
-        action: "submitted",
-        repository: { full_name: "acme/widgets" },
-        pull_request: { number: 7, head: { sha: "head-1" } },
-        review: {
-          user: { login: "sami" },
-          state: "approved",
-          commit_id: "head-1",
-          body: "lgtm",
-        },
-      },
+      payload: reviewPayload({ body: "lgtm" }),
     },
     config
   );

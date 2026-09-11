@@ -6,10 +6,12 @@ import { type EventPumpDeps, startEventPump, truncateTermReason } from "../event
 import { type LegionState, newLegionState } from "../legion-state";
 import {
   checkPr,
+  commentPayload,
   config,
   type FakeDurableControlCalls,
   FakeNats,
   prPayload,
+  reviewPayload,
   settledChecks,
   stateForIssue,
 } from "./ci-fixtures";
@@ -506,20 +508,7 @@ describe("core-NATS event pump", () => {
     try {
       nats.emit(
         "notifications.github.acme.widgets.pull_request_review.submitted",
-        envelope(
-          {
-            action: "submitted",
-            repository: { full_name: "acme/widgets" },
-            pull_request: { number: 7, head: { sha: "head-1" } },
-            review: {
-              user: { login: "sami" },
-              state: "approved",
-              commit_id: "head-1",
-              body: "Looks good",
-            },
-          },
-          "review-1"
-        ),
+        envelope(reviewPayload(), "review-1"),
         { ack: () => acks.push("ack-1") }
       );
       await pump.drain();
@@ -575,7 +564,7 @@ describe("core-NATS event pump", () => {
     }
   });
 
-  it("routes raw review and review-comment payloads with a nested pull request", async () => {
+  it("routes normalized review and review-comment payloads to the active phase (the shape Envoy actually delivers)", async () => {
     const { state, issue, implementer } = stateForIssue();
     state.prs["acme/widgets#7"] = checkPr(issue);
     state.phases[issue] = { phase: "implementer", sessionId: "worker-session" };
@@ -591,36 +580,17 @@ describe("core-NATS event pump", () => {
     try {
       nats.emit(
         "notifications.github.acme.widgets.pull_request_review.submitted",
-        envelope(
-          {
-            action: "submitted",
-            repository: { full_name: "acme/widgets" },
-            pull_request: { number: 7, head: { sha: "head-1" } },
-            review: {
-              user: { login: "reviewer" },
-              state: "approved",
-              commit_id: "head-1",
-              body: "Looks good",
-            },
-          },
-          "review-submitted"
-        )
+        envelope(reviewPayload({ author: "reviewer" }), "review-submitted")
       );
       await pump.drain();
       nats.emit(
         "notifications.github.acme.widgets.pull_request_review_comment.created",
         envelope(
-          {
-            action: "created",
-            repository: { full_name: "acme/widgets" },
-            pull_request: { number: 7, head: { sha: "head-1" } },
-            comment: {
-              user: { login: "reviewer" },
-              body: "Please rename this",
-              path: "src/index.ts",
-              html_url: "https://github.com/acme/widgets/pull/7#discussion_r1",
-            },
-          },
+          commentPayload({
+            author: "reviewer",
+            path: "src/index.ts",
+            url: "https://github.com/acme/widgets/pull/7#discussion_r1",
+          }),
           "review-comment-created"
         )
       );
