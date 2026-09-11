@@ -82,10 +82,11 @@ func scan(ctx context.Context, deps Deps) {
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(i.project_key, ar.project_key), e.seq,
-		       e.type, e.actor, e.notify, e.created_at, e.payload, coalesce(ar.slug, ''), i.route
+		       e.type, e.actor, e.notify, e.created_at, e.payload, coalesce(ar.slug, ''), coalesce(i.route, ai.route)
 		from events e
 		left join issues i on i.key = e.issue_key
 		left join artifacts ar on ar.id = e.artifact_id
+		left join issues ai on ai.key = ar.issue_key
 		where e.published_at is null
 		order by e.id
 		limit $1
@@ -160,48 +161,110 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err := deps.Publisher.Publish(item); err != nil {
 		return err
 	}
-	if event.Notify && event.ArtifactID == nil {
+	if event.Notify {
 		publishRoute(deps.Publisher, item, route)
-		publishAskAuthorRoute(ctx, deps, item, event)
+		publishAuthorRoutes(ctx, deps, item, event)
 	}
 	return nil
 }
 
-// publishAskAuthorRoute delivers a human reply or resolution on an issue ask directly to the
-// asking session's own topic, regardless of the issue's route. The issue's route (if any) may
-// point at an entirely different reviewer, so without this the agent that asked the question
-// never learns about the human action.
-func publishAskAuthorRoute(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) {
-	var askID string
+// publishAuthorRoutes delivers a human comment-thread action or ask resolution directly to
+// the involved sessions' own topics, regardless of the issue's route (which may point at an
+// entirely different reviewer) and regardless of whether the event's owner is an issue or a
+// project document (which has no route at all). Without this, the agent that asked the
+// question, started the thread, or is the thread's own root author never learns about the
+// human's reply, resolution, reopening, or edit.
+func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) {
+	var askID, replyTo, commentID string
 	switch event.Type {
-	case "comment.created":
+	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
 		askID = payloadString(event.Payload, "ask_id")
+		replyTo = payloadString(event.Payload, "reply_to")
+		commentID = payloadString(event.Payload, "id")
 	case "ask.resolved":
 		askID = payloadString(event.Payload, "id")
 	default:
 		return
 	}
-	if askID == "" {
-		return
+
+	seen := map[string]bool{}
+	var targets []model.Actor
+	consider := func(author model.Actor, ok bool) {
+		if !ok || author.Kind != "session" || seen[author.ID] {
+			return
+		}
+		if event.Actor.Kind == author.Kind && event.Actor.ID == author.ID {
+			return
+		}
+		seen[author.ID] = true
+		targets = append(targets, author)
 	}
+
+	if askID != "" {
+		consider(loadAskAuthor(ctx, deps, askID))
+	}
+	if replyTo != "" {
+		// The root is what humans reply under; the parent (reply_to's own target) is
+		// usually the same comment today since a reply must target a thread root, but
+		// walking to the true root keeps this correct if nesting is ever allowed.
+		consider(loadRootCommentAuthor(ctx, deps, replyTo))
+		consider(loadCommentAuthor(ctx, deps, replyTo))
+	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
+		consider(loadRootCommentAuthor(ctx, deps, commentID))
+	}
+
+	for _, author := range targets {
+		routed := item
+		routed.Topic = contracts.AgentTopicPrefix + author.ID
+		if err := deps.Publisher.Publish(routed); err != nil {
+			slog.Error("dispatch outbox: publish author route", "session_id", author.ID, "error", err)
+		}
+	}
+}
+
+func loadAskAuthor(ctx context.Context, deps Deps, askID string) (model.Actor, bool) {
 	var authorJSON []byte
 	if err := deps.Store.Pool.QueryRow(ctx, `select author from asks where id = $1`, askID).Scan(&authorJSON); err != nil {
 		slog.Error("dispatch outbox: load ask author", "ask_id", askID, "error", err)
-		return
+		return model.Actor{}, false
 	}
+	return decodeAuthor(authorJSON, "ask", askID)
+}
+
+func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool) {
+	var authorJSON []byte
+	if err := deps.Store.Pool.QueryRow(ctx, `select author from comments where id = $1`, commentID).Scan(&authorJSON); err != nil {
+		slog.Error("dispatch outbox: load comment author", "comment_id", commentID, "error", err)
+		return model.Actor{}, false
+	}
+	return decodeAuthor(authorJSON, "comment", commentID)
+}
+
+// loadRootCommentAuthor walks a comment's reply_to chain up to its thread root - the comment
+// humans reply under - and returns that root's author.
+func loadRootCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool) {
+	var authorJSON []byte
+	if err := deps.Store.Pool.QueryRow(ctx, `
+		with recursive chain as (
+			select id, reply_to, author from comments where id = $1
+			union all
+			select c.id, c.reply_to, c.author from comments c join chain h on c.id = h.reply_to
+		)
+		select author from chain where reply_to is null limit 1
+	`, commentID).Scan(&authorJSON); err != nil {
+		slog.Error("dispatch outbox: load root comment author", "comment_id", commentID, "error", err)
+		return model.Actor{}, false
+	}
+	return decodeAuthor(authorJSON, "comment", commentID)
+}
+
+func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool) {
 	var author model.Actor
-	if err := json.Unmarshal(authorJSON, &author); err != nil {
-		slog.Error("dispatch outbox: decode ask author", "ask_id", askID, "error", err)
-		return
+	if err := json.Unmarshal(raw, &author); err != nil {
+		slog.Error("dispatch outbox: decode author", "kind", kind, "id", id, "error", err)
+		return model.Actor{}, false
 	}
-	if author.Kind != "session" {
-		return
-	}
-	routed := item
-	routed.Topic = contracts.AgentTopicPrefix + author.ID
-	if err := deps.Publisher.Publish(routed); err != nil {
-		slog.Error("dispatch outbox: publish ask author route", "ask_id", askID, "error", err)
-	}
+	return author, true
 }
 
 func publishRoute(publisher Publisher, item contracts.Envelope, route *string) {

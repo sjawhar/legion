@@ -264,6 +264,11 @@ type CommentEventPayload struct {
 	// notification renderer can show "re: <question>" instead of a bare UUID.
 	// Empty when the comment does not reply to an ask.
 	AskQuestion string `json:"ask_question,omitempty"`
+	// ThreadRootID is the id of the comment thread's root (Comment.ReplyTo's
+	// target) for a comment.created event that replies to another comment, so
+	// a routed agent can reply under the same root humans use. Empty when the
+	// comment does not reply to another comment.
+	ThreadRootID string `json:"thread_root_id,omitempty"`
 }
 
 // Message is a short issue update.
