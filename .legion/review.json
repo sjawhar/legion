@@ -5,7 +5,7 @@
   "prUrl": "https://github.com/sjawhar/legion/pull/923",
   "branch": "legion/LEGION-6",
   "reviewedHead": "72989037b5c2c27cfe26980d1cccf41c7ea6929e",
-  "verdict": "CHANGES_REQUESTED (round 2 at 1741381a8e3a; see round2)",
+  "verdict": "APPROVED at a01618eb0058 pending the .legion/ cleanup push (round 3; see round3.headToApprove)",
   "review": "https://github.com/sjawhar/legion/pull/923#pullrequestreview-5182392737",
   "summary": "Security contract holds in every traced path (no secret on any tmux -e argv; every daemon tmux argv is `tmux -L legion-<project>`; 0700/0600 files; X_FILE-first consumers with no fallback in envoy-client, pi-envoy, CLI; stripDispatchEnv covers DISPATCH_TOKEN_FILE). Not approvable yet: the branch conflicts with main and CI has never run on the PR, and two correctness gaps in the new stop/prune logic must land in this PR.",
   "blocking": [
@@ -131,7 +131,32 @@
     "nextSteps": "implementer: R1 + R2 (one commit; nits optional), resolve the 7 threads, PR body Threads line -> tester: daemon bun test + the two regression tests -> reviewer re-review; then cleanup push per ask e091bc28 and approval of that exact head.",
     "completed": "2026-09-11T20:30:00Z"
   },
+  "round3": {
+    "reviewedHead": "a01618eb0058 (fix commit 4630c17e6252; origin head ef2475efad17 adds only .legion/test.json)",
+    "verdict": "APPROVED — clean, awaiting cleanup push",
+    "headToApprove": "the commit that deletes .legion/ on top of ef2475efad1751a59c396a8a47340633edf77ab7 (product tree identical to a01618eb0058); reviewer approves that exact sha via `legion gh -- pr review --approve` once messaged. a01618eb0058 / ef2475efad17 themselves are NOT approved (they still carry .legion/).",
+    "round2Resolution": {
+      "R1": "resolved in 4630c17e6252 — releaseSecret() immediately after the rollback (processes.ts:1328), before publishController/promotion-sweep awaits; nothing between the hold (:1304) and the release can throw (cancelRootRegistrationDeadline is a no-throw cancel; four assignments). New test `releases the failed launch's secret-file hold even when the launch-failed publish throws…` fails at parent 764e2a0a (architect file survives the next persist; re-run by reviewer) and passes at head.",
+      "R2": "resolved in 4630c17e6252 — hard `boot-gen-2` expect after flushEventLoopUntil (processes.test.ts:1194). Nit taken: C1 test seeds generation/sessionId/readyConfirmedAt so reconnect takes markWorkerDead → retireWorkerLocator → stopProcess; deps.revokeSessionCapability is supplied by the manager() fixture.",
+      "threads": "9/9 resolved individually by the implementer; PR body Threads line lists each with its fixing commit (verified against GitHub)."
+    },
+    "rulings": {
+      "rebaseOntoMain": "NOT REQUIRED. main@origin d2d45f19 is 5 commits ahead (#930/#931 dispatch-web, #934 worker-shim/socket-writer/worker-rpc RPC framing, #935 reducers review-pin, cli v0.23.8 release). Daemon file overlap with the branch: none (verified by name-set intersection). Reviewer trial merge (git merge-tree d2d45f19 + ef2475ef): conflict-free; merged tree daemon tsc clean, bun test 820 pass / 0 fail. A rebase would churn every sha the 9 threads and three handoff rounds cite for no correctness gain.",
+      "nitsNotTaken": "Named as the single fast-follow per the reviewer charter (PR body Fast-follow line set by the reviewer): `chore(daemon): pane-secret naming and prune return shape` — stripDispatchEnv → stripPaneSecretEnv; environment.ts doc comment on plain LEGION_CONTROLLER_SECRET; drop pruneSecretFiles's unused `removed` + the sort pin in secrets.test.ts; plus the round-3 deep-review comment nit at processes.ts:1325 ('This generation stored no locator' — the rollback discards any locator spawnTree stored before a writeStatus failure). None are correctness findings."
+    },
+    "verifiedFacts": {
+      "ci": "Tests + Legion Envoy and Contracts success at a01618eb0058 and ef2475efad17 (check-runs: changes, claude-envoy-bridge, envoy-client, envoy-plugin, lint, pi-envoy, pr-title, test, typecheck all success; contracts/dispatch/envoy-go skipped by path filter); mergeStateStatus BLOCKED on legion-human-approval only",
+      "threads": "9 total, 0 unresolved; last reply authors legion-implementer/legion-reviewer",
+      "regressionLocks": "reviewer re-ran at head: R1 + C1 + C2 tests 3 pass; R1 test at parent 764e2a0a 1 fail (readdir +1: architect file survived)",
+      "thermo": "deep-review + code-quality once at 1741381a8e3a (full diff, no blocking); deep-review at a01618eb0058 scoped to 4630c17e6252: APPROVE, no blocking/should-fix, one comment nit. Recorded in the PR body Thermo line.",
+      "e2e": "round-2 rig evidence stands (only spawnRoot catch ordering + tests changed since); round-3 unit fail-before/pass-after evidence in .legion/test.json round3",
+      "prBody": "reviewer set the Thermo and Fast-follow lines at this head via gh pr edit (review App has pull_requests:write; it lacks resolveReviewThread and contents:write)"
+    },
+    "preExistingMainBugCarriedForward": "index.ts: reconnectWorkers (:430) runs before `api` is assigned (:409), so a confirmed dead worker's boot-time retire throws TypeError in revokeSessionCapability and keeps its locator — masks C1 for that sub-case. Not a LEGION-6 regression; needs its own issue (architect).",
+    "nextSteps": "architect → implementer pushes the .legion/ deletion as the final commit on legion/LEGION-6; reviewer is messaged with that sha and approves it by name with `legion gh -- pr review --approve`; merger publishes READY to the queue.",
+    "completed": "2026-09-11T20:55:00Z"
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-11T20:15:44.817Z"
+  "completed": "2026-09-11T20:49:40.095Z"
 }
