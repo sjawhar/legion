@@ -16,6 +16,7 @@ import { useDialog, useMediaQuery } from "../shell/useDialog";
 import { CommentsTab } from "./CommentsTab";
 import type { MarginSheetModel } from "./Margin";
 import { PinnedTab } from "./PinnedTab";
+import { ThreadCard } from "./ThreadCard";
 import type { MarginTab } from "./useMarginItems";
 
 interface MarginSheetProps {
@@ -30,9 +31,9 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
       actionErrorId,
       answeredAsksPending,
       asksPending,
-      comments,
       commentsError,
       commentsPending,
+      historicalAsks,
       marginRef,
       isClosed,
       issueError,
@@ -43,13 +44,19 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
       pinned,
       pinnedIds,
       needsYou,
+      onSelectCard,
+      resolvedThreads,
+      threads,
+      viewerLogin,
       visibleArtifact,
     },
+    placement,
     selection,
     sheet,
     tab,
   } = model;
   const isCompactViewport = useMediaQuery("(max-width: 1279px)");
+  const isPhoneViewport = useMediaQuery("(max-width: 767px)");
   const sheetDragOrigin = useRef<number | undefined>(undefined);
   const sheetDragMoved = useRef(false);
   const dialog = useDialog<HTMLElement>({
@@ -60,6 +67,14 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
   const reviewToggleLabel = `${sheet.expanded ? "Close" : "Open"} review panel (${openAskCount} open ${
     openAskCount === 1 ? "ask" : "asks"
   })`;
+  const phoneThread =
+    sheet.threadKey === undefined
+      ? undefined
+      : [...threads, ...resolvedThreads].find((thread) => thread.key === sheet.threadKey);
+  const threadDialog = useDialog<HTMLElement>({
+    onClose: sheet.closeThread,
+    open: isPhoneViewport && phoneThread !== undefined,
+  });
 
   return (
     <>
@@ -124,70 +139,120 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
             </button>
           </>
         ) : null}
-        <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
-          <div className={`flex border-b ${borderDefault}`} role="tablist">
-            {(["comments", "pinned"] as MarginTab[]).map((name) => (
+        {!isPhoneViewport || phoneThread === undefined ? (
+          <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
+            <div className={`flex border-b ${borderDefault}`} role="tablist">
+              {(["comments", "pinned"] as MarginTab[]).map((name) => (
+                <button
+                  aria-selected={tab.value === name}
+                  className={
+                    tab.value === name
+                      ? `border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+                      : `px-3 py-2 text-sm ${textSecondaryOnSurface}`
+                  }
+                  key={name}
+                  onClick={() => tab.set(name)}
+                  role="tab"
+                  type="button"
+                >
+                  {name === "comments" ? "Comments" : "Pinned"}
+                </button>
+              ))}
+            </div>
+            {issueKey === undefined ? (
+              <p className={`pt-3 text-sm ${textMutedOnSurface}`}>
+                Open an issue to review its margin.
+              </p>
+            ) : null}
+            {issueKey !== undefined && visibleArtifact === undefined && issuePending ? (
+              <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Loading margin…</p>
+            ) : null}
+            {issueKey !== undefined && visibleArtifact === undefined && issueError ? (
+              <div className="pt-3">
+                <QueryError
+                  message="Could not load this issue's margin."
+                  onRetry={actions.onRetryIssue}
+                />
+              </div>
+            ) : null}
+            {tab.value === "pinned" ? (
+              <PinnedTab events={pinned} issueKey={issueKey} pinnedIds={pinnedIds} />
+            ) : null}
+            {tab.value === "comments" && visibleArtifact !== undefined ? (
+              <CommentsTab
+                actionErrorId={actionErrorId}
+                answeredAsksPending={answeredAsksPending}
+                artifactSlug={visibleArtifact.slug}
+                asksPending={asksPending}
+                commentsError={commentsError}
+                commentsPending={commentsPending}
+                composer={composer}
+                expandedThreadKey={selection.expandedThreadKey}
+                historicalAsks={historicalAsks}
+                hoveredItemId={selection.hoveredItemId}
+                hoveredMarkId={selection.hoveredMarkId}
+                isClosed={isClosed}
+                issueKey={issueKey ?? ""}
+                markPlacements={placement.markPlacements}
+                needsYou={needsYou}
+                onAction={actions.onAction}
+                onCloseComposer={actions.closeComposer}
+                onComposerSaved={actions.onComposerSaved}
+                onEdit={actions.onEdit}
+                onRetryAction={actions.onRetryAction}
+                onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
+                onRetryComments={actions.onRetryComments}
+                onSelectCard={onSelectCard}
+                onToggleResolved={actions.onToggleResolved}
+                onToggleThread={actions.onToggleThread}
+                pendingActionId={pendingActionId}
+                resolvedThreads={resolvedThreads}
+                selectedItemId={selection.selectedItemId}
+                showResolved={selection.showResolved}
+                threads={threads}
+                viewerLogin={viewerLogin}
+              />
+            ) : null}
+          </div>
+        ) : null}
+        {isPhoneViewport && phoneThread !== undefined ? (
+          <section
+            aria-label="Thread"
+            aria-modal="true"
+            className={`fixed inset-0 z-20 flex flex-col ${card}`}
+            role="dialog"
+            ref={threadDialog.containerRef}
+          >
+            <header className={`flex items-center border-b px-4 py-3 ${borderDefault}`}>
               <button
-                aria-selected={tab.value === name}
-                className={
-                  tab.value === name
-                    ? `border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-                    : `px-3 py-2 text-sm ${textSecondaryOnSurface}`
-                }
-                key={name}
-                onClick={() => tab.set(name)}
-                role="tab"
+                className={`min-h-11 text-sm font-medium ${textPrimaryOnSurface}`}
+                onClick={sheet.closeThread}
                 type="button"
               >
-                {name === "comments" ? "Comments" : "Pinned"}
+                Back
               </button>
-            ))}
-          </div>
-          {issueKey === undefined ? (
-            <p className={`pt-3 text-sm ${textMutedOnSurface}`}>
-              Open an issue to review its margin.
-            </p>
-          ) : null}
-          {issueKey !== undefined && visibleArtifact === undefined && issuePending ? (
-            <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Loading margin…</p>
-          ) : null}
-          {issueKey !== undefined && visibleArtifact === undefined && issueError ? (
-            <div className="pt-3">
-              <QueryError
-                message="Could not load this issue's margin."
-                onRetry={actions.onRetryIssue}
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4">
+              <ThreadCard
+                actionError={actionErrorId === phoneThread.key}
+                artifactSlug={visibleArtifact?.slug ?? ""}
+                className="min-h-full pb-32"
+                composerClassName={`fixed inset-x-0 bottom-0 z-10 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
+                expanded
+                hovered={selection.hoveredMarkId === phoneThread.anchor?.mark_id}
+                isClosed={isClosed}
+                onAction={actions.onAction}
+                onEdit={actions.onEdit}
+                onRetryAction={actions.onRetryAction}
+                onSelect={() => onSelectCard(phoneThread.key)}
+                onToggle={sheet.closeThread}
+                pendingAction={pendingActionId === phoneThread.key}
+                thread={phoneThread}
+                viewerLogin={viewerLogin}
               />
             </div>
-          ) : null}
-          {tab.value === "pinned" ? (
-            <PinnedTab events={pinned} issueKey={issueKey} pinnedIds={pinnedIds} />
-          ) : null}
-          {tab.value === "comments" && visibleArtifact !== undefined ? (
-            <CommentsTab
-              actionErrorId={actionErrorId}
-              answeredAsksPending={answeredAsksPending}
-              artifactSlug={visibleArtifact.slug}
-              commentsError={commentsError}
-              asksPending={asksPending}
-              commentsPending={commentsPending}
-              composer={composer}
-              hoveredItemId={selection.hoveredItemId}
-              isClosed={isClosed}
-              issueKey={issueKey ?? ""}
-              items={comments}
-              needsYou={needsYou}
-              onAction={actions.onAction}
-              onCloseComposer={actions.closeComposer}
-              onComposerSaved={actions.onComposerSaved}
-              onReply={actions.onReply}
-              onRetryAction={actions.onRetryAction}
-              onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
-              onRetryComments={actions.onRetryComments}
-              pendingActionId={pendingActionId}
-              selectedItemId={selection.selectedItemId}
-            />
-          ) : null}
-        </div>
+          </section>
+        ) : null}
       </aside>
     </>
   );

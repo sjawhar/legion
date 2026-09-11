@@ -20,6 +20,7 @@ import type {
   CreateVersionInput,
   EditArtifactInput,
   EditArtifactResponse,
+  EditCommentInput,
   Event,
   Issue,
   IssueDetails,
@@ -253,6 +254,14 @@ export class DispatchApiClient {
 
   resolveComment(id: string): Promise<Comment> {
     return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/resolve`, {});
+  }
+
+  reopenComment(id: string): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reopen`, {});
+  }
+
+  editComment(id: string, input: EditCommentInput): Promise<Comment> {
+    return this.send<Comment>("PATCH", `/api/v1/comments/${pathSegment(id)}`, input);
   }
 
   acceptComment(id: string): Promise<Comment> {

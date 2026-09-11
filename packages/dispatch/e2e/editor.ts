@@ -1,4 +1,4 @@
-import type { Locator, Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 export function documentEditor(page: Page): Locator {
   return page.getByRole("textbox", { name: "Document editor" });
@@ -62,6 +62,23 @@ export function marginCard(page: Page, id: string): Locator {
   return page.locator(`[data-margin-item="${id}"]`);
 }
 
+export function threadCard(page: Page, rootId: string): Locator {
+  return marginCard(page, rootId);
+}
+
+export async function replyInThread(page: Page, rootId: string, body: string): Promise<void> {
+  const card = threadCard(page, rootId);
+  if ((await card.getAttribute("aria-expanded")) !== "true") {
+    await card.getByRole("button").click();
+  }
+  const phoneThread = page.getByRole("dialog", { name: "Thread" });
+  const thread = (await phoneThread.count()) === 0 ? card : phoneThread;
+  const composer = thread.getByRole("form", { name: "Reply composer" });
+  const reply = composer.getByLabel("Reply");
+  await reply.fill(body);
+  await reply.press("Control+Enter");
+  await expect(composer.getByLabel("Reply")).toHaveValue("");
+}
 export function countDocumentSockets(page: Page): () => number {
   let count = 0;
   page.on("websocket", (socket) => {

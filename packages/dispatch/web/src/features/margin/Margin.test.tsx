@@ -675,14 +675,14 @@ test("Margin replies to an agent's anchored reply with the thread root id and no
   );
 
   try {
-    const replyCard = await screen.findByTestId(`margin-comment-${agentReply.id}`);
-    fireEvent.click(within(replyCard).getByRole("button", { name: "Reply" }));
-    const composer = await screen.findByRole("form", { name: "Comment composer" });
+    const threadCard = await screen.findByTestId(`margin-comment-${agentRootComment.id}`);
+    fireEvent.click(within(threadCard).getByRole("button"));
+    const composer = await screen.findByRole("form", { name: "Reply composer" });
     expect(composer.querySelector("blockquote")).toBeNull();
-    fireEvent.change(within(composer).getByLabelText("Comment"), {
+    fireEvent.change(within(composer).getByLabelText("Reply"), {
       target: { value: "Nested reply." },
     });
-    fireEvent.click(within(composer).getByRole("button", { name: "Comment" }));
+    fireEvent.click(within(composer).getByRole("button", { name: "Reply" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     const payload = createComment.mock.calls[0]?.[1];
     expect(payload).toEqual({
@@ -877,7 +877,7 @@ test("composeForMark opens the composer with the mark anchor and resolves when i
   }
 });
 
-test("replying while a mark composer is pending rejects that mark instead of settling it on save", async () => {
+test("replying inside a thread leaves a pending mark composer open", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -904,21 +904,21 @@ test("replying while a mark composer is pending rejects that mark instead of set
   try {
     fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
     await screen.findByRole("form", { name: "Comment composer" });
-    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
-    await waitFor(() =>
-      expect(screen.getByLabelText("First composer outcome").textContent).toBe(
-        "replaced by a newer composer"
-      )
-    );
-    const replyComposer = screen.getByRole("form", { name: "Comment composer" });
-    fireEvent.change(within(replyComposer).getByLabelText("Comment"), {
+    const threadCard = await screen.findByTestId(`margin-comment-${comment.id}`);
+    fireEvent.click(within(threadCard).getByRole("button"));
+    const replyComposer = await screen.findByRole("form", { name: "Reply composer" });
+    expect(screen.getByLabelText("First composer outcome").textContent).toBe("idle");
+    fireEvent.change(within(replyComposer).getByLabelText("Reply"), {
       target: { value: "reply" },
     });
-    fireEvent.click(within(replyComposer).getByRole("button", { name: "Comment" }));
+    fireEvent.click(within(replyComposer).getByRole("button", { name: "Reply" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
-    expect(screen.getByLabelText("First composer outcome").textContent).toBe(
-      "replaced by a newer composer"
-    );
+    expect(screen.getByLabelText("First composer outcome").textContent).toBe("idle");
+    const phoneThread = screen.queryByRole("dialog", { name: "Thread" });
+    if (phoneThread !== null) {
+      fireEvent.click(within(phoneThread).getByRole("button", { name: "Back" }));
+    }
+    expect(screen.getByRole("form", { name: "Comment composer" })).not.toBeNull();
   } finally {
     view.unmount();
     createComment.mockRestore();
@@ -969,7 +969,7 @@ test("composeForMark rejects when the composer is dismissed unsaved", async () =
   }
 });
 
-test("focusItemForMark selects and scrolls the matching card and opens the sheet on compact viewports", async () => {
+test("focusItemForMark opens the matching thread in the compact sheet", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -982,7 +982,6 @@ test("focusItemForMark selects and scrolls the matching card and opens the sheet
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], [comment]);
   const originalMatchMedia = window.matchMedia;
-  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
   window.matchMedia = (() =>
     ({
       addEventListener: () => {},
@@ -1009,14 +1008,17 @@ test("focusItemForMark selects and scrolls the matching card and opens the sheet
     const card = await screen.findByTestId(`margin-comment-${comment.id}`);
     fireEvent.click(screen.getByRole("button", { name: "Focus mark" }));
     await waitFor(() => {
-      expect(card.getAttribute("aria-current")).toBe("true");
-      expect(scrollTo).toHaveBeenCalledTimes(1);
+      const phoneThread = screen.queryByRole("dialog", { name: "Thread" });
+      const focusedCard =
+        phoneThread === null
+          ? card
+          : within(phoneThread).getByTestId(`margin-comment-${comment.id}`);
+      expect(focusedCard.getAttribute("aria-current")).toBe("true");
       expect(screen.getByTestId("margin-sheet").getAttribute("data-expanded")).toBe("true");
     });
   } finally {
     view.unmount();
     window.matchMedia = originalMatchMedia;
-    scrollTo.mockRestore();
   }
 });
 
@@ -1051,7 +1053,7 @@ test("selecting or hovering a card drives the document bridge", async () => {
   try {
     const card = await screen.findByTestId(`margin-comment-${comment.id}`);
     fireEvent.click(screen.getByRole("button", { name: "Register document bridge" }));
-    fireEvent.click(card);
+    fireEvent.click(within(card).getByRole("button"));
     await waitFor(() => expect(focusedMarks).toEqual(["m-1"]));
     fireEvent.mouseOver(card);
     await waitFor(() => expect(activeMarkCalls).toContainEqual(["m-1"]));

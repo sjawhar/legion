@@ -1,11 +1,16 @@
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
+import type { MarkPlacement } from "../margin/useMarginItems";
+
 export const recordMarkTypes = ["proofComment", "proofSuggestion", "dispatchAsk"] as const;
 
 type SelectionBarKind = "comment" | "suggest" | "ask";
 
-export function markPositions(doc: ProseMirrorNode): Map<string, number> {
-  const positions = new Map<string, number>();
+export function markPlacements(
+  doc: ProseMirrorNode,
+  offsets: ReadonlyMap<string, number>
+): Map<string, MarkPlacement> {
+  const placements = new Map<string, MarkPlacement>();
   doc.descendants((node, pos) => {
     if (!node.isText) {
       return true;
@@ -14,14 +19,17 @@ export function markPositions(doc: ProseMirrorNode): Map<string, number> {
       if (
         recordMarkTypes.includes(mark.type.name as (typeof recordMarkTypes)[number]) &&
         typeof mark.attrs.id === "string" &&
-        !positions.has(mark.attrs.id)
+        !placements.has(mark.attrs.id)
       ) {
-        positions.set(mark.attrs.id, pos);
+        const top = offsets.get(mark.attrs.id);
+        if (top !== undefined) {
+          placements.set(mark.attrs.id, { pos, top });
+        }
       }
     }
     return true;
   });
-  return positions;
+  return placements;
 }
 
 export function composerKindFor(kind: SelectionBarKind): "comment" | "suggestion" | "ask" {

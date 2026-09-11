@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Schema } from "prosemirror-model";
 
-import { composerKindFor, markPositions, setActiveMarkClass } from "./marks";
+import { composerKindFor, markPlacements, setActiveMarkClass } from "./marks";
 
 const schema = new Schema({
   marks: {
@@ -15,7 +15,7 @@ const schema = new Schema({
   },
 });
 
-test("markPositions reports the first position of every record-bearing mark", () => {
+test("markPlacements reports the first position of every record-bearing mark", () => {
   const comment = schema.marks.proofComment.create({ by: "alice", id: "c-1" });
   const ask = schema.marks.dispatchAsk.create({ by: "bob", id: "a-1" });
   const doc = schema.node("doc", undefined, [
@@ -29,9 +29,43 @@ test("markPositions reports the first position of every record-bearing mark", ()
     ]),
   ]);
 
-  expect([...markPositions(doc)]).toEqual([
-    ["c-1", 5],
-    ["a-1", 17],
+  expect([
+    ...markPlacements(
+      doc,
+      new Map([
+        ["c-1", 40],
+        ["a-1", 72],
+      ])
+    ),
+  ]).toEqual([
+    ["c-1", { pos: 5, top: 40 }],
+    ["a-1", { pos: 17, top: 72 }],
+  ]);
+});
+
+test("markPlacements reports the first position and matching vertical offset of every mark", () => {
+  const comment = schema.marks.proofComment.create({ by: "alice", id: "c-1" });
+  const ask = schema.marks.dispatchAsk.create({ by: "bob", id: "a-1" });
+  const doc = schema.node("doc", undefined, [
+    schema.node("paragraph", undefined, [
+      schema.text("The "),
+      schema.text("quick", [comment]),
+      schema.text(" brown "),
+      schema.text("fox", [ask]),
+    ]),
+  ]);
+
+  expect([
+    ...markPlacements(
+      doc,
+      new Map([
+        ["c-1", 40],
+        ["a-1", 72],
+      ])
+    ),
+  ]).toEqual([
+    ["c-1", { pos: 5, top: 40 }],
+    ["a-1", { pos: 17, top: 72 }],
   ]);
 });
 

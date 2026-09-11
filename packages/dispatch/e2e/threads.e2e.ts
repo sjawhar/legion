@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   createAsk,
@@ -9,6 +9,7 @@ import {
   listComments,
   resolveAsk,
 } from "./api";
+import { replyInThread, threadCard } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -35,6 +36,25 @@ async function setSheet(page: Page, project: string, open: boolean): Promise<voi
       .click();
   }
   await expect(sheet).toHaveAttribute("data-expanded", expanded);
+}
+
+async function expandedThread(page: Page, rootId: string): Promise<Locator> {
+  const card = threadCard(page, rootId);
+  if ((await card.getAttribute("aria-expanded")) !== "true") {
+    await card.getByRole("button").click();
+  }
+  const phoneThread = page.getByRole("dialog", { name: "Thread" });
+  return (await phoneThread.count()) === 0 ? card : phoneThread;
+}
+
+async function closeThreadView(page: Page, project: string): Promise<void> {
+  if (project !== "iphone") {
+    return;
+  }
+  const phoneThread = page.getByRole("dialog", { name: "Thread" });
+  if ((await phoneThread.count()) > 0) {
+    await phoneThread.getByRole("button", { name: "Back" }).click();
+  }
 }
 
 test.beforeEach(async () => {
@@ -129,11 +149,7 @@ test("a comment reply after an agent-authored reply targets the root without cop
     anchor: { artifact: "spec", quote: "Keep" },
     body: "Root comment.",
   });
-  const agentReply = await createComment(
-    issue.key,
-    { body: "Agent reply.", reply_to: root.id },
-    bobSession
-  );
+  await createComment(issue.key, { body: "Agent reply.", reply_to: root.id }, bobSession);
   const alice = await asUser(browser, "alice");
   const submittedReplies: Record<string, unknown>[] = [];
 
@@ -149,12 +165,12 @@ test("a comment reply after an agent-authored reply targets the root without cop
     });
     await page.goto(`/issues/${issue.key}`);
     await setSheet(page, testInfo.project.name, true);
-    const replyCard = page.getByTestId(`margin-comment-${agentReply.id}`);
-    await expect(replyCard.getByRole("button", { name: "Reply" })).toBeVisible();
-    await replyCard.getByRole("button", { name: "Reply" }).click();
-    const composer = page.getByRole("form", { name: "Comment composer" });
-    await composer.getByLabel("Comment").fill("Human thread reply.");
-    await composer.getByRole("button", { name: "Comment" }).click();
+    await threadCard(page, root.id).getByRole("button").click();
+    const phoneThread = page.getByRole("dialog", { name: "Thread" });
+    const thread = (await phoneThread.count()) === 0 ? threadCard(page, root.id) : phoneThread;
+    const composer = thread.getByRole("form", { name: "Reply composer" });
+    await composer.getByLabel("Reply").fill("Human thread reply.");
+    await composer.getByRole("button", { name: "Reply" }).click();
     await expect.poll(() => submittedReplies).toHaveLength(1);
     expect(submittedReplies[0]).toMatchObject({
       body: "Human thread reply.",
@@ -164,6 +180,166 @@ test("a comment reply after an agent-authored reply targets the root without cop
     await expect
       .poll(() => listComments(issue.key))
       .toContainEqual(expect.objectContaining({ body: "Human thread reply.", reply_to: root.id }));
+  } finally {
+    await alice.close();
+  }
+});
+
+test("alice resolves a comment thread and bob reopens it", async ({ browser }, testInfo) => {
+  await createProject({ key: "THREAD", name: "Thread controls" });
+  const issue = await createIssue({
+    project: "THREAD",
+    spec: "The quick brown fox",
+    title: "Resolve and reopen",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Should this change?",
+  });
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
+    await Promise.all([
+      setSheet(alicePage, testInfo.project.name, true),
+      setSheet(bobPage, testInfo.project.name, true),
+    ]);
+    await replyInThread(bobPage, root.id, "Looks good.");
+    await closeThreadView(bobPage, testInfo.project.name);
+    const aliceThread = await expandedThread(alicePage, root.id);
+    await expect(aliceThread).toContainText("Looks good.");
+    await aliceThread.getByRole("button", { name: "Resolve" }).click();
+    await closeThreadView(alicePage, testInfo.project.name);
+    await expect(threadCard(alicePage, root.id)).toHaveCount(0);
+    await expect(threadCard(bobPage, root.id)).toHaveCount(0, { timeout: 1000 });
+
+    await bobPage.getByRole("button", { name: "Resolved (1)" }).click();
+    const resolvedThread = await expandedThread(bobPage, root.id);
+    await expect(resolvedThread).toContainText(/Resolved by alice/);
+    await resolvedThread.getByRole("button", { name: "Reopen" }).click();
+    await closeThreadView(bobPage, testInfo.project.name);
+    await expect(threadCard(alicePage, root.id)).toBeVisible({ timeout: 1000 });
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("only the author edits a comment and both viewers see its edited marker", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "EDIT", name: "Comment edits" });
+  const issue = await createIssue({
+    project: "EDIT",
+    spec: "The quick brown fox",
+    title: "Edit a comment",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Original comment",
+  });
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
+    await Promise.all([
+      setSheet(alicePage, testInfo.project.name, true),
+      setSheet(bobPage, testInfo.project.name, true),
+    ]);
+    await expect(threadCard(bobPage, root.id).getByRole("button", { name: "Edit" })).toHaveCount(0);
+
+    const aliceThread = await expandedThread(alicePage, root.id);
+    await aliceThread.getByRole("button", { name: "Edit" }).click();
+    await aliceThread.getByLabel("Edit comment").fill("Edited comment");
+    await aliceThread.getByRole("button", { name: "Save" }).click();
+    await expect(aliceThread).toContainText("Edited comment");
+    await closeThreadView(alicePage, testInfo.project.name);
+
+    const bobThread = await expandedThread(bobPage, root.id);
+    await expect(bobThread).toContainText("Edited comment", { timeout: 1000 });
+    await expect(bobThread).toContainText("edited");
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("an agent comment reply appears in the root comment thread", async ({ browser }, testInfo) => {
+  await createProject({ key: "AGENT", name: "Agent reply" });
+  const issue = await createIssue({
+    project: "AGENT",
+    spec: "The quick brown fox",
+    title: "Agent reply thread",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Human root comment",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await setSheet(page, testInfo.project.name, true);
+    await createComment(issue.key, { body: "Agent response", reply_to: root.id }, bobSession);
+
+    const thread = await expandedThread(page, root.id);
+    await expect(thread).toContainText("Agent response", { timeout: 1000 });
+    await expect(thread.getByText("Agent response").locator("..")).toHaveCSS("margin-left", "0px");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("the phone sheet opens a full-height thread view with its composer pinned at the bottom", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "This scenario exercises the phone-specific view.");
+  await createProject({ key: "PHONE", name: "Phone threads" });
+  const issue = await createIssue({
+    project: "PHONE",
+    spec: "The quick brown fox",
+    title: "Phone thread view",
+  });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Thread summary",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await setSheet(page, testInfo.project.name, true);
+    await threadCard(page, root.id).getByRole("button").click();
+    const thread = page.getByRole("dialog", { name: "Thread" });
+    await expect(thread).toBeVisible();
+    const viewport = page.viewportSize();
+    const threadBox = await thread.boundingBox();
+    const composerBox = await thread.getByRole("form", { name: "Reply composer" }).boundingBox();
+    if (viewport === null || threadBox === null || composerBox === null) {
+      throw new Error("The phone thread view did not expose a measurable layout.");
+    }
+    expect(threadBox.height).toBeGreaterThanOrEqual(viewport.height * 0.8);
+    expect(Math.abs(viewport.height - (composerBox.y + composerBox.height))).toBeLessThanOrEqual(8);
+    await page.keyboard.press("Escape");
+    await expect(thread).toHaveCount(0);
+    await expect(page.getByTestId("margin-sheet")).toHaveAttribute("data-expanded", "true");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      viewport.width
+    );
   } finally {
     await alice.close();
   }
