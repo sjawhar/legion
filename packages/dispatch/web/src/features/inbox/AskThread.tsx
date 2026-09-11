@@ -61,7 +61,12 @@ function useAskThread(
     queryFn: () => getAskThread(ask.id),
   });
   const submit = useMutation({
-    mutationFn: (text: string) => createReply(ask.issue_key, { ask_id: ask.id, body: text }),
+    mutationFn: (text: string) => {
+      if (ask.issue_key === null) {
+        throw new Error("cannot reply to an ask without an issue");
+      }
+      return createReply(ask.issue_key, { ask_id: ask.id, body: text });
+    },
     onSuccess: () => {
       setBody("");
       void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
@@ -145,7 +150,7 @@ export function AskThread({
           ))}
         </ul>
       )}
-      {resolution === null ? (
+      {resolution === null && ask.issue_key !== null ? (
         <form className="flex flex-col gap-2" onSubmit={submitReply}>
           <label
             className={`block text-sm font-medium ${textSecondaryOnCanvas}`}

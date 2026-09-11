@@ -1,15 +1,18 @@
 import type {
   Actor,
   Artifact,
+  ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
   AskRead,
   Comment,
+  CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
   CreateMessageInput,
   CreateProjectInput,
   EditArtifactInput,
+  EditAskInput,
   Event,
   Issue,
   Project,
@@ -115,6 +118,36 @@ export function createAsk(
   options: ApiOptions = {}
 ): Promise<Ask> {
   return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
+}
+
+export function createProjectArtifact(
+  project: string,
+  input: CreateArtifactInput,
+  options: ApiOptions = {}
+): Promise<ArtifactUploadResponse> {
+  return request<ArtifactUploadResponse>(
+    `/api/v1/projects/${encodeURIComponent(project)}/artifacts`,
+    "POST",
+    input,
+    options
+  );
+}
+
+export function createArtifactAsk(
+  artifactID: string,
+  input: CreateAskInput,
+  options: ApiOptions = {}
+): Promise<Ask> {
+  return request<Ask>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/asks`,
+    "POST",
+    input,
+    options
+  );
+}
+
+export function editAsk(id: string, input: EditAskInput, options: ApiOptions = {}): Promise<Ask> {
+  return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "PATCH", input, options);
 }
 
 export function resolveAsk(

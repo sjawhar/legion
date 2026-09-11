@@ -61,6 +61,9 @@ jobs:
               - 'packages/contracts/**'
             dispatch:
               - 'packages/dispatch/**'
+              - 'packages/contracts/**'
+              - 'packages/envoy/internal/dispatch/**'
+              - 'packages/envoy/cmd/dispatch/**'
 
   contracts:
     needs: changes

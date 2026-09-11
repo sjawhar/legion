@@ -1,15 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useId, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type {
   AnswerAskInput,
   Ask,
+  AskEditPrevious,
   AskRead,
   AskResolution,
   Comment,
   CreateCommentInput,
+  Event,
 } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -52,6 +54,8 @@ const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answe
 export interface AskCardProps {
   artifactSlug?: string;
   ask: Ask;
+  /** Loaded issue events let the card disclose the latest pre-edit question. */
+  events?: Event[];
   thread?: "inline" | "collapsed";
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
@@ -73,6 +77,53 @@ const URGENCY_LABELS: Record<Ask["urgency"], string> = {
   med: "Medium",
 };
 
+function latestPreviousQuestion(
+  askID: string,
+  events: Event[] | undefined
+): AskEditPrevious | undefined {
+  let latest: Extract<Event, { type: "ask.edited" }> | undefined;
+  for (const event of events ?? []) {
+    if (
+      event.type === "ask.edited" &&
+      event.payload.id === askID &&
+      (latest === undefined || event.seq > latest.seq)
+    ) {
+      latest = event;
+    }
+  }
+  return latest?.payload.previous;
+}
+
+function AskEditHistory({
+  ask,
+  previous,
+}: {
+  ask: Ask;
+  previous: AskEditPrevious | undefined;
+}): ReactNode {
+  if (ask.edited_at === null) {
+    return null;
+  }
+  return (
+    <div className={`mt-2 text-xs ${textMutedOnSurface}`}>
+      <p>
+        Edited <Timestamp at={ask.edited_at} />
+      </p>
+      {previous === undefined ? null : (
+        <details className="mt-1">
+          <summary className={`cursor-pointer font-medium ${linkText} ${linkHoverText}`}>
+            Show previous question
+          </summary>
+          <div className="mt-2">
+            <p className={`font-medium ${textPrimaryOnSurface}`}>{previous.question}</p>
+            <AskOptionList options={previous.options} selected={[]} />
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function OrphanedAnchorNotice({
   artifactSlug,
   ask,
@@ -87,17 +138,19 @@ function OrphanedAnchorNotice({
   return (
     <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>
       Text changed.{" "}
-      <Link
-        className="underline"
-        to={`${buildIssuePath({
-          key: ask.issue_key,
-          kind: "artifact",
-          slug: artifactSlug,
-          version: anchor.version,
-        })}&ask=${ask.id}`}
-      >
-        View original text
-      </Link>
+      {ask.issue_key === null ? null : (
+        <Link
+          className="underline"
+          to={`${buildIssuePath({
+            key: ask.issue_key,
+            kind: "artifact",
+            slug: artifactSlug,
+            version: anchor.version,
+          })}&ask=${ask.id}`}
+        >
+          View original text
+        </Link>
+      )}
     </p>
   );
 }
@@ -105,9 +158,11 @@ function OrphanedAnchorNotice({
 function AnsweredAsk({
   artifactSlug,
   ask,
+  previous,
 }: {
   artifactSlug: string | undefined;
   ask: Ask;
+  previous: AskEditPrevious | undefined;
 }): ReactNode {
   const { answer } = ask;
   return (
@@ -125,6 +180,7 @@ function AnsweredAsk({
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
       <p className={`font-medium ${textPrimaryOnSuccessCallout}`}>{ask.question}</p>
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
+      <AskEditHistory ask={ask} previous={previous} />
       <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
       {answer === null || answer.text === null || answer.text === "" ? null : (
         <p className="mt-1 whitespace-pre-wrap">{answer.text}</p>
@@ -143,7 +199,13 @@ function AnsweredAsk({
   );
 }
 
-function ResolvedAsk({ ask }: { ask: Ask & { resolution: AskResolution } }): ReactNode {
+function ResolvedAsk({
+  ask,
+  previous,
+}: {
+  ask: Ask & { resolution: AskResolution };
+  previous: AskEditPrevious | undefined;
+}): ReactNode {
   const { resolution } = ask;
   return (
     <article className={`rounded-xl p-4 text-sm ${card}`} data-testid={`ask-${ask.id}`}>
@@ -161,6 +223,7 @@ function ResolvedAsk({ ask }: { ask: Ask & { resolution: AskResolution } }): Rea
       </span>
       <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(ask.author)}</p>
       <AskOptionList options={ask.options} selected={[]} />
+      <AskEditHistory ask={ask} previous={previous} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Asked <Timestamp at={ask.created_at} /> · {describeAskResolution(resolution)}
       </p>
@@ -222,6 +285,7 @@ function AskThreadDisclosure(props: AskThreadProps): ReactNode {
 export function AskCard({
   artifactSlug,
   ask,
+  events,
   thread = "inline",
   answerAsk: answer = answerAsk,
   createReply: reply,
@@ -235,6 +299,7 @@ export function AskCard({
   const [answerText, setAnswerText] = useState("");
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const submitGuard = useSubmitGuard();
+  const previous = useMemo(() => latestPreviousQuestion(ask.id, events), [ask.id, events]);
   const mutation = useMutation({
     mutationFn: (input: AnswerAskInput) => answer(ask.id, input),
     onMutate: async () => {
@@ -283,14 +348,21 @@ export function AskCard({
         throw new Error("resolved ask is missing its resolution");
       return (
         <>
-          <ResolvedAsk ask={{ ...completed, resolution: completed.resolution }} />
+          <ResolvedAsk
+            ask={{ ...completed, resolution: completed.resolution }}
+            previous={previous}
+          />
           {threadNode}
         </>
       );
     }
     return (
       <>
-        <AnsweredAsk artifactSlug={artifactSlug} ask={{ ...completed, answer: completed.answer }} />
+        <AnsweredAsk
+          artifactSlug={artifactSlug}
+          ask={{ ...completed, answer: completed.answer }}
+          previous={previous}
+        />
         {threadNode}
       </>
     );
@@ -313,6 +385,7 @@ export function AskCard({
             <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
               {actorLabel(ask.author)} · <Timestamp at={ask.created_at} />
             </p>
+            <AskEditHistory ask={ask} previous={previous} />
           </div>
           <span
             className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[ask.urgency].bg} ${URGENCY_STYLES[ask.urgency].text}`}

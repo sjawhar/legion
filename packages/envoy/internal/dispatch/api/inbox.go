@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -33,7 +34,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select a.id::text, a.issue_key, a.artifact_id::text, a.author, a.question, a.options, a.multiple, a.urgency,
-		       a.anchor, a.state, a.answer, a.resolution, a.created_at,
+		       a.anchor, a.state, a.answer, a.resolution, a.created_at, a.edited_at,
 		       i.key, i.title, ar.project_key, ar.slug, ar.name
 		from asks a
 		left join issues i on i.key = a.issue_key
@@ -53,9 +54,10 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		var ask inboxAsk
 		var author, options, anchor, answer, resolution []byte
 		var issueKey, issueTitle, documentProject, documentSlug, documentName *string
+		var editedAt *time.Time
 		if err := rows.Scan(
 			&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
-			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt,
+			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt,
 			&issueKey, &issueTitle, &documentProject, &documentSlug, &documentName,
 		); err != nil {
 			s.writeHandlerError(w, err)
@@ -65,6 +67,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
+		ask.EditedAt = askTimestampPtr(editedAt)
 		if issueKey != nil {
 			ask.Issue = &inboxIssue{Key: *issueKey, Title: *issueTitle}
 		}

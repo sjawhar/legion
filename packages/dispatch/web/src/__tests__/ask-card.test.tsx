@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { Ask, AskRead, Comment } from "../api/types";
+import type { Ask, AskRead, Comment, Event } from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
 
 function ask(overrides: Partial<Ask> = {}): Ask {
@@ -11,6 +11,7 @@ function ask(overrides: Partial<Ask> = {}): Ask {
     answer: null,
     author: { kind: "session", id: "session-1" },
     created_at: "2026-09-09T00:00:00Z",
+    edited_at: null,
     id: "ask-1",
     issue_key: "CORE-1",
     multiple: false,
@@ -70,6 +71,71 @@ function renderCard(node: ReactNode) {
 // The same open anchored ask renders in more than one place at once (the issue board and
 // the margin both show it) - each mounted AskCard's own answer field must stay independently
 // labeled, not collide on an ask.id-derived id shared by every instance.
+test("AskCard marks an edited question and reveals its previous question and options", () => {
+  const editedAt = new Date().toISOString();
+  const input = ask({
+    edited_at: editedAt,
+    options: [{ label: "SSE" }],
+    question: "Should we use SSE?",
+  });
+  const edited: Extract<Event, { type: "ask.edited" }> = {
+    actor: { id: "session-1", kind: "session" },
+    created_at: editedAt,
+    id: 2,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      ...input,
+      edited_by: { id: "session-1", kind: "session" },
+      previous: {
+        multiple: false,
+        options: [{ label: "Polling" }],
+        question: "Should we use polling?",
+        urgency: "med",
+      },
+    },
+    seq: 2,
+    type: "ask.edited",
+  };
+  const earlier: Extract<Event, { type: "ask.edited" }> = {
+    ...edited,
+    created_at: "2026-09-10T00:00:00Z",
+    id: 1,
+    payload: {
+      ...edited.payload,
+      previous: {
+        multiple: false,
+        options: [{ label: "Email" }],
+        question: "Should we use email?",
+        urgency: "med",
+      },
+    },
+    seq: 1,
+  };
+  const { view } = renderCard(
+    <AskCard ask={input} events={[earlier, edited]} getAskThread={emptyThread(input)} />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    expect(card.textContent).toContain("Edited just now");
+    const summary = view.getByText("Show previous question");
+    const disclosure = summary.closest("details");
+    if (!(disclosure instanceof HTMLDetailsElement)) {
+      throw new Error("previous question disclosure is missing");
+    }
+    expect(disclosure.open).toBe(false);
+    fireEvent.click(summary);
+    expect(disclosure.open).toBe(true);
+    expect(within(disclosure).getByText("Should we use polling?")).toBeTruthy();
+    expect(within(disclosure).getByRole("list", { name: "Options" }).textContent).toContain(
+      "Polling"
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
 test("two AskCard instances for the same ask keep independently labeled answer fields", () => {
   const input = ask();
   const { view } = renderCard(

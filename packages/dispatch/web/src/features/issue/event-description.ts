@@ -7,6 +7,8 @@ export function eventDescription(event: Event): string {
       return describeAskResolution(event.payload.resolution);
     case "ask.answered":
       return `Ask answered: ${event.payload.question}`;
+    case "ask.edited":
+      return `Ask edited: ${event.payload.question}`;
     case "comment.resolved":
       return "Comment resolved";
     case "comment.reopened":

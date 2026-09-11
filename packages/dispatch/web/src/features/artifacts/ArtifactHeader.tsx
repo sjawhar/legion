@@ -42,12 +42,14 @@ function versionLabel(version: Version): string {
 
 export function ArtifactHeader({
   artifact,
+  issueKey,
   children,
   highlight,
   showVersionPicker,
   version,
 }: {
   artifact: Artifact;
+  issueKey: string;
   children: ReactNode;
   highlight: boolean;
   showVersionPicker: boolean;
@@ -93,9 +95,9 @@ export function ArtifactHeader({
                 navigate(
                   buildIssuePath(
                     nextVersion === ""
-                      ? { key: artifact.issue_key, kind: "artifact", slug: artifact.slug }
+                      ? { key: issueKey, kind: "artifact", slug: artifact.slug }
                       : {
-                          key: artifact.issue_key,
+                          key: issueKey,
                           kind: "artifact",
                           slug: artifact.slug,
                           version: Number(nextVersion),

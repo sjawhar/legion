@@ -123,7 +123,7 @@ function isText(content: ArtifactVersionContent | undefined): content is Artifac
   return content !== undefined && "markdown" in content;
 }
 
-function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
+function ArtifactCard({ artifact, issueKey }: { artifact: Artifact; issueKey: string }): ReactNode {
   const { pathname } = useLocation();
   const route = parseIssuePath(pathname);
   const highlighted = route?.kind === "artifact" && route.slug === artifact.slug;
@@ -171,7 +171,7 @@ function ArtifactCard({ artifact }: { artifact: Artifact }): ReactNode {
               <Link
                 className={`underline ${linkText} ${linkHoverText}`}
                 to={buildIssuePath({
-                  key: artifact.issue_key,
+                  key: issueKey,
                   kind: "artifact",
                   slug: artifact.slug,
                 })}
@@ -363,7 +363,7 @@ export function ArtifactsTab(): ReactNode {
     <div className="space-y-1 pt-3">
       <Upload issueKey={issueKey} />
       {orderedArtifacts.map((artifact) => (
-        <ArtifactCard artifact={artifact} key={artifact.id} />
+        <ArtifactCard artifact={artifact} issueKey={issueKey} key={artifact.id} />
       ))}
     </div>
   );
