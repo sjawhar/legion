@@ -3,6 +3,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  useCallback,
   useLayoutEffect,
   useRef,
   useState,
@@ -53,6 +54,8 @@ import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
 import { shortSessionId } from "../conversation/conversation-model";
 import { useAgents } from "../conversation/useAgents";
+import { ConnectionDot } from "../doc/ConnectionDot";
+import type { DocumentToolbar } from "../doc/ProofDocument";
 import {
   buildIssuePath,
   type IssueRoute,
@@ -210,11 +213,23 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
 function IssueHeader({
   isClosed,
   issue,
+  onShowDiffChange,
+  onVersionChange,
+  showDiff,
+  showDocumentControls,
   state,
+  toolbar,
+  version,
 }: {
   isClosed: boolean;
   issue: Issue;
+  onShowDiffChange(next: boolean): void;
+  onVersionChange(version: number | null): void;
+  showDiff: boolean;
+  showDocumentControls: boolean;
   state: UserIssueState;
+  toolbar: DocumentToolbar | undefined;
+  version: number | undefined;
 }): ReactNode {
   const queryClient = useQueryClient();
   const [editingTitle, setEditingTitle] = useState(false);
@@ -358,6 +373,49 @@ function IssueHeader({
             ))}
           </select>
         </label>
+        {showDocumentControls && toolbar !== undefined ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <label
+              className={`flex min-h-11 min-w-0 items-center gap-2 text-sm font-medium ${textSecondaryOnCanvas}`}
+            >
+              Version
+              <select
+                aria-label="Version"
+                className={`min-h-11 min-w-0 max-w-56 truncate rounded border px-2 py-2 font-normal ${inputClasses(false)}`}
+                onChange={(event) => {
+                  onVersionChange(event.target.value === "" ? null : Number(event.target.value));
+                }}
+                value={version ?? ""}
+              >
+                <option value="">Current</option>
+                {toolbar.versions.map((item) => (
+                  <option key={item.number} value={item.number}>
+                    Version {item.number}
+                    {item.named && item.summary !== null ? ` — ${item.summary}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+              disabled={isClosed || toolbar.isNamingVersion}
+              onClick={toolbar.requestNamedVersion}
+              type="button"
+            >
+              Name version
+            </button>
+            {version === undefined ? null : (
+              <button
+                className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+                onClick={() => onShowDiffChange(!showDiff)}
+                type="button"
+              >
+                {showDiff ? "Show version" : "Diff vs current"}
+              </button>
+            )}
+            <ConnectionDot connection={toolbar.connection} />
+          </div>
+        ) : null}
         {routeEditing ? (
           <form className="flex min-w-0 flex-1 flex-wrap items-center gap-2" onSubmit={saveRoute}>
             <label className="sr-only" htmlFor="issue-route">
@@ -551,6 +609,22 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const conversationFocusItemId =
     route.kind === "ask" || route.kind === "comment" ? route.id : undefined;
   const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
+  const [specShowDiff, setSpecShowDiff] = useState(false);
+  const [specToolbar, setSpecToolbar] = useState<DocumentToolbar | undefined>(undefined);
+  const [artifactShowDiff, setArtifactShowDiff] = useState(false);
+  const [artifactToolbar, setArtifactToolbar] = useState<DocumentToolbar | undefined>(undefined);
+  const handleSpecToolbarChange = useCallback((next: DocumentToolbar | undefined) => {
+    setSpecToolbar(next);
+    if (next === undefined) {
+      setSpecShowDiff(false);
+    }
+  }, []);
+  const handleArtifactToolbarChange = useCallback((next: DocumentToolbar | undefined) => {
+    setArtifactToolbar(next);
+    if (next === undefined) {
+      setArtifactShowDiff(false);
+    }
+  }, []);
 
   useLayoutEffect(() => {
     const top = panelScroll.current[activeTab];
@@ -643,7 +717,20 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
           This issue is closed.
         </p>
       ) : null}
-      <IssueHeader isClosed={isClosed} issue={issue.data} state={issueState} />
+      <IssueHeader
+        isClosed={isClosed}
+        issue={issue.data}
+        onShowDiffChange={setSpecShowDiff}
+        onVersionChange={(version) => {
+          setSpecShowDiff(false);
+          selectDocumentVersion(primaryArtifact, version);
+        }}
+        showDiff={specShowDiff}
+        showDocumentControls={activeTab === "spec"}
+        state={issueState}
+        toolbar={specToolbar}
+        version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+      />
       <IssueTabs
         activeTab={activeTab}
         issueKey={issueKey}
@@ -665,8 +752,13 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             commentId={commentId}
             highlightTerm={highlightTerm}
             isClosed={isClosed}
+            onToolbarChange={handleSpecToolbarChange}
             owner={{ key: issueKey, kind: "issue" }}
-            onVersionChange={(version) => selectDocumentVersion(primaryArtifact, version)}
+            onVersionChange={(version) => {
+              setSpecShowDiff(false);
+              selectDocumentVersion(primaryArtifact, version);
+            }}
+            showDiff={specShowDiff}
             version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
           />
         ) : null}
@@ -701,9 +793,13 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         active={activeTab === "artifacts"}
         artifact={selectedArtifact}
         artifactRoute={artifactRoute}
+        isClosed={isClosed}
         isPrimaryArtifactRoute={isPrimaryArtifactRoute}
         mounted={activatedTabs.artifacts}
+        onShowDiffChange={setArtifactShowDiff}
         route={route}
+        showDiff={artifactShowDiff}
+        toolbar={artifactToolbar}
       >
         {selectedArtifact?.kind === "doc" ? (
           <ArtifactDocument
@@ -712,8 +808,13 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             commentId={commentId}
             highlightTerm={highlightTerm}
             isClosed={isClosed}
+            onToolbarChange={handleArtifactToolbarChange}
             owner={{ key: issueKey, kind: "issue" }}
-            onVersionChange={(version) => selectDocumentVersion(selectedArtifact, version)}
+            onVersionChange={(version) => {
+              setArtifactShowDiff(false);
+              selectDocumentVersion(selectedArtifact, version);
+            }}
+            showDiff={artifactShowDiff}
             version={artifactRoute?.version}
           />
         ) : null}

@@ -411,6 +411,14 @@ registerText("connected pill", STATUS_CONNECTED_TEXT, STATUS_CONNECTED_BG);
 registerText("connecting pill", STATUS_CONNECTING_TEXT, STATUS_CONNECTING_BG);
 registerText("offline pill", STATUS_OFFLINE_TEXT, STATUS_OFFLINE_BG);
 
+/** A live connection-status dot: fixed, solid fill per state, unlike the pale `statusConnected`-
+ * family pills above (a pill holds text and needs a light background for contrast; a dot holds
+ * no text and needs a solid fill to stay visible at a few pixels wide). Decorative — no contrast
+ * check applies, since the adjacent `sr-only` text carries the accessible label. */
+export const connectionDotConnected = "bg-emerald-500 dark:bg-emerald-400";
+export const connectionDotConnecting = "bg-amber-500 dark:bg-amber-400";
+export const connectionDotOffline = "bg-slate-400 dark:bg-slate-500";
+
 // ---------------------------------------------------------------------------------------------
 // Buttons and inputs
 // ---------------------------------------------------------------------------------------------

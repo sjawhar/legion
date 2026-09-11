@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -14,6 +14,7 @@ import {
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactBlobView, ArtifactHeader } from "../artifacts/ArtifactHeader";
 import { ReferencedBy } from "../artifacts/ArtifactsTab";
+import type { DocumentToolbar } from "../doc/ProofDocument";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { firstHighlightTerm } from "../search/search-model";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
@@ -23,6 +24,14 @@ export function DocumentPage(): ReactNode {
   const navigate = useNavigate();
   const route = parseProjectPath(location.pathname, location.search);
   const documentRoute = route?.kind === "document" ? route : undefined;
+  const [showDiff, setShowDiff] = useState(false);
+  const [toolbar, setToolbar] = useState<DocumentToolbar | undefined>(undefined);
+  const handleToolbarChange = useCallback((next: DocumentToolbar | undefined) => {
+    setToolbar(next);
+    if (next === undefined) {
+      setShowDiff(false);
+    }
+  }, []);
   const artifact = useQuery({
     enabled: documentRoute !== undefined,
     queryKey: ["artifact-ref", `${documentRoute?.project}/${documentRoute?.slug}`],
@@ -79,6 +88,7 @@ export function DocumentPage(): ReactNode {
   const version = documentRoute.version;
   const item = documentRoute.item;
   const selectVersion = (nextVersion: number | null) => {
+    setShowDiff(false);
     navigate(
       buildProjectPath({
         kind: "document",
@@ -94,7 +104,11 @@ export function DocumentPage(): ReactNode {
       <ArtifactHeader
         artifact={artifact.data}
         highlight={false}
+        isClosed={false}
+        onShowDiffChange={setShowDiff}
+        showDiff={showDiff}
         showVersionPicker
+        toolbar={artifact.data.kind === "doc" ? toolbar : undefined}
         version={version}
       >
         {artifact.data.kind === "doc" ? (
@@ -104,9 +118,10 @@ export function DocumentPage(): ReactNode {
             commentId={item?.kind === "comment" ? item.id : undefined}
             highlightTerm={highlightTerm}
             isClosed={false}
+            onToolbarChange={handleToolbarChange}
             onVersionChange={selectVersion}
             owner={owner}
-            showVersionPicker={false}
+            showDiff={showDiff}
             version={version}
           />
         ) : (

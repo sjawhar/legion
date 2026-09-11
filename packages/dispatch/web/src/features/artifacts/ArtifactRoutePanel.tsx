@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import type { Artifact } from "../../api/types";
 import { dangerText, linkHoverText, linkText } from "../../theme/classes";
+import type { DocumentToolbar } from "../doc/ProofDocument";
 import { buildIssuePath, type DispatchRoute } from "../refs/routes";
 import { ArtifactBlobView, ArtifactHeader } from "./ArtifactHeader";
 import { ArtifactsTab } from "./ArtifactsTab";
@@ -12,17 +13,25 @@ export function ArtifactRoutePanel({
   artifact,
   artifactRoute,
   children,
+  isClosed,
   isPrimaryArtifactRoute,
   mounted,
+  onShowDiffChange,
   route,
+  showDiff,
+  toolbar,
 }: {
   active: boolean;
   artifact: Artifact | undefined;
   artifactRoute: Extract<DispatchRoute, { kind: "artifact" }> | undefined;
   children: ReactNode;
+  isClosed: boolean;
   isPrimaryArtifactRoute: boolean;
   mounted: boolean;
+  onShowDiffChange(next: boolean): void;
   route: DispatchRoute;
+  showDiff: boolean;
+  toolbar: DocumentToolbar | undefined;
 }): ReactNode {
   return (
     <div
@@ -52,7 +61,11 @@ export function ArtifactRoutePanel({
             <ArtifactHeader
               artifact={artifact}
               highlight
-              showVersionPicker={artifact.kind !== "doc"}
+              isClosed={isClosed}
+              onShowDiffChange={onShowDiffChange}
+              showDiff={showDiff}
+              showVersionPicker
+              toolbar={artifact.kind === "doc" ? toolbar : undefined}
               version={artifactRoute.version}
             >
               {artifact.kind === "doc" ? (

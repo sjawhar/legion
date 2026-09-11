@@ -6,6 +6,10 @@ const presenceColors = ["#0284c7", "#7c3aed", "#c2410c", "#047857", "#be123c", "
 
 export type ConnectionState = "connecting" | "connected" | "offline";
 
+export function connectionLabel(connection: ConnectionState): string {
+  return connection === "connecting" ? "Connecting to the document…" : connection;
+}
+
 export interface DocumentConnection {
   readonly awareness: Awareness;
   readonly doc: Y.Doc;

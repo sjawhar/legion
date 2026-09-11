@@ -92,12 +92,8 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     ]);
     await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
     await expect(documentEditor(bobPage)).toContainText(initialMarkdown);
-    await expect(
-      alicePage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
-    await expect(
-      bobPage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
+    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
 
     // Cancelling a mark composer rejects the editor action and removes the provisional mark.
     await selectEditorText(alicePage, "brown");
@@ -221,12 +217,8 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
       alicePage.goto(`/issues/${issue.key}/spec`),
       bobPage.goto(`/issues/${issue.key}/spec`),
     ]);
-    await expect(
-      alicePage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
-    await expect(
-      bobPage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
+    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
 
     const comment = await createComment(
       issue.key,
@@ -275,12 +267,8 @@ test("highlights follow edits in the other browser and orphan to their original 
     ]);
     const aliceEditor = documentEditor(alicePage);
     const bobEditor = documentEditor(bobPage);
-    await expect(
-      alicePage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
-    await expect(
-      bobPage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
+    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
     const brown = await createComment(
       issue.key,
       { anchor: { artifact: "spec", quote: "brown" }, body: "brown note" },
@@ -362,12 +350,8 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     ]);
     const aliceEditor = documentEditor(alicePage);
     const bobEditor = documentEditor(bobPage);
-    await expect(
-      alicePage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
-    await expect(
-      bobPage.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
+    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
 
     await selectEditorText(bobPage, "brown");
     await barAction(bobPage, "Suggest");
@@ -524,9 +508,7 @@ test("margin cards and document highlights focus each other", async ({ browser }
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
-    await expect(
-      page.getByRole("region", { name: "Document editor" }).getByRole("status")
-    ).toHaveText("connected");
+    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
     const comment = await createComment(
       issue.key,
       { anchor: { artifact: "spec", quote: "brown" }, body: "focus this" },
