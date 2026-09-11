@@ -393,3 +393,45 @@ test("a version deep link renders the comment's original quote highlighted in a 
     await alice.close();
   }
 });
+
+test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload", async ({
+  browser,
+}) => {
+  await createProject({ key: "NAV", name: "Navigation" });
+  const target = await createIssue({
+    project: "NAV",
+    title: "Navigation target",
+  });
+  const source = await createIssue({
+    project: "NAV",
+    spec: `See [the other issue](dispatch://${target.key}) for context.`,
+    title: "Navigation source",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${source.key}/spec`);
+
+    const editor = documentEditor(page);
+    // The live editor keeps the author's own link text (`@sjawhar/proof-editor` exposes no
+    // decoration hook to safely replace a live editable mark's rendered text) and surfaces the
+    // resolved title as a hover tooltip instead.
+    const link = editor.getByRole("link", { name: "the other issue" });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("title", "Navigation target");
+
+    // A full page reload would reset this marker; an in-app route change preserves it.
+    await page.evaluate(() => {
+      (window as unknown as { __e2eNavMarker?: boolean }).__e2eNavMarker = true;
+    });
+    await link.click();
+
+    await expect(page).toHaveURL(new RegExp(`/issues/${target.key}(/|$)`));
+    expect(
+      await page.evaluate(() => (window as unknown as { __e2eNavMarker?: boolean }).__e2eNavMarker)
+    ).toBe(true);
+  } finally {
+    await alice.close();
+  }
+});

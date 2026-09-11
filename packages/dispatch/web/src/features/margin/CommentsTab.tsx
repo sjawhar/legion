@@ -9,7 +9,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
-import { Unfurl } from "../refs/Unfurl";
+import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
 import { ThreadList } from "./ThreadList";
 import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
@@ -70,7 +70,7 @@ function AskCardItem({
       data-margin-item={ask.id}
     >
       <AskCard ask={ask} artifactSlug={artifactSlug} />
-      <Unfurl body={ask.question} />
+      {isBareReferenceBody(ask.question) ? <Unfurl body={ask.question} /> : null}
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         {new Date(ask.created_at).toLocaleString()}
       </p>

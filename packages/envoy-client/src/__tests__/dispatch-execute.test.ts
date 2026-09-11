@@ -843,6 +843,37 @@ describe("executeDispatchTool", () => {
       "/api/v1/projects/CORE/artifacts/runbook-md",
       false,
     ],
+    [
+      "dispatch_ask",
+      { ref: "dispatch://CORE/artifact/runbook-md", question: "Publish?" },
+      "/api/v1/artifacts/artifact-42/asks",
+      true,
+    ],
+    [
+      "dispatch_comment",
+      { ref: "dispatch://CORE/artifact/runbook-md", body: "Looks good." },
+      "/api/v1/artifacts/artifact-42/comments",
+      true,
+    ],
+    [
+      "dispatch_suggest",
+      {
+        ref: "dispatch://CORE/artifact/runbook-md",
+        quote: "draft",
+        replace_with: "final",
+      },
+      "/api/v1/artifacts/artifact-42/comments",
+      true,
+    ],
+    [
+      "dispatch_doc_edit",
+      {
+        ref: "dispatch://CORE/artifact/runbook-md",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      },
+      "/api/v1/artifacts/artifact-42/edits",
+      true,
+    ],
   ])("executes %s with a project document owner", async (tool, args, expectedPath, writes) => {
     const paths: string[] = [];
     const artifact = {

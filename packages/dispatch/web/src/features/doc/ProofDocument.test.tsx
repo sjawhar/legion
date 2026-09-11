@@ -1,12 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
+import * as Y from "yjs";
 
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
-import type { Artifact } from "../../api/types";
+import type { Artifact, IssueDetails } from "../../api/types";
 import { MarginProvider, useMargin } from "../margin/Margin";
 import type { MarkPlacement } from "../margin/useMarginItems";
 import { colorForLogin } from "./connection";
@@ -30,6 +31,11 @@ function createQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
+}
+
+function CurrentRoute() {
+  const location = useLocation();
+  return <div data-testid="current-route">{location.pathname}</div>;
 }
 
 function renderProofDocument({
@@ -85,6 +91,7 @@ function renderProofDocument({
       <QueryClientProvider client={queryClient}>
         <DocumentRuntime.Provider value={fake.runtime}>
           <MarginProvider>
+            <CurrentRoute />
             <MarginProbe />
             <ProofDocument
               artifact={document}
@@ -211,6 +218,68 @@ test("ProofDocument highlights a routed search term again after route and docume
     } else {
       Object.defineProperty(styleApi, "CSS", originalCss);
     }
+  }
+});
+
+test("ProofDocument sets a hover title and navigates in-app for a dispatch:// link", async () => {
+  const issue: IssueDetails = {
+    artifacts: [],
+    children: [],
+    closed_at: null,
+    created_at: "2026-09-09T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    external_links: [],
+    key: "CORE-1",
+    labels: [],
+    last_seq: 1,
+    number: 1,
+    parent: null,
+    primary_artifact_id: "artifact-1",
+    project: "CORE",
+    route: null,
+    status: "testing",
+    title: "Ship the release",
+    open_asks: [],
+    updated_at: "2026-09-09T00:00:00Z",
+  };
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const { connections, editors, sync, view } = renderProofDocument();
+
+  try {
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const root = editors[0]?.root;
+    if (root === undefined) throw new Error("editor root missing");
+    // The fake runtime never runs Markdown through the real proof-editor serializer (its
+    // createEditor stub just dumps a debug string), so this stands in for what that serializer
+    // now actually emits for a dispatch:// link mark: href sanitized to "", the real target
+    // carried in data-dispatch-href. `doc.e2e.ts` proves the real serializer produces this shape
+    // and that clicking it navigates in a genuinely live document.
+    act(() => {
+      root.innerHTML =
+        '<p><a href="" data-dispatch-href="dispatch://CORE-1">dispatch://CORE-1</a></p>';
+    });
+    // A live-document mutation is what the effect actually observes; it re-scans root for
+    // dispatch:// anchors afterward, which is how it picks up the one just inserted above.
+    act(() => {
+      const fragment = connections[0]?.doc.getXmlFragment("prosemirror");
+      const paragraph = new Y.XmlElement("paragraph");
+      paragraph.insert(0, [new Y.XmlText(" ")]);
+      fragment?.insert(fragment.length, [paragraph]);
+    });
+
+    const anchor = await waitFor(() => {
+      const found = root.querySelector("a");
+      if (found === null) throw new Error("anchor not attached yet");
+      return found;
+    });
+    await waitFor(() => expect(anchor.title).toBe("Ship the release"));
+
+    fireEvent.click(anchor);
+    expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-1");
+  } finally {
+    getIssue.mockRestore();
+    view.unmount();
   }
 });
 

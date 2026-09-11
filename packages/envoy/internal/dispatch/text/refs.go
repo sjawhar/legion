@@ -118,12 +118,14 @@ func parseDispatch(value string) (Ref, bool) {
 		}
 		return Ref{Kind: "artifact", Project: key, ID: slug}, true
 	}
-	if len(parts) == 3 && !strings.Contains(parts[0], "@") && validItemID(parts[2]) {
-		switch parts[1] {
-		case "ask":
-			return Ref{Kind: "ask", Project: key, ID: parts[2]}, true
-		case "comment":
-			return Ref{Kind: "comment", Project: key, ID: parts[2]}, true
+	if len(parts) == 3 && validItemID(parts[2]) {
+		if _, ok := parseArtifactSlug(parts[0]); ok {
+			switch parts[1] {
+			case "ask":
+				return Ref{Kind: "ask", Project: key, ID: parts[2]}, true
+			case "comment":
+				return Ref{Kind: "comment", Project: key, ID: parts[2]}, true
+			}
 		}
 	}
 	return Ref{}, false

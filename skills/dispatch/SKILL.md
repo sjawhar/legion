@@ -169,19 +169,22 @@ retrying. Pass `summary` to name the version when recording a decision.
 Add feedback with:
 
 ```ts
-dispatch_comment({ issue?, project?, artifact?, quote?, occurrence?, body, reply_to?, reply_to_ask? })
+dispatch_comment({ issue?, project?, artifact?, ref?, quote?, occurrence?, body, reply_to?, reply_to_ask? })
 ```
 
-It returns issue or project-document owner details plus `comment` and, for writes, `topic`. `quote` requires `artifact`; omit both for a
-floating issue comment. A reply (`reply_to`/`reply_to_ask`) takes no `quote`; it belongs to its parent's anchor. Use `reply_to` to
-continue a comment thread at its root; a reply to a resolved thread reopens it. Use `reply_to_ask` to reply directly under a question
-asked with `dispatch_ask`. Comments are edited only by their author from the dashboard. A delivered `comment.created` event carries the
-comment `id`; reply to it with `dispatch_comment({ reply_to: <id> })`.
+It returns issue or project-document owner details plus `comment` and, for writes, `topic`.
+`ref` names the owner (an issue or project-document reference) in place of `issue`/`project`.
+`quote` requires `artifact`; omit both for a floating issue comment. A reply (`reply_to`/`reply_to_ask`)
+takes no `quote`; it belongs to its parent's anchor. Use `reply_to` to continue a comment thread at
+its root; a reply to a resolved thread reopens it. Use `reply_to_ask` to reply directly under a
+question asked with `dispatch_ask`. Comments are edited only by their author from the dashboard. A
+delivered `comment.created` event carries the comment `id`; reply to it with
+`dispatch_comment({ reply_to: <id> })`.
 
 Propose an exact replacement instead of describing it:
 
 ```ts
-dispatch_suggest({ issue?, project?, artifact, quote, replace_with, body?, occurrence? })
+dispatch_suggest({ issue?, project?, artifact, ref?, quote, replace_with, body?, occurrence? })
 ```
 
 It returns issue or project-document owner details plus `comment` and its write `topic`. A human accepts or rejects a suggestion.
@@ -238,7 +241,12 @@ message ref, it returns that message and its reply chain. Reads do not subscribe
 
 ## References
 
-Use these in document, ask, comment, and message bodies; Dispatch unfurls them:
+Use these in document, ask, comment, and message bodies. In the dashboard, a reference renders
+as an inline link whose text is the target's title (an issue's title, an ask's question, a
+comment's first line, a document's name) once it resolves; a body that is only a bare reference
+still gets an unfurl card instead. Every `ref` argument below (and `issue`/`project`) accepts
+either form — an issue key or a project key is never ambiguous, since a project key never
+contains a dash:
 
 ```text
 dispatch://KEY

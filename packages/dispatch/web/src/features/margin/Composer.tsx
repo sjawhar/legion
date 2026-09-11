@@ -128,7 +128,7 @@ interface ComposerProps {
   saveEdit?: (id: string, body: string) => Promise<unknown>;
 }
 
-function trimReference(value: string): string {
+export function trimReference(value: string): string {
   return value.replace(/[),.;:!?]+$/, "");
 }
 

@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 
 import { api } from "../../api/client";
-import type { Artifact, IssueDetails } from "../../api/types";
-import { Unfurl } from "./Unfurl";
+import type { Artifact, AskRead, CommentRead, IssueDetails } from "../../api/types";
+import { isBareReferenceBody, Unfurl } from "./Unfurl";
 
 test("Unfurl trims terminal punctuation before resolving a GitHub reference", async () => {
   const githubRest = spyOn(api, "githubRest").mockResolvedValue(
@@ -146,4 +146,135 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
     getArtifactVersion.mockRestore();
     getProjectArtifact.mockRestore();
   }
+});
+
+test("Unfurl unfurls a dispatch ask reference with the question, not the issue title", async () => {
+  const issue: IssueDetails = {
+    artifacts: [],
+    children: [],
+    closed_at: null,
+    created_at: "2026-09-09T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    external_links: [],
+    key: "CORE-1",
+    labels: [],
+    last_seq: 1,
+    number: 1,
+    parent: null,
+    primary_artifact_id: "artifact-none",
+    project: "CORE",
+    route: null,
+    status: "testing",
+    title: "Design decision",
+    open_asks: [],
+    updated_at: "2026-09-09T00:00:00Z",
+  };
+  const askRead: AskRead = {
+    ask: {
+      id: "ask-1",
+      issue_key: "CORE-1",
+      author: { id: "alice", kind: "user" },
+      question: "Should we ship this on Friday or wait for the review to land first?",
+      options: [],
+      multiple: false,
+      urgency: "med",
+      anchor: null,
+      state: "open",
+      answer: null,
+      opened_event_id: 1,
+      created_at: "2026-09-09T00:00:00Z",
+      edited_at: null,
+    },
+    replies: [],
+  };
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body="See dispatch://CORE-1/ask/ask-1" />
+    </QueryClientProvider>
+  );
+
+  try {
+    await within(view.container).findByText(
+      "Should we ship this on Friday or wait for the review to land…"
+    );
+    expect(within(view.container).queryByText("Design decision")).toBeNull();
+    expect(getAsk).toHaveBeenCalledWith("ask-1");
+  } finally {
+    getAsk.mockRestore();
+    getIssue.mockRestore();
+    view.unmount();
+  }
+});
+
+test("Unfurl unfurls a dispatch comment reference with its first line, not the issue title", async () => {
+  const issue: IssueDetails = {
+    artifacts: [],
+    children: [],
+    closed_at: null,
+    created_at: "2026-09-09T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    external_links: [],
+    key: "CORE-1",
+    labels: [],
+    last_seq: 1,
+    number: 1,
+    parent: null,
+    primary_artifact_id: "artifact-none",
+    project: "CORE",
+    route: null,
+    status: "testing",
+    title: "Design decision",
+    open_asks: [],
+    updated_at: "2026-09-09T00:00:00Z",
+  };
+  const commentRead: CommentRead = {
+    comment: {
+      id: "comment-1",
+      issue_key: "CORE-1",
+      author: { id: "alice", kind: "user" },
+      body: "Looks good overall.\nOne nit below.",
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      created_at: "2026-09-09T00:00:00Z",
+    },
+    replies: [],
+  };
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getComment = spyOn(api, "getComment").mockResolvedValue(commentRead);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body="See dispatch://CORE-1/comment/comment-1" />
+    </QueryClientProvider>
+  );
+
+  try {
+    await within(view.container).findByText("Looks good overall.");
+    expect(within(view.container).queryByText("Design decision")).toBeNull();
+    expect(getComment).toHaveBeenCalledWith("comment-1");
+  } finally {
+    getComment.mockRestore();
+    getIssue.mockRestore();
+    view.unmount();
+  }
+});
+
+test("isBareReferenceBody accepts only whitespace-joined bare references", () => {
+  expect(isBareReferenceBody("dispatch://CORE-1")).toBe(true);
+  expect(isBareReferenceBody("  dispatch://CORE-1  ")).toBe(true);
+  expect(isBareReferenceBody("dispatch://CORE-1 dispatch://CORE-2")).toBe(true);
+  expect(isBareReferenceBody("See dispatch://CORE-1")).toBe(false);
+  expect(isBareReferenceBody("dispatch://CORE-1 for details")).toBe(false);
+  expect(isBareReferenceBody("")).toBe(false);
 });

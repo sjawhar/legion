@@ -30,7 +30,7 @@ import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { Unfurl } from "../refs/Unfurl";
+import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { Composer } from "./Composer";
 import type { MarginItemAction, MarginOwner, Thread } from "./useMarginItems";
 
@@ -120,7 +120,7 @@ function CommentBody({
           )}
         </div>
       ) : null}
-      <Unfurl body={comment.body} />
+      {isBareReferenceBody(comment.body) ? <Unfurl body={comment.body} /> : null}
       <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
         {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
         {comment.edited_at === null ? null : " · edited"}

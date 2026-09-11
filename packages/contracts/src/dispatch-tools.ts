@@ -29,7 +29,8 @@ const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
 function documentOwnerValidation(
-  requireArtifact: boolean
+  requireArtifact: boolean,
+  alwaysRequireArtifact = false
 ): NonNullable<DispatchToolSpec["validation"]> {
   return {
     check: (value) => {
@@ -41,13 +42,17 @@ function documentOwnerValidation(
       };
       const hasIssue = typeof input.issue === "string";
       const hasProject = typeof input.project === "string";
+      const hasArtifact = typeof input.artifact === "string";
+      const hasRef = typeof input.ref === "string";
       return (
-        (hasIssue !== hasProject || (!hasIssue && !hasProject && typeof input.ref === "string")) &&
-        (!hasProject || !requireArtifact || typeof input.artifact === "string")
+        (hasIssue !== hasProject || (!hasIssue && !hasProject && hasRef)) &&
+        (!hasProject || !requireArtifact || hasArtifact) &&
+        (!alwaysRequireArtifact || hasArtifact || hasRef)
       );
     },
-    message:
-      "Exactly one of issue and project is required; with project, artifact names the document.",
+    message: alwaysRequireArtifact
+      ? "Exactly one of issue and project is required; artifact or ref must name the document."
+      : "Exactly one of issue and project is required; with project, artifact names the document.",
   };
 }
 export const SPEC_SECTIONS = [
@@ -104,6 +109,7 @@ export const dispatchToolSpecs = [
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Project document slug or id.").optional(),
+      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       question: z.string({ max: 800 }).describe("Decision question, at most 800 characters."),
       options: z
         .array(
@@ -196,6 +202,7 @@ export const dispatchToolSpecs = [
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Artifact slug or id required when quote is given.").optional(),
+      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z
         .number({ int: true, min: 0 })
@@ -221,7 +228,11 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
-      artifact: z.string().describe("Artifact slug or id containing the quoted text."),
+      artifact: z
+        .string()
+        .describe("Artifact slug or id containing the quoted text; optional when ref names it.")
+        .optional(),
+      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Exact document text to replace."),
       replace_with: z.string().describe("Replacement text."),
       body: z
@@ -233,7 +244,7 @@ export const dispatchToolSpecs = [
         .describe("Optional zero-based occurrence of quote.")
         .optional(),
     }),
-    validation: documentOwnerValidation(true),
+    validation: documentOwnerValidation(true, true),
   },
   {
     name: "dispatch_message",
@@ -262,7 +273,11 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
-      artifact: z.string().describe("Artifact slug or id for the document."),
+      artifact: z
+        .string()
+        .describe("Artifact slug or id for the document; optional when ref names it.")
+        .optional(),
+      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z
         .array(
           z.object({
@@ -281,7 +296,7 @@ export const dispatchToolSpecs = [
         .describe("Flat tagged edits; the server validates fields required for each operation."),
       summary: z.string().describe("Optional named-version summary.").optional(),
     }),
-    validation: documentOwnerValidation(true),
+    validation: documentOwnerValidation(true, true),
   },
   {
     name: "dispatch_doc_read",

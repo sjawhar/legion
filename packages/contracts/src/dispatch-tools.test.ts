@@ -235,7 +235,7 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  test("accepts ref alone on dispatch_doc_read and dispatch_read", () => {
+  test("accepts a project-document ref in place of issue/project on every ref-aware tool", () => {
     expect(
       schemaFor("dispatch_doc_read").safeParse({
         ref: "dispatch://CORE/artifact/runbook-md",
@@ -246,6 +246,47 @@ describe("dispatchToolSpecs", () => {
         ref: "dispatch://CORE/artifact/runbook-md",
       }).success
     ).toBe(true);
+    expect(
+      schemaFor("dispatch_ask").safeParse({
+        ref: "dispatch://CORE/artifact/runbook-md",
+        question: "Publish?",
+      }).success
+    ).toBe(true);
+    expect(
+      schemaFor("dispatch_comment").safeParse({
+        ref: "dispatch://CORE/artifact/runbook-md",
+        body: "Looks good.",
+      }).success
+    ).toBe(true);
+    expect(
+      schemaFor("dispatch_suggest").safeParse({
+        ref: "dispatch://CORE/artifact/runbook-md",
+        quote: "draft",
+        replace_with: "final",
+      }).success
+    ).toBe(true);
+    expect(
+      schemaFor("dispatch_doc_edit").safeParse({
+        ref: "dispatch://CORE/artifact/runbook-md",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      }).success
+    ).toBe(true);
+  });
+
+  test("rejects dispatch_suggest and dispatch_doc_edit when neither artifact nor ref names the document", () => {
+    expect(
+      schemaFor("dispatch_suggest").safeParse({
+        issue: "CORE-1",
+        quote: "draft",
+        replace_with: "final",
+      }).success
+    ).toBe(false);
+    expect(
+      schemaFor("dispatch_doc_edit").safeParse({
+        issue: "CORE-1",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      }).success
+    ).toBe(false);
   });
 
   test("does not advertise a primary artifact option", () => {

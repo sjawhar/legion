@@ -1,6 +1,14 @@
 import type { HeadlessProofEditor } from "@sjawhar/proof-editor/headless";
 import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+
+import {
+  collectReferenceAnchors,
+  linkifyDispatchRefs,
+  type ReferenceAnchor,
+  RefLink,
+} from "./RefLink";
 
 let headlessProof: Promise<HeadlessProofEditor> | undefined;
 
@@ -28,6 +36,28 @@ interface InlineContent {
   extra: string;
 }
 
+/** A textblock's own text, skipping any code span or code block content — used only for the
+ * "extra" (non-first) textblocks in the `inline` variant below, which flatten to plain text and
+ * so would otherwise re-expose a code span's `dispatch://` ref as linkifiable bare text once its
+ * `code` mark is gone. The first textblock keeps its marks (serialized, not flattened), so its
+ * own code spans stay real `<code>` elements and need no such filtering. */
+function plainTextExcludingCode(node: ProseMirrorNode): string {
+  const parts: string[] = [];
+  node.descendants((child) => {
+    if (child.type.name === "code_block") {
+      return false;
+    }
+    if (child.isText) {
+      const hasCode = child.marks.some((mark) => mark.type.name === "inlineCode");
+      if (!hasCode) {
+        parts.push(child.text ?? "");
+      }
+    }
+    return true;
+  });
+  return parts.join("");
+}
+
 function flattenInline(root: ProseMirrorNode): InlineContent | undefined {
   let head: ProseMirrorNode | undefined;
   const extra: string[] = [];
@@ -38,7 +68,7 @@ function flattenInline(root: ProseMirrorNode): InlineContent | undefined {
     if (head === undefined) {
       head = node;
     } else {
-      const text = node.textContent.trim();
+      const text = plainTextExcludingCode(node).trim();
       if (text !== "") {
         extra.push(text);
       }
@@ -78,6 +108,7 @@ export function MarkdownBody({
   onRenderedRef.current = onRendered;
   const blockRoot = useRef<HTMLDivElement>(null);
   const inlineRoot = useRef<HTMLSpanElement>(null);
+  const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>([]);
 
   useEffect(() => {
     let mounted = true;
@@ -116,6 +147,13 @@ export function MarkdownBody({
           }
         }
       }
+      // A dispatch:// reference stays literal text to Markdown (it isn't a scheme GFM
+      // autolinks), so bare refs get wrapped into real links first; a same-origin dashboard
+      // URL is already a real link by then (GFM autolinked it, or the author wrote it as
+      // Markdown link syntax). Either way, every reference anchor gets its href rewritten to
+      // the SPA route and its text handed to a portal-mounted `RefLink` for the resolved title.
+      linkifyDispatchRefs(root);
+      setReferenceAnchors(collectReferenceAnchors(root));
       onRenderedRef.current?.();
     });
     return () => {
@@ -123,9 +161,17 @@ export function MarkdownBody({
     };
   }, [markdown, variant]);
 
+  const portals = referenceAnchors.map(({ anchor, key, route }) =>
+    createPortal(<RefLink route={route} />, anchor, key)
+  );
+
   return variant === "inline" ? (
-    <span className={markdownClassName} ref={inlineRoot} />
+    <span className={markdownClassName} ref={inlineRoot}>
+      {portals}
+    </span>
   ) : (
-    <div className={`${markdownClassName} max-w-none`} ref={blockRoot} />
+    <div className={`${markdownClassName} max-w-none`} ref={blockRoot}>
+      {portals}
+    </div>
   );
 }

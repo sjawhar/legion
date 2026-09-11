@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
+  type RefObject,
   useCallback,
   useContext,
   useEffect,
@@ -8,13 +9,20 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
 import { useMargin } from "../margin/Margin";
 import type { MarginOwner } from "../margin/useMarginItems";
-import { buildIssuePath, buildProjectPath } from "../refs/routes";
+import {
+  buildIssuePath,
+  buildProjectPath,
+  type DispatchReferenceRoute,
+  isProjectRoute,
+  parseDispatchReference,
+} from "../refs/routes";
+import { useReferenceTarget } from "../refs/Unfurl";
 import type { ConnectionState } from "./connection";
 import { colorForLogin } from "./connection";
 import type { EditorHandle, StoredMark } from "./editor";
@@ -99,6 +107,64 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
   CSS.highlights.set("dispatch-search", new Highlight(...ranges));
 }
 
+/** A rendered link mark's `dispatch://` target, if any. `@sjawhar/proof-editor`'s Markdown
+ * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
+ * http/https/mailto/tel/ftp — a document strangers can edit should never render an
+ * attacker-chosen non-http scheme as a clickable href) and tags the anchor with
+ * `data-dispatch-href` carrying the original target instead. */
+function dispatchHrefOf(anchor: Element): string | null {
+  const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
+  return href?.startsWith("dispatch://") ? href : null;
+}
+
+/** Every already-rendered dispatch:// link mark in the live editor, deduplicated by target.
+ * Read-only: unlike `RefLink`'s DOM rewriting for static Markdown bodies, this never touches the
+ * editor's DOM — `@sjawhar/proof-editor` exposes no decoration/markView hook to safely replace a
+ * live, editable mark's rendered text, so `ReferenceTooltip` below only sets a hover tooltip. */
+function collectDispatchHrefRoutes(
+  root: HTMLElement
+): { reference: string; route: DispatchReferenceRoute }[] {
+  const routes = new Map<string, DispatchReferenceRoute>();
+  for (const anchor of root.querySelectorAll("a")) {
+    const href = dispatchHrefOf(anchor);
+    if (href === null) {
+      continue;
+    }
+    const route = parseDispatchReference(href);
+    if (route !== undefined) {
+      routes.set(href, route);
+    }
+  }
+  return [...routes].map(([reference, route]) => ({ reference, route }));
+}
+
+/** Sets the resolved title as a hover tooltip on every editor anchor matching reference. Renders
+ * nothing itself; `useReferenceTarget` drives the effect that mutates the DOM directly, the same
+ * pattern `setSearchHighlights`/`setActiveMarkClass` already use for this editor surface. */
+function ReferenceTooltip({
+  reference,
+  route,
+  rootRef,
+}: {
+  reference: string;
+  route: DispatchReferenceRoute;
+  rootRef: RefObject<HTMLDivElement | null>;
+}): null {
+  const { title } = useReferenceTarget(route);
+  useEffect(() => {
+    const root = rootRef.current;
+    if (root === null) {
+      return;
+    }
+    for (const anchor of root.querySelectorAll("a")) {
+      if (dispatchHrefOf(anchor) === reference) {
+        anchor.title = title ?? "";
+      }
+    }
+  }, [reference, rootRef, title]);
+  return null;
+}
+
 export function ProofDocument({
   artifact,
   highlight,
@@ -117,6 +183,10 @@ export function ProofDocument({
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [dispatchLinkRoutes, setDispatchLinkRoutes] = useState<
+    { reference: string; route: DispatchReferenceRoute }[]
+  >([]);
+  const navigate = useNavigate();
   const { connect, createEditor } = useContext(DocumentRuntime);
   const {
     composeForMark,
@@ -216,6 +286,7 @@ export function ProofDocument({
       __dispatchDocument?: { editor: EditorHandle; view: EditorHandle["view"] };
     };
     setConnection("connecting");
+    setDispatchLinkRoutes([]);
     const document = connect(artifact.id, {
       onStatus: setConnection,
       onSynced: () => {
@@ -298,6 +369,15 @@ export function ProofDocument({
           };
           refreshSearchHighlights();
           fragment.observeDeep(refreshSearchHighlights);
+          let referenceFrame = 0;
+          const refreshDispatchLinks = () => {
+            cancelAnimationFrame(referenceFrame);
+            referenceFrame = requestAnimationFrame(() => {
+              setDispatchLinkRoutes(collectDispatchHrefRoutes(handle.view.dom));
+            });
+          };
+          refreshDispatchLinks();
+          fragment.observeDeep(refreshDispatchLinks);
           let frame = 0;
           const publishPlacements = () => {
             cancelAnimationFrame(frame);
@@ -314,10 +394,12 @@ export function ProofDocument({
           disposeEditorBindings = () => {
             cancelAnimationFrame(frame);
             cancelAnimationFrame(searchFrame);
+            cancelAnimationFrame(referenceFrame);
             resizeObserver.disconnect();
             marks.unobserve(project);
             fragment.unobserveDeep(publishPlacements);
             fragment.unobserveDeep(refreshSearchHighlights);
+            fragment.unobserveDeep(refreshDispatchLinks);
             registerDocumentRef.current(undefined);
           };
         });
@@ -362,13 +444,38 @@ export function ProofDocument({
         saving={nameVersion.isPending}
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: delegates to the rendered <a> elements,
+      which are already keyboard-operable — Enter on a focused link fires a click that bubbles here. */}
       <article
         aria-label="Document"
         className="dispatch-doc"
         data-read-only={isClosed}
         hidden={version !== undefined}
+        onClick={(event) => {
+          // A modifier click (open in new tab/window) or a drag-selection that happens to end
+          // on the link should reach the browser/editor's own handling, not steal the click.
+          const modified = event.ctrlKey || event.metaKey || event.shiftKey || event.altKey;
+          if (event.button !== 0 || modified) {
+            return;
+          }
+          const selection = window.getSelection();
+          if (selection !== null && !selection.isCollapsed) {
+            return;
+          }
+          const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a");
+          const href = anchor === null ? null : dispatchHrefOf(anchor);
+          const route = href === null ? undefined : parseDispatchReference(href);
+          if (route === undefined) {
+            return;
+          }
+          event.preventDefault();
+          navigate(isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route));
+        }}
       >
         <div ref={root} />
+        {dispatchLinkRoutes.map(({ reference, route }) => (
+          <ReferenceTooltip key={reference} reference={reference} route={route} rootRef={root} />
+        ))}
       </article>
       {version === undefined ? null : versionQuery.isError ? (
         <section aria-label={`Document version ${version}`} className="space-y-3">
