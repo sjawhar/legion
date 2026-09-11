@@ -1,7 +1,4 @@
-// Unit tests for `panePid`'s row selection. `list-panes -t <target>` always lists the target's
-// whole window (a pane id resolves to its window), so the pane-id column — not row position —
-// must pick the row for a pane target; a window target keeps the first row (its first pane, the
-// same pane `firstPaneId` backfills into a pane-id-less locator).
+// Row selection in `panePid` over a `list-panes -F "#{pane_id} #{pane_pid}"` listing.
 import { describe, expect, it } from "bun:test";
 import { panePid, type TmuxServer } from "../tmux";
 
@@ -40,5 +37,12 @@ describe("panePid", () => {
 
   it("is undefined for a pane id missing from the listing, never a sibling pane's pid", async () => {
     expect(await panePid(server({ stdout: rows, exitCode: 0 }), "%1535")).toBeUndefined();
+  });
+
+  it("matches the pane id exactly, never a longer or shorter id sharing its digits", async () => {
+    // Longer ids first, so a prefix match in either direction would land on the wrong row.
+    const prefixes = "%150 446716\n%1 3715931\n%15 4141285\n";
+    expect(await panePid(server({ stdout: prefixes, exitCode: 0 }), "%15")).toBe(4141285);
+    expect(await panePid(server({ stdout: prefixes, exitCode: 0 }), "%1")).toBe(3715931);
   });
 });

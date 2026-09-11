@@ -1,9 +1,9 @@
-// Direct unit tests for WorkerBootWatchdog's real-timer cleanup, isolated from ProcessManager:
-// every path a watch can exit through (a worker's socket closing, the observation interval
-// timing out, an explicit cancel, and a confirmed-dead retirement) must clear every timer it
-// armed along the way, never leaving one live in the background — see `cancelableSleep`'s own
-// doc comment for why an uncleared one would otherwise accumulate without bound across a
-// long-lived daemon watching a persistently borderline-slow worker.
+// Direct unit tests for WorkerBootWatchdog, isolated from ProcessManager: timer cleanup on every
+// path a watch can exit through (a worker's socket closing, the observation interval timing out,
+// an explicit cancel, and a confirmed-dead retirement — see `cancelableSleep`'s own doc comment
+// for why an uncleared timer would otherwise accumulate without bound across a long-lived daemon
+// watching a persistently borderline-slow worker), the registration deadline, and the pane-pid
+// probe behind `probeAlive`.
 import { describe, expect, it } from "bun:test";
 import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { WorkerLocator } from "../legion-state";
@@ -308,7 +308,6 @@ describe("WorkerBootWatchdog pid probe", () => {
     const events: string[] = [];
     const watchdog = new WorkerBootWatchdog(
       baseDeps({
-        // 0.01s → exactly one connect attempt per interval (see `maxAttemptsPerInterval`).
         workerBootTimeoutSeconds: () => 0.01,
         sleep: async () => {},
         yield: async () => {},
@@ -347,9 +346,14 @@ describe("WorkerBootWatchdog pid probe", () => {
     );
     for (let i = 0; i < 200 && !events.includes("retire"); i += 1) await Promise.resolve();
 
-    // The interval's single connect attempt, then `probeAlive`: the pid probe asks about %1533's
-    // own pid (not OMP), falls through to the socket probe (refused), and the boot is retired.
-    // Before the fix the first row's 2363427 confirmed the boot and no socket probe ran.
-    expect(events).toEqual(["workerClient", "isOmpPane:3003090", "workerClient", "retire"]);
+    // `probeAlive` asks about %1533's own pid — never the first row's 2363427, the architect's
+    // live OMP, which would confirm the boot — and, finding it dead, falls through to the socket
+    // probe (refused) and retires the boot.
+    expect(events.filter((e) => e.startsWith("isOmpPane:"))).toEqual(["isOmpPane:3003090"]);
+    expect(events.slice(events.indexOf("isOmpPane:3003090"))).toEqual([
+      "isOmpPane:3003090",
+      "workerClient",
+      "retire",
+    ]);
   });
 });

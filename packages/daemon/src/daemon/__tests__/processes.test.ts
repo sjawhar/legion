@@ -225,12 +225,12 @@ function liveRun(command: string[]): Promise<{ stdout: string; exitCode: number 
 
 /** Answers a `list-panes` liveness probe for a pane that is alive. `panePid`'s
  * `-F "#{pane_id} #{pane_pid}"` probe gets one `<pane_id> <pid>` row for the probed target — the
- * pane itself, or `%1` standing in for a window's first pane; any other `list-panes` format keeps
- * the bare `<pid>` line these fixtures have always answered with (so `firstPaneId` still reads no
- * pane id from it and `windowAlive` still reads exit 0). */
+ * pane itself, or `%1` standing in for a window's first pane; any other `list-panes` format gets
+ * a bare `<pid>` line, which `firstPaneId` rejects as a pane id (`/^%\d+$/`) and `windowAlive`
+ * reads only as exit 0. */
 function livePanes(command: string[], pid = 12345): { stdout: string; exitCode: number } {
   if (!command.includes("#{pane_id} #{pane_pid}")) return { stdout: `${pid}\n`, exitCode: 0 };
-  const target = command[command.indexOf("-t") + 1] ?? "";
+  const target = command[command.indexOf("-t") + 1];
   return { stdout: `${target.startsWith("%") ? target : "%1"} ${pid}\n`, exitCode: 0 };
 }
 
