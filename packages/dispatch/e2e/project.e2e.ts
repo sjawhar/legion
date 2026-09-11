@@ -163,6 +163,7 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
   try {
     const page = await context.newPage();
     await page.goto(`/issues/${issue.key}/artifacts`);
+    await page.getByText(/References \(\d+\)/).click();
     const references = page.getByRole("region", { name: "References" });
     await expect(references.getByRole("link", { name: "Design notes" })).toHaveAttribute(
       "href",
