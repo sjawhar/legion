@@ -97,7 +97,9 @@ export const dispatchToolSpecs = [
     name: "dispatch_ask",
     description:
       "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
-      `use dispatch_message instead. Question is at most 800 characters and has at most 8 options. ${OWNER_REFERENCE}`,
+      "use dispatch_message instead. Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
+      `reference — it must be answerable from its own text and anchor alone, never "see above". Question is at most 800 ` +
+      `characters and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -236,8 +238,9 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_message",
     description:
-      "Post a plain issue update. Do not use it for a decision or line-specific review; use dispatch_ask " +
-      `or dispatch_comment instead. Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+      "Post a note to the issue's Conversation for humans: a status they should see now, or a reply to a human's message. " +
+      "Not a progress ledger (the issue's progress.md artifact), a decision (dispatch_ask), or document feedback " +
+      `(dispatch_comment). Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       body: z.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
@@ -247,7 +250,8 @@ export const dispatchToolSpecs = [
     name: "dispatch_doc_edit",
     description:
       "Apply deterministic text edits to an issue or project document. Do not use it for review feedback or for reading; use " +
-      `dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
+      "dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. The spec (or any document) holds requirements, " +
+      `design, and decisions — record progress in the issue's progress.md artifact instead. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),

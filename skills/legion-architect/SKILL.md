@@ -71,6 +71,9 @@ exercise a criterion end to end, building that path is a child issue of this tre
   inert until released.
 
 Specifications written into Dispatch follow [`skills/dispatch`'s Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+Record ongoing status — wave releases, child closures, blockers — in the issue's `progress.md`
+artifact (see [`skills/dispatch`'s Progress](../dispatch/SKILL.md#progress)), never in the spec
+or a `dispatch_message`.
 
 Write one root specification containing the accepted scope, adoption/decomposition,
 waves, acceptance criteria, and integration test. When the config-armed root design gate
