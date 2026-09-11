@@ -207,7 +207,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           tmux: {
             socket: "legion-omp",
             run: async (cmd) => {
-              if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+              if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
               return { stdout: "", exitCode: 0 };
             },
           },
@@ -244,7 +244,7 @@ describe("WorkerBootWatchdog registration deadline", () => {
         tmux: {
           socket: "legion-omp",
           run: async (cmd) => {
-            if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+            if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
             return { stdout: "", exitCode: 0 };
           },
         },
@@ -279,7 +279,7 @@ describe("WorkerBootWatchdog registration deadline", () => {
         tmux: {
           socket: "legion-omp",
           run: async (cmd) => {
-            if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+            if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
             return { stdout: "", exitCode: 0 };
           },
         },
@@ -300,5 +300,56 @@ describe("WorkerBootWatchdog registration deadline", () => {
     expect(probeCount).toBe(2);
     expect(retirements).toEqual([]);
     watchdog.cancel(token, 1);
+  });
+});
+
+describe("WorkerBootWatchdog pid probe", () => {
+  it("probes the worker's own pane pid, not its window's first pane, so a sibling's live OMP never confirms a dead boot", async () => {
+    const events: string[] = [];
+    const watchdog = new WorkerBootWatchdog(
+      baseDeps({
+        // 0.01s → exactly one connect attempt per interval (see `maxAttemptsPerInterval`).
+        workerBootTimeoutSeconds: () => 0.01,
+        sleep: async () => {},
+        yield: async () => {},
+        tmux: {
+          socket: "legion-omp",
+          run: async (cmd) => {
+            if (cmd.includes("list-panes")) {
+              // The worker's whole window: the architect's pane first, then two split-in workers.
+              return { stdout: "%1531 2363427\n%1533 3003090\n%1534 446716\n", exitCode: 0 };
+            }
+            return { stdout: "", exitCode: 0 };
+          },
+        },
+        // Only the architect's pane still runs OMP; the watched worker's own process is gone.
+        isOmpPane: async (pid) => {
+          events.push(`isOmpPane:${pid}`);
+          return pid === 2363427;
+        },
+        workerClient: async () => {
+          events.push("workerClient");
+          throw new Error("shim not listening");
+        },
+        retireUnconfirmedBoot: async () => {
+          events.push("retire");
+        },
+      })
+    );
+
+    watchdog.arm(
+      root,
+      child,
+      role,
+      token,
+      { ...locator, tmuxWindowId: "@1464", tmuxPaneId: "%1533" },
+      1
+    );
+    for (let i = 0; i < 200 && !events.includes("retire"); i += 1) await Promise.resolve();
+
+    // The interval's single connect attempt, then `probeAlive`: the pid probe asks about %1533's
+    // own pid (not OMP), falls through to the socket probe (refused), and the boot is retired.
+    // Before the fix the first row's 2363427 confirmed the boot and no socket probe ran.
+    expect(events).toEqual(["workerClient", "isOmpPane:3003090", "workerClient", "retire"]);
   });
 });
