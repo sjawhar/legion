@@ -409,7 +409,19 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     await barAction(bobPage, "Suggest");
     const rejectComposer = bobPage.getByRole("form", { name: "Suggest composer" });
     await rejectComposer.getByLabel("Replacement").fill("slow");
-    await rejectComposer.getByRole("button", { exact: true, name: "Suggest" }).click();
+    const submitSuggestion = rejectComposer.getByRole("button", { exact: true, name: "Suggest" });
+    const submitBounds = await submitSuggestion.boundingBox();
+    if (submitBounds === null) {
+      throw new Error("The suggestion submit control has no bounds.");
+    }
+    if (testInfo.project.name === "iphone") {
+      await bobPage.touchscreen.tap(
+        submitBounds.x + submitBounds.width / 2,
+        submitBounds.y + submitBounds.height / 2
+      );
+    } else {
+      await submitSuggestion.click();
+    }
     await expect
       .poll(() =>
         listComments(issue.key, artifactId).then((items) =>

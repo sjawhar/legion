@@ -27,11 +27,11 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { actorLabel } from "../refs/actor";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { Unfurl } from "../refs/Unfurl";
 import { Composer } from "./Composer";
-import type { MarginItemAction, Thread } from "./useMarginItems";
+import type { MarginItemAction, MarginOwner, Thread } from "./useMarginItems";
 
 export interface ThreadCardProps {
   actionError: boolean;
@@ -46,6 +46,7 @@ export interface ThreadCardProps {
   onRetryAction(): void;
   onSelect?(): void;
   onToggle(): void;
+  owner: MarginOwner;
   pendingAction: boolean;
   thread: Thread;
   viewerLogin: string;
@@ -54,35 +55,43 @@ export interface ThreadCardProps {
 function CommentBody({
   artifactSlug,
   comment,
+  owner,
   showOrphan,
 }: {
   artifactSlug: string;
   comment: Comment;
+  owner: MarginOwner;
   showOrphan: boolean;
 }): ReactNode {
   const anchor = comment.anchor;
   const suggestion = comment.suggestion;
   let orphanNotice: ReactNode = null;
   if (showOrphan && anchor?.orphaned) {
-    if (comment.issue_key === null) {
-      throw new Error("A margin comment with an orphaned anchor must belong to an issue.");
-    }
-    orphanNotice = (
-      <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>
-        Text changed.{" "}
-        <Link
-          className="underline"
-          to={`${buildIssuePath({
+    const originalPath =
+      comment.issue_key === null
+        ? owner.kind === "document"
+          ? buildProjectPath({
+              kind: "document",
+              project: owner.project,
+              slug: owner.slug,
+              version: anchor.version,
+            })
+          : undefined
+        : buildIssuePath({
             key: comment.issue_key,
             kind: "artifact",
             slug: artifactSlug,
             version: anchor.version,
-          })}&comment=${comment.id}`}
-        >
-          View original text
-        </Link>
-      </p>
-    );
+          });
+    orphanNotice =
+      originalPath === undefined ? null : (
+        <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>
+          Text changed.{" "}
+          <Link className="underline" to={`${originalPath}&comment=${comment.id}`}>
+            View original text
+          </Link>
+        </p>
+      );
   }
   return (
     <>
@@ -132,6 +141,7 @@ export function ThreadCard({
   onRetryAction,
   onSelect,
   onToggle,
+  owner,
   pendingAction,
   thread,
   viewerLogin,
@@ -146,21 +156,16 @@ export function ThreadCard({
       : rootSuggestion?.accepted === false
         ? "Rejected"
         : "Resolved";
-  const renderEditor = (comment: Comment) => {
-    if (comment.issue_key === null) {
-      throw new Error("A margin comment editor must belong to an issue.");
-    }
-    return (
-      <Composer
-        edit={{ body: comment.body, id: comment.id }}
-        issueKey={comment.issue_key}
-        kind="comment"
-        onClose={() => setEditingId(undefined)}
-        saveEdit={onEdit}
-        onSaved={() => setEditingId(undefined)}
-      />
-    );
-  };
+  const renderEditor = (comment: Comment) => (
+    <Composer
+      edit={{ body: comment.body, id: comment.id }}
+      kind="comment"
+      onClose={() => setEditingId(undefined)}
+      owner={owner}
+      saveEdit={onEdit}
+      onSaved={() => setEditingId(undefined)}
+    />
+  );
   const editButton = (comment: Comment) =>
     comment.author.kind === "user" && comment.author.id === viewerLogin ? (
       <button
@@ -210,7 +215,7 @@ export function ThreadCard({
             {editingId === root.id ? (
               renderEditor(root)
             ) : (
-              <CommentBody artifactSlug={artifactSlug} comment={root} showOrphan />
+              <CommentBody artifactSlug={artifactSlug} comment={root} owner={owner} showOrphan />
             )}
             <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
               {rootSuggestion !== null && rootSuggestion.accepted === null && !thread.resolved ? (
@@ -284,7 +289,12 @@ export function ThreadCard({
                     {editingId === reply.id ? (
                       renderEditor(reply)
                     ) : (
-                      <CommentBody artifactSlug={artifactSlug} comment={reply} showOrphan={false} />
+                      <CommentBody
+                        artifactSlug={artifactSlug}
+                        comment={reply}
+                        owner={owner}
+                        showOrphan={false}
+                      />
                     )}
                     {editingId === reply.id ? null : (
                       <div className="mt-2 flex gap-3 text-sm">{editButton(reply)}</div>
@@ -293,13 +303,13 @@ export function ThreadCard({
                 ))}
               </ol>
             )}
-            {isClosed || terminalSuggestion || root.issue_key === null ? null : (
+            {isClosed || terminalSuggestion ? null : (
               <div className={composerClassName}>
                 <Composer
                   inline
-                  issueKey={root.issue_key}
                   kind="comment"
                   onClose={onToggle}
+                  owner={owner}
                   replyTo={root.id}
                 />
               </div>

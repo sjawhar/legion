@@ -567,7 +567,7 @@ test("a collapsed thread with no replies offers Reply, and a failed thread fetch
   }
 });
 
-test("a document ask labels its project and document without an unavailable document page link", async () => {
+test("a document ask links its project and document page", async () => {
   const input = ask({
     artifact_id: "artifact-1",
     document: { name: "Design notes", project: "CORE", slug: "design-notes" },
@@ -585,7 +585,9 @@ test("a document ask labels its project and document without an unavailable docu
 
   try {
     await screen.findByText("CORE · Design notes");
-    expect(screen.queryByRole("link", { name: "CORE · Design notes" })).toBeNull();
+    expect(screen.getByRole("link", { name: "CORE · Design notes" }).getAttribute("href")).toBe(
+      "/projects/CORE/documents/design-notes?ask=ask-1"
+    );
   } finally {
     view.unmount();
     getInbox.mockRestore();

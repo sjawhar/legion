@@ -92,6 +92,7 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     }
     const keys: (readonly unknown[])[] = [
       ["artifact", event.artifact_id],
+      ["artifact-ref"],
       ["project", event.project, "artifacts"],
       ["projects"],
     ];

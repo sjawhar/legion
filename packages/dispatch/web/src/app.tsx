@@ -57,6 +57,9 @@ const IssuePage = lazy(() =>
 const ProjectPage = lazy(() =>
   import("./features/project/ProjectPage").then((module) => ({ default: module.ProjectPage }))
 );
+const DocumentPage = lazy(() =>
+  import("./features/document/DocumentPage").then((module) => ({ default: module.DocumentPage }))
+);
 
 function IssuePageFallback(): ReactNode {
   return (
@@ -403,6 +406,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Route element={<IssuePage />} path="/issues/:key/*" />
               <Route element={<ProjectPage />} path="/projects/:key" />
               <Route element={<ProjectPage />} path="/projects/:key/documents" />
+              <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
               <Route element={<SettingsPage />} path="/settings" />
               <Route element={<NotFoundPage />} path="*" />
             </Routes>

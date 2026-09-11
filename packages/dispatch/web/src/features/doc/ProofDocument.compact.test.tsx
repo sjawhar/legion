@@ -41,7 +41,7 @@ test("ProofDocument keeps transport active without cursor decorations in the com
               artifact={artifact}
               highlight={undefined}
               isClosed={false}
-              issueKey="CORE-1"
+              owner={{ key: "CORE-1", kind: "issue" }}
               onVersionChange={() => {}}
               user={{ kind: "user", login: "alice" }}
             />

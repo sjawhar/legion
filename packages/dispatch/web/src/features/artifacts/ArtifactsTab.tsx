@@ -7,6 +7,8 @@ import type {
   Artifact,
   ArtifactVersionContent,
   ArtifactVersionText,
+  IssueReferences,
+  ReferencedBy as ReferencedByItem,
   Version,
 } from "../../api/types";
 import {
@@ -24,7 +26,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { VersionDiff } from "../doc/VersionDiff";
-import { buildIssuePath, parseIssuePath } from "../refs/routes";
+import { buildIssuePath, buildProjectPath, parseIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { Unfurl } from "../refs/Unfurl";
 import { artifactVersionUrl, formatArtifactBytes } from "./ArtifactHeader";
@@ -121,6 +123,105 @@ export function BlobVersionComparison({
 
 function isText(content: ArtifactVersionContent | undefined): content is ArtifactVersionText {
   return content !== undefined && "markdown" in content;
+}
+function artifactPath(artifact: Artifact): string {
+  return artifact.issue_key === null
+    ? buildProjectPath({
+        kind: "document",
+        project: artifact.project,
+        slug: artifact.slug,
+      })
+    : buildIssuePath({
+        key: artifact.issue_key,
+        kind: "artifact",
+        slug: artifact.slug,
+      });
+}
+
+export function ReferencedBy({ references }: { references: ReferencedByItem[] }): ReactNode {
+  if (references.length === 0) {
+    return null;
+  }
+
+  return (
+    <section aria-label="Referenced by" className="space-y-2">
+      <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Referenced by</h3>
+      {references.map((reference) => {
+        const [sourceKey, sourceSlug] = reference.ref_key?.split("/") ?? [];
+        const sourcePath =
+          reference.kind === "artifact" && sourceKey !== undefined && sourceSlug !== undefined
+            ? sourceKey.includes("-")
+              ? buildIssuePath({ key: sourceKey, kind: "artifact", slug: sourceSlug })
+              : buildProjectPath({
+                  kind: "document",
+                  project: sourceKey,
+                  slug: sourceSlug,
+                })
+            : reference.issue_key !== null
+              ? buildIssuePath({ key: reference.issue_key, kind: "issue" })
+              : sourceKey === undefined || sourceSlug === undefined
+                ? undefined
+                : sourceKey.includes("-")
+                  ? buildIssuePath({ key: sourceKey, kind: "artifact", slug: sourceSlug })
+                  : buildProjectPath({
+                      kind: "document",
+                      project: sourceKey,
+                      slug: sourceSlug,
+                    });
+        const source = reference.issue_key ?? reference.ref_key;
+        const label = `${reference.kind[0]?.toUpperCase()}${reference.kind.slice(1)}${
+          source === undefined ? "" : ` · ${source}`
+        }`;
+        return (
+          <article
+            className={`rounded-lg border p-3 ${borderDefault}`}
+            key={`${reference.kind}:${reference.id}`}
+          >
+            <p className={`text-xs font-medium ${textMutedOnSurface}`}>
+              {sourcePath === undefined ? (
+                label
+              ) : (
+                <Link className={`underline ${linkText}`} to={sourcePath}>
+                  {label}
+                </Link>
+              )}
+            </p>
+            <Unfurl body={reference.excerpt} />
+          </article>
+        );
+      })}
+    </section>
+  );
+}
+
+function References({ references }: { references: IssueReferences }): ReactNode {
+  if (references.members.length === 0) {
+    return null;
+  }
+
+  return (
+    <section aria-label="References" className="space-y-2">
+      <h2 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>References</h2>
+      <ul className="space-y-2">
+        {references.members.map(({ artifact, depth, via }) => (
+          <li className={`rounded-lg border p-3 text-sm ${borderDefault}`} key={artifact.id}>
+            <Link
+              className={`font-medium underline ${linkText} ${linkHoverText}`}
+              to={artifactPath(artifact)}
+            >
+              {artifact.name}
+            </Link>
+            <p className={textMutedOnSurface}>
+              {artifact.issue_key ?? artifact.project} · via {via.kind} · depth {depth}
+            </p>
+          </li>
+        ))}
+      </ul>
+      {references.truncated ? (
+        <p className={`text-sm ${textMutedOnSurface}`}>more references beyond 8 hops</p>
+      ) : null}
+    </section>
+  );
 }
 
 function ArtifactCard({ artifact, issueKey }: { artifact: Artifact; issueKey: string }): ReactNode {
@@ -303,32 +404,7 @@ function ArtifactCard({ artifact, issueKey }: { artifact: Artifact; issueKey: st
       {detail.isError ? (
         <p className={`text-sm ${dangerText}`}>Could not load references.</p>
       ) : null}
-      {referencedBy.length === 0 ? null : (
-        <section aria-label="Referenced by" className="space-y-2">
-          <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Referenced by</h3>
-          {referencedBy.map((reference) => {
-            if (reference.issue_key === null) return null;
-            return (
-              <article
-                className={`rounded-lg border p-3 ${borderDefault}`}
-                key={`${reference.kind}:${reference.id}`}
-              >
-                <p className={`text-xs font-medium ${textMutedOnSurface}`}>
-                  {reference.kind[0]?.toUpperCase()}
-                  {reference.kind.slice(1)} ·{" "}
-                  <Link
-                    className={`underline ${linkText}`}
-                    to={buildIssuePath({ key: reference.issue_key, kind: "issue" })}
-                  >
-                    {reference.issue_key}
-                  </Link>
-                </p>
-                <Unfurl body={reference.excerpt} />
-              </article>
-            );
-          })}
-        </section>
-      )}
+      <ReferencedBy references={referencedBy} />
     </article>
   );
 }
@@ -339,7 +415,22 @@ export function ArtifactsTab(): ReactNode {
   const artifacts = useQuery({
     enabled: issueKey !== undefined,
     queryKey: ["artifacts", issueKey],
-    queryFn: () => api.listArtifacts(issueKey ?? ""),
+    queryFn: () => {
+      if (issueKey === undefined) {
+        throw new Error("Artifact list requires an issue route.");
+      }
+      return api.listArtifacts(issueKey);
+    },
+  });
+  const references = useQuery({
+    enabled: issueKey !== undefined,
+    queryKey: ["issue", issueKey, "references"],
+    queryFn: () => {
+      if (issueKey === undefined) {
+        throw new Error("Issue references require an issue route.");
+      }
+      return api.getIssueReferences(issueKey);
+    },
   });
   const orderedArtifacts = [...(artifacts.data ?? [])].sort((left, right) => {
     if (left.primary !== right.primary) {
@@ -365,6 +456,7 @@ export function ArtifactsTab(): ReactNode {
   return (
     <div className="space-y-1 pt-3">
       <Upload owner={{ issue: issueKey }} />
+      {references.data === undefined ? null : <References references={references.data} />}
       {orderedArtifacts.map((artifact) => (
         <ArtifactCard artifact={artifact} issueKey={issueKey} key={artifact.id} />
       ))}

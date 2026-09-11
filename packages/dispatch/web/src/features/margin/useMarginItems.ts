@@ -1,13 +1,49 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
+import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { pinnedEventIds } from "../issue/pins";
+import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { useAnsweredAsks } from "./useAnsweredAsks";
 
 export type MarginTab = "comments" | "pinned";
+
+export type MarginOwner =
+  | { kind: "issue"; key: string }
+  | { kind: "document"; artifactId: string; project: string; slug: string };
+
+export function useMarginOwner(): MarginOwner | undefined {
+  const { pathname, search } = useLocation();
+  const issueRoute = parseIssuePath(pathname, search);
+  const projectRoute = parseProjectPath(pathname, search);
+  const document = projectRoute?.kind === "document" ? projectRoute : undefined;
+  const artifact = useQuery({
+    enabled: document !== undefined,
+    queryKey: ["artifact-ref", `${document?.project}/${document?.slug}`],
+    queryFn: () => {
+      if (document === undefined) {
+        throw new Error("Project document query requires a document route.");
+      }
+      return api.getProjectArtifact(document.project, document.slug);
+    },
+  });
+
+  if (issueRoute !== undefined) {
+    return { key: issueRoute.key, kind: "issue" };
+  }
+  if (document !== undefined && artifact.data !== undefined) {
+    return {
+      artifactId: artifact.data.id,
+      kind: "document",
+      project: document.project,
+      slug: document.slug,
+    };
+  }
+  return undefined;
+}
 export type MarginItemAction = "accept" | "reject" | "resolve" | "reopen";
 export type MarginItem =
   | { ask: Ask; kind: "ask" }
@@ -148,34 +184,63 @@ export function threadMarkId(thread: Thread): string | undefined {
 }
 
 export function useMarginItems(
-  issueKey: string | undefined,
+  owner: MarginOwner | undefined,
   tab: MarginTab,
   visibleArtifact: Artifact | undefined,
   markPlacements: ReadonlyMap<string, MarkPlacement>
 ) {
   const queryClient = useQueryClient();
+  const issueKey = owner?.kind === "issue" ? owner.key : undefined;
+  const commentsQueryKey =
+    owner?.kind === "issue"
+      ? ["comments", owner.key]
+      : owner?.kind === "document"
+        ? ["artifact", owner.artifactId, "comments"]
+        : ["comments", undefined];
   const asks = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
   const inboxOpenAsks = useMemo(
-    () => (asks.data ?? []).filter((ask) => ask.issue_key === issueKey && ask.state === "open"),
-    [asks.data, issueKey]
+    () =>
+      (asks.data ?? []).filter(
+        (ask) =>
+          ask.state === "open" &&
+          (owner?.kind === "issue"
+            ? ask.issue_key === owner.key
+            : owner?.kind === "document"
+              ? ask.artifact_id === owner.artifactId
+              : false)
+      ),
+    [asks.data, owner]
   );
   const comments = useQuery({
-    enabled: issueKey !== undefined,
-    queryKey: ["comments", issueKey],
-    queryFn: () => api.listComments(issueKey ?? ""),
+    enabled: owner !== undefined,
+    queryKey: commentsQueryKey,
+    queryFn: () => {
+      if (owner === undefined) {
+        throw new Error("Margin comments require an owner.");
+      }
+      return owner.kind === "document"
+        ? api.listArtifactComments(owner.artifactId)
+        : api.listComments(owner.key);
+    },
   });
   const userState = useQuery({
-    enabled: issueKey !== undefined,
+    enabled: owner?.kind === "issue",
     queryKey: ["user-state"],
     queryFn: () => api.getMyState(),
   });
-  const pinnedIds = pinnedEventIds(userState.data?.[issueKey ?? ""]?.dismissed ?? []);
+  const pinnedIds =
+    owner?.kind === "issue" ? pinnedEventIds(userState.data?.[owner.key]?.dismissed ?? []) : [];
   const pinned = useQuery({
-    enabled: issueKey !== undefined && tab === "pinned" && pinnedIds.length > 0,
+    enabled: owner?.kind === "issue" && tab === "pinned" && pinnedIds.length > 0,
     queryKey: ["events", issueKey, "margin-pinned", pinnedIds],
-    queryFn: () => fetchPinnedEvents(api.getIssueEvents.bind(api), issueKey ?? "", pinnedIds),
+    queryFn: () => {
+      if (owner?.kind !== "issue") {
+        throw new Error("Pinned margin events require an issue owner.");
+      }
+      return fetchPinnedEvents(api.getIssueEvents.bind(api), owner.key, pinnedIds);
+    },
   });
-  const answeredAsks = useAnsweredAsks(issueKey, visibleArtifact?.id);
+  const answeredAsks = useAnsweredAsks(owner, visibleArtifact?.id);
   const needsYou = useMemo(() => {
     const openAsks = new Map(inboxOpenAsks.map((ask) => [ask.id, ask]));
     for (const ask of answeredAsks.asks) {
@@ -274,10 +339,9 @@ export function useMarginItems(
       actionGuard.release();
     },
     onMutate: async ({ id, kind }) => {
-      const commentsKey = ["comments", issueKey];
-      await queryClient.cancelQueries({ queryKey: commentsKey });
-      const previous = queryClient.getQueryData<Comment[]>(commentsKey);
-      queryClient.setQueryData<Comment[]>(commentsKey, (current) =>
+      await queryClient.cancelQueries({ queryKey: commentsQueryKey });
+      const previous = queryClient.getQueryData<Comment[]>(commentsQueryKey);
+      queryClient.setQueryData<Comment[]>(commentsQueryKey, (current) =>
         current?.map((comment) => {
           if (comment.id !== id) {
             return comment;
@@ -300,17 +364,21 @@ export function useMarginItems(
       return { previous };
     },
     onError: (_error, _variables, context) => {
-      queryClient.setQueryData(["comments", issueKey], context?.previous);
+      queryClient.setQueryData(commentsQueryKey, context?.previous);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
-      void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
+      void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
+      if (owner?.kind === "issue") {
+        void queryClient.invalidateQueries({ queryKey: ["issue", owner.key] });
+      } else if (owner?.kind === "document") {
+        void queryClient.invalidateQueries({ queryKey: ["artifact", owner.artifactId] });
+      }
     },
   });
   const edit = useMutation({
     mutationFn: ({ body, id }: { body: string; id: string }) => api.editComment(id, { body }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
+      void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
     },
   });
 
@@ -336,6 +404,7 @@ export function useMarginItems(
     pinned: pinned.data ?? [],
     pinnedIds,
     resolvedThreads,
+    isClosed: owner?.kind === "document" ? false : undefined,
     retryAnsweredAsk,
     retryComments: () => void comments.refetch(),
     retryItem: () => actionGuard.retryLast(action),

@@ -75,6 +75,7 @@ function renderCard(
         onEdit={async () => undefined}
         onRetryAction={() => {}}
         onToggle={() => {}}
+        owner={{ key: "CORE-1", kind: "issue" }}
         pendingAction={false}
         thread={currentThread}
         viewerLogin="alice"
@@ -169,6 +170,7 @@ test("the author can edit a comment and an edited comment carries its marker", a
           onEdit={async () => undefined}
           onRetryAction={() => {}}
           onToggle={() => {}}
+          owner={{ key: "CORE-1", kind: "issue" }}
           pendingAction={false}
           thread={thread({
             root: {
@@ -233,7 +235,10 @@ test("a terminal suggestion shows its disposition and has no Reopen control", ()
   }
 });
 
-test("a document-owned comment thread renders no reply composer", () => {
+test("a document-owned comment thread posts its inline reply to the artifact route", async () => {
+  const createArtifactComment = spyOn(api, "createArtifactComment").mockResolvedValue(
+    undefined as never
+  );
   const documentRoot = comment("document-root", "Document-owned comment", "2026-09-10T00:00:00Z", {
     issue_key: null,
   });
@@ -241,11 +246,28 @@ test("a document-owned comment thread renders no reply composer", () => {
     thread({
       key: documentRoot.id,
       root: { comment: documentRoot, kind: "comment" },
-    })
+    }),
+    {
+      owner: {
+        artifactId: "artifact-1",
+        kind: "document",
+        project: "CORE",
+        slug: "design-notes",
+      },
+    }
   );
   try {
-    expect(screen.queryByRole("form", { name: "Reply composer" })).toBeNull();
+    const reply = screen.getByLabelText("Reply");
+    fireEvent.change(reply, { target: { value: "Document reply" } });
+    fireEvent.keyDown(reply, { ctrlKey: true, key: "Enter" });
+    await waitFor(() =>
+      expect(createArtifactComment).toHaveBeenCalledWith("artifact-1", {
+        body: "Document reply",
+        reply_to: documentRoot.id,
+      })
+    );
   } finally {
     view.unmount();
+    createArtifactComment.mockRestore();
   }
 });

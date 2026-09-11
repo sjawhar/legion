@@ -2,23 +2,34 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import { api } from "../../api/client";
+import type { MarginOwner } from "./useMarginItems";
 
 /**
- * Every anchored ask on an issue's visible artifact.
- *
- * The server, not this tab's own history, is authoritative: a single per-issue query (not a
- * fan-out over individually observed IDs) means a viewer who opens the issue only after an ask
- * is closed sees it too, exactly like one who watched it close live.
+ * Every anchored ask on the visible artifact. Document-owned asks arrive from the artifact
+ * endpoint; issue-owned asks retain the single per-issue history query.
  */
-export function useAnsweredAsks(issueKey: string | undefined, artifactID: string | undefined) {
+export function useAnsweredAsks(owner: MarginOwner | undefined, artifactID: string | undefined) {
   const query = useQuery({
-    enabled: issueKey !== undefined,
-    queryFn: () => api.listIssueAsks(issueKey ?? "", "all"),
-    queryKey: ["asks", issueKey],
+    enabled: owner !== undefined,
+    queryFn: () => {
+      if (owner === undefined) {
+        throw new Error("Answered asks require a margin owner.");
+      }
+      return owner.kind === "document"
+        ? api.listArtifactAsks(owner.artifactId, "all")
+        : api.listIssueAsks(owner.key, "all");
+    },
+    queryKey:
+      owner?.kind === "document"
+        ? ["artifact", owner.artifactId, "asks"]
+        : ["asks", owner?.kind === "issue" ? owner.key : undefined],
   });
   const asks = useMemo(
-    () => (query.data ?? []).filter((ask) => ask.anchor?.artifact_id === artifactID),
-    [artifactID, query.data]
+    () =>
+      owner?.kind === "document"
+        ? (query.data ?? [])
+        : (query.data ?? []).filter((ask) => ask.anchor?.artifact_id === artifactID),
+    [artifactID, owner?.kind, query.data]
   );
 
   return {

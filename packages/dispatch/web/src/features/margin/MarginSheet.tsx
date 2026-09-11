@@ -37,7 +37,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
       marginRef,
       isClosed,
       issueError,
-      issueKey,
+      owner,
       issuePending,
       openAskCount,
       pendingActionId,
@@ -71,6 +71,9 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
     sheet.threadKey === undefined
       ? undefined
       : [...threads, ...resolvedThreads].find((thread) => thread.key === sheet.threadKey);
+  if (phoneThread !== undefined && visibleArtifact === undefined) {
+    throw new Error("A phone margin thread requires its visible artifact.");
+  }
   const threadDialog = useDialog<HTMLElement>({
     onClose: sheet.closeThread,
     open: isPhoneViewport && phoneThread !== undefined,
@@ -90,7 +93,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
         aria-label={isCompactViewport ? "Review panel" : "Review margin"}
         aria-modal={sheet.expanded && isCompactViewport ? true : undefined}
         className={`fixed inset-x-0 bottom-0 z-10 border-t shadow-[0_-8px_24px_rgba(15,23,42,0.08)] ${card} ${
-          issueKey === undefined
+          owner === undefined
             ? "hidden"
             : sheet.expanded
               ? "max-h-[85dvh] overflow-y-auto p-4"
@@ -142,13 +145,16 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
         {!isPhoneViewport || phoneThread === undefined ? (
           <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
             <div className={`flex border-b ${borderDefault}`} role="tablist">
-              {(["comments", "pinned"] as MarginTab[]).map((name) => (
+              {(owner?.kind === "document"
+                ? (["comments"] as MarginTab[])
+                : (["comments", "pinned"] as MarginTab[])
+              ).map((name) => (
                 <button
                   aria-selected={tab.value === name}
                   className={
                     tab.value === name
-                      ? `border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-                      : `px-3 py-2 text-sm ${textSecondaryOnSurface}`
+                      ? `min-h-11 border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+                      : `min-h-11 px-3 py-2 text-sm ${textSecondaryOnSurface}`
                   }
                   key={name}
                   onClick={() => tab.set(name)}
@@ -159,15 +165,15 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
                 </button>
               ))}
             </div>
-            {issueKey === undefined ? (
+            {owner === undefined ? (
               <p className={`pt-3 text-sm ${textMutedOnSurface}`}>
-                Open an issue to review its margin.
+                Open an issue or document to review its margin.
               </p>
             ) : null}
-            {issueKey !== undefined && visibleArtifact === undefined && issuePending ? (
+            {owner?.kind === "issue" && visibleArtifact === undefined && issuePending ? (
               <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Loading margin…</p>
             ) : null}
-            {issueKey !== undefined && visibleArtifact === undefined && issueError ? (
+            {owner?.kind === "issue" && visibleArtifact === undefined && issueError ? (
               <div className="pt-3">
                 <QueryError
                   message="Could not load this issue's margin."
@@ -175,10 +181,10 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
                 />
               </div>
             ) : null}
-            {tab.value === "pinned" ? (
-              <PinnedTab events={pinned} issueKey={issueKey} pinnedIds={pinnedIds} />
+            {tab.value === "pinned" && owner?.kind === "issue" ? (
+              <PinnedTab events={pinned} issueKey={owner.key} pinnedIds={pinnedIds} />
             ) : null}
-            {tab.value === "comments" && visibleArtifact !== undefined ? (
+            {tab.value === "comments" && visibleArtifact !== undefined && owner !== undefined ? (
               <CommentsTab
                 actionErrorId={actionErrorId}
                 answeredAsksPending={answeredAsksPending}
@@ -192,7 +198,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
                 hoveredItemId={selection.hoveredItemId}
                 hoveredMarkId={selection.hoveredMarkId}
                 isClosed={isClosed}
-                issueKey={issueKey ?? ""}
+                owner={owner}
                 markPlacements={placement.markPlacements}
                 needsYou={needsYou}
                 onAction={actions.onAction}
@@ -215,7 +221,10 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
             ) : null}
           </div>
         ) : null}
-        {isPhoneViewport && phoneThread !== undefined ? (
+        {isPhoneViewport &&
+        phoneThread !== undefined &&
+        owner !== undefined &&
+        visibleArtifact !== undefined ? (
           <section
             aria-label="Thread"
             aria-modal="true"
@@ -235,7 +244,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
             <div className="min-h-0 flex-1 overflow-y-auto px-4">
               <ThreadCard
                 actionError={actionErrorId === phoneThread.key}
-                artifactSlug={visibleArtifact?.slug ?? ""}
+                artifactSlug={visibleArtifact.slug}
                 className="min-h-full pb-32"
                 composerClassName={`fixed inset-x-0 bottom-0 z-10 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
                 expanded
@@ -246,6 +255,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
                 onRetryAction={actions.onRetryAction}
                 onSelect={() => onSelectCard(phoneThread.key)}
                 onToggle={sheet.closeThread}
+                owner={owner}
                 pendingAction={pendingActionId === phoneThread.key}
                 thread={phoneThread}
                 viewerLogin={viewerLogin}

@@ -98,7 +98,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
   }
 });
 
-test("Unfurl reads a project document by project artifact reference", async () => {
+test("Unfurl unfurls a dispatch project document reference with its name and document link", async () => {
   const artifact: Artifact = {
     created_at: "2026-09-10T00:00:00Z",
     created_by: { id: "alice", kind: "user" },
@@ -138,7 +138,9 @@ test("Unfurl reads a project document by project artifact reference", async () =
     await screen.findByText("Project version three");
     expect(getProjectArtifact).toHaveBeenCalledWith("CORE", "design-notes");
     expect(getIssue).not.toHaveBeenCalled();
-    expect(screen.queryByRole("link", { name: "Design notes" })).toBeNull();
+    expect(screen.getByRole("link", { name: /Design notes/ }).getAttribute("href")).toBe(
+      "/projects/CORE/documents/design-notes?version=3"
+    );
   } finally {
     getIssue.mockRestore();
     getArtifactVersion.mockRestore();

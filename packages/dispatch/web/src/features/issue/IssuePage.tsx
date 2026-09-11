@@ -665,7 +665,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             commentId={commentId}
             highlightTerm={highlightTerm}
             isClosed={isClosed}
-            issueKey={issueKey}
+            owner={{ key: issueKey, kind: "issue" }}
             onVersionChange={(version) => selectDocumentVersion(primaryArtifact, version)}
             version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
           />
@@ -712,7 +712,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             commentId={commentId}
             highlightTerm={highlightTerm}
             isClosed={isClosed}
-            issueKey={issueKey}
+            owner={{ key: issueKey, kind: "issue" }}
             onVersionChange={(version) => selectDocumentVersion(selectedArtifact, version)}
             version={artifactRoute?.version}
           />

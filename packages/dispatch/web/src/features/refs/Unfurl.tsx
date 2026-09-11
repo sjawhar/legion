@@ -66,14 +66,15 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
 
   if (document !== undefined) {
     return (
-      <div
-        className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault}`}
+      <a
+        className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault} ${cardHoverBorder}`}
+        href={reference.href}
       >
         <span className={`block font-medium ${linkText}`}>{title ?? reference.reference}</span>
         {description === undefined ? null : (
           <span className={`mt-1 block ${textSecondaryOnSurface}`}>{description}</span>
         )}
-      </div>
+      </a>
     );
   }
   return (

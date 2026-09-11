@@ -57,6 +57,7 @@ function renderList(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) 
         hoveredMarkId="open-mark"
         hoveredItemId={undefined}
         isClosed={false}
+        owner={{ key: "CORE-1", kind: "issue" }}
         markPlacements={new Map([["open-mark", { pos: 5, top: 180 }]])}
         onAction={() => {}}
         onEdit={async () => undefined}

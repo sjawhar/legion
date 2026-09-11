@@ -10,7 +10,7 @@ import {
   linkText,
   textMutedOnCanvas,
 } from "../../theme/classes";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { AskCard } from "./AskCard";
 
 export function Inbox(): ReactNode {
@@ -53,9 +53,17 @@ export function Inbox(): ReactNode {
                 </Link>
               )
             ) : (
-              <p className={`mb-2 text-sm font-semibold ${textMutedOnCanvas}`}>
+              <Link
+                className={`mb-2 flex flex-col items-start gap-1 text-sm font-semibold md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
+                to={buildProjectPath({
+                  item: { id: ask.id, kind: "ask" },
+                  kind: "document",
+                  project: ask.document.project,
+                  slug: ask.document.slug,
+                })}
+              >
                 {ask.document.project} · {ask.document.name}
-              </p>
+              </Link>
             )}
             <AskCard ask={ask} />
           </li>

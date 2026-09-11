@@ -54,12 +54,14 @@ import { ReferencePicker } from "../refs/ReferencePicker";
 import {
   buildDispatchReference,
   buildIssuePath,
+  buildProjectPath,
   type DispatchRoute,
   isProjectRoute,
   parseDispatchReference,
   parseIssuePath,
   parseProjectPath,
 } from "../refs/routes";
+import type { MarginOwner } from "./useMarginItems";
 
 export interface ComposerReference {
   href?: string;
@@ -119,7 +121,7 @@ interface ComposerProps {
   edit?: { body: string; id: string };
   inline?: boolean;
   kind: ComposerKind;
-  issueKey: string;
+  owner: MarginOwner;
   onClose: () => void;
   onSaved?: () => void;
   replyTo?: string;
@@ -132,7 +134,9 @@ function trimReference(value: string): string {
 
 function composerReference(route: DispatchRoute): ComposerReference | undefined {
   if (isProjectRoute(route)) {
-    return route.kind === "document" ? { reference: buildDispatchReference(route) } : undefined;
+    return route.kind === "document"
+      ? { href: buildProjectPath(route), reference: buildDispatchReference(route) }
+      : undefined;
   }
   return { href: buildIssuePath(route), reference: buildDispatchReference(route) };
 }
@@ -218,9 +222,9 @@ export function Composer({
   edit,
   inline = false,
   kind,
-  issueKey,
   onClose,
   onSaved,
+  owner,
   replyTo,
   saveEdit,
 }: ComposerProps): ReactNode {
@@ -285,6 +289,8 @@ export function Composer({
   }, [askOptions, body, confirmingDiscard, onClose, pickerOpen, replacement]);
   const references = useMemo(() => composerReferences(body), [body]);
   const submitGuard = useSubmitGuard();
+  const commentsQueryKey =
+    owner.kind === "issue" ? ["comments", owner.key] : ["artifact", owner.artifactId, "comments"];
   const save = useMutation({
     mutationFn: async () => {
       if (edit !== undefined) {
@@ -295,36 +301,47 @@ export function Composer({
       const selection =
         anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
       if (kind === "message") {
-        return api.createMessage(issueKey, { body: body.trim() });
+        if (owner.kind !== "issue") {
+          throw new Error("Project documents do not support messages.");
+        }
+        return api.createMessage(owner.key, { body: body.trim() });
       }
       if (kind === "ask") {
-        return api.createAsk(issueKey, {
+        const input = {
           anchor: selection,
           multiple,
           options: submittedAskOptions(askOptions),
           question: body.trim(),
           urgency,
-        });
+        };
+        return owner.kind === "issue"
+          ? api.createAsk(owner.key, input)
+          : api.createArtifactAsk(owner.artifactId, input);
       }
       const comment = {
         body: kind === "suggestion" && body.trim() === "" ? "Suggested replacement." : body.trim(),
         reply_to: replyTo,
         ...(kind === "suggestion" ? { suggestion: { replace_with: replacement } } : {}),
       };
-      return api.createComment(
-        issueKey,
-        replyTo === undefined ? { ...comment, anchor: selection } : comment
-      );
+      const input = replyTo === undefined ? { ...comment, anchor: selection } : comment;
+      return owner.kind === "issue"
+        ? api.createComment(owner.key, input)
+        : api.createArtifactComment(owner.artifactId, input);
     },
     onSettled: () => {
       submitGuard.release();
     },
     onSuccess: () => {
       onSaved?.();
-      void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
-      void queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
+      void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-      void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
+      if (owner.kind === "issue") {
+        void queryClient.invalidateQueries({ queryKey: ["events", owner.key] });
+        void queryClient.invalidateQueries({ queryKey: ["issue", owner.key] });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["artifact", owner.artifactId] });
+        void queryClient.invalidateQueries({ queryKey: ["project", owner.project, "artifacts"] });
+      }
       if (inline) {
         setBody("");
         return;
@@ -334,19 +351,27 @@ export function Composer({
   });
   const uploadRetryGuard = useSubmitGuard();
   const upload = useMutation({
-    mutationFn: (file: File) => uploadFile({ issue: issueKey }, file),
+    mutationFn: (file: File) =>
+      uploadFile(owner.kind === "issue" ? { issue: owner.key } : { project: owner.project }, file),
     onMutate: () => {
       setPendingUploads((count) => count + 1);
     },
     onSuccess: ({ artifact }) => {
-      setBody((current) =>
-        appendReference(
-          current,
-          buildDispatchReference({ key: issueKey, kind: "artifact", slug: artifact.slug })
-        )
-      );
-      void queryClient.invalidateQueries({ queryKey: ["artifacts", issueKey] });
-      void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
+      const reference =
+        owner.kind === "issue"
+          ? buildDispatchReference({ key: owner.key, kind: "artifact", slug: artifact.slug })
+          : buildDispatchReference({
+              kind: "document",
+              project: owner.project,
+              slug: artifact.slug,
+            });
+      setBody((current) => appendReference(current, reference));
+      if (owner.kind === "issue") {
+        void queryClient.invalidateQueries({ queryKey: ["artifacts", owner.key] });
+        void queryClient.invalidateQueries({ queryKey: ["issue", owner.key] });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["project", owner.project, "artifacts"] });
+      }
     },
     onSettled: () => {
       setPendingUploads((count) => count - 1);
@@ -400,7 +425,12 @@ export function Composer({
   };
   const canSubmit = canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads);
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!compact && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    if (
+      owner.kind === "issue" &&
+      !compact &&
+      (event.ctrlKey || event.metaKey) &&
+      event.key.toLowerCase() === "k"
+    ) {
       event.preventDefault();
       setPickerOpen(true);
       return;
@@ -614,7 +644,8 @@ export function Composer({
       {compact ? null : (
         <>
           <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
-            Paste or drop a file to add it as an artifact. Ctrl+K inserts a reference.
+            Paste or drop a file to add it as an artifact.
+            {owner.kind === "issue" ? " Ctrl+K inserts a reference." : ""}
           </p>
           {references.length === 0 ? null : (
             <section aria-label="References" className="flex flex-wrap gap-2">
@@ -629,9 +660,9 @@ export function Composer({
               ))}
             </section>
           )}
-          {pickerOpen ? (
+          {owner.kind === "issue" && pickerOpen ? (
             <ReferencePicker
-              issueKey={issueKey}
+              issueKey={owner.key}
               onClose={() => setPickerOpen(false)}
               onSelect={addReference}
             />

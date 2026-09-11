@@ -38,7 +38,7 @@ test("Composer uploads dropped files and inserts their references", async () => 
       <QueryClientProvider client={queryClient}>
         <Composer
           anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "text" }}
-          issueKey="CORE-1"
+          owner={{ key: "CORE-1", kind: "issue" }}
           kind="comment"
           onClose={() => {}}
         />
@@ -65,15 +65,85 @@ test("Composer ignores a pasted project page URL because only documents are refe
   expect(composerReferences(`${origin}/projects/CORE`, origin)).toEqual([]);
 });
 
-test("Composer preserves a project document reference without an unavailable page href", () => {
+test("Composer preserves a project document reference with its document page href", () => {
   const origin = "https://dispatch.test";
 
   expect(composerReferences(`${origin}/projects/CORE/documents/design-notes`, origin)).toEqual([
-    { reference: "dispatch://CORE/artifact/design-notes" },
+    {
+      href: "/projects/CORE/documents/design-notes",
+      reference: "dispatch://CORE/artifact/design-notes",
+    },
   ]);
   expect(composerReferences("dispatch://CORE/artifact/design-notes", origin)).toEqual([
-    { reference: "dispatch://CORE/artifact/design-notes" },
+    {
+      href: "/projects/CORE/documents/design-notes",
+      reference: "dispatch://CORE/artifact/design-notes",
+    },
   ]);
+});
+test("Composer posts a document ask and comment to the artifact routes", async () => {
+  const createArtifactAsk = spyOn(api, "createArtifactAsk").mockResolvedValue(undefined as never);
+  const createArtifactComment = spyOn(api, "createArtifactComment").mockResolvedValue(
+    undefined as never
+  );
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const owner = {
+    artifactId: "document-1",
+    kind: "document" as const,
+    project: "CORE",
+    slug: "design-notes",
+  };
+
+  try {
+    const ask = render(
+      <QueryClientProvider client={queryClient}>
+        <Composer
+          anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
+          kind="ask"
+          onClose={() => {}}
+          owner={owner}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Why this text?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() =>
+      expect(createArtifactAsk).toHaveBeenCalledWith("document-1", {
+        anchor: { artifact: "document-1", mark_id: "mark-1" },
+        multiple: false,
+        options: [],
+        question: "Why this text?",
+        urgency: "med",
+      })
+    );
+    ask.unmount();
+
+    const comment = render(
+      <QueryClientProvider client={queryClient}>
+        <Composer
+          anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
+          kind="comment"
+          onClose={() => {}}
+          owner={owner}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() =>
+      expect(createArtifactComment).toHaveBeenCalledWith("document-1", {
+        anchor: { artifact: "document-1", mark_id: "mark-1" },
+        body: "Please revise.",
+        reply_to: undefined,
+      })
+    );
+    comment.unmount();
+  } finally {
+    createArtifactAsk.mockRestore();
+    createArtifactComment.mockRestore();
+  }
 });
 
 function renderComposer(kind: "ask" | "comment" | "suggestion") {
@@ -84,7 +154,7 @@ function renderComposer(kind: "ask" | "comment" | "suggestion") {
     <QueryClientProvider client={queryClient}>
       <Composer
         anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
-        issueKey="CORE-1"
+        owner={{ key: "CORE-1", kind: "issue" }}
         kind={kind}
         onClose={() => {}}
       />
@@ -200,7 +270,7 @@ test("Escape after typing only an ask option prompts before discarding", async (
     <QueryClientProvider client={queryClient}>
       <Composer
         anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
-        issueKey="CORE-1"
+        owner={{ key: "CORE-1", kind: "issue" }}
         kind="ask"
         onClose={() => {
           closed = true;
@@ -253,7 +323,7 @@ test("Escape on a suggestion with only a replacement shows the discard prompt in
     <QueryClientProvider client={queryClient}>
       <Composer
         anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
-        issueKey="CORE-1"
+        owner={{ key: "CORE-1", kind: "issue" }}
         kind="suggestion"
         onClose={() => {
           closed = true;
@@ -301,7 +371,7 @@ test("Escape from the composer while its reference picker opens closes only the 
     <QueryClientProvider client={queryClient}>
       <Composer
         anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
-        issueKey="CORE-1"
+        owner={{ key: "CORE-1", kind: "issue" }}
         kind="comment"
         onClose={() => {
           closed = true;
@@ -393,7 +463,7 @@ test("Composer reports onSaved before onClose", async () => {
     <QueryClientProvider client={queryClient}>
       <Composer
         anchor={{ artifact: "document-1", mark_id: "mark-1", quote: "selected" }}
-        issueKey="CORE-1"
+        owner={{ key: "CORE-1", kind: "issue" }}
         kind="comment"
         onClose={() => calls.push("closed")}
         onSaved={() => calls.push("saved")}
@@ -418,7 +488,13 @@ test("inline Composer posts a reply to its thread root with Ctrl+Enter", async (
   });
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <Composer inline issueKey="CORE-1" kind="comment" onClose={() => {}} replyTo="root-1" />
+      <Composer
+        inline
+        kind="comment"
+        onClose={() => {}}
+        owner={{ key: "CORE-1", kind: "issue" }}
+        replyTo="root-1"
+      />
     </QueryClientProvider>
   );
 
@@ -449,7 +525,7 @@ test("edit Composer PATCHes the author comment body and reads Save", async () =>
     <QueryClientProvider client={queryClient}>
       <Composer
         edit={{ body: "Original comment", id: "comment-1" }}
-        issueKey="CORE-1"
+        owner={{ key: "CORE-1", kind: "issue" }}
         kind="comment"
         onClose={() => {}}
       />
