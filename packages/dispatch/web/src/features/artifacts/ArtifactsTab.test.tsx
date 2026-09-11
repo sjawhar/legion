@@ -13,6 +13,7 @@ const artifact: Artifact = {
   created_by: { id: "alice", kind: "user" },
   id: "artifact-1",
   issue_key: "CORE-1",
+  project: "CORE",
   kind: "image",
   name: "diagram.png",
   primary: false,

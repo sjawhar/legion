@@ -5,7 +5,10 @@ export const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
 export type MessageEvent = Extract<Event, { type: "message.created" }>;
 export type CommentEvent = Extract<Event, { type: "comment.created" }>;
-export type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
+export type AskEvent = Extract<
+  Event,
+  { type: "ask.opened" | "ask.edited" | "ask.answered" | "ask.resolved" }
+>;
 
 interface Turn {
   id: string;
@@ -63,7 +66,10 @@ export function dayLabel(date: string, today: string): string {
 
 function isAskEvent(event: Event): event is AskEvent {
   return (
-    event.type === "ask.opened" || event.type === "ask.answered" || event.type === "ask.resolved"
+    event.type === "ask.opened" ||
+    event.type === "ask.edited" ||
+    event.type === "ask.answered" ||
+    event.type === "ask.resolved"
   );
 }
 
@@ -108,6 +114,8 @@ export function activityDescription(event: Event): string {
       return describeAskResolution(event.payload.resolution);
     case "ask.opened":
       return `asked “${event.payload.question}”`;
+    case "ask.edited":
+      return `edited the question "${event.payload.question}"`;
     case "ask.answered":
       return `answered “${event.payload.question}”`;
     case "message.created":
@@ -148,7 +156,9 @@ export function buildConversationItems({
         existing.ask = event.payload;
         existing.lastSeq = event.seq;
       }
-      continue;
+      if (event.type !== "ask.edited") {
+        continue;
+      }
     }
 
     const base = {

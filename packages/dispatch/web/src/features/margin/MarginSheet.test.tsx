@@ -9,6 +9,7 @@ const specArtifact: Artifact = {
   created_by: { id: "alice", kind: "user" },
   id: "artifact-1",
   issue_key: "CORE-1",
+  project: "CORE",
   kind: "doc",
   name: "Spec",
   primary: true,

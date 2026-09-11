@@ -128,7 +128,14 @@ export interface Ask {
   readonly opened_event_id: number;
   readonly created_at: string;
   readonly issue?: Pick<Issue, "key" | "title">;
+  readonly document?: InboxDocument;
   readonly edited_at: string | null;
+}
+
+export interface InboxDocument {
+  readonly project: string;
+  readonly slug: string;
+  readonly name: string;
 }
 
 export interface AskOption {

@@ -1,10 +1,12 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  createArtifactAsk,
   createAsk,
   createComment,
   createIssue,
   createProject,
+  createProjectArtifact,
   getAsk,
   getIssue,
   getIssueEvents,
@@ -226,6 +228,21 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
         state: "answered",
       },
     });
+
+  const document = await createProjectArtifact("CORE", {
+    content: "# Design notes\n",
+    name: "Design notes",
+  });
+  const documentAsk = await createArtifactAsk(
+    document.artifact.id,
+    { question: "Does this design need review?" },
+    session
+  );
+  await alicePage.goto("/");
+  await expect(alicePage.getByTestId(`ask-${documentAsk.id}`)).toContainText(
+    "Does this design need review?"
+  );
+  await expect(alicePage.getByText("CORE / Design notes", { exact: true })).toBeVisible();
 
   await bob.close();
   await alice.close();

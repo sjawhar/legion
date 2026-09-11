@@ -84,7 +84,7 @@ export function ProofDocument({
   highlight,
   highlightTerm = "",
   isClosed,
-  issueKey: _issueKey,
+  issueKey,
   onVersionChange,
   user,
   version,
@@ -356,9 +356,9 @@ export function ProofDocument({
           <Link
             to={
               artifact.primary
-                ? buildIssuePath({ key: artifact.issue_key, kind: "spec" })
+                ? buildIssuePath({ key: issueKey, kind: "spec" })
                 : buildIssuePath({
-                    key: artifact.issue_key,
+                    key: issueKey,
                     kind: "artifact",
                     slug: artifact.slug,
                   })

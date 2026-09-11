@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Actor, Event } from "../../api/types";
+import type { Actor, Ask, Event } from "../../api/types";
 import {
   activityDescription,
   buildConversationItems,
@@ -23,35 +23,30 @@ function message(id: number, at: string, actor: Actor = session, body = `m${id}`
   } as Event;
 }
 
-function askEvent(
-  id: number,
-  at: string,
-  type: "ask.opened" | "ask.answered" | "ask.resolved",
-  ask: Record<string, unknown>
-): Event {
-  const openedEventID = ask.opened_event_id;
-  return {
+function askEvent(id: number, at: string, type: "ask.opened" | "ask.answered", ask: Ask): Event {
+  const event = {
     actor: session,
     created_at: at,
     id,
     issue_key: "CORE-1",
     notify: false,
     seq: id,
-    type,
-    payload:
-      typeof openedEventID !== "number" && type === "ask.opened"
-        ? { ...ask, opened_event_id: id }
-        : ask,
-  } as unknown as Event;
+  };
+  if (type === "ask.opened") {
+    return { ...event, payload: ask, type: "ask.opened" };
+  }
+  return { ...event, payload: ask, type: "ask.answered" };
 }
 
-const baseAsk = {
+const baseAsk: Ask = {
   anchor: null,
   answer: null,
   author: session,
   created_at: "2026-09-10T09:00:00Z",
+  edited_at: null,
   id: "ask-1",
   issue_key: "CORE-1",
+  opened_event_id: 2,
   multiple: false,
   options: [{ label: "Ship" }, { label: "Hold" }],
   question: "Ship it?",
@@ -61,6 +56,46 @@ const baseAsk = {
 
 const build = (events: Event[], lastReadSeq = 0) =>
   buildConversationItems({ events, lastReadSeq, today: "2026-09-10" });
+
+test("an ask edit updates its existing card and remains a question-edit activity line", () => {
+  const edited: Extract<Event, { type: "ask.edited" }> = {
+    actor: session,
+    created_at: "2026-09-10T09:05:00Z",
+    id: 3,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      ...baseAsk,
+      edited_at: "2026-09-10T09:05:00Z",
+      edited_by: session,
+      options: [{ label: "SSE" }, { label: "Polling" }],
+      previous: {
+        multiple: false,
+        options: [{ label: "Ship" }, { label: "Hold" }],
+        question: "Ship it?",
+        urgency: "med",
+      },
+      question: "Which transport should we use?",
+    },
+    seq: 3,
+    type: "ask.edited",
+  };
+  const items = build([askEvent(2, "2026-09-10T09:00:00Z", "ask.opened", baseAsk), edited]);
+
+  expect(items.map((item) => item.kind)).toEqual(["day-divider", "ask", "activity"]);
+  const ask = items.find((item) => item.kind === "ask");
+  const activity = items.find((item) => item.kind === "activity");
+  if (
+    ask === undefined ||
+    ask.kind !== "ask" ||
+    activity === undefined ||
+    activity.kind !== "activity"
+  ) {
+    throw new Error("edited ask should retain its card and add one activity line");
+  }
+  expect(ask.ask.question).toBe("Which transport should we use?");
+  expect(activity.description).toBe('edited the question "Which transport should we use?"');
+});
 
 test("an ask's opened, answered and resolved events coalesce into one item placed where it was asked", () => {
   const items = build([

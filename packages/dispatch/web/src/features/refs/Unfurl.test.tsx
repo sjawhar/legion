@@ -37,6 +37,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
     created_by: { id: "alice", kind: "user" },
     id: "artifact-1",
     issue_key: "CORE-1",
+    project: "CORE",
     kind: "doc",
     name: "design.md",
     primary: true,

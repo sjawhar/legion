@@ -50,6 +50,7 @@ export function ArtifactRoutePanel({
             </section>
           ) : (
             <ArtifactHeader
+              issueKey={artifactRoute.key}
               artifact={artifact}
               highlight
               showVersionPicker={artifact.kind !== "doc"}

@@ -25,6 +25,7 @@ const knownEventTypes: Record<EventType, true> = {
   "artifact.created": true,
   "artifact.version": true,
   "ask.opened": true,
+  "ask.edited": true,
   "ask.answered": true,
   "ask.resolved": true,
   "comment.created": true,
@@ -106,6 +107,7 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
 
   if (
     event.type === "ask.opened" ||
+    event.type === "ask.edited" ||
     event.type === "ask.answered" ||
     event.type === "ask.resolved"
   ) {

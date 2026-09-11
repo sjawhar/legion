@@ -617,10 +617,10 @@ function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
     navigate(
       buildIssuePath(
         version === null && artifact.primary
-          ? { key: artifact.issue_key, kind: "spec" }
+          ? { key: issue.data.key, kind: "spec" }
           : version === null
-            ? { key: artifact.issue_key, kind: "artifact", slug: artifact.slug }
-            : { key: artifact.issue_key, kind: "artifact", slug: artifact.slug, version }
+            ? { key: issue.data.key, kind: "artifact", slug: artifact.slug }
+            : { key: issue.data.key, kind: "artifact", slug: artifact.slug, version }
       )
     );
   };

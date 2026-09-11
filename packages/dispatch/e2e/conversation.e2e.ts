@@ -6,6 +6,7 @@ import {
   createIssue,
   createMessage,
   createProject,
+  editAsk,
   getAsk,
   getIssueEvents,
   patchIssue,
@@ -105,6 +106,56 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
     const screenshot = testInfo.outputPath("conversation-desktop.png");
     await page.screenshot({ path: screenshot, fullPage: true });
     await testInfo.attach("conversation desktop", { contentType: "image/png", path: screenshot });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("Conversation updates an open ask in place after an agent edit and preserves its prior question", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Edited decision" });
+  const ask = await createAsk(
+    issue.key,
+    { options: [{ label: "REST" }, { label: "gRPC" }], question: "Which implementation?" },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const conversation = page.getByRole("region", { name: "Conversation" });
+    const card = conversation.getByTestId(`ask-${ask.id}`);
+    await expect(card).toContainText("Which implementation?");
+
+    await editAsk(
+      ask.id,
+      {
+        options: [{ label: "HTTP" }, { label: "MCP" }],
+        question: "Which transport should we implement?",
+      },
+      agent
+    );
+
+    await expect(card).toContainText("Which transport should we implement?");
+    await expect(card).toContainText(/Edited /);
+    await expect(page.locator(`[data-turn="ask:${ask.id}"]`)).toHaveCount(1);
+    await expect(
+      page.locator('[data-kind="activity"]', { hasText: 'edited the question "Which transport' })
+    ).toBeVisible();
+    await card.getByText("Show previous question").click();
+    await expect(card.getByText("Which implementation?")).toBeVisible();
+    await expect(card.getByRole("list", { name: "Options" })).toContainText("REST");
+    await expect(card.getByRole("list", { name: "Options" })).toContainText("gRPC");
+
+    await page.goto("/");
+    const inboxCard = page.getByTestId(`ask-${ask.id}`);
+    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(1);
+    await expect(inboxCard).toContainText("Which transport should we implement?");
+    await expect(inboxCard).toContainText(/Edited /);
+    await page.screenshot({ path: testInfo.outputPath("ask-edited-in-place.png"), fullPage: true });
   } finally {
     await alice.close();
   }

@@ -42,6 +42,52 @@ test("ask events refresh the issue, its asks list, user state, and the inbox", (
     ["asks", "CORE-1"],
   ]);
 });
+test("an ask edit refreshes the issue, its asks list, user state, and the inbox", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
+  const edited: Extract<Event, { type: "ask.edited" }> = {
+    actor: { id: "session-1", kind: "session" },
+    created_at: "2026-09-11T00:00:00Z",
+    id: 13,
+    issue_key: "CORE-1",
+    notify: true,
+    payload: {
+      anchor: null,
+      answer: null,
+      author: { id: "session-1", kind: "session" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: "2026-09-11T00:00:00Z",
+      edited_by: { id: "session-1", kind: "session" },
+      id: "ask-1",
+      issue_key: "CORE-1",
+      multiple: false,
+      opened_event_id: 1,
+      options: [],
+      previous: { multiple: false, options: [], question: "Before?", urgency: "med" },
+      question: "After?",
+      state: "open",
+      urgency: "med",
+    },
+    seq: 5,
+    type: "ask.edited",
+  };
+
+  applyEventInvalidations(queryClient, edited);
+
+  expect(invalidated).toEqual([
+    ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues"],
+    ["user-state"],
+    ["inbox"],
+    ["asks", "CORE-1"],
+  ]);
+});
 
 test("issue changes refresh user state and the inbox", () => {
   for (const type of ["issue.closed", "issue.updated"] as const) {
