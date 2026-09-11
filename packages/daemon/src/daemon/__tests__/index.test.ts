@@ -675,7 +675,7 @@ describe("startDaemon", () => {
       );
       const beforeReady = await fetch(`http://127.0.0.1:${second.server.port}/legion/v1/state`);
       expect(beforeReady.status).toBe(200);
-      expect(await beforeReady.json()).toEqual({ project: daemonConfig.project });
+      expect(await beforeReady.json()).toMatchObject({ project: daemonConfig.project });
 
       const ready = async () =>
         fetch(`http://127.0.0.1:${second?.server.port}/legion/v1/controller/ready`, {
@@ -689,7 +689,7 @@ describe("startDaemon", () => {
       expect((await ready()).status).toBe(200);
       expect((await ready()).status).toBe(200);
       const afterReady = await fetch(`http://127.0.0.1:${second.server.port}/legion/v1/state`);
-      expect(await afterReady.json()).toEqual({ project: daemonConfig.project });
+      expect(await afterReady.json()).toMatchObject({ project: daemonConfig.project });
     } finally {
       await first?.stop();
       await second?.stop();
@@ -999,7 +999,7 @@ describe("startDaemon", () => {
 
       const response = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/state`);
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ project: "acme1" });
+      expect(await response.json()).toMatchObject({ project: "acme1" });
       expect(nats.subscriptions.map((subscription) => subscription.subject)).toEqual([
         "notifications.github.acme.widgets.>",
         "notifications.dispatch.issue.*.>",

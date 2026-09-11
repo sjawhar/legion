@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import type { IssueKey } from "@legion/contracts";
+import { type IssueKey, roleToken } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { type LegionState, newLegionState } from "../legion-state";
@@ -155,17 +155,32 @@ describe("thermonuclear API regressions", () => {
     );
   });
 
-  it("keeps role identities private and requires a daemon-issued recovery token", async () => {
+  it("exposes an established role's session on GET /legion/v1/state but never its recovery token or capability secret, and still requires the token to recover it", async () => {
     const state = stateWithRoot();
     api = startApi(state);
 
     const rootSession = await startRoot(api);
 
-    expect(
-      await (await fetch(`http://127.0.0.1:${api.server.port}/legion/v1/state`)).json()
-    ).toEqual({
+    const stateBody = (await (
+      await fetch(`http://127.0.0.1:${api.server.port}/legion/v1/state`)
+    ).json()) as Record<string, unknown>;
+    // Session/role visibility is intentional (the controller needs it for triage); the boot
+    // token and session capability secret are not — neither is a field this projection ever
+    // names, so asserting their raw values are absent from the whole response also proves no
+    // other field smuggled them in.
+    expect(stateBody).toMatchObject({
       project: "omp",
+      roles: {
+        [roleToken(state.project, root, "architect")]: {
+          role: "architect",
+          issue: root,
+          sessionId: rootSession.sessionId,
+        },
+      },
     });
+    const stateText = JSON.stringify(stateBody);
+    expect(stateText).not.toContain(rootSession.bootToken);
+    expect(stateText).not.toContain(rootSession.secret);
 
     const publicIdentifierAttempt = await post(api, "/legion/v1/worker-session", {
       sessionId: rootSession.sessionId,

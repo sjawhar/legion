@@ -29,9 +29,72 @@ const controllerIssue = z.strictObject({
   issue: nonEmptyString,
 });
 
+const TREE_STATUSES = ["queued", "active", "lingering", "dead", "launch-failed", "closed"] as const;
+
+// `/legion/v1/state`'s redaction contract: every schema below is a `strictObject` so an
+// accidentally-forwarded field (a `*Hash`/`*Secret`/`*Token`/grant, or a raw `socketPath`) fails
+// `validateContractResponse`'s parse instead of silently reaching the wire — the controller and
+// any other reader of this endpoint get only what they need to triage, never a capability.
+const stateWindowLocator = z.strictObject({
+  tmuxSession: nonEmptyString,
+  tmuxWindowId: nonEmptyString,
+  tmuxPaneId: nonEmptyString.optional(),
+});
+const stateTreeLocator = stateWindowLocator.extend({ ompSessionFile: nonEmptyString.optional() });
+const stateIssue = z.strictObject({
+  key: nonEmptyString,
+  title: z.string(),
+  status: z.enum(LIFECYCLE_STATUSES).optional(),
+  children: z.array(nonEmptyString),
+  parent: nonEmptyString.optional(),
+  lastAppliedSeq: z.number().int().nonnegative().optional(),
+});
+const stateTree = z.strictObject({
+  status: z.enum(TREE_STATUSES),
+  generation: z.number().int().nonnegative(),
+  launchFailures: z.number().int().nonnegative(),
+  readyConfirmedAt: z.number().optional(),
+  locator: stateTreeLocator.optional(),
+});
+const stateGate = z.strictObject({
+  designAskId: nonEmptyString.optional(),
+  designApproved: nonEmptyString.optional(),
+});
+// `role` matches `RoleClaim.role`'s own persisted type (a plain non-empty string, not the
+// stricter `legionRole` enum request schemas use): a stored claim's role always belongs to
+// `LEGION_ROLES` or is `"controller"`, but this projection reflects durable state as recorded
+// rather than re-validating it against the daemon's current role list.
+const stateRole = z.strictObject({
+  role: nonEmptyString,
+  issue: nonEmptyString.optional(),
+  generation: z.number().int().nonnegative().optional(),
+  sessionId: nonEmptyString.optional(),
+  readyConfirmedAt: z.number().optional(),
+  launchFailures: z.number().int().nonnegative().optional(),
+  locator: stateWindowLocator.optional(),
+});
+
 export const LegionDaemonApi = {
   State: {
-    response: z.object({ project: nonEmptyString }),
+    // Redacted projection of durable `LegionState` for `GET /legion/v1/state` — never a
+    // `*Hash`/`*Secret`/`*Token` field, a `spawnCapabilities`/grant record, or a `socketPath`
+    // (every locator here is one of the `stateWindowLocator`/`stateTreeLocator` shapes above).
+    response: z.strictObject({
+      project: nonEmptyString,
+      version: z.number().int(),
+      issues: z.record(z.string(), stateIssue),
+      trees: z.record(z.string(), stateTree),
+      admission: z.strictObject({
+        cap: z.number().int().nonnegative(),
+        active: z.array(nonEmptyString),
+        queue: z.array(nonEmptyString),
+      }),
+      gates: z.record(z.string(), stateGate),
+      controllerLocator: stateWindowLocator.optional(),
+      roles: z.record(z.string(), stateRole),
+      controllerPendingNotices: z.number().int().nonnegative(),
+      pendingStatusWrites: z.array(nonEmptyString),
+    }),
   },
   ControllerReady: {
     request: z.strictObject({ secret: nonEmptyString, sessionId: nonEmptyString }),

@@ -1016,6 +1016,125 @@ describe("Legion HTTP API", () => {
     expect(stateJson).not.toContain("controllerCapabilityHash");
   });
 
+  it("projects redacted durable state for GET /legion/v1/state: issues, trees, admission, and roles present, every secret/hash/token/grant key absent", async () => {
+    state.issues[root].lastAppliedSeq = 7;
+    state.trees[root].readyConfirmedAt = now;
+    state.trees[root].locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@1",
+      tmuxPaneId: "%1",
+      socketPath: "/tmp/legion/architect.sock",
+      ompSessionFile: "/tmp/root.jsonl",
+    };
+    state.controllerLocator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+      socketPath: "/tmp/legion/controller.sock",
+    };
+    state.gates[root] = { designAskId: "ask-1", designApproved: "ask-1" };
+    state.pendingStatusWrites[child] = { status: "in_progress", statusAtRecord: "todo" };
+    state.controllerPendingNotices.push({ payloadJson: '{"type":"escalate"}', eventId: "evt-1" });
+    state.roles[controllerToken(state.project)] = {
+      role: "controller",
+      sessionId: "ses_controller",
+    };
+    state.roles[roleToken(state.project, root, "implementer")] = {
+      issue: root,
+      role: "implementer",
+      sessionId: "ses_implementer",
+      generation: 2,
+      readyConfirmedAt: now,
+      launchFailures: 1,
+      bootTokenHash: secretHash("boot-secret").toString("hex"),
+      resumeSessionFile: "/tmp/resume.jsonl",
+      expectedSessionId: "ses_implementer",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@2",
+        tmuxPaneId: "%2",
+        socketPath: "/tmp/legion/implementer.sock",
+        ompSessionFile: "/tmp/implementer.jsonl",
+      },
+    };
+    state.spawnCapabilities[spawnCapabilityKey("boot-secret")] = {
+      tree: root,
+      issue: root,
+      role: "architect",
+    };
+    state.controllerCapabilityHash = secretHash("controller-secret").toString("hex");
+
+    await start();
+    const stateResponse = await request("/legion/v1/state");
+    expect(stateResponse.status).toBe(200);
+    const body = (await stateResponse.json()) as Record<string, unknown>;
+
+    expect(body.issues).toMatchObject({
+      [root]: {
+        key: root,
+        title: "Root",
+        status: "in_progress",
+        children: [],
+        lastAppliedSeq: 7,
+      },
+    });
+    expect(body.trees).toMatchObject({
+      [root]: {
+        status: "queued",
+        generation: 3,
+        launchFailures: 0,
+        readyConfirmedAt: now,
+        locator: {
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@1",
+          tmuxPaneId: "%1",
+          ompSessionFile: "/tmp/root.jsonl",
+        },
+      },
+    });
+    expect(body.admission).toEqual({ cap: 2, active: [], queue: [] });
+    expect(body.gates).toEqual({ [root]: { designAskId: "ask-1", designApproved: "ask-1" } });
+    expect(body.controllerLocator).toEqual({
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+    });
+    expect(body.roles).toMatchObject({
+      [controllerToken(state.project)]: { role: "controller", sessionId: "ses_controller" },
+      [roleToken(state.project, root, "implementer")]: {
+        role: "implementer",
+        issue: root,
+        generation: 2,
+        sessionId: "ses_implementer",
+        readyConfirmedAt: now,
+        launchFailures: 1,
+        locator: { tmuxSession: "legion-omp", tmuxWindowId: "@2", tmuxPaneId: "%2" },
+      },
+    });
+    expect(body.controllerPendingNotices).toBe(1);
+    expect(body.pendingStatusWrites).toEqual([child]);
+
+    // Every locator in the response is a plain tmux/window triple: no `socketPath` survived the
+    // projection anywhere (tree, controller, or role locators).
+    expect(JSON.stringify(body)).not.toContain("socketPath");
+
+    const leakedKeys: string[] = [];
+    const SECRET_KEY_PATTERN = /secret|hash|token|grant/i;
+    const walk = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const entry of value) walk(entry);
+        return;
+      }
+      if (value === null || typeof value !== "object") return;
+      for (const [key, nested] of Object.entries(value)) {
+        if (SECRET_KEY_PATTERN.test(key)) leakedKeys.push(key);
+        walk(nested);
+      }
+    };
+    walk(body);
+    expect(leakedKeys).toEqual([]);
+  });
+
   it("responds to controller/ready before its own shim connects, delivering the connect afterward", async () => {
     const shimGate = Promise.withResolvers<void>();
     let connected: Promise<void> | undefined;
