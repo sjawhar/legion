@@ -6,6 +6,9 @@
     "extensions": [
       "extensions/envoy.ts",
       "extensions/legion.ts"
+    ],
+    "skills": [
+      "dist/skills"
     ]
   },
   "repository": {

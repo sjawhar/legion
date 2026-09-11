@@ -40,6 +40,7 @@ import {
   handleWorkerSession,
   handleWorkerStarted,
 } from "./api/routes/workers";
+import { buildLegionStateResponse } from "./api/state";
 import type { DispatchClient } from "./dispatch-client";
 import type { LegionState } from "./legion-state";
 import { StopFailed, TreeClosingError } from "./processes";
@@ -219,7 +220,10 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       const pathname = url.pathname;
       if (request.method === "GET" && pathname === "/legion/v1/state") {
         return Response.json(
-          validateContractResponse(LegionDaemonApi.State.response, { project: deps.state.project })
+          validateContractResponse(
+            LegionDaemonApi.State.response,
+            buildLegionStateResponse(deps.state)
+          )
         );
       }
       if (request.method !== "POST") {

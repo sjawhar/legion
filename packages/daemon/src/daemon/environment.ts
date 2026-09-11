@@ -1,4 +1,5 @@
 import { accessSync, constants, realpathSync } from "node:fs";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
 
@@ -11,6 +12,11 @@ export interface ResolveDaemonEnvironmentDeps {
   readonly env?: NodeJS.ProcessEnv;
   readonly resolveExecutable?: ResolveExecutable;
   readonly run: CommandRunner;
+  /** Legion daemon state directory. The `legion` CLI launcher (see `legionCliLauncherScript`) is
+   * written to `<stateDir>/bin/legion` and that directory is prepended to `paneEnv.PATH`, so every
+   * spawned pane's ambient `legion` resolves to a CLI that matches this daemon instead of
+   * whatever (if anything) happens to be installed on the operator's own PATH. */
+  readonly stateDir: string;
 }
 
 export interface FullMiseEnvironment extends NodeJS.ProcessEnv {
@@ -160,10 +166,53 @@ async function resolveOmpInvocation(
   );
 }
 
+/** Builds the `<stateDir>/bin/legion` launcher script: a thin `sh` wrapper that re-execs this
+ * same running daemon's own runtime/entry, so every pane the daemon spawns resolves an ambient
+ * `legion` invocation (`legion state`, `legion gh`, `legion credential`, `legion handoff`, …) to a
+ * CLI build that matches the daemon that set `LEGION_STATE_DIR`/`LEGION_DAEMON_URL` for it —
+ * never a stale or mismatched `legion` some other install left earlier on PATH. Two shapes,
+ * detected from the running process's own entry:
+ * - Source under bun (`argv1` ends with `cli/index.ts`, and this isn't secretly a compiled binary
+ *   whose bundled entry happens to match that suffix — hence the `bunMain !== execPath` guard):
+ *   re-exec bun against that same absolute source entry.
+ * - A compiled `legion` binary (`bunMain === execPath`) or any other/no `.ts` entry: re-exec the
+ *   runtime directly, since a compiled binary parses its own subcommands from argv. */
+export function legionCliLauncherScript(
+  execPath: string,
+  argv1: string | undefined,
+  bunMain: string | undefined
+): string {
+  if (!path.isAbsolute(execPath)) {
+    throw new Error(
+      "[legion] process.execPath must be an absolute path to build the legion CLI launcher"
+    );
+  }
+  const isSourceEntry =
+    bunMain !== execPath && argv1 !== undefined && argv1.endsWith("cli/index.ts");
+  if (!isSourceEntry) {
+    return `#!/bin/sh\nexec "${execPath}" "$@"\n`;
+  }
+  return `#!/bin/sh\nexec "${execPath}" "${path.resolve(argv1)}" "$@"\n`;
+}
+
+/** Writes the `legion` CLI launcher (mode 0755, no secrets) to `<stateDir>/bin/legion` and
+ * returns that directory, so callers can prepend it to a pane's PATH. */
+async function installLegionCliLauncher(stateDir: string): Promise<string> {
+  const binDir = path.join(stateDir, "bin");
+  await mkdir(binDir, { recursive: true });
+  const launcherPath = path.join(binDir, "legion");
+  const script = legionCliLauncherScript(process.execPath, process.argv[1], Bun.main);
+  await writeFile(launcherPath, script, "utf8");
+  await chmod(launcherPath, 0o755);
+  return binDir;
+}
+
 /**
  * Resolves all commands before the daemon owns state or accepts work. mise env
  * restores the user's complete tool environment; every daemon child then gets
- * explicit tool paths and that same PATH instead of the launcher context.
+ * explicit tool paths and that same PATH instead of the launcher context. Also installs the
+ * `legion` CLI launcher (see `legionCliLauncherScript`) and prepends its directory to the pane
+ * PATH every root, worker, and controller pane inherits.
  */
 export async function resolveDaemonEnvironment(
   ompInvocation: string,
@@ -178,7 +227,12 @@ export async function resolveDaemonEnvironment(
     );
   }
 
-  const paneEnv = await fullMiseEnvironment(mise, env, deps.run);
+  const miseEnv = await fullMiseEnvironment(mise, env, deps.run);
+  const legionBinDir = await installLegionCliLauncher(deps.stateDir);
+  const paneEnv: FullMiseEnvironment = {
+    ...miseEnv,
+    PATH: `${legionBinDir}${path.delimiter}${miseEnv.PATH}`,
+  };
   const missing: string[] = [];
   const commands = {} as Record<DaemonTool, string>;
   for (const tool of REQUIRED_DAEMON_TOOLS) {

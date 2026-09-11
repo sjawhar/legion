@@ -3,13 +3,24 @@ import { createLegionDaemonClient } from "./daemon-client";
 
 test("reads the Legion project from daemon state", async () => {
   const requests: { readonly method: string; readonly path: string }[] = [];
+  const redactedState = {
+    project: "omp",
+    version: 21,
+    issues: {},
+    trees: {},
+    admission: { cap: 2, active: [], queue: [] },
+    gates: {},
+    roles: {},
+    controllerPendingNotices: 0,
+    pendingStatusWrites: [],
+  };
   const client = createLegionDaemonClient("http://daemon.test", (async (input, init) => {
     const url = new URL(input.toString());
     requests.push({ method: init?.method ?? "GET", path: url.pathname });
-    return Response.json({ project: "omp" });
+    return Response.json(redactedState);
   }) as typeof fetch);
 
-  await expect(client.state()).resolves.toEqual({ project: "omp" });
+  await expect(client.state()).resolves.toEqual(redactedState);
   expect(requests).toEqual([{ method: "GET", path: "/legion/v1/state" }]);
 });
 

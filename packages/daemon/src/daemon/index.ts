@@ -349,6 +349,7 @@ async function startDaemonLocked(
 ): Promise<DaemonHandle> {
   const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
     run: deps.runner,
+    stateDir: config.stateDir,
   });
   const runner = createDaemonRunner(environment, deps.runner);
   await verifyOmpAgentsCapability(environment.ompInvocation, config.ompLaunchPrefix, runner);

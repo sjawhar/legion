@@ -10,7 +10,7 @@ The localhost-only Legion API lives in `api.ts`.
 
 | Surface | Purpose |
 | --- | --- |
-| `GET /legion/v1/state` | Read redacted durable Legion state. |
+| `GET /legion/v1/state` | Read redacted durable Legion state: `project`, `version`, `issues` (key/title/status/children/parent/lastAppliedSeq), `trees` (status/generation/launchFailures/readyConfirmedAt/locator minus `socketPath`), `admission`, `gates`, `controllerLocator` (minus `socketPath`), `roles` (role/issue/generation/sessionId/readyConfirmedAt/launchFailures/locator minus `socketPath`), `controllerPendingNotices` (a count, not the payloads), and `pendingStatusWrites` (its keys only) — never a `*Hash`/`*Secret`/`*Token` field, `spawnCapabilities`, or a `socketPath`. See `api/state.ts`. |
 | `POST /legion/v1/process/started` | Register a root process with transcript-derived architect role backing. |
 | `POST /legion/v1/process/exit` | Authenticated architect exit that releases an admission slot or marks its root process dead. |
 | `POST /legion/v1/issues/status`, `/waves/release`, `/gates/register` | Scoped architect writes (any status in its tree; `release_wave` PATCHes `todo` for every key in `issues`; gate registers a design-ask id) — and the controller capability may additionally set `todo`\|`backlog`\|`icebox` on any project issue via `/issues/status`. |
@@ -65,7 +65,7 @@ Set `omp_invocation` in `legion.yaml` or `LEGION_OMP_INVOCATION` to the required
 mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp
 ```
 
-Launch the daemon normally with `bun run ...`, not inside that scoped `mise x` command. At startup it obtains the complete `mise env --json` environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and uses `mise where` to turn the default invocation into the pinned OMP binary path. All daemon subprocesses use those absolute paths; root and controller panes receive the complete `PATH` and execute that same OMP path.
+Launch the daemon normally with `bun run ...`, not inside that scoped `mise x` command. At startup it obtains the complete `mise env --json` environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and uses `mise where` to turn the default invocation into the pinned OMP binary path. It also writes a `legion` CLI launcher to `<state_dir>/bin/legion` (mode 0755, re-execing this same daemon's own runtime/entry — see `legionCliLauncherScript` in `environment.ts`) and prepends `<state_dir>/bin` to that PATH, so `legion state`/`legion gh`/`legion credential`/`legion handoff` on an ambient pane PATH always resolve to a CLI build that matches this daemon, never a stale or unrelated install. All daemon subprocesses use those absolute paths; root, worker, and controller panes all receive that same complete, launcher-prepended `PATH` and execute that same OMP path.
 
 Set `omp_launch_prefix` in `legion.yaml` (an array) or `LEGION_OMP_LAUNCH_PREFIX` (a single
 shell-words string, e.g. `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --`) to an argv

@@ -21,6 +21,21 @@ import type {
   ZodProperty,
 } from "../src/pi-types";
 
+/** Minimal, fully-valid `GET /legion/v1/state` mock response — the contract schema is a
+ * `strictObject` at every level, so a partial payload like `{ project }` now fails `.parse()`. */
+function redactedLegionState(project: string) {
+  return {
+    project,
+    version: 21,
+    issues: {},
+    trees: {},
+    admission: { cap: 1, active: [], queue: [] },
+    gates: {},
+    roles: {},
+    controllerPendingNotices: 0,
+    pendingStatusWrites: [],
+  };
+}
 const natsConnections: { readonly name: string }[] = [];
 mock.module("nats", () => ({
   connect: async (options: { readonly name: string }) => {
@@ -590,7 +605,7 @@ describe("Legion OMP extension", () => {
       const url = new URL(input.toString());
       const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
       requests.push({ path: url.pathname, body });
-      if (url.pathname === "/legion/v1/state") return Response.json({ project: "omp" });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
       if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
       return Response.json({
         session_id: body?.session_id,
@@ -703,7 +718,7 @@ describe("Legion OMP extension", () => {
       const url = new URL(input.toString());
       const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
       requests.push({ method: init?.method ?? "GET", path: url.pathname, body });
-      if (url.pathname === "/legion/v1/state") return Response.json({ project });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState(project));
       if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
       return Response.json({
         session_id: body?.session_id,
@@ -1223,7 +1238,7 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
     globalThis.fetch = (async (input) => {
       const url = new URL(input.toString());
-      if (url.pathname === "/legion/v1/state") return Response.json({ project: "omp" });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
       if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
       return Response.json({
         session_id: "ses_controller_bash",
