@@ -291,8 +291,12 @@ export function Composer({
   const submitGuard = useSubmitGuard();
   const commentsQueryKey =
     owner.kind === "issue" ? ["comments", owner.key] : ["artifact", owner.artifactId, "comments"];
+  // The mutation takes the field values as variables read from the DOM at submit time
+  // (`currentDraft`), never from this render's `body`/`replacement` state: a submit that lands
+  // in the same frame as the last keystroke would otherwise send the text from the previous
+  // render - for an edit, the unedited body, saved with an "edited" marker.
   const save = useMutation({
-    mutationFn: async () => {
+    mutationFn: async ({ body, replacement }: { body: string; replacement: string }) => {
       if (edit !== undefined) {
         return saveEdit === undefined
           ? api.editComment(edit.id, { body: body.trim() })
@@ -424,6 +428,10 @@ export function Composer({
     uploadFiles([...event.dataTransfer.files]);
   };
   const canSubmit = canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads);
+  const currentDraft = () => ({
+    body: textarea.current?.value ?? body,
+    replacement: replacementTextarea.current?.value ?? replacement,
+  });
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (
       owner.kind === "issue" &&
@@ -438,14 +446,14 @@ export function Composer({
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
       if (canSubmit) {
-        submitGuard.guard(() => save.mutate());
+        submitGuard.guard(() => save.mutate(currentDraft()));
       }
     }
   };
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (canSubmit) {
-      submitGuard.guard(() => save.mutate());
+      submitGuard.guard(() => save.mutate(currentDraft()));
     }
   };
   const title =
@@ -690,7 +698,7 @@ export function Composer({
               ? save.error.message
               : "Could not save this item."
           }
-          onRetry={() => submitGuard.guard(() => save.mutate())}
+          onRetry={() => submitGuard.guard(() => save.mutate(currentDraft()))}
           retrying={save.isPending}
         />
       ) : null}

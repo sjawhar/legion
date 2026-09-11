@@ -33,6 +33,10 @@ interface ThreadListProps {
   viewerLogin: string;
 }
 
+function isAnchoredThread(thread: Thread): boolean {
+  return thread.anchor !== null && !thread.anchor.orphaned;
+}
+
 function placementFor(
   thread: Thread,
   markPlacements: ReadonlyMap<string, MarkPlacement>
@@ -67,8 +71,14 @@ export function ThreadList({
   const anchoredRegion = useRef<HTMLElement>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
   const [layoutTops, setLayoutTops] = useState<ReadonlyMap<string, number>>(() => new Map());
-  const anchored = threads.filter((thread) => placementFor(thread, markPlacements) !== undefined);
-  const discussion = threads.filter((thread) => placementFor(thread, markPlacements) === undefined);
+  // Which section a thread lives in is a property of its data - it has a live (non-orphaned)
+  // anchor or it does not - never of whether its mark has been measured yet. Placements arrive
+  // after the document renders; deciding membership by them moved a card from Discussion into
+  // Anchored once its placement landed, and React remounts a card that changes parents, dropping
+  // its open editor's draft. An anchored thread without a placement yet stacks below the previous
+  // card (`measure`) until its mark can be located.
+  const anchored = threads.filter((thread) => isAnchoredThread(thread));
+  const discussion = threads.filter((thread) => !isAnchoredThread(thread));
   const topFor = useCallback(
     (thread: Thread) => {
       const placement = placementFor(thread, markPlacements);
