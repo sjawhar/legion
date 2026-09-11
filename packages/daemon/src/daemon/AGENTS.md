@@ -83,8 +83,12 @@ startup from the `DISPATCH_TOKEN` environment variable (required whenever `dispa
 `resolveDaemonConfig` refuses to start otherwise; an fs failure writing the file refuses startup
 too). Neither variable is exported when `dispatch_url` is unset; those panes fall back to their own
 `envoy.json` dispatch config. The daemon never emits the retired `DISPATCH_MCP_URL` alias and strips
-it — with `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, and `DISPATCH_URL` — from every child process it
-spawns, pane or otherwise.
+it — with `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `DISPATCH_URL`, and the per-pane secret family
+`LEGION_BOOT_TOKEN`/`LEGION_BOOT_TOKEN_FILE`/`LEGION_CONTROLLER_SECRET`/
+`LEGION_CONTROLLER_SECRET_FILE` — from every child process it spawns, pane or otherwise
+(`stripDispatchEnv`): a daemon started from inside a Legion pane inherits that pane's boot secret,
+and the private tmux server it forks would otherwise hand it to every pane that does not override
+it.
 
 No secret is ever a tmux `-e KEY=VALUE` value (a transient tmux client's argv is world-readable via
 `/proc/<pid>/cmdline`). Boot tokens and the controller secret travel the same way as the Dispatch
@@ -92,13 +96,16 @@ bearer: `LEGION_BOOT_TOKEN_FILE` / `LEGION_CONTROLLER_SECRET_FILE` name a 0600 f
 `<state_dir>/secrets/<role token>` (`legion-<project>-<key>-<role>`,
 `legion-<project>-controller`) written immediately before that pane launches, overwritten on a
 respawn of the same role, and removed by the prune `ProcessManager.persist()` runs once no live
-locator references it — the steady-state prune walks only the names this process wrote (no
-directory listing per save); the one listing prune `index.ts` runs at boot reaps anything a crash
-left behind. A boot token doubles as the pane's recovery token after a daemon restart, so its file
-lives exactly as long as the pane's locator. Consumers (`@legion/envoy-client`
-`resolveDispatchConfig`, the pi-envoy extension, `legion status`) resolve `X_FILE` — trimmed
-contents — ahead of `X`, and a set-but-unreadable or blank file is an error naming the variable and
-path, never a fallback.
+locator references it — the steady-state prune walks only the names this process wrote or
+inherited (no directory listing per save); the one listing prune `index.ts` runs at boot reaps
+anything a crash left behind and seeds the steady-state set with its survivors, so an inherited
+file is reaped the moment its locator clears. A launch in flight holds its file exempt from
+pruning (`holdPaneSecret`, a refcount: two generations of one root can be launching at once) from
+before the write until its locator is in state. A boot token doubles as the pane's recovery token
+after a daemon restart, so its file lives exactly as long as the pane's locator. Consumers
+(`@legion/envoy-client` `resolveDispatchConfig`, the pi-envoy extension, `legion status`) resolve
+`X_FILE` — trimmed contents — ahead of `X`, and a set-but-unreadable or blank file is an error
+naming the variable and path, never a fallback.
 
 Every tmux command the daemon runs targets its own private server: `tmux -L legion-<project>`
 (`TmuxServer` in `tmux.ts`; the socket name equals the session name). That server is forked by the

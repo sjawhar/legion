@@ -92,27 +92,35 @@ function parseMiseEnvironment(stdout: string): FullMiseEnvironment {
  * tmux environment, and the token itself is never exported at all — panes read it from the 0600
  * file `DISPATCH_TOKEN_FILE` names (see `secrets.ts`), so no `-e` argv ever carries the bearer.
  * `DISPATCH_TOKEN` in the daemon's own environment is startup configuration only.
- * `DISPATCH_MCP_URL` is a retired alias with no legitimate destination. The tmux server that hosts
- * every Legion pane is forked by the daemon's own first `tmux -L legion-<project>` command and so
- * inherits this stripped environment — which is what makes stripping here sufficient: an `-e` pair
- * can only add or override a key for a new pane, never remove one the pane would otherwise inherit
- * from the server. Every other child process the daemon spawns (mise/tool resolution here,
+ * `DISPATCH_MCP_URL` is a retired alias with no legitimate destination. The same holds for the
+ * per-pane secret family — `LEGION_BOOT_TOKEN_FILE` / `LEGION_CONTROLLER_SECRET_FILE` and the
+ * plain variables they replaced: each is set by exactly one pane's own `-e` pair, so any copy in
+ * the daemon's environment (a daemon started from inside a Legion pane inherits that pane's) is a
+ * leak every other pane would otherwise inherit. The tmux server that hosts every Legion pane is
+ * forked by the daemon's own first `tmux -L legion-<project>` command and so inherits this
+ * stripped environment — which is what makes stripping here sufficient: an `-e` pair can only add
+ * or override a key for a new pane, never remove one the pane would otherwise inherit from the
+ * server. Every other child process the daemon spawns (mise/tool resolution here,
  * `executePrivateKeyCommand`'s `sh -c` in `config.ts`, GitHub App role/`gh` CLI children in
- * `github-app-env.ts`, and any other daemon subprocess) must never see any of the four, even when
- * the daemon's own process (or mise's) happens to carry one for unrelated reasons. Shared by
+ * `github-app-env.ts`, and any other daemon subprocess) must never see any of these either, even
+ * when the daemon's own process (or mise's) happens to carry one for unrelated reasons. Shared by
  * `fullMiseEnvironment`/`resolveOmpInvocation` below, by `config.ts`'s `executePrivateKeyCommand`,
- * and by `github-app-env.ts`'s base-env copy, so every consumer strips the same four keys the same
+ * and by `github-app-env.ts`'s base-env copy, so every consumer strips the same keys the same
  * way. */
-const DISPATCH_ENV_KEYS = [
+const PANE_SECRET_ENV_KEYS = [
   "DISPATCH_TOKEN",
   "DISPATCH_TOKEN_FILE",
   "DISPATCH_URL",
   "DISPATCH_MCP_URL",
+  "LEGION_BOOT_TOKEN",
+  "LEGION_BOOT_TOKEN_FILE",
+  "LEGION_CONTROLLER_SECRET",
+  "LEGION_CONTROLLER_SECRET_FILE",
 ] as const;
 
 export function stripDispatchEnv<T extends NodeJS.ProcessEnv>(env: T): T {
   const stripped = { ...env };
-  for (const key of DISPATCH_ENV_KEYS) delete stripped[key];
+  for (const key of PANE_SECRET_ENV_KEYS) delete stripped[key];
   return stripped;
 }
 

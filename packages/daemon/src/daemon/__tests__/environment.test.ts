@@ -154,7 +154,20 @@ describe("resolveDaemonEnvironment", () => {
     }
   });
 
-  it("strips DISPATCH_TOKEN, DISPATCH_TOKEN_FILE, DISPATCH_URL, and DISPATCH_MCP_URL from paneEnv regardless of source", async () => {
+  it("strips the Dispatch keys and the Legion pane-secret family from paneEnv regardless of source", async () => {
+    // A daemon started from inside a Legion pane (a worker's own shell during the smoke rig)
+    // inherits that pane's boot token and pointers; the private tmux server it forks would pass
+    // them to every pane that does not override them with its own `-e`.
+    const STRIPPED_KEYS = [
+      "DISPATCH_TOKEN",
+      "DISPATCH_TOKEN_FILE",
+      "DISPATCH_URL",
+      "DISPATCH_MCP_URL",
+      "LEGION_BOOT_TOKEN",
+      "LEGION_BOOT_TOKEN_FILE",
+      "LEGION_CONTROLLER_SECRET",
+      "LEGION_CONTROLLER_SECRET_FILE",
+    ];
     const environment = await resolveDaemonEnvironment(
       `mise x ${OMP_PIN} -- omp`,
       dependencies({
@@ -163,6 +176,8 @@ describe("resolveDaemonEnvironment", () => {
           DISPATCH_TOKEN: "leaked-from-daemon-process",
           DISPATCH_TOKEN_FILE: "/leaked/dispatch-token",
           DISPATCH_URL: "http://leaked-from-daemon-process",
+          LEGION_BOOT_TOKEN: "leaked-from-the-launching-pane",
+          LEGION_BOOT_TOKEN_FILE: "/leaked/legion-omp-legion-6-implementer",
         },
         run: async (command) => {
           if (command.join(" ") === "/tools/mise env --json") {
@@ -174,6 +189,8 @@ describe("resolveDaemonEnvironment", () => {
                 DISPATCH_TOKEN_FILE: "/leaked/dispatch-token",
                 DISPATCH_URL: "http://leaked-from-mise",
                 DISPATCH_MCP_URL: "http://leaked-from-mise/mcp",
+                LEGION_CONTROLLER_SECRET: "leaked-from-mise",
+                LEGION_CONTROLLER_SECRET_FILE: "/leaked/controller",
               }),
               stderr: "",
               exitCode: 0,
@@ -187,10 +204,7 @@ describe("resolveDaemonEnvironment", () => {
       })
     );
 
-    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_TOKEN");
-    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_TOKEN_FILE");
-    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_URL");
-    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_MCP_URL");
+    for (const key of STRIPPED_KEYS) expect(environment.paneEnv).not.toHaveProperty(key);
     expect(environment.paneEnv).toMatchObject({
       PATH: `${path.join(stateDir, "bin")}${path.delimiter}/full/bin:/usr/bin`,
       HOME: "/home/legion",
@@ -203,10 +217,7 @@ describe("resolveDaemonEnvironment", () => {
     });
     await runner(["tmux", "new-session"]);
 
-    expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_TOKEN");
-    expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_TOKEN_FILE");
-    expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_URL");
-    expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_MCP_URL");
+    for (const key of STRIPPED_KEYS) expect(received[0]?.options?.env).not.toHaveProperty(key);
   });
 
   it("strips dispatch env keys from the bootstrap `mise env`/`mise where` calls that predate createDaemonRunner", async () => {
