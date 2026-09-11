@@ -15,7 +15,8 @@ Follow this ordering exactly. It keeps the reviewed branch clean while preservin
 retrospective's durable output.
 
 1. Tester green and all code-review cycles finish.
-2. The reviewer removes `.legion/`, pushes that deletion as its final commit, then approves.
+2. The implementer pushes the `.legion/` deletion at the reviewer's direction, and the reviewer
+   approves that head.
 3. Run this retro: commit durable learnings to `docs/solutions/` and post the issue comment.
    Retro writes **no `.legion` file**, so it never re-dirties the cleaned handoff tree.
 4. Sami approves the final reviewed head.
