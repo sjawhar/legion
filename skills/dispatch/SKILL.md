@@ -252,8 +252,8 @@ dispatch_read({ issue?, project?, artifact?, ref? })
 
 With an issue ref, it returns the issue summary, open asks, references, and recent events with `details` `{ issue }`. With a project
 document owner or ref, it returns a document summary with `details` `{ project, document }`. With an ask ref, it returns that ask's
-question, options, state, answer, and its reply thread. With a comment ref, it returns that comment and its quoted reply chain. Reads do
-not subscribe; use `dispatch_doc_read` for document contents.
+question, options, state, answer, and its reply thread. With a comment ref, it returns that comment and its quoted reply chain. With a
+message ref, it returns that message and its reply chain. Reads do not subscribe; use `dispatch_doc_read` for document contents.
 
 ## References
 
@@ -265,6 +265,7 @@ dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
 dispatch://KEY/comment/<id>
+dispatch://KEY/message/<id>
 dispatch://PROJECT/artifact/<slug>[@vN]
 dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>

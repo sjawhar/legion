@@ -110,6 +110,77 @@ describe("executeDispatchTool", () => {
     expect(execCalls).toBe(0);
   });
 
+  test("posts a message reply_to as a bare id or a dispatch://.../message/<id> reference, and cites the result", async () => {
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42/messages") {
+        bodies.push(JSON.parse(init?.body as string));
+        return response({ id: "message-2", issue_key: "DSP-42" });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const bareIDResult = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { issue: "DSP-42", body: "Sounds good", reply_to: "message-1" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    const refResult = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: {
+        issue: "DSP-42",
+        body: "Sounds good",
+        reply_to: "dispatch://DSP-42/message/message-1",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(bodies).toMatchObject([
+      { body: "Sounds good", reply_to: "message-1" },
+      { body: "Sounds good", reply_to: "message-1" },
+    ]);
+    expect(bareIDResult.text).toBe(
+      "Posted message message-2 (dispatch://DSP-42/message/message-2)"
+    );
+    expect(refResult.text).toBe("Posted message message-2 (dispatch://DSP-42/message/message-2)");
+  });
+
+  test("rejects a message reply_to referencing a non-message dispatch reference", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_message",
+        args: {
+          issue: "DSP-42",
+          body: "Sounds good",
+          reply_to: "dispatch://DSP-42/comment/comment-1",
+        },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(
+      /reply_to must be a bare message id or a dispatch:\/\/\.\.\.\/message\/<id> reference/
+    );
+  });
+
   test("uses a full LEGION_ISSUE external reference without resolving cwd repo", async () => {
     const requests: string[] = [];
     let execCalls = 0;
@@ -465,7 +536,8 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(
       "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
         "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
-        "dispatch://KEY-1/artifact/<slug>, or dispatch://PROJECT/artifact/<slug>"
+        "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
+        "dispatch://PROJECT/artifact/<slug>"
     );
   });
 
@@ -1396,6 +1468,61 @@ describe("executeDispatchTool", () => {
     });
     expect(dispatchSubscriptionTopic(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/comments/comment-42"]);
+  });
+  test("reads the targeted message and its reply chain from a Dispatch message reference", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42/messages/message-42") {
+        return response({
+          message: {
+            id: "message-42",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "writer-1" },
+            body: "Ship the build tonight.",
+            reply_to: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [
+            {
+              id: "message-43",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Sounds good.",
+              reply_to: "message-42",
+              created_at: "2026-09-09T00:01:00Z",
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/message/message-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "Message:",
+        "message-42 · session writer-1",
+        "Body: Ship the build tonight.",
+        "Reply chain:",
+        "message-43 · user sami",
+        "Body: Sounds good.",
+      ].join("\n"),
+      details: { issue: "DSP-42" },
+    });
+    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(requests).toEqual(["/api/v1/issues/DSP-42/messages/message-42"]);
   });
   test("reading an issue summary does not subscribe the session to the issue", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {

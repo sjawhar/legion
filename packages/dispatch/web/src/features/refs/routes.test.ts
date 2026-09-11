@@ -88,6 +88,15 @@ test("reference builders preserve dispatch version syntax while emitting canonic
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/artifacts/design?v=3"));
 });
 
+test("message routes round-trip through the dispatch:// reference and the browser path", () => {
+  const route = { id: "message-1", key: "CORE-1", kind: "message" as const };
+
+  expect(parseDispatchReference("dispatch://CORE-1/message/message-1")).toEqual(route);
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/message/message-1");
+  expect(parseIssuePath("/issues/CORE-1/messages/message-1")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/messages/message-1"));
+});
+
 test("the conversation owns the /conversation path and still answers the retired /log path", () => {
   expect(parseIssuePath("/issues/CORE-1/conversation")).toEqual({
     key: "CORE-1",

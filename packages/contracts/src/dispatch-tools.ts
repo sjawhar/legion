@@ -244,6 +244,13 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       body: z.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
+      reply_to: z
+        .string()
+        .describe(
+          "Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " +
+            "this message under it so the reply stays with the original in the Conversation."
+        )
+        .optional(),
     }),
   },
   {

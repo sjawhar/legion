@@ -17,6 +17,7 @@ const messageEvent: Event = {
     created_at: "2026-09-10T00:00:00Z",
     id: "message-1",
     issue_key: "CORE-1",
+    reply_to: null,
   },
   seq: 1,
   type: "message.created",

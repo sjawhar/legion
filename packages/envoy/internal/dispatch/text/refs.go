@@ -98,6 +98,9 @@ func parseDispatch(value string) (Ref, bool) {
 		if id, ok := strings.CutPrefix(tail, "comment/"); ok && validItemID(id) {
 			return Ref{Kind: "comment", IssueKey: key, ID: id}, true
 		}
+		if id, ok := strings.CutPrefix(tail, "message/"); ok && validItemID(id) {
+			return Ref{Kind: "message", IssueKey: key, ID: id}, true
+		}
 		return Ref{}, false
 	}
 	if !projectKeyPattern.MatchString(key) || !found {
@@ -194,6 +197,9 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 		}
 		if len(parts) == 4 && parts[2] == "comments" && validItemID(parts[3]) {
 			return Ref{Kind: "comment", IssueKey: key, ID: parts[3]}, true
+		}
+		if len(parts) == 4 && parts[2] == "messages" && validItemID(parts[3]) {
+			return Ref{Kind: "message", IssueKey: key, ID: parts[3]}, true
 		}
 		return Ref{}, false
 	}

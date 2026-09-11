@@ -19,7 +19,14 @@ function message(id: number, at: string, actor: Actor = session, body = `m${id}`
     notify: false,
     seq: id,
     type: "message.created",
-    payload: { author: actor, body, created_at: at, id: `message-${id}`, issue_key: "CORE-1" },
+    payload: {
+      author: actor,
+      body,
+      created_at: at,
+      id: `message-${id}`,
+      issue_key: "CORE-1",
+      reply_to: null,
+    },
   } as Event;
 }
 

@@ -14,6 +14,7 @@ import type {
   Event,
   IssueDetails,
   IssueReferences,
+  MessageRead,
   SearchResult,
 } from "@legion/contracts";
 import {
@@ -86,7 +87,7 @@ type Owner =
 
 interface ParsedDispatchRef {
   readonly owner: Owner;
-  readonly kind: "issue" | "spec" | "log" | "children" | "artifact" | "ask" | "comment";
+  readonly kind: "issue" | "spec" | "log" | "children" | "artifact" | "ask" | "comment" | "message";
   readonly id: string;
   readonly version?: number;
 }
@@ -245,10 +246,10 @@ function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   }
 
   const issueReference = ref.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+))?$/
+    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/
   );
   if (!issueReference) return null;
-  const [, issue, spec, log, children, artifact, version, ask, comment] = issueReference;
+  const [, issue, spec, log, children, artifact, version, ask, comment, message] = issueReference;
   if (!issue || (version !== undefined && Number(version) < 1)) return null;
   const owner: Owner = { kind: "issue", issue };
   if (spec) return { owner, kind: "spec", id: spec };
@@ -264,6 +265,7 @@ function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   }
   if (ask) return { owner, kind: "ask", id: ask };
   if (comment) return { owner, kind: "comment", id: comment };
+  if (message) return { owner, kind: "message", id: message };
   return { owner, kind: "issue", id: issue };
 }
 
@@ -273,6 +275,18 @@ function askId(args: ToolArguments): string {
   const reference = parseDispatchRef(ask);
   if (reference?.kind !== "ask") {
     throw new Error("ask must be a bare ask id or a dispatch://.../ask/<id> reference");
+  }
+  return reference.id;
+}
+
+function messageReplyTo(args: ToolArguments): string | undefined {
+  const replyTo = optionalString(args, "reply_to");
+  if (replyTo === undefined || !replyTo.startsWith("dispatch://")) return replyTo;
+  const reference = parseDispatchRef(replyTo);
+  if (reference?.kind !== "message") {
+    throw new Error(
+      "reply_to must be a bare message id or a dispatch://.../message/<id> reference"
+    );
   }
   return reference.id;
 }
@@ -299,7 +313,8 @@ async function resolveOwnerArguments(
           throw new Error(
             "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
               "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
-              "dispatch://KEY-1/artifact/<slug>, or dispatch://PROJECT/artifact/<slug>"
+              "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
+              "dispatch://PROJECT/artifact/<slug>"
           );
         })())
       : null;
@@ -573,6 +588,20 @@ function commentSummary({ comment, replies }: CommentRead): string {
   );
 }
 
+function messageSummary({ message, replies }: MessageRead): string {
+  const root = [
+    `${message.id} · ${message.author.kind} ${message.author.id}`,
+    `Body: ${message.body}`,
+  ];
+  const chain = replies.flatMap((reply) => [
+    `${reply.id} · ${reply.author.kind} ${reply.author.id}`,
+    `Body: ${reply.body}`,
+  ]);
+  return ["Message:", ...root, "Reply chain:", ...(chain.length === 0 ? ["- none"] : chain)].join(
+    "\n"
+  );
+}
+
 async function openArtifactMarks(
   client: DispatchClient,
   resolved: ResolvedArtifact
@@ -830,9 +859,15 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_message": {
-      const message = await client.message(issue(), { body: stringArg(args, "body"), actor });
+      const replyTo = messageReplyTo(args);
+      const message = await client.message(issue(), {
+        body: stringArg(args, "body"),
+        ...(replyTo === undefined ? {} : { reply_to: replyTo }),
+        actor,
+      });
+      const messageRef = `dispatch://${message.issue_key}/message/${message.id}`;
       return {
-        text: `Posted message ${message.id}`,
+        text: `Posted message ${message.id} (${messageRef})`,
         details: {
           issue: message.issue_key,
           topic: dispatchIssueSubject(message.issue_key, ">"),
@@ -947,6 +982,19 @@ export async function executeDispatchTool(
             ownerArguments.ref.owner.kind === "project"
               ? { project: ownerArguments.ref.owner.project }
               : { issue: comment.comment.issue_key },
+        };
+      }
+      if (ownerArguments.ref?.kind === "message") {
+        if (ownerArguments.ref.owner.kind !== "issue") {
+          throw new Error("message references are issue-scoped");
+        }
+        const messageRead = await client.getMessage(
+          ownerArguments.ref.owner.issue,
+          ownerArguments.ref.id
+        );
+        return {
+          text: messageSummary(messageRead),
+          details: { issue: messageRead.message.issue_key },
         };
       }
       if (documentOwner().kind === "project") {

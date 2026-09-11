@@ -191,6 +191,33 @@ test("a deep link to an old unanchored comment scrolls its Conversation turn int
   }
 });
 
+test("a message reply renders its quoted parent link and deep links scroll to the parent turn", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Message reply thread" });
+  const root = await createMessage(issue.key, { body: "Ship the build tonight" }, agent);
+  await createMessage(issue.key, { body: "Sounds good, thanks!", reply_to: root.id }, bob);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+
+    const reply = turn(page, "Sounds good, thanks!");
+    await expect(reply.getByRole("link", { name: "Ship the build tonight" })).toBeVisible();
+
+    await page.goto(`/issues/${issue.key}/messages/${root.id}`);
+    const target = page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator('li[aria-current="true"]');
+    await expect(target).toContainText("Ship the build tonight");
+    await expect(target).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
 test("Conversation coalesces answered asks and toggles activity without remounting turns", async ({
   browser,
 }, testInfo) => {

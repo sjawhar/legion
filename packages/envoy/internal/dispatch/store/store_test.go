@@ -122,6 +122,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_search",
 		"asks_search",
 		"messages_search",
+		"messages_reply_to",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
@@ -175,6 +176,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_reply_to_fkey",
 		"comments_ask_id_fkey",
 		"messages_pkey",
+		"messages_reply_to_fkey",
 		"comments_artifact_id_fkey",
 		"comments_one_owner",
 		"messages_issue_key_fkey",

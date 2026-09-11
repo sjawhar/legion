@@ -271,13 +271,22 @@ type CommentEventPayload struct {
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 }
 
-// Message is a short issue update.
+// Message is a short issue update, optionally threaded under another message (ReplyTo).
 type Message struct {
 	ID        string    `json:"id"`
 	IssueKey  string    `json:"issue_key"`
 	Author    Actor     `json:"author"`
 	Body      string    `json:"body"`
+	ReplyTo   *string   `json:"reply_to"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// MessageEventPayload wraps a Message with the reply target's body preview (first 160
+// characters, ReplyBody) so a message.created event carrying ReplyTo can render "re: <preview>"
+// without a second lookup. ReplyBody is empty when the message does not reply to another message.
+type MessageEventPayload struct {
+	Message
+	ReplyBody string `json:"reply_body,omitempty"`
 }
 
 // ReferencedBy identifies a post or artifact that mentions an artifact.

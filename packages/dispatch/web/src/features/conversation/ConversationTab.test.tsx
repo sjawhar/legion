@@ -25,6 +25,7 @@ function message(
       created_at: "2026-09-09T00:00:00Z",
       id: `message-${id}`,
       issue_key: "CORE-1",
+      reply_to: null,
     },
     seq: id,
     type: "message.created",
