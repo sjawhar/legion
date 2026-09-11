@@ -1,0 +1,18 @@
+{
+  "topic": "notifications.github.example-org.example-repo.pr.42.comment",
+  "payload_summary": "review comment on example-org/example-repo#42 by octocat (packages/envoy/internal/contracts/normalize.go:668): This branch condition looks inverted.",
+  "payload": {
+    "action": "created",
+    "author": "octocat",
+    "body": "This branch condition looks inverted.",
+    "head_sha": "2222222222222222222222222222222222222222",
+    "kind": "comment",
+    "line": "668",
+    "number": "42",
+    "parent_kind": "pr",
+    "path": "packages/envoy/internal/contracts/normalize.go",
+    "repo": "example-org/example-repo",
+    "title": "Add local acceptance driver",
+    "url": "https://example.invalid/example-org/example-repo/pull/42#discussion_r1234567890"
+  }
+}

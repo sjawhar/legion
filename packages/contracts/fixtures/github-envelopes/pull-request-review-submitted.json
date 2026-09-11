@@ -1,0 +1,18 @@
+{
+  "topic": "notifications.github.example-org.example-repo.pr.42.review",
+  "payload_summary": "review approved on example-org/example-repo#42 by sjawhar: Looks good, ship it.",
+  "payload": {
+    "action": "submitted",
+    "author": "sjawhar",
+    "body": "Looks good, ship it.",
+    "commit_id": "992c2a2249d47a1a2a6b2f3e4c5d6e7f8091a2b3",
+    "head_sha": "992c2a2249d47a1a2a6b2f3e4c5d6e7f8091a2b3",
+    "kind": "review",
+    "number": "42",
+    "parent_kind": "pr",
+    "repo": "example-org/example-repo",
+    "state": "approved",
+    "title": "Add local acceptance driver",
+    "url": "https://example.invalid/example-org/example-repo/pull/42#pullrequestreview-555000111"
+  }
+}

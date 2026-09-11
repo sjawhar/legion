@@ -633,12 +633,14 @@ func githubPayload(event string, body map[string]any) string {
 			"author":      nestedString(body, "comment", "user", "login"),
 			"url":         nestedString(body, "comment", "html_url"),
 		}
+		markLegionFooter(data, commentBody)
 		if action == "edited" {
 			data["body_changed"] = "true"
 		} else {
 			addCappedBody(data, commentBody)
 		}
 	case "pull_request_review_comment":
+		commentBody := nestedString(body, "comment", "body")
 		data = map[string]string{
 			"kind":        "comment",
 			"action":      action,
@@ -649,18 +651,21 @@ func githubPayload(event string, body map[string]any) string {
 			"author":      nestedString(body, "comment", "user", "login"),
 			"url":         nestedString(body, "comment", "html_url"),
 			"path":        nestedString(body, "comment", "path"),
+			"head_sha":    nestedString(body, "pull_request", "head", "sha"),
 		}
 		line := nestedNumberString(body, "comment", "line")
 		if line == "" {
 			line = nestedNumberString(body, "comment", "original_line")
 		}
 		data["line"] = line
+		markLegionFooter(data, commentBody)
 		if action == "edited" {
 			data["body_changed"] = "true"
 		} else {
-			addCappedBody(data, nestedString(body, "comment", "body"))
+			addCappedBody(data, commentBody)
 		}
 	case "pull_request_review":
+		reviewBody := nestedString(body, "review", "body")
 		data = map[string]string{
 			"kind":        "review",
 			"action":      action,
@@ -671,8 +676,11 @@ func githubPayload(event string, body map[string]any) string {
 			"author":      nestedString(body, "review", "user", "login"),
 			"url":         nestedString(body, "review", "html_url"),
 			"state":       nestedString(body, "review", "state"),
+			"commit_id":   nestedString(body, "review", "commit_id"),
+			"head_sha":    nestedString(body, "pull_request", "head", "sha"),
 		}
-		addCappedBody(data, nestedString(body, "review", "body"))
+		markLegionFooter(data, reviewBody)
+		addCappedBody(data, reviewBody)
 	case "pull_request":
 		data = map[string]string{
 			"kind":             "pr",
@@ -757,6 +765,14 @@ func addCappedBody(data map[string]string, body string) {
 	data["body"] = capped
 	if truncated {
 		data["body_truncated"] = "true"
+	}
+}
+
+// markLegionFooter checks the uncapped body, not the capped one stored in "body": the 2048-rune
+// cap can cut off a trailing footer on a long body, and this flag must still reflect its presence.
+func markLegionFooter(data map[string]string, body string) {
+	if strings.Contains(body, "<!-- legion:") {
+		data["legion_footer"] = "true"
 	}
 }
 
