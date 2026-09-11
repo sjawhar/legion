@@ -3,7 +3,7 @@
   "spec": "dispatch://LEGION-9/spec (v2)",
   "planDoc": "docs/plans/2026-09-11-pane-pid-target-row.md",
   "commit": "3a9b0423f8cd (change lznlnsrw) fix(daemon): panePid reads the target pane's own pid, not its window's first pane",
-  "headSha": "3a9b0423f8cd",
+  "headSha": "fcc343c07a2f",
   "prNumber": 945,
   "prUrl": "https://github.com/sjawhar/legion/pull/945",
   "branch": "legion/LEGION-9",
@@ -54,7 +54,41 @@
     "no display-message, no list-panes -a, no caller changes"
   ],
   "testerNotes": "Plan Task 5 is yours: /tmp/legion9-live/probe.ts (full text in the plan doc) run from your own pane shell (needs TMUX_TMPDIR=/home/ubuntu/.tmux/sockets) against main's tmux.ts (`jj file show -r main packages/daemon/src/daemon/tmux.ts`) expecting FAIL rows for every non-first pane, then against $LEGION_WORKSPACE/packages/daemon/src/daemon/tmux.ts expecting ALL MATCH + `negative control %999999 → undefined`. Paste both outputs into .legion/test.json and the PR's E2E line. The PR body's CI/Thermo/E2E lines are marked pending for you and the reviewer to fill in.",
+  "round2": {
+    "trigger": "legion-reviewer CHANGES_REQUESTED at 16a0d31c (2026-09-12T00:32:56Z); .legion/review.json committed by the reviewer as 6bc0209b (its push 403d — carried by this round's push)",
+    "commit": "fcc343c07a2f (change orppkqxs) test(daemon): pin exact pane-id match and the pid-probe contract — on top of 6bc0209b; tmux.ts, processes.ts, worker-boot-watchdog.ts untouched",
+    "headSha": "fcc343c07a2f",
+    "pushed": "legion/LEGION-9 moved forward 16a0d31c → fcc343c0 (carries 6bc0209b review handoff + fcc343c0)",
+    "changes": {
+      "finding1_tmuxTest": "new case 'matches the pane id exactly, never a longer or shorter id sharing its digits': rows \"%150 446716\\n%1 3715931\\n%15 4141285\\n\", panePid(_, \"%15\") === 4141285 and panePid(_, \"%1\") === 3715931",
+      "finding2_watchdogTest": "assertion at the pid-probe case replaced with expect(events.filter(e => e.startsWith(\"isOmpPane:\"))).toEqual([\"isOmpPane:3003090\"]) and expect(events.slice(events.indexOf(\"isOmpPane:3003090\"))).toEqual([\"isOmpPane:3003090\", \"workerClient\", \"retire\"]); the now-irrelevant 'exactly one connect attempt per interval' comment on workerBootTimeoutSeconds dropped with it",
+      "nits": [
+        "worker-boot-watchdog.test.ts pid-probe comment → present-tense contract (a first-row read would return 2363427, the architect's live OMP, and confirm the boot)",
+        "processes.test.ts livePanes doc → present tense, parenthetical kept (bare pid fails firstPaneId's /^%\\d+$/, windowAlive reads exit 0)",
+        "processes.test.ts livePanes: dropped `?? \"\"` (noUncheckedIndexedAccess is unset; tsc clean)",
+        "tmux.test.ts header → one line naming the subject",
+        "worker-boot-watchdog.test.ts header → covers timer cleanup, registration deadline, and the pane-pid probe"
+      ]
+    },
+    "mutationEvidence": {
+      "baseline": "bun test tmux.test.ts worker-boot-watchdog.test.ts → 12 pass, 0 fail",
+      "startsWithMutation": "tmux.ts `rows.find((r) => r[0] === target)` → `rows.find((r) => target.startsWith(r[0]))` (in place, sed); bun test tmux.test.ts → 4 pass, 1 fail: only the new case, `Expected: 4141285 Received: 3715931` (the %1 architect row — the LEGION-9 defect back); reverted with `jj restore packages/daemon/src/daemon/tmux.ts` → 5 pass, 0 fail",
+      "rowsZeroRegression": "tmux.ts `const row = …` → `const row = rows[0];` (in place, sed); bun test worker-boot-watchdog.test.ts → 6 pass, 1 fail: the pid-probe case, first assertion `Expected [\"isOmpPane:3003090\"] Received 18× \"isOmpPane:2363427\"` (the architect's pid confirms the boot every interval, never retiring); reverted → 7 pass, 0 fail",
+      "tmuxTsClean": "jj diff --stat after both reverts lists only the three test files (+ untracked .omp/config.yml); tmux.ts absent from the diff"
+    },
+    "gates": {
+      "cwd": "packages/daemon",
+      "biomeFormat": "bunx biome format src/ --write → No fixes applied",
+      "biomeCheck": "bunx biome check src/ → Checked 135 files in 409ms. No fixes applied.",
+      "tsc": "bunx tsc --noEmit → exit 0",
+      "bunTest": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test → 810 pass, 5 skip, 0 fail (815 tests, 53 files, 24.52s); no 5001 flake"
+    },
+    "rigIssues": {
+      "grantInjection": "N per call observed 2,3,3,3,2,4,4,3 this round (max 4); /tmp/legion9-grant-trap.sh export-shadow sourced at the first call; every credentialed command succeeded"
+    },
+    "next": "Reviewer re-reviews fcc343c0, then directs the .legion/ deletion push (implementer) and approves that head by SHA. PR #945 body: CI/Thermo/E2E lines still owned by tester/reviewer."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T00:06:54.520Z"
+  "completed": "2026-09-12T00:39:11.420Z"
 }
