@@ -621,6 +621,39 @@ describe("envoy OMP extension", () => {
     expect(lastRegistration?.topics).toEqual(expect.arrayContaining([base, topic]));
   });
 
+  test("tells the agent the first time a write subscribes it, and stays quiet on repeat writes to the same issue", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?dispatch-subscribe-notice");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const topic = dispatchIssueSubject("LEGION-1", ">");
+    const toolResult = {
+      toolName: "dispatch_ask",
+      toolCallId: "call_1",
+      input: {},
+      details: { topic },
+      isError: false,
+    };
+
+    await fixture.handlers.get("tool_result")?.(toolResult, sessionContext());
+    // Model-visible, not a UI-only notification: the host never lets a
+    // tool_result handler amend the result the model already saw, so this
+    // goes through the same sendMessage/steer channel `deliver` uses for
+    // inbound envelopes.
+    expect(fixture.messages).toEqual([
+      `Subscribed to LEGION-1 (every event on this issue reaches you; envoy_unsubscribe ${topic} to stop).`,
+    ]);
+    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+
+    await fixture.handlers.get("tool_result")?.(
+      { ...toolResult, toolCallId: "call_2" },
+      sessionContext()
+    );
+    expect(fixture.messages).toHaveLength(1);
+  });
+
   test("rejects malformed wildcard bases before opening subscriptions", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?malformed-wildcard-base");
@@ -2334,6 +2367,87 @@ describe("envoy OMP extension", () => {
     expect(
       fixture.messages.some((m) => m.includes("published after the tool said it was unsubscribed"))
     ).toBe(false);
+  });
+
+  test("a subscription.removed notice drops the local subscription so dead-connection recovery does not resurrect it", async () => {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    const { default: envoyExtension } = await import("./envoy.ts?subscription-removed-drops-local");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_dropped"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+
+    const topic = dispatchIssueSubject("LEGION-1", ">");
+    await subscribeTool.execute("", { topics: [topic] });
+    const dropped = natsState.controls.get(topic);
+    expect(dropped).toBeDefined();
+
+    const inbox = natsState.controls.get("notifications.agent.ses_dropped");
+    inbox?.push(
+      JSON.stringify({
+        source: "dispatch",
+        topic: "notifications.agent.ses_dropped",
+        payload: JSON.stringify({
+          issue_key: "LEGION-1",
+          type: "subscription.removed",
+          actor: { kind: "user", id: "alice" },
+          notify: true,
+          payload: { session_id: "ses_dropped", by: { kind: "user", id: "alice" }, topics: [topic] },
+        }),
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(natsState.controls.get(topic)).toBe(dropped);
+    expect(dropped?.active()).toBe(false);
+
+    // Well past ENVOY_RESUBSCRIBE_DELAY_MS: the dead-connection recovery path
+    // had its chance to treat this deliberate close as an outage. It must not.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(natsState.controls.get(topic)).toBe(dropped);
+  });
+
+  test("a subscription.removed notice naming a different session leaves this session's subscription and emits no notice", async () => {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    const { default: envoyExtension } = await import("./envoy.ts?subscription-removed-other-session");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_other"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+
+    const topic = dispatchIssueSubject("LEGION-1", ">");
+    await subscribeTool.execute("", { topics: [topic] });
+    const kept = natsState.controls.get(topic);
+    expect(kept).toBeDefined();
+
+    // This issue's own topic reaches every subscriber, not just the session
+    // named in the payload — ses_other must not act on a removal that names
+    // a different session (ses_target).
+    const inbox = natsState.controls.get("notifications.agent.ses_other");
+    inbox?.push(
+      JSON.stringify({
+        source: "dispatch",
+        topic,
+        payload: JSON.stringify({
+          issue_key: "LEGION-1",
+          type: "subscription.removed",
+          actor: { kind: "user", id: "alice" },
+          notify: true,
+          payload: { session_id: "ses_target", by: { kind: "user", id: "alice" }, topics: [topic] },
+        }),
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(natsState.controls.get(topic)).toBe(kept);
+    expect(kept?.active()).toBe(true);
+    expect(fixture.messages.some((m) => m.includes("Unsubscribed"))).toBe(false);
   });
 
   test("envoy_unsubscribe deregisters a topic while its pump waits to retry", async () => {

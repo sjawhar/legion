@@ -60,6 +60,8 @@ export type {
   SearchResponse,
   SearchResult,
   SearchResultKind,
+  Subscriber,
+  SubscriptionRemovedEventPayload,
   Suggestion,
   TargetCandidate,
   UpdateIssueInput,

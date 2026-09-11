@@ -323,6 +323,41 @@ describe("renderInbound dispatch events", () => {
     expect(renderInbound(raw, reader)).toMatchObject({ skip: true, content: "" });
   });
 
+  test("renders subscription.removed as a short plain-text notice, not the generic TOON envelope", () => {
+    const rendered = renderInbound(
+      dispatchEvent("subscription.removed", {
+        session_id: reader,
+        by: { kind: "user", id: "alice" },
+        topics: ["notifications.dispatch.issue.DSP-1.>"],
+      }),
+      reader
+    );
+
+    expect(rendered).toMatchObject({ skip: false, content: "Unsubscribed from DSP-1 by alice" });
+  });
+
+  test("falls back to 'someone' when subscription.removed carries no actor", () => {
+    const rendered = renderInbound(
+      dispatchEvent("subscription.removed", { session_id: reader, topics: [] }),
+      reader
+    );
+
+    expect(rendered.content).toBe("Unsubscribed from DSP-1 by someone");
+  });
+
+  test("renders nothing for a subscription.removed naming a different session — this event also reaches the issue's own topic, so every other subscriber sees nothing", () => {
+    const rendered = renderInbound(
+      dispatchEvent("subscription.removed", {
+        session_id: "ses_someone_else",
+        by: { kind: "user", id: "alice" },
+        topics: ["notifications.dispatch.issue.DSP-1.>"],
+      }),
+      reader
+    );
+
+    expect(rendered).toMatchObject({ skip: true, content: "" });
+  });
+
   test("renders a comment.created reply to an ask as 're: <question>', not the raw ask id", () => {
     const askID = "ask-1";
     const raw = JSON.stringify(

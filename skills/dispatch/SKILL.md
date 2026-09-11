@@ -226,9 +226,11 @@ It returns `details` `{ issue, topic, message }`. `body` is capped at 2,000 char
 
 ## What comes back
 
-A write result's `details.topic` subscribes the host to its owner. Issue writes use `notifications.dispatch.issue.<KEY>.>`;
+A write result's `details.topic` subscribes the host to its owner, and the first such subscription on an issue or document also tells
+you so (an already-subscribed write stays quiet — no repeat notice). Issue writes use `notifications.dispatch.issue.<KEY>.>`;
 project-document writes use `notifications.dispatch.document.<PROJECT>.<SLUG>.>`. The owner topic carries every Dispatch event; `notify`
-only controls agent wake and routed delivery. After a restart, catch up with:
+only controls agent wake and routed delivery. A human may unsubscribe you from the issue or document header; you are told with a
+`subscription.removed` notice when that happens. After a restart, catch up with:
 
 ```ts
 dispatch_read({ issue?, project?, artifact?, ref? })

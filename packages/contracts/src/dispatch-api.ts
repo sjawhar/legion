@@ -261,6 +261,23 @@ export interface Agent {
   readonly last_seen: number;
 }
 
+// Subscriber is a session whose persisted Envoy interests include an issue's
+// or unlinked document's topic family, enriched with its live registry state
+// when the session is currently connected. Removable is false when the only
+// matching topic is broader than this owner (e.g. "notifications.dispatch.>"):
+// removing it would silently unsubscribe the session from every other issue
+// and document too, so the server refuses to remove it; `via` then names one
+// such topic.
+export interface Subscriber {
+  readonly session_id: string;
+  readonly title: string;
+  readonly live: boolean;
+  readonly last_seen: number;
+  readonly topics: readonly string[];
+  readonly removable: boolean;
+  readonly via?: string;
+}
+
 export interface ReferencedBy {
   readonly kind: "ask" | "comment" | "message" | "artifact";
   readonly id: string;
@@ -312,6 +329,16 @@ export interface ChildStatusEventPayload {
   readonly child_key: string;
   readonly from: string;
   readonly to: string;
+}
+
+// SubscriptionRemovedEventPayload is the wire payload of subscription.removed:
+// a human unsubscribed session_id from topics on this issue or document, and
+// this record is both the audit trail and the direct notice routed to that
+// session's own agent topic regardless of the issue's route.
+export interface SubscriptionRemovedEventPayload {
+  readonly session_id: string;
+  readonly by: Actor;
+  readonly topics: readonly string[];
 }
 
 interface DispatchEventBase {
@@ -378,6 +405,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "child.status";
       readonly payload: ChildStatusEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "subscription.removed";
+      readonly payload: SubscriptionRemovedEventPayload;
     });
 
 export type Event = DispatchEvent;
@@ -672,4 +703,10 @@ export const ChildStatusEventPayloadSchema = z.object({
   child_key: z.string().optional(),
   from: z.string().optional(),
   to: z.string().optional(),
+});
+
+export const SubscriptionRemovedEventPayloadSchema = z.object({
+  session_id: z.string().optional(),
+  by: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
+  topics: z.array(z.string()).optional(),
 });

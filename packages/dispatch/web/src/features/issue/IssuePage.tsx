@@ -12,14 +12,7 @@ import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
-import type {
-  Artifact,
-  Event,
-  ExternalLink,
-  Issue,
-  UserIssueState,
-  UserState,
-} from "../../api/types";
+import type { Artifact, ExternalLink, Issue, UserIssueState, UserState } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -52,8 +45,6 @@ import {
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
-import { shortSessionId } from "../conversation/conversation-model";
-import { useAgents } from "../conversation/useAgents";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import {
@@ -70,6 +61,7 @@ import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
 import { IssueTabs } from "./IssueTabs";
+import { SubscribedAgents } from "./SubscribedAgents";
 import { useIssueDrafts } from "./useIssueDrafts";
 
 const issueStatuses = [
@@ -83,19 +75,6 @@ const issueStatuses = [
   "retro",
   "done",
 ];
-
-function activeSessions(
-  events: Event[],
-  liveSessionTitles: ReadonlyMap<string, string>
-): Extract<Event["actor"], { kind: "session" }>[] {
-  const sessions = new Map<string, Extract<Event["actor"], { kind: "session" }>>();
-  for (const event of events) {
-    if (event.actor.kind === "session") {
-      sessions.set(event.actor.id, event.actor);
-    }
-  }
-  return [...sessions.values()].filter((session) => liveSessionTitles.has(session.id));
-}
 
 function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
   return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false };
@@ -234,13 +213,17 @@ function IssueHeader({
   const queryClient = useQueryClient();
   const [editingTitle, setEditingTitle] = useState(false);
   const [routeEditing, setRouteEditing] = useState(false);
-  const events = useQuery({
-    queryKey: ["events", issue.key, "active-sessions"],
-    queryFn: () => api.getIssueEvents(issue.key, { limit: 200, order: "desc" }),
+  const subscribers = useQuery({
+    queryKey: ["subscribers", issue.key],
+    queryFn: () => api.getIssueSubscribers(issue.key),
   });
-  const hasSessionEvents = events.data?.some((event) => event.actor.kind === "session") ?? false;
-  const { isError: liveSessionsError, titles: liveSessionTitles } = useAgents(hasSessionEvents);
-  const sessions = liveSessionsError ? [] : activeSessions(events.data ?? [], liveSessionTitles);
+  const subscriberList = subscribers.isError ? [] : (subscribers.data ?? []);
+  const unsubscribe = useMutation({
+    mutationFn: (sessionId: string) => api.unsubscribeIssueSession(issue.key, sessionId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["subscribers", issue.key] });
+    },
+  });
   const updateIssue = useMutation({
     mutationFn: (input: Partial<Pick<Issue, "route" | "status" | "title">>) =>
       api.patchIssue(issue.key, input),
@@ -526,38 +509,25 @@ function IssueHeader({
           ))}
         </div>
       )}
-      {sessions.length === 0 ? null : (
-        <section aria-label="Active sessions" className="mt-2">
-          <h2 className={`text-sm font-semibold ${textSecondaryOnCanvas}`}>Active sessions</h2>
-          <ul className="mt-2 flex flex-wrap gap-2">
-            {sessions.map((session) => {
-              const tmuxTarget = session.origin?.tmux;
-              const title = liveSessionTitles.get(session.id)?.trim();
-              const label =
-                title === "" || title === undefined ? shortSessionId(session.id) : title;
-              return (
-                <li
-                  className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm ${badgeLow.bg} ${badgeLow.text}`}
-                  key={session.id}
-                >
-                  <span title={session.id}>{label}</span>
-                  {tmuxTarget === undefined ? null : (
-                    <button
-                      className={`font-medium ${linkText} ${linkHoverText}`}
-                      onClick={() => {
-                        void navigator.clipboard?.writeText(tmuxTarget);
-                      }}
-                      type="button"
-                    >
-                      Copy tmux target
-                    </button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      )}
+      <SubscribedAgents
+        onUnsubscribe={(sessionId) => unsubscribe.mutate(sessionId)}
+        ownerLabel={issue.key}
+        subscribers={subscriberList}
+      />
+      {subscribers.isError ? (
+        <QueryError
+          message="Subscribed agents unavailable — Envoy listener unreachable."
+          onRetry={() => subscribers.refetch()}
+          retrying={subscribers.isFetching}
+        />
+      ) : null}
+      {unsubscribe.isError ? (
+        <QueryError
+          message="Could not unsubscribe this agent."
+          onRetry={() => unsubscribe.mutate(unsubscribe.variables as string)}
+          retrying={unsubscribe.isPending}
+        />
+      ) : null}
       {updateIssue.isError ? (
         <QueryError
           message="Could not update this issue."

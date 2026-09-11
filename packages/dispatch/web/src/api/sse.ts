@@ -36,6 +36,7 @@ const knownEventTypes: Record<EventType, true> = {
   "suggestion.rejected": true,
   "message.created": true,
   "child.status": true,
+  "subscription.removed": true,
 };
 
 // A dead connection reveals no client-visible signal until this much time passes with
@@ -99,6 +100,9 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     if (event.type.startsWith("ask.")) {
       keys.push(["inbox"]);
     }
+    if (event.type === "subscription.removed") {
+      keys.push(["subscribers", event.artifact_id]);
+    }
     return keys;
   }
 
@@ -157,6 +161,11 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
 
   if (event.type === "message.created") {
     keys.push(["messages", event.issue_key], ["artifact"]);
+    return keys;
+  }
+
+  if (event.type === "subscription.removed") {
+    keys.push(["subscribers", event.issue_key]);
     return keys;
   }
 

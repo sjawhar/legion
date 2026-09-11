@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
@@ -15,6 +15,7 @@ import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactBlobView, ArtifactHeader } from "../artifacts/ArtifactHeader";
 import { ReferencedBy } from "../artifacts/ArtifactsTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
+import { SubscribedAgents } from "../issue/SubscribedAgents";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { firstHighlightTerm } from "../search/search-model";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
@@ -22,6 +23,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 export function DocumentPage(): ReactNode {
   const location = useLocation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const route = parseProjectPath(location.pathname, location.search);
   const documentRoute = route?.kind === "document" ? route : undefined;
   const [showDiff, setShowDiff] = useState(false);
@@ -40,6 +42,29 @@ export function DocumentPage(): ReactNode {
         throw new Error("Project document query requires a document route.");
       }
       return api.getProjectArtifact(documentRoute.project, documentRoute.slug);
+    },
+  });
+  const subscribers = useQuery({
+    enabled: artifact.data !== undefined,
+    queryKey: ["subscribers", artifact.data?.id],
+    queryFn: () => {
+      if (artifact.data === undefined) {
+        throw new Error("Document subscribers query requires an artifact.");
+      }
+      return api.getArtifactSubscribers(artifact.data.id);
+    },
+  });
+  const unsubscribe = useMutation({
+    mutationFn: (sessionId: string) => {
+      if (artifact.data === undefined) {
+        throw new Error("Document unsubscribe requires an artifact.");
+      }
+      return api.unsubscribeArtifactSession(artifact.data.id, sessionId);
+    },
+    onSuccess: () => {
+      if (artifact.data !== undefined) {
+        void queryClient.invalidateQueries({ queryKey: ["subscribers", artifact.data.id] });
+      }
     },
   });
   const query = new URLSearchParams(location.search);
@@ -111,6 +136,25 @@ export function DocumentPage(): ReactNode {
         toolbar={artifact.data.kind === "doc" ? toolbar : undefined}
         version={version}
       >
+        <SubscribedAgents
+          onUnsubscribe={(sessionId) => unsubscribe.mutate(sessionId)}
+          ownerLabel={`${artifact.data.project}/${artifact.data.slug}`}
+          subscribers={subscribers.isError ? [] : (subscribers.data ?? [])}
+        />
+        {subscribers.isError ? (
+          <QueryError
+            message="Subscribed agents unavailable — Envoy listener unreachable."
+            onRetry={() => subscribers.refetch()}
+            retrying={subscribers.isFetching}
+          />
+        ) : null}
+        {unsubscribe.isError ? (
+          <QueryError
+            message="Could not unsubscribe this agent."
+            onRetry={() => unsubscribe.mutate(unsubscribe.variables as string)}
+            retrying={unsubscribe.isPending}
+          />
+        ) : null}
         {artifact.data.kind === "doc" ? (
           <ArtifactDocument
             artifact={artifact.data}

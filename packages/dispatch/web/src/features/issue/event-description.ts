@@ -37,6 +37,8 @@ export function eventDescription(event: Event): string {
       return "Suggestion rejected";
     case "child.status":
       return "Child status changed";
+    case "subscription.removed":
+      return `Unsubscribed ${event.payload.session_id}`;
   }
   return event satisfies never;
 }

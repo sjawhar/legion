@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { setLiveSessions } from "./agents";
+import { setInterests, setLiveSessions } from "./agents";
 import {
   createAsk,
   createComment,
@@ -67,6 +67,15 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
   await setEventCreatedAt(code.id, new Date(Date.now() - 10 * 60 * 1_000).toISOString());
   if (!process.env.PLAYWRIGHT_BASE_URL) {
     await setLiveSessions([{ session_id: "e2e-conv-agent", title: "Planner (e2e)" }]);
+    await setInterests([
+      {
+        session_id: "e2e-conv-agent",
+        topics: [
+          `notifications.dispatch.issue.${issue.key}`,
+          `notifications.dispatch.issue.${issue.key}.>`,
+        ],
+      },
+    ]);
   }
 
   const alice = await asUser(browser, "alice");
@@ -74,9 +83,11 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
     if (!process.env.PLAYWRIGHT_BASE_URL) {
-      const activeSessions = page.getByRole("region", { name: "Active sessions" });
-      await expect(activeSessions.getByText("Planner (e2e)", { exact: true })).toBeVisible();
-      await expect(activeSessions.getByText("ghost-session-0000", { exact: true })).toHaveCount(0);
+      const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
+      await expect(subscribedAgents.getByText("Planner (e2e)", { exact: true })).toBeVisible();
+      await expect(subscribedAgents.getByText("ghost-session-0000", { exact: true })).toHaveCount(
+        0
+      );
     }
 
     await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
