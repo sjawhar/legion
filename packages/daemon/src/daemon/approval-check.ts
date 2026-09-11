@@ -14,6 +14,27 @@ const reviewsResponse = z.array(
 const SUCCESS_DESCRIPTION = "Approved by a human on the current head";
 const PENDING_DESCRIPTION = "Awaiting human approval on the current head";
 
+/** `gh api`'s own failure text on a non-2xx response, e.g. `gh: Resource not accessible by
+ * integration (HTTP 403)`. There is no structured exit code per HTTP status, so this is the only
+ * way to recover the status GitHub actually returned. */
+const HTTP_STATUS_PATTERN = /\(HTTP (\d{3})\)/;
+/** Non-2xx codes a retry can never fix on its own: the App's installation is missing the
+ * `statuses: write` permission (401/403), the sha or repo no longer exists (404), or the request
+ * itself is malformed (422). Every other failure (a 5xx, a network error, an unrecognized code)
+ * is presumed transient and worth retrying as-is. */
+const PERMANENT_STATUS_CODES: Record<number, true> = { 401: true, 403: true, 404: true, 422: true };
+const APPROVAL_STATUS_REMEDY =
+  "grant the App `Commit statuses: Read and write` and accept the installation permission update";
+
+/** The result of one `setApprovalStatus` attempt: `written` on a 2xx response, otherwise
+ * `permanent` classifies whether a retry can ever succeed without human intervention (see
+ * `PERMANENT_STATUS_CODES`) and `reason` is a single, fully-composed message -- repo, sha, HTTP
+ * status, and (for a permanent failure) the exact remedy -- ready for the caller to log verbatim
+ * without assembling anything itself. */
+export type SetApprovalStatusOutcome =
+  | { written: true }
+  | { written: false; permanent: boolean; reason: string };
+
 export type ApprovalState = "success" | "pending";
 
 type TokenLease = {
@@ -91,12 +112,18 @@ export async function getApprovalState(
   return (await queryApprovalState(effect, deps)).state;
 }
 
+/** Writes the human-approval backstop status for `effect`'s head sha. Never throws for an HTTP
+ * failure -- only for a programmer error (a malformed `effect.repo`, surfaced by
+ * `queryApprovalState`'s own validation): a non-2xx response from the POST is classified instead
+ * and handed back as a `SetApprovalStatusOutcome` for the caller (`events.ts`'s durable dispatch)
+ * to record and retry. This backstop status is never the merge gate itself (a human `APPROVED`
+ * PR review is), so a write that can never succeed must not take the daemon down. */
 export async function setApprovalStatus(
   effect: { repo: string; pr: number; sha: string },
   deps: ApprovalCheckDeps
-): Promise<void> {
+): Promise<SetApprovalStatusOutcome> {
   if (deps.gatesMerge === "off") {
-    return;
+    return { written: true };
   }
 
   const { state, env } = await queryApprovalState(effect, deps);
@@ -116,7 +143,15 @@ export async function setApprovalStatus(
     ],
     { env }
   );
-  if (statusResult.exitCode !== 0) {
-    throw new Error(`GitHub status write failed: ${statusResult.stderr || statusResult.stdout}`);
+  if (statusResult.exitCode === 0) {
+    return { written: true };
   }
+
+  const detail = (statusResult.stderr || statusResult.stdout).trim();
+  const code = Number(detail.match(HTTP_STATUS_PATTERN)?.[1]);
+  const permanent = Number.isInteger(code) && PERMANENT_STATUS_CODES[code] === true;
+  const reason = permanent
+    ? `GitHub status write to ${effect.repo}@${effect.sha} failed permanently (HTTP ${code}): ${detail} -- ${APPROVAL_STATUS_REMEDY}.`
+    : `GitHub status write to ${effect.repo}@${effect.sha} failed${Number.isInteger(code) ? ` (HTTP ${code})` : ""}: ${detail}`;
+  return { written: false, permanent, reason };
 }

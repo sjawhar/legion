@@ -9478,6 +9478,7 @@ describe("ProcessManager", () => {
               await processes.resurrect(effect.tree);
           }
         },
+        setApprovalStatus: async () => ({ written: true }),
       },
       { force: true }
     );

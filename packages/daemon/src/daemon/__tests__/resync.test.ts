@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { type IssueKey, roleToken } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
@@ -22,6 +22,7 @@ function resyncDeps(state: LegionState): RunResyncDeps {
     saveState: async () => {},
     fetchCiStatusBatch: async () => ({}),
     applyEffects: async () => {},
+    setApprovalStatus: async () => ({ written: true }),
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
   };
 }
@@ -1287,6 +1288,61 @@ describe("runResync", () => {
     expect(statusWrites).toEqual([]);
     expect(state.pendingStatusWrites[issue]).toBeUndefined();
     expect(saves).toBe(1);
+  });
+
+  it("retries a pending approval-status write against the failing sha and clears it on success", async () => {
+    const state = newLegionState("omp", 1);
+    state.approvalStatusPending["acme/widgets#7"] = {
+      sha: "head-1",
+      lastError: "boom",
+      attempts: 2,
+      at: Date.parse("2026-08-23T00:00:00.000Z"),
+    };
+    const attempted: Array<{ repo: string; pr: number; sha: string }> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      setApprovalStatus: async (effect) => {
+        attempted.push({ repo: effect.repo, pr: effect.pr, sha: effect.sha });
+        return { written: true };
+      },
+    });
+
+    expect(attempted).toEqual([{ repo: "acme/widgets", pr: 7, sha: "head-1" }]);
+    expect(state.approvalStatusPending["acme/widgets#7"]).toBeUndefined();
+  });
+
+  it("keeps retrying a still-failing approval-status write and bumps its attempt count without a second warning", async () => {
+    const state = newLegionState("omp", 1);
+    state.approvalStatusPending["acme/widgets#7"] = {
+      sha: "head-1",
+      lastError: "old reason",
+      attempts: 1,
+      at: Date.parse("2026-08-23T00:00:00.000Z"),
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await runResync({
+        ...resyncDeps(state),
+        setApprovalStatus: async () => ({
+          written: false,
+          permanent: true,
+          reason: "still failing",
+        }),
+      });
+
+      expect(state.approvalStatusPending["acme/widgets#7"]).toMatchObject({
+        sha: "head-1",
+        lastError: "still failing",
+        attempts: 2,
+      });
+      // Already warned once for this sha (attempts started at 1, not 0): resync's retry must
+      // not repeat the same permission-denied warning on every cycle.
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("probes every active tree with a confirmed ready root and a recorded locator", async () => {
