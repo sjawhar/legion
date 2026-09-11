@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { controllerToken, type LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
@@ -117,6 +118,26 @@ async function persistedTranscript(
   return { sessionFile, agentId };
 }
 
+/**
+ * OMP identifies a subagent session by its transcript path, not by environment: a `task`-spawned
+ * subagent's transcript file lives inside a directory named after its parent's transcript file
+ * (minus the `.jsonl` extension), so `fs.existsSync(path.dirname(sessionFile) + ".jsonl")` finds
+ * the parent (oh-my-pi `packages/coding-agent/src/session/session-manager.ts:143-154`). A
+ * subagent session still loads a fresh instance of this extension module and inherits the
+ * parent's LEGION_* environment, so without this guard `classifySession` would still see
+ * root-architect or phase-worker markers and try to bootstrap a second time: `/process/started`
+ * or `/worker/started` would be called with the already-consumed `LEGION_BOOT_TOKEN`, the daemon
+ * would refuse it, and the bootstrap catch's `exitProcess(1)` would kill the whole OS process --
+ * including the parent that is still waiting on the subagent. A subagent session must therefore
+ * claim no role, call no daemon route, install no tool gate of its own (the parent's gate, live
+ * in the parent process, still applies to it), and never call `exitProcess`.
+ */
+async function isSubagentSession(context: SessionContext): Promise<boolean> {
+  await context.sessionManager.ensureOnDisk();
+  const sessionFile = context.sessionManager.getSessionFile();
+  return sessionFile !== undefined && fs.existsSync(`${path.dirname(sessionFile)}.jsonl`);
+}
+
 // An architect delegates code work, but its prompt requires `legion handoff
 // write/complete` and `legion gh --` to report its own phase and touch GitHub.
 // Allow bash only for a single `legion ...` invocation: no chaining outside a
@@ -185,6 +206,15 @@ export default function legionExtension(pi: PiApi): void {
   // plain closure state.
   let capability: LegionCapability | undefined;
   let bootstrap: Promise<void> | undefined;
+
+  // A subagent session's transcript path never changes over its lifetime, so the check that
+  // gates both session_start and tool_call below needs to run at most once per session instead
+  // of once per tool call.
+  let subagentSession: Promise<boolean> | undefined;
+  const checkSubagentSession = (context: SessionContext): Promise<boolean> => {
+    subagentSession ??= isSubagentSession(context);
+    return subagentSession;
+  };
 
   const roleDaemon = () => {
     return createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"), fetch, {
@@ -470,6 +500,10 @@ export default function legionExtension(pi: PiApi): void {
   };
 
   pi.on("session_start", async (_event, context) => {
+    // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
+    // before classification, or the inherited LEGION_* environment would look like a fresh
+    // root/worker boot and its failure would exit the parent process. See isSubagentSession.
+    if (await checkSubagentSession(context)) return;
     const classification = classifySession(process.env);
     switch (classification.kind) {
       case "controller": {
@@ -496,6 +530,10 @@ export default function legionExtension(pi: PiApi): void {
   });
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
+    // No gate of any kind applies to a subagent's own tool calls: the parent session's gate,
+    // running in the parent's own module instance, already governs the parent's `task` call
+    // that spawned it (see the architect `task` block above and isSubagentSession).
+    if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
     const active = capability?.sessionID === sessionID ? capability : undefined;
     // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
@@ -511,6 +549,16 @@ export default function legionExtension(pi: PiApi): void {
         (toolCall.toolName === "bash" && !isSingleLegionCommand(toolCall.input.command)))
     ) {
       return { block: true, reason: "the architect delegates all code work to phase workers" };
+    }
+    // The architect spawns further Legion work only through `spawn_worker`: Legion runs one
+    // agent per process, and an in-process `task` subagent would inherit the architect's Legion
+    // environment and clash with its own daemon-registered role (see isSubagentSession).
+    if (active?.role === "architect" && toolCall.toolName === "task") {
+      return {
+        block: true,
+        reason:
+          "the architect delegates only through spawn_worker; Legion runs one agent per process",
+      };
     }
     // Only a phase-worker session (never the root or sub-architect kinds above) is further
     // restricted by role below.

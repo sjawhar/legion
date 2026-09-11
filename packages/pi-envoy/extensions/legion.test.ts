@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -244,6 +244,24 @@ function sessionContext(
   };
 }
 
+/** Lays out a `{ parentFile, childFile }` transcript pair matching OMP's own subagent
+ * convention (oh-my-pi packages/coding-agent/src/session/session-manager.ts:143-154): the
+ * child's transcript sits inside a directory named after the parent's transcript file, minus
+ * its `.jsonl` extension, so `fs.existsSync(path.dirname(childFile) + ".jsonl")` finds
+ * `parentFile`. */
+async function createSubagentTranscriptPaths(): Promise<{
+  readonly parentFile: string;
+  readonly childFile: string;
+}> {
+  const baseDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-subagent-"));
+  temporaryPaths.push(baseDirectory);
+  const parentFile = path.join(baseDirectory, "parent.jsonl");
+  await writeFile(parentFile, "");
+  const childDirectory = path.join(baseDirectory, "parent");
+  await mkdir(childDirectory, { recursive: true });
+  const childFile = path.join(childDirectory, "child.jsonl");
+  return { parentFile, childFile };
+}
 async function createJjWorkspace(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "legion-omp-extension-"));
   temporaryPaths.push(directory);
@@ -888,6 +906,105 @@ describe("Legion OMP extension", () => {
     expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
   });
+  test("never bootstraps, claims a role, or exits for a subagent session, even with root-architect environment", async () => {
+    const requests: { readonly path: string }[] = [];
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error(`exitProcess(${code})`);
+    });
+    const { childFile } = await createSubagentTranscriptPaths();
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-subagent-root";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = "REPO-42";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      requests.push({ path: url.pathname });
+      return Response.json({
+        session_id: "ses_sub_root",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("session_start or tool_call handler was not registered");
+    }
+    const context = sessionContext("ses_sub_root", childFile);
+
+    await sessionStart({}, context);
+
+    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+    expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
+    expect(exits).toEqual([]);
+    expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+
+    // No tool gate was installed for this session either: a plain bash call, which an
+    // unregistered root/phase worker would otherwise have blocked, passes through untouched.
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-sub-root-bash", input: { command: "ls" } },
+        context
+      )
+    ).resolves.toBeUndefined();
+  });
+  test("never bootstraps, claims a role, or exits for a subagent session, even with phase-worker environment", async () => {
+    const requests: { readonly path: string }[] = [];
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error(`exitProcess(${code})`);
+    });
+    const { childFile } = await createSubagentTranscriptPaths();
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_BOOT_TOKEN = "boot-subagent-worker";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      requests.push({ path: url.pathname });
+      return Response.json({
+        session_id: "ses_sub_worker",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("session_start or tool_call handler was not registered");
+    }
+    const context = sessionContext("ses_sub_worker", childFile);
+
+    await sessionStart({}, context);
+
+    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+    expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
+    expect(exits).toEqual([]);
+    expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-sub-worker-bash", input: { command: "ls" } },
+        context
+      )
+    ).resolves.toBeUndefined();
+  });
   test("throws naming the missing variable when a phase worker boots without LEGION_BOOT_TOKEN", async () => {
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -1082,6 +1199,9 @@ describe("Legion OMP extension", () => {
       if (role === "architect" && ["edit", "write", "apply_patch"].includes(toolName)) {
         return "the architect delegates all code work to phase workers";
       }
+      if (role === "architect" && toolName === "task") {
+        return "the architect delegates only through spawn_worker; Legion runs one agent per process";
+      }
       if (role === "reviewer" && ["edit", "write", "apply_patch"].includes(toolName)) {
         return "the reviewer edits nothing except the final .legion/ cleanup commit via bash";
       }
@@ -1113,6 +1233,37 @@ describe("Legion OMP extension", () => {
         else expect(result).toEqual({ block: true, reason });
       }
     }
+  });
+  test("blocks the architect's task tool but allows an implementer's, per the one-agent-per-process rule", async () => {
+    const architectWorkspace = await createJjWorkspace();
+    const { toolCall: architectToolCall, context: architectContext } = await bootWorker({
+      role: "architect",
+      workspace: architectWorkspace,
+      sessionId: "ses_architect_task",
+    });
+    await expect(
+      architectToolCall(
+        { toolName: "task", toolCallId: "call-architect-task", input: {} },
+        architectContext
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason:
+        "the architect delegates only through spawn_worker; Legion runs one agent per process",
+    });
+
+    const implementerWorkspace = await createJjWorkspace();
+    const { toolCall: implementerToolCall, context: implementerContext } = await bootWorker({
+      role: "implementer",
+      workspace: implementerWorkspace,
+      sessionId: "ses_implementer_task",
+    });
+    await expect(
+      implementerToolCall(
+        { toolName: "task", toolCallId: "call-implementer-task", input: {} },
+        implementerContext
+      )
+    ).resolves.toBeUndefined();
   });
   test("allows xd:// tool-device writes through the mutation gate but still blocks real file writes", async () => {
     const blockedReason = (role: LegionRole): string =>
