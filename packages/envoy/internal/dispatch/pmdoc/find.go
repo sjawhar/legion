@@ -17,6 +17,7 @@ type Range struct {
 }
 
 var ErrTargetNotFound = errors.New("pmdoc: target not found")
+var ErrTargetSpansBlocks = errors.New("pmdoc: target spans textblocks")
 
 // Candidate gives one matching range and enough surrounding document text to
 // disambiguate it.
@@ -80,6 +81,20 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 		})
 	}
 	return Range{}, &ErrTargetAmbiguous{Candidates: candidates}
+}
+
+// TargetSpansBlocks reports whether r is not wholly contained by one
+// textblock. Inline code and links remain inside their containing textblock.
+func TargetSpansBlocks(doc *Node, r Range) bool {
+	withinTextblock := false
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if isTextblock(node.Type) && pos+1 <= r.From && r.To <= end-1 {
+			withinTextblock = true
+			return false
+		}
+		return true
+	})
+	return !withinTextblock
 }
 
 // FindHeading finds the heading whose text equals title exactly. occurrence is

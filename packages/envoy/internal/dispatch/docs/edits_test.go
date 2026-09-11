@@ -80,12 +80,12 @@ func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 	waitForDocumentText(t, service, artifactID, "base browser\n\n!\n")
 }
 
-func TestApplyOpsInsertsAtHeadingsQuotesAndEdges(t *testing.T) {
+func TestApplyOpsInsertsAtHeadingsAndEdgesAndReplacesInlineText(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "# Title\n\nBody text.\n")
 	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
 		{Op: "insert", Markdown: "Intro.", After: "heading:Title"},
-		{Op: "insert", Markdown: " more", After: "text."},
+		{Op: "replace", Find: "text.", With: "text. more"},
 		{Op: "insert", Markdown: "- item", Before: "start"},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
 	if err != nil {
@@ -103,4 +103,157 @@ func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "keep\n")
+}
+
+func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing.T) {
+	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| A10 | old |\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := applyOperation(tree, model.EditOp{
+		Op:       "insert",
+		After:    "A10",
+		Markdown: "Inserted paragraph",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
+	if markdown != want {
+		t.Fatalf("paragraph after cell anchor = %q, want %q", markdown, want)
+	}
+}
+
+func TestApplyOperationInsertsParagraphAfterParagraphContainingAnchor(t *testing.T) {
+	tree, err := parseInput("Before anchor after.\n\nNext.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := applyOperation(tree, model.EditOp{
+		Op:       "insert",
+		After:    "anchor",
+		Markdown: "Inserted paragraph",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "Before anchor after.\n\nInserted paragraph\n\nNext.\n"
+	if markdown != want {
+		t.Fatalf("paragraph after in-paragraph anchor = %q, want %q", markdown, want)
+	}
+}
+
+func TestApplyOperationInsertsInlineMarkdownAsOwnParagraph(t *testing.T) {
+	tree, err := parseInput("Before anchor after.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := applyOperation(tree, model.EditOp{
+		Op:       "insert",
+		After:    "anchor",
+		Markdown: " **bold**",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "Before anchor after.\n\n**bold**\n"
+	if markdown != want {
+		t.Fatalf("inline markdown insert = %q, want %q", markdown, want)
+	}
+}
+
+func TestApplyOperationExtendsTableAfterCellAnchor(t *testing.T) {
+	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| A10 | old |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := applyOperation(tree, model.EditOp{
+		Op:       "insert",
+		After:    "A10",
+		Markdown: "| A11 | new |",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n"
+	if markdown != want {
+		t.Fatalf("table-row insertion = %q, want %q", markdown, want)
+	}
+}
+
+func TestApplyOperationRejectsFindTargetSpanningTextblocks(t *testing.T) {
+	tree, err := parseInput("one\n\ntwo\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range []model.EditOp{
+		{Op: "replace", Find: "one two", With: "changed"},
+		{Op: "delete", Find: "one two"},
+	} {
+		_, err := applyOperation(tree, op)
+		if !errors.Is(err, pmdoc.ErrTargetSpansBlocks) {
+			t.Fatalf("%s spanning textblocks error = %v, want ErrTargetSpansBlocks", op.Op, err)
+		}
+	}
+}
+
+func TestApplyOperationMatchesPlainTextInsideInlineCodeAndLinks(t *testing.T) {
+	tests := []struct {
+		name     string
+		markdown string
+		anchor   string
+		want     string
+	}{
+		{
+			name:     "inline code",
+			markdown: "before `code anchor` after\n",
+			anchor:   "code anchor",
+			want:     "before updated after\n",
+		},
+		{
+			name:     "link",
+			markdown: "before [link anchor](https://example.com) after\n",
+			anchor:   "link anchor",
+			want:     "before updated after\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := applyOperation(tree, model.EditOp{
+				Op:   "replace",
+				Find: test.anchor,
+				With: "updated",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("replace %q = %q, want %q", test.anchor, markdown, test.want)
+			}
+		})
+	}
 }

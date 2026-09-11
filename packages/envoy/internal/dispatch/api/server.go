@@ -237,6 +237,14 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_OP", http.StatusBadRequest, invalidOp.Error())
 		return
 	}
+	if errors.Is(err, pmdoc.ErrTargetSpansBlocks) {
+		writeError(w, "TARGET_SPANS_BLOCKS", http.StatusBadRequest, err.Error())
+		return
+	}
+	if errors.Is(err, pmdoc.ErrTableWidth) {
+		writeError(w, "TABLE_WIDTH", http.StatusBadRequest, err.Error())
+		return
+	}
 	if errors.Is(err, docs.ErrAnchorMissing) {
 		writeError(w, "ANCHOR_MISSING", http.StatusConflict, err.Error())
 		return

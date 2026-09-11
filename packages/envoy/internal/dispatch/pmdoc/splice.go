@@ -1,6 +1,9 @@
 package pmdoc
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Splice returns a copy of doc with r replaced by with using Proof's
 // ProseMirror-compatible range-fitting rules.
@@ -32,6 +35,111 @@ func validateSplice(doc *Node, r Range, with *Node) error {
 		return err
 	}
 	return with.Validate()
+}
+
+var ErrTableWidth = errors.New("pmdoc: table row exceeds table width")
+
+// BlockBoundary returns the document-level boundary before or after the block
+// containing target.
+func BlockBoundary(doc *Node, target Range, after bool) (int, error) {
+	if doc == nil || doc.Type != "doc" {
+		return 0, fmt.Errorf("%w: BlockBoundary wants a document", ErrSchema)
+	}
+	if err := doc.Validate(); err != nil {
+		return 0, err
+	}
+	position := 0
+	for _, block := range doc.Children {
+		end := position + nodeSize(block)
+		if target.From >= position && target.To <= end {
+			if after {
+				return end, nil
+			}
+			return position, nil
+		}
+		position = end
+	}
+	return 0, ErrTargetNotFound
+}
+
+// InsertTableRows inserts a pipe-table row fragment beside the row containing
+// target. It reports inserted=false when target is outside a table or markdown
+// is not exclusively table rows.
+func InsertTableRows(doc *Node, target Range, markdown string, after bool) (*Node, bool, error) {
+	if doc == nil || doc.Type != "doc" {
+		return nil, false, fmt.Errorf("%w: InsertTableRows wants a document", ErrSchema)
+	}
+	if err := doc.Validate(); err != nil {
+		return nil, false, err
+	}
+
+	var tablePath []int
+	rowIndex := -1
+	walk(doc, func(node *Node, path []int, pos, end int) bool {
+		if (node.Type != "table_header_row" && node.Type != "table_row") ||
+			target.From < pos+1 || target.To > end-1 || len(path) == 0 {
+			return true
+		}
+		parentPath := path[:len(path)-1]
+		if nodeAtPath(doc, parentPath).Type != "table" {
+			return true
+		}
+		tablePath = append([]int(nil), parentPath...)
+		rowIndex = path[len(path)-1]
+		return false
+	})
+	if rowIndex < 0 {
+		return doc, false, nil
+	}
+
+	table := nodeAtPath(doc, tablePath)
+	width := len(table.Children[0].Children)
+	rows, supported, err := parseTableRows(markdown, width)
+	if err != nil || !supported {
+		return nil, supported, err
+	}
+	rows, err = normalizeTableRows(rows, table.Children[0], width)
+	if err != nil {
+		return nil, true, err
+	}
+
+	out := cloneNode(doc)
+	outTable := nodeAtPath(out, tablePath)
+	index := rowIndex
+	if after {
+		index++
+	}
+	children := make([]*Node, 0, len(outTable.Children)+len(rows))
+	children = append(children, outTable.Children[:index]...)
+	children = append(children, rows...)
+	children = append(children, outTable.Children[index:]...)
+	outTable.Children = children
+	if err := out.Validate(); err != nil {
+		return nil, true, err
+	}
+	return out, true, nil
+}
+
+func normalizeTableRows(rows []*Node, header *Node, width int) ([]*Node, error) {
+	out := make([]*Node, 0, len(rows))
+	for _, row := range rows {
+		if len(row.Children) > width {
+			return nil, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, len(row.Children), width)
+		}
+		normalized := cloneNode(row)
+		for len(normalized.Children) < width {
+			template := header.Children[len(normalized.Children)]
+			normalized.Children = append(normalized.Children, &Node{
+				Type:  "table_cell",
+				Attrs: cloneAttrs(template.Attrs),
+				Children: []*Node{{
+					Type: "paragraph",
+				}},
+			})
+		}
+		out = append(out, normalized)
+	}
+	return out, nil
 }
 
 type insertionBoundary struct {

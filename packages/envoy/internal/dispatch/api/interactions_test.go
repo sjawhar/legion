@@ -662,6 +662,88 @@ func TestDocumentEditMapsMissingAndAmbiguousTargets(t *testing.T) {
 	}
 }
 
+func TestDocumentEditExtendsTableAfterCellAnchor(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Table document edit", "| Key | Value |\n| --- | --- |\n| A10 | old |\n")
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":       "insert",
+			"after":    "A10",
+			"markdown": "| A11 | new |",
+		}},
+	}, "alice")
+	if edited.Code != http.StatusOK {
+		t.Fatalf("insert table row: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	if text.Code != http.StatusOK {
+		t.Fatalf("read edited table: status=%d body=%s", text.Code, text.Body.String())
+	}
+	got := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, text)
+	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n"
+	if got.Markdown != want {
+		t.Fatalf("table row insertion = %q, want %q", got.Markdown, want)
+	}
+}
+
+func TestDocumentEditInsertsParagraphAfterTableContainingCellAnchor(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Table paragraph insertion", "| Key | Value |\n| --- | --- |\n| A10 | old |\n\nAfter.\n")
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":       "insert",
+			"after":    "A10",
+			"markdown": "Inserted paragraph",
+		}},
+	}, "alice")
+	if edited.Code != http.StatusOK {
+		t.Fatalf("insert paragraph: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
+	if text.Code != http.StatusOK {
+		t.Fatalf("read edited table: status=%d body=%s", text.Code, text.Body.String())
+	}
+	got := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, text)
+	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
+	if got.Markdown != want {
+		t.Fatalf("paragraph insertion = %q, want %q", got.Markdown, want)
+	}
+}
+
+func TestDocumentEditRejectsTableRowWiderThanContainingTable(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Table width", "| Key | Value |\n| --- | --- |\n| A10 | old |\n")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":       "insert",
+			"after":    "A10",
+			"markdown": "| A11 | new | extra |",
+		}},
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"TABLE_WIDTH"`) {
+		t.Fatalf("wide table row: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestDocumentEditRejectsTargetSpanningTextblocks(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Target spans textblocks", "one\n\ntwo\n")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{
+			"op":   "replace",
+			"find": "one two",
+			"with": "changed",
+		}},
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"TARGET_SPANS_BLOCKS"`) {
+		t.Fatalf("spanning target: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestDocumentEditWithoutSummaryWritesUnnamedVersionAndEvent(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Unnamed document edit", "before")
