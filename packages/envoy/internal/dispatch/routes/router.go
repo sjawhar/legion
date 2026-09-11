@@ -198,7 +198,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadGateway, "code exchange failed: "+err.Error())
 		return
 	}
-	if _, allowed := r.ctx.AllowedLogins[tokens.GithubLogin]; !allowed {
+	if _, allowed := r.ctx.AllowedLogins[strings.ToLower(tokens.GithubLogin)]; !allowed {
 		identity.WriteError(w, identity.ErrLoginNotAllowed)
 		return
 	}

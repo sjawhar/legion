@@ -376,10 +376,12 @@ func seedRepoProjects(ctx context.Context, database *store.Store, raw string) er
 	return nil
 }
 
+// parseAllowedLogins lower-cases every entry: GitHub logins are case-insensitive, and the
+// login GitHub returns at sign-in carries the user's display casing.
 func parseAllowedLogins(raw string) map[string]struct{} {
 	logins := map[string]struct{}{}
 	for _, login := range strings.Split(raw, ",") {
-		if login = strings.TrimSpace(login); login != "" {
+		if login = strings.ToLower(strings.TrimSpace(login)); login != "" {
 			logins[login] = struct{}{}
 		}
 	}
