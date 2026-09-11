@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ComponentProps } from "react";
+import { MemoryRouter } from "react-router-dom";
 
 import type { Comment } from "../../api/types";
 import { ThreadList } from "./ThreadList";
@@ -49,32 +50,34 @@ function renderList(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) 
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={queryClient}>
-      <ThreadList
-        editingCommentId={undefined}
-        onEditingChange={() => {}}
-        actionErrorId={undefined}
-        artifactSlug="spec"
-        expandedThreadKey={open.key}
-        hoveredMarkId="open-mark"
-        hoveredItemId={undefined}
-        isClosed={false}
-        owner={{ key: "CORE-1", kind: "issue" }}
-        markPlacements={new Map([["open-mark", { pos: 5, top: 180 }]])}
-        onAction={() => {}}
-        onEdit={async () => undefined}
-        onRetryAction={() => {}}
-        onSelect={() => {}}
-        onToggle={() => {}}
-        onToggleResolved={() => {}}
-        pendingActionId={undefined}
-        resolvedThreads={[resolved]}
-        showResolved={false}
-        threads={[open]}
-        viewerLogin="alice"
-        {...overrides}
-      />
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ThreadList
+          editingCommentId={undefined}
+          onEditingChange={() => {}}
+          actionErrorId={undefined}
+          artifactSlug="spec"
+          expandedThreadKey={open.key}
+          hoveredMarkId="open-mark"
+          hoveredItemId={undefined}
+          isClosed={false}
+          owner={{ key: "CORE-1", kind: "issue" }}
+          markPlacements={new Map([["open-mark", { pos: 5, top: 180 }]])}
+          onAction={() => {}}
+          onEdit={async () => undefined}
+          onRetryAction={() => {}}
+          onSelect={() => {}}
+          onToggle={() => {}}
+          onToggleResolved={() => {}}
+          pendingActionId={undefined}
+          resolvedThreads={[resolved]}
+          showResolved={false}
+          threads={[open]}
+          viewerLogin="alice"
+          {...overrides}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 }
 
@@ -110,6 +113,74 @@ test("a toggled resolved section contains resolved comment threads", () => {
   try {
     expect(screen.getByRole("region", { name: "Resolved" })).not.toBeNull();
     expect(screen.getByTestId("margin-comment-resolved")).not.toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an anchored card keeps its identity when its mark placement arrives after the first render", () => {
+  // Placements are measured after the document renders. A card that changed section - and so
+  // React parent - once its placement landed was remounted, and an editor open on it lost its
+  // draft. Membership comes from the anchor; placement only positions the card.
+  const view = renderList({ markPlacements: new Map() });
+  try {
+    const before = screen.getByTestId("margin-comment-open");
+    expect(screen.getByRole("region", { name: "Anchored comments" }).contains(before)).toBe(true);
+    view.rerender(
+      <MemoryRouter>
+        <QueryClientProvider
+          client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        >
+          <ThreadList
+            editingCommentId={undefined}
+            onEditingChange={() => {}}
+            actionErrorId={undefined}
+            artifactSlug="spec"
+            expandedThreadKey="open"
+            hoveredMarkId={undefined}
+            hoveredItemId={undefined}
+            isClosed={false}
+            owner={{ key: "CORE-1", kind: "issue" }}
+            markPlacements={new Map([["open-mark", { pos: 5, top: 180 }]])}
+            onAction={() => {}}
+            onEdit={async () => undefined}
+            onRetryAction={() => {}}
+            onSelect={() => {}}
+            onToggle={() => {}}
+            onToggleResolved={() => {}}
+            pendingActionId={undefined}
+            resolvedThreads={[]}
+            showResolved={false}
+            threads={[thread("open")]}
+            viewerLogin="alice"
+          />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+    const after = screen.getByTestId("margin-comment-open");
+    expect(after).toBe(before);
+    expect(after.parentElement?.style.top).toBe("180px");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a thread whose anchor the server marks orphaned flows in Discussion", () => {
+  const orphan = thread("orphan");
+  if (orphan.anchor === null) throw new Error("fixture thread has an anchor");
+  const root = { ...orphan.root.comment, anchor: { ...orphan.anchor, orphaned: true } };
+  const view = renderList({
+    markPlacements: new Map(),
+    threads: [{ ...orphan, anchor: root.anchor, root: { comment: root, kind: "comment" } }],
+    expandedThreadKey: "orphan",
+  });
+  try {
+    expect(
+      screen
+        .getByRole("region", { name: "Discussion" })
+        .contains(screen.getByTestId("margin-comment-orphan"))
+    ).toBe(true);
+    expect(screen.queryByRole("region", { name: "Anchored comments" })).toBeNull();
   } finally {
     view.unmount();
   }

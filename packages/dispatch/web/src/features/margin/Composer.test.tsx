@@ -547,3 +547,37 @@ test("edit Composer PATCHes the author comment body and reads Save", async () =>
     editComment.mockRestore();
   }
 });
+
+test("edit Composer saves the text in the field at Save time, not the text of the last render", async () => {
+  // A keystroke and the Save click can land in the same frame under load: the textarea already
+  // holds the new text while React has not re-rendered with the new state. Saving the render's
+  // text would PATCH the unedited body and mark it "edited".
+  const editComment = spyOn(api, "editComment").mockResolvedValue(undefined as never);
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Composer
+        edit={{ body: "Original comment", id: "comment-1" }}
+        owner={{ key: "CORE-1", kind: "issue" }}
+        kind="comment"
+        onClose={() => {}}
+      />
+    </QueryClientProvider>
+  );
+
+  try {
+    const comment = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
+    // The browser has applied the keystroke; no change event has reached React yet.
+    comment.value = "Edited comment";
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(editComment).toHaveBeenCalledWith("comment-1", { body: "Edited comment" })
+    );
+  } finally {
+    view.unmount();
+    editComment.mockRestore();
+  }
+});
