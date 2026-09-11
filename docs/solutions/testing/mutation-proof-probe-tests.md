@@ -82,24 +82,27 @@ It still kills the regression it exists for: with `const row = rows[0]` every in
 `2363427`, which is alive, so the watch re-arms forever — the filter assertion receives eighteen
 `isOmpPane:2363427` entries and no retirement.
 
-Exact sequences are right when the order *is* the claim (the same file's timer-cleanup cases assert exact clear order
-because that ordering is the bug being guarded). They are wrong when a fixed cadence parameter is interleaved with
-the behavior under test; use `filter`/`slice`/`indexOf` to assert the invariant and let the cadence float.
+Exact sequences are right when the order *is* the claim — this case's own second assertion is one:
+`events.slice(indexOf("isOmpPane:3003090"))` must be exactly `["isOmpPane:3003090", "workerClient", "retire"]`
+because pid probe, then socket probe, then retirement is the contract. They are wrong when a fixed cadence parameter
+is interleaved with the behavior under test; use `filter`/`slice`/`indexOf` to assert the invariant and let the
+cadence float.
 
 ## How to run the mutation check in place
 
-No scratch copy is needed in a jj workspace; the working copy reverts by path:
+No scratch copy is needed in a jj workspace; the working copy reverts by path. Everything below runs from
+`packages/daemon`, so `bun test` gets its usual path and `jj restore` gets a path relative to that same directory:
 
 ```bash
-sed -i 's/rows.find((r) => r\[0\] === target)/rows.find((r) => target.startsWith(r[0]))/' \
-  packages/daemon/src/daemon/tmux.ts
+cd -- "$LEGION_WORKSPACE/packages/daemon"
+sed -i 's/rows.find((r) => r\[0\] === target)/rows.find((r) => target.startsWith(r[0]))/' src/daemon/tmux.ts
 bun test src/daemon/__tests__/tmux.test.ts        # expect: only the new case fails
-jj -R "$LEGION_WORKSPACE" restore packages/daemon/src/daemon/tmux.ts   # run from the workspace root
+jj -R "$LEGION_WORKSPACE" restore src/daemon/tmux.ts
 bun test src/daemon/__tests__/tmux.test.ts        # expect: all pass
 jj -R "$LEGION_WORKSPACE" diff --stat              # the mutated file must be absent
 ```
 
-`jj restore <path>` resolves the path relative to the **current directory**, not the repo root — run from a package
-directory with a root-relative path it prints `No matching entries for paths` and reverts nothing. Confirm the revert
-with `diff --stat` before committing. Record the mutation's exact failure (`Expected: 4141285 Received: 3715931`) in
-the handoff: "fails" alone does not show the test observes the right thing.
+`jj restore <path>` resolves the path relative to the **current directory**, not the repo root — from `packages/daemon`
+the root-relative `packages/daemon/src/daemon/tmux.ts` prints `No matching entries for paths` and reverts nothing.
+Confirm the revert with `diff --stat` before committing. Record the mutation's exact failure
+(`Expected: 4141285 Received: 3715931`) in the handoff: "fails" alone does not show the test observes the right thing.

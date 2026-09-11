@@ -53,9 +53,10 @@ so a grep for it cannot find them.
 ## Mechanism 3: tests that pass for the wrong reason
 
 After the parser change and before the fixture cutover, only one of three affected watchdog cases failed. The other
-two assert `retireUnconfirmedBoot` — and a fixture that now reads as "dead" also ends in retirement. They went green
-without exercising the alive/re-arm path their titles describe. A green suite mid-cutover is not evidence that the
-remaining fixtures are fine; the sweep is complete when the grep sweep is clean, not when the run is green.
+two never observe the alive/re-arm path their titles describe: one asserts retirement, which a dead read also
+produces; the other asserts only that every timer is cleared after `cancel()`, which holds whether the watch
+re-armed or retired. A green suite mid-cutover is not evidence that the remaining fixtures are fine; the sweep is
+complete when the grep sweep is clean, not when the run is green.
 
 ## The procedure
 

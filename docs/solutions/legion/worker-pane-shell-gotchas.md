@@ -23,8 +23,8 @@ symptoms:
 
 # Worker-Pane Shell Gotchas
 
-Three things every phase worker on `sjawhar/legion` hit during LEGION-9 (planner, implementer, and reviewer each
-rediscovered the first one). None is part of any issue's scope; the first is re-filed to the controller as a rig bug.
+Three things every phase worker on `sjawhar/legion` hit during LEGION-9 (planner, implementer, tester, and reviewer
+each rediscovered the first one). None is part of any issue's scope; the first is re-filed to the controller as a rig bug.
 Until it is fixed, this is the workaround.
 
 ## 1. Stacked `export LEGION_GRANT=…` lines: only the first per call redeems
@@ -92,7 +92,8 @@ jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards
 jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 
-The remote still moves **forward** (`jj` reports `[move forward from <old> to <new>]`); `--allow-backwards` only
+The remote still moves **forward** — jj 0.45's push summary reads `Changes to push to origin:` followed by
+`bookmark: legion/<KEY> [move forward from <old> to <new>]`; `--allow-backwards` only
 concerns the local pointer stepping from the empty child to its described parent. Check `jj diff -r @- --stat` first:
 the described commit must hold exactly the paths you named.
 
