@@ -34,7 +34,7 @@ func (i CookieIdentity) Login(r *http.Request) (string, error) {
 	if login == "" {
 		return "", ErrNoIdentity
 	}
-	if _, allowed := i.AllowedLogins[login]; !allowed {
+	if _, allowed := i.AllowedLogins[strings.ToLower(login)]; !allowed {
 		return "", ErrLoginNotAllowed
 	}
 	return login, nil
@@ -53,7 +53,7 @@ func (i HeaderIdentity) Login(r *http.Request) (string, error) {
 	if login == "" {
 		return "", ErrNoIdentity
 	}
-	if _, allowed := i.AllowedLogins[login]; !allowed {
+	if _, allowed := i.AllowedLogins[strings.ToLower(login)]; !allowed {
 		return "", ErrLoginNotAllowed
 	}
 	return login, nil

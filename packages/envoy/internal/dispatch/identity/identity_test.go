@@ -90,3 +90,34 @@ func TestWriteErrorMapsIdentitySentinels(t *testing.T) {
 		})
 	}
 }
+
+func TestAllowedLoginsMatchGitHubCasing(t *testing.T) {
+	// The allowlist is stored lower-case; GitHub returns the user's display casing at sign-in.
+	allowed := map[string]struct{}{"xodarap": {}}
+
+	header := HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Dispatch-User", "Xodarap")
+	login, err := header.Login(req)
+	if err != nil {
+		t.Fatalf("header login: %v", err)
+	}
+	if login != "Xodarap" {
+		t.Errorf("header login: got %q, want the login as presented", login)
+	}
+
+	cookie := strings.SplitN(auth.IssueSessionCookie("Xodarap", "signing-key"), ";", 2)[0]
+	name, value, ok := strings.Cut(cookie, "=")
+	if !ok {
+		t.Fatalf("invalid session cookie %q", cookie)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: name, Value: value})
+	login, err = CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed}.Login(req)
+	if err != nil {
+		t.Fatalf("cookie login: %v", err)
+	}
+	if login != "Xodarap" {
+		t.Errorf("cookie login: got %q, want the login as presented", login)
+	}
+}

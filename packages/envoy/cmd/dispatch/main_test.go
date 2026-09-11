@@ -274,3 +274,15 @@ func TestCheckDocumentsReportsLegacyParseFailures(t *testing.T) {
 		t.Fatalf("check-documents output = %q, want artifact parse failure", got)
 	}
 }
+
+func TestParseAllowedLoginsLowerCasesAndTrimsEntries(t *testing.T) {
+	logins := parseAllowedLogins(" sjawhar, Xodarap ,,")
+	if len(logins) != 2 {
+		t.Fatalf("logins: got %v, want two entries", logins)
+	}
+	for _, want := range []string{"sjawhar", "xodarap"} {
+		if _, ok := logins[want]; !ok {
+			t.Errorf("logins: missing %q in %v", want, logins)
+		}
+	}
+}
