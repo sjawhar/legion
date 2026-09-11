@@ -32,10 +32,12 @@ extension injects the session credential grant for `legion gh --`.
 1. Verify tester and reviewer cycles completed, the `.legion/` cleanup landed before the
    reviewer's approval, retro completed, and any post-review branch change is only the
    prescribed `docs/solutions/` retro output.
-2. Identify the exact PR head recorded by Sami's approving review after retro. Re-read the
-   current PR head immediately before publishing. They must be identical; if they differ, do not
-   publish, and notify the architect with `envoy_publish` to its encoded role token that Sami
-   must review the new head.
+2. Identify the head the reviewer approved by sha and the retro commits above it. Re-read the
+   current PR head immediately before publishing: it must be that approved head plus only the
+   retro's `docs/solutions/` commits. If anything else landed, do not publish, and notify the
+   architect with `envoy_publish` to its encoded role token that the new head must return to
+   review. Whether a human must approve the PR before it merges is the repository's own
+   branch-protection or CODEOWNERS rule, enforced by GitHub and the merge queue, not by you.
 3. Publish `READY #<n> at <sha>` and the PR body's gate facts (checks, review state, retro
    status) to `notifications.role.pr-queue` with `envoy_publish`. Do not run `legion gh -- pr
    merge`; the merge queue performs the squash merge under its own authority once it accepts your

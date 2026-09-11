@@ -42,7 +42,7 @@ implementer back to push exactly that deletion; you then re-read the PR head, co
 from the reviewed head only by that deletion, and approve it by name with
 `legion gh -- pr review --approve` (the credential helper supplies the reviewer App identity).
 After approval, no implementation or further review change may happen. The prescribed retro may
-commit only `docs/solutions/` before Sami approves its resulting head.
+commit only `docs/solutions/` before the merger publishes `READY`.
 
 The resulting order is mandatory:
 
@@ -50,8 +50,7 @@ The resulting order is mandatory:
 2. the implementer pushes the `.legion/` deletion at your direction;
 3. reviewer approves that final head;
 4. architect runs retro;
-5. Sami approves;
-6. merger verifies the approved head and publishes `READY`; the merge queue merges under its own authority.
+5. merger verifies the approved head and publishes `READY`; the merge queue merges under its own authority and the repository's own rules.
 
 ## Completion
 

@@ -164,30 +164,30 @@ Wait for the messaged implementer to report its durable retro result. Retro outp
 `docs/solutions/` plus an issue comment; it must not create a `.legion` file or change
 the reviewer-approved head after cleanup.
 
-## 6. Architect sign-off and final merge gate
+## 6. Architect sign-off and merge
 
 Sign off only when scope is fully met, integration evidence is current, corrective work
 is complete, review is clean, retro completed, and no necessary work was silently
 deferred. Make the sign-off comment explicit about that evidence.
 
-When the config-armed final merge gate applies, preserve this order exactly:
+Preserve this order exactly:
 
 1. tester green and review cycles complete;
 2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
    deletion (the review App holds no `contents` permission), then the reviewer approves that
-   head. The deletion must land before any human approval, which is head-pinned;
-3. retro completes without dirtying the branch;
-4. enter the Sami-approval step by calling
-   `legion({ op: "merge_gate", pr: <pull request number> })`. The daemon performs one
-   current GitHub review read against the pinned head. If it returns `approved: true`, the
-   approval already satisfies the gate and you immediately continue to the merger; do not
-   wait for a new wake. If it returns `approved: false`, request or retain Sami approval
-   and park for a later `pr-ready` wake. Do not poll or retry this check;
-5. The merger verifies the approved head and publishes `READY #<n> at <sha>` to
-   `notifications.role.pr-queue`; it never merges. The merge queue approves and merges under its own authority.
+   head. The deletion must land before that approval, which is head-pinned. An implementer
+   completion always writes the issue's status as `testing`; this one is not a test round,
+   so on its `phase-complete` wake call `legion({ op: "set_status", issue, status: "retro" })`
+   before messaging the reviewer to approve;
+3. retro completes without dirtying the branch beyond `docs/solutions/`;
+4. the merger verifies the current head is the reviewer-approved head plus only the retro
+   commits and publishes `READY #<n> at <sha>` to `notifications.role.pr-queue`; it never
+   merges. The merge queue merges under its own authority and the repository's own rules
+   (branch protection, CODEOWNERS); whether a human must approve first is that repository's
+   setting, not Legion's, and you never ask for or wait on such an approval.
 
-If anything changes the approved head, return to review; do not let the merger publish
-`READY` for an obsolete approval.
+If anything else changes the head, return to review; do not let the merger publish `READY`
+for an obsolete approval.
 
 ## 7. Close
 
@@ -195,7 +195,7 @@ After the merge result and sign-off are recorded, post the sign-off and close th
 through the Legion write surface:
 
 ```text
-dispatch_comment({ issue: "LEGION-40", body: "<sign-off: scope, integration evidence, review, retro, Sami approval, and merge>" })
+dispatch_comment({ issue: "LEGION-40", body: "<sign-off: scope, integration evidence, review, retro, and merge>" })
 legion({ op: "set_status", issue: "LEGION-40", status: "done" })
 ```
 
@@ -215,7 +215,7 @@ corresponding lifecycle procedure.
 | `phase-complete` | Payload `{type:"phase-complete", issue, role, summary}`. May arrive live or via `catchup-overseer`'s `phaseCompletions`. Read the committed handoff for that phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `reviewer` completion whose GitHub review is `CHANGES_REQUESTED` (the daemon has already returned the issue's Dispatch status to `in_progress` for this) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer completion with an `APPROVED` review proceeds to retro (step 5). |
 | `worker-queued` | Payload `{type:"worker-queued", issue, role}`. The deployment's worker cap is full; this role's spawn is queued. Do not respawn or retry — wait for `worker-started`. |
 | `worker-started` | Payload `{type:"worker-started", issue, role}`. A previously queued role has been promoted and is now running. Treat it exactly as a normal spawn: resume tracking that role's live session. |
-| `pr-ready` | Verify the live PR head, green status, and review state. Continue the review/retro/Sami/merger order only for that current head. |
+| `pr-ready` | Verify the live PR head, green status, and review state. Continue the review/retro/merger order only for that current head. |
 | `pr-review` | Payload `{type:"pr-review", state, author, body}`. Delivered to whichever role is currently active for the issue, falling back to you when no worker phase is active. Follows the same verdict rule as a reviewer's `phase-complete`: `state: "changes_requested"` sends the implementer back in with the review findings, then tester, then reviewer — never the reviewer again and never retro; `state: "approved"` proceeds toward retro (step 5) once the step 6 integration/merge-gate conditions are met. |
 | `pr-blocked` | Read the failed CI evidence and recovery attempts. Assign a focused implementer or corrective child, then return it through testing and review; do not treat the blocked PR as final. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |

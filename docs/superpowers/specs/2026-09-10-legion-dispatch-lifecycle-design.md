@@ -30,8 +30,9 @@ Legion's issue lifecycle. Tracked on Dispatch issue `LEGION-4` (mirror of sjawha
 - Dispatch replaces the board; T20 lands before T18 (Sami, LEGION-4, 2026-09-10 01:14Z).
 - Dispatch's `IssueStatuses` is Legion's lifecycle verbatim: `triage, icebox, backlog, todo,
   in_progress, testing, needs_review, retro, done` (`packages/envoy/internal/dispatch/model/model.go:204-220`).
-- The merge gate stays GitHub-native: a human `APPROVED` review at the PR head → the
-  `legion-human-approval` commit status (`approval-check.ts`). Unchanged.
+- Legion has no merge gate of its own. Whether a human must approve a PR before merge is the
+  repository's branch-protection/CODEOWNERS rule; the daemon neither reads nor writes it
+  (decision 2026-09-11, superseding the `approval-check.ts` backstop this spec first kept).
 - Human design gate becomes an ask: the architect opens `dispatch_ask` on the root issue with an
   `Approve` option; `ask.answered` with `Approve` selected is the wake. No labels.
 

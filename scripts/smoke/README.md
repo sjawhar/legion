@@ -23,7 +23,6 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | `SMOKE_UPSTREAM_NATS` | Production NATS source for `envoy` mode. | `nats://envoy-nats.tailb86685.ts.net:4222` |
 | `LEGION_IMPLEMENT_APP_ID` | Numeric implementation App ID. | `3202636` |
 | `LEGION_REVIEW_APP_ID` | Numeric reviewer App ID. | `3202653` |
-| `LEGION_APP_LOGINS` | Comma-separated GitHub bot logins for both Legion Apps. | `legion-implementer[bot],legion-reviewer[bot]` |
 | `SMOKE_OMP_LAUNCH_PREFIX` | Whitespace-separated argv prefix written into the generated config's `omp_launch_prefix`, so daemon-spawned panes get provider credentials from `secretsd` instead of the daemon's own environment (see the "OMP invocation" section below). Set to an empty string to disable. | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` |
 
 `LEGSMOKE` must already exist on the server named by `DISPATCH_URL` before starting the rig (project creation is human-only); it is not configurable. `up.sh` creates this exercise's own root Dispatch issue inside that shared project (or reuses one already recorded under `SMOKE_DIR` from an earlier run of the same rig) and records its key at `${SMOKE_DIR}/root-issue`; checkpoints read that file (or `SMOKE_ROOT_ISSUE`, if set) rather than guessing which of the shared project's parentless issues belongs to this run.
@@ -46,7 +45,7 @@ Provide secrets with the `secrets` wrapper rather than writing a `.env` file. Th
 | `SMOKE_WEBHOOK_MODE=envoy` | Production Envoy ingress | App-only, live GitHub envelope ingress from the production Envoy receiver. It never registers a hook or calls GitHub with a personal identity. |
 | `SMOKE_WEBHOOK_MODE=forward` | Local GitHub webhook ingress | When `gh webhook forward --help` is unavailable, the default is `none`. This mode needs a user-authenticated `gh` identity. |
 | `SMOKE_WEBHOOK_MODE=none` | Deliberately no live GitHub ingress | The rig prints `SKIPPED-BLOCKED` for only checkpoints that directly require a live event. Resync-driven checkpoints 1–4 remain usable. |
-| `SMOKE_BRANCH_PROTECTION=1` | Merge gate | `up.sh` configures branch protection and runs the reviewer-App approval measurement only when explicitly armed. This gate needs a user-authenticated `gh` identity. Without it, the rig prints `SKIPPED-BLOCKED`; checkpoints 7–8 exit 3 with the exact missing-ruleset reason. |
+| `SMOKE_BRANCH_PROTECTION=1` | Branch protection | `up.sh` configures `main` to require one approving review only when explicitly armed. This needs a user-authenticated `gh` identity. Without it, the rig prints `SKIPPED-BLOCKED`; checkpoints 7–8 exit 3 with the exact missing-ruleset reason. |
 
 The sandbox repository includes the 20-second `ci` check and the `.fail-me`-controlled `fail-on-demand` workflow. Both Legion Apps are installed account-wide for `sjawhar`; no per-repository install step is required.
 
@@ -92,15 +91,15 @@ The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, 
 
 `SMOKE_WEBHOOK_EVENTS` overrides the supported repository-webhook event list in `forward` mode. The default includes `issues`, `issue_comment`, `sub_issues`, `pull_request`, `pull_request_review`, and `check_run`.
 
-When `SMOKE_BRANCH_PROTECTION=1` is set, the rig configures `main` to require one approving review, opens a disposable pull request, approves it through the reviewer App, and reads `reviewDecision`. If GitHub reports `APPROVED`, the rig adds the existing `legion-human-approval` status check to branch protection; otherwise it leaves that check unrequired. The disposable pull request number and result are recorded under the smoke directory. This optional gate uses the user-authenticated `gh` identity described above.
+When `SMOKE_BRANCH_PROTECTION=1` is set, the rig configures `main` to require one approving review, using the user-authenticated `gh` identity described above. Legion itself never reads or writes a human-approval signal: whether a human must approve before merge is the sandbox repository's own rule, and checkpoint 8 verifies that the merge queue respected it.
 
-Tear down the processes, tmux session, disposable protection probe, and NATS container with:
+Tear down the processes, tmux session, and NATS container with:
 
 ```sh
 bash scripts/smoke/down.sh
 ```
 
-Keep `SMOKE_REPO` and `SMOKE_PROJECT` exported for teardown so it can close the disposable protection probe and the named tmux session.
+Keep `SMOKE_REPO` and `SMOKE_PROJECT` exported for teardown so it can close the named tmux session.
 
 `down.sh` also succeeds in `none` mode: absent forwarder process and hook records are ignored while the listener, daemon, tmux session, and NATS container are stopped. In `envoy` mode it first stops the start-time-validated bridge PID, preventing new upstream envelopes from reaching the local daemon during teardown.
 
