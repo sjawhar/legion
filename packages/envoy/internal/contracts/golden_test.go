@@ -27,6 +27,9 @@ func TestGithubEnvelopeGoldens(t *testing.T) {
 		{name: "pull-request-closed-merged", event: "pull_request"},
 		{name: "issue-comment-created", event: "issue_comment"},
 		{name: "issue-comment-pr-created", event: "issue_comment"},
+		{name: "issue-comment-pr-legion-footer", event: "issue_comment"},
+		{name: "pull-request-review-submitted", event: "pull_request_review"},
+		{name: "pull-request-review-comment-created", event: "pull_request_review_comment"},
 		{name: "push", event: "push"},
 	}
 

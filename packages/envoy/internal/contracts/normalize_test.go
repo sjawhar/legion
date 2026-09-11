@@ -1660,6 +1660,7 @@ func TestGithubSummary(t *testing.T) {
 
 func TestGithubPayloadFields(t *testing.T) {
 	longBody := strings.Repeat("a", 3000)
+	longBodyWithFooter := strings.Repeat("a", 3000) + `<!-- legion:{"session":"worker-1"} -->`
 	tests := []struct {
 		name        string
 		event       string
@@ -1742,17 +1743,35 @@ func TestGithubPayloadFields(t *testing.T) {
 			omitted: []string{"body"},
 		},
 		{
-			name:  "review comment carries location",
+			name:  "review comment carries location and head sha",
 			event: "pull_request_review_comment",
 			body: map[string]any{
 				"action":       "created",
 				"repository":   map[string]any{"full_name": "example-org/example-repo"},
-				"pull_request": map[string]any{"number": 27},
+				"pull_request": map[string]any{"number": 27, "head": map[string]any{"sha": "comment-head-sha"}},
 				"comment": map[string]any{
 					"body": "Use the helper", "path": "internal/contracts/normalize.go", "original_line": float64(44),
 				},
 			},
-			want: map[string]string{"path": "internal/contracts/normalize.go", "line": "44"},
+			want: map[string]string{
+				"path": "internal/contracts/normalize.go", "line": "44", "head_sha": "comment-head-sha",
+			},
+		},
+		{
+			name:  "review carries commit_id, head_sha, and state",
+			event: "pull_request_review",
+			body: map[string]any{
+				"action":       "submitted",
+				"repository":   map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{"number": 27, "head": map[string]any{"sha": "review-head-sha"}},
+				"review": map[string]any{
+					"body": "Ship it", "state": "approved", "commit_id": "review-commit-sha",
+					"user": map[string]any{"login": "reviewer"},
+				},
+			},
+			want: map[string]string{
+				"commit_id": "review-commit-sha", "head_sha": "review-head-sha", "state": "approved",
+			},
 		},
 		{
 			name:  "long comment body is capped and marked",
@@ -1764,6 +1783,19 @@ func TestGithubPayloadFields(t *testing.T) {
 				"comment":    map[string]any{"body": longBody, "user": map[string]any{"login": "commenter"}},
 			},
 			want:        map[string]string{"body_truncated": "true"},
+			omitted:     []string{"legion_footer"},
+			wantBodyLen: 2048,
+		},
+		{
+			name:  "legion footer survives truncation of the capped body",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"issue":      map[string]any{"number": 29},
+				"comment":    map[string]any{"body": longBodyWithFooter, "user": map[string]any{"login": "commenter"}},
+			},
+			want:        map[string]string{"body_truncated": "true", "legion_footer": "true"},
 			wantBodyLen: 2048,
 		},
 	}
