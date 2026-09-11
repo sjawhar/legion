@@ -186,5 +186,287 @@
     "method": "regex (DISPATCH_TOKEN=|LEGION_BOOT_TOKEN=|LEGION_CONTROLLER_SECRET=)([0-9a-fA-F][0-9a-fA-F-]{19,}) over the session JSONL; each value replaced by [REDACTED-LEGION-6] padded to the original length, written back in place (r+b, same size, fsync) \u2014 no truncation, no inode swap, line count unchanged. *_FILE pointers and the negative-control literal `planted` do not match the pattern.",
     "before": "20 matches (DISPATCH_TOKEN 10, LEGION_BOOT_TOKEN 6, LEGION_CONTROLLER_SECRET 4) over 4 distinct values",
     "verification": "after rewrite: regex matches 0; exact occurrences of each of the 4 leaked values 0 in the transcript; 0 in every other file under the session directory, ~/.omp/profiles/legion/agent (agent.db/history/sessions) and ~/.omp/profiles/legion/logs; every JSONL line still parses. Values were never echoed after the original tool output and were purged from the eval kernel."
+  },
+  "round2": {
+    "head": "1741381a8e3a8222a341518165f140b21883e646",
+    "base": "main 8961e44398c2 (rebased)",
+    "trigger": "review.json CHANGES_REQUESTED at 72989037 (B1, B2, C1, C2, S1-S3)",
+    "verdict": "PASS \u2014 every round-2 item verified on the real surface or by fail-before/pass-after evidence; no code patched. One pre-existing main bug observed live and reported below (not a LEGION-6 regression).",
+    "items": {
+      "1_smoke_rig_at_head": {
+        "verdict": "PASS",
+        "environment": "Same rig as round 1 (test.json environment.rigLaunch): branch daemon from this workspace at 1741381a, branch pi-envoy bundle rebuilt at head (0.41.2-legion6.1741381a) into OMP profile legion6-smoke, SMOKE_WEBHOOK_MODE=envoy, LEGION_OMP_PATH rpcfix override, root issue force-created (LEGSMOKE-25; architect created child LEGSMOKE-26 unprompted this round). Daemon state wiped before the run; a stale 0600 secrets/legion-sjawhar24-legsmoke-99-architect was seeded to exercise the S1 boot prune.",
+        "checkpoint1": {
+          "command": "bash scripts/smoke/checkpoints.sh 1",
+          "exit": 0,
+          "output": "CHECKPOINT 1 OK: Dispatch tracks LEGSMOKE-25 past triage; controller locator is live"
+        },
+        "checkpoint2": {
+          "command": "bash scripts/smoke/checkpoints.sh 2",
+          "exit": 0,
+          "output": "CHECKPOINT 2 OK: Dispatch reports LEGSMOKE-25 in_progress; architect locator is live"
+        },
+        "checkpoint3": {
+          "command": "bash scripts/smoke/checkpoints.sh 3",
+          "exit": 0,
+          "output": "CHECKPOINT 3 OK: posted spec artifact, open design gate, and child issue observed"
+        },
+        "checkpoint13": {
+          "command": "bash scripts/smoke/checkpoints.sh 13",
+          "exit": 0,
+          "output": "CHECKPOINT 13 OK: 3 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24"
+        },
+        "checkpoint13_final": {
+          "command": "bash scripts/smoke/checkpoints.sh 13",
+          "exit": 0,
+          "output": "CHECKPOINT 13 OK: 3 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24"
+        },
+        "perProcess": [
+          {
+            "process": "tmux server",
+            "pid": "110880",
+            "secret_names_in_environ": [],
+            "secret_names_in_cmdline": [],
+            "file_pointers_in_environ": []
+          },
+          {
+            "process": "controller pane %1",
+            "pid": "112455",
+            "secret_names_in_environ": [],
+            "secret_names_in_cmdline": [],
+            "file_pointers_in_environ": [
+              "LEGION_CONTROLLER_SECRET_FILE",
+              "DISPATCH_TOKEN_FILE"
+            ]
+          },
+          {
+            "process": "tree LEGSMOKE-25 architect pane %2",
+            "pid": "174647",
+            "secret_names_in_environ": [],
+            "secret_names_in_cmdline": [],
+            "file_pointers_in_environ": [
+              "LEGION_BOOT_TOKEN_FILE",
+              "DISPATCH_TOKEN_FILE"
+            ]
+          }
+        ],
+        "privateServerGlobalEnv": {
+          "command": "tmux -L legion-sjawhar24 show-environment -g | grep -E '^(DISPATCH_TOKEN|LEGION_BOOT_TOKEN|LEGION_CONTROLLER_SECRET)(_FILE)?=' || echo '<none of the secret family in private server global env>'",
+          "exit": 0,
+          "output": "<none of the secret family in private server global env>"
+        },
+        "defaultSocket": {
+          "command": "tmux list-sessions",
+          "exit": 0,
+          "output": "bmev: 1 windows (created Wed Sep  9 20:00:56 2026)\ndev: 5 windows (created Wed Sep  9 13:58:37 2026) (group dev) (attached)\ndev2: 5 windows (created Wed Sep  9 13:58:42 2026) (group dev) (attached)\ndev3: 5 windows (created Thu Sep 10 02:40:18 2026) (group dev) (attached)\ndev4: 5 windows (created Wed Sep  9 13:58:43 2026) (group dev) (attached)\nlegion-sjawharlegion: 2 windows (created Fri Sep 11 04:45:27 2026)"
+        },
+        "privateSocket": {
+          "command": "tmux -L legion-sjawhar24 list-sessions",
+          "exit": 0,
+          "output": "legion-sjawhar24: 2 windows (created Fri Sep 11 19:35:19 2026)"
+        },
+        "secretsDir": {
+          "command": "ls -la /tmp/legion6-smoke/rig/daemon/secrets && stat -c '%a %n' /tmp/legion6-smoke/rig/daemon/secrets /tmp/legion6-smoke/rig/daemon/secrets/*",
+          "exit": 0,
+          "output": "total 20\ndrwx------ 2 ubuntu ubuntu 4096 Sep 11 19:36 .\ndrwxr-xr-x 8 ubuntu ubuntu 4096 Sep 11 19:36 ..\n-rw------- 1 ubuntu ubuntu   64 Sep 11 19:34 dispatch-token\n-rw------- 1 ubuntu ubuntu   36 Sep 11 19:35 legion-sjawhar24-controller\n-rw------- 1 ubuntu ubuntu   36 Sep 11 19:36 legion-sjawhar24-legsmoke-25-architect\n700 /tmp/legion6-smoke/rig/daemon/secrets\n600 /tmp/legion6-smoke/rig/daemon/secrets/dispatch-token\n600 /tmp/legion6-smoke/rig/daemon/secrets/legion-sjawhar24-controller\n600 /tmp/legion6-smoke/rig/daemon/secrets/legion-sjawhar24-legsmoke-25-architect"
+        },
+        "dispatchTokenFile": {
+          "command": "[ \"$(sha256sum < /tmp/legion6-smoke/rig/daemon/secrets/dispatch-token | cut -d' ' -f1)\" = \"$(printf %s \"$DISPATCH_TOKEN\" | sha256sum | cut -d' ' -f1)\" ] && echo 'sha256(secrets/dispatch-token) == sha256(DISPATCH_TOKEN bearer)' || echo MISMATCH",
+          "exit": 0,
+          "output": "sha256(secrets/dispatch-token) == sha256(DISPATCH_TOKEN bearer)"
+        },
+        "negativeControl": [
+          {
+            "command": "tmux -L legion-sjawhar24 set-environment -g LEGION_BOOT_TOKEN planted",
+            "exit": 0,
+            "output": ""
+          },
+          {
+            "command": "bash scripts/smoke/checkpoints.sh 13",
+            "exit": 1,
+            "output": "CHECKPOINT 13 FAILED: private tmux server global environment carries LEGION_BOOT_TOKEN"
+          },
+          {
+            "command": "tmux -L legion-sjawhar24 set-environment -g -u LEGION_BOOT_TOKEN",
+            "exit": 0,
+            "output": ""
+          },
+          {
+            "command": "bash scripts/smoke/checkpoints.sh 13",
+            "exit": 0,
+            "output": "CHECKPOINT 13 OK: 3 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24"
+          }
+        ],
+        "down": {
+          "command": "bash scripts/smoke/down.sh",
+          "exit": 0,
+          "output": "STOPPED tmux session legion-sjawhar24 on private socket legion-sjawhar24\nSTOPPED NATS container legion-smoke-nats\nRIG DOWN"
+        },
+        "privateSocketAfterDown": {
+          "command": "tmux -L legion-sjawhar24 list-sessions",
+          "exit": 1,
+          "output": "no server running on /home/ubuntu/.tmux/sockets/tmux-1000/legion-sjawhar24"
+        },
+        "S1_bootPrune": {
+          "command": "seed 0600 secrets/legion-sjawhar24-legsmoke-99-architect before start; after daemon boot: ls -la $SMOKE_DIR/daemon/secrets",
+          "output": "total 12\ndrwx------ 2 ubuntu ubuntu 4096 Sep 11 19:35 .\ndrwxr-xr-x 4 ubuntu ubuntu 4096 Sep 11 19:35 ..\n-rw------- 1 ubuntu ubuntu   64 Sep 11 19:34 dispatch-token",
+          "verdict": "PASS"
+        },
+        "S2_live_run1": {
+          "daemon_pid": "92725",
+          "daemon_env_has": [
+            "DISPATCH_TOKEN",
+            "DISPATCH_URL"
+          ],
+          "tmux_server_pid": "110880",
+          "tmux_server_env_has": [],
+          "note": "daemon env carried DISPATCH_TOKEN; the private server it forked carried none of the 8-key family"
+        },
+        "S2_live_run2_planted": {
+          "daemon_pid": "431466",
+          "daemon_env_family": [
+            "DISPATCH_TOKEN",
+            "DISPATCH_URL",
+            "LEGION_BOOT_TOKEN",
+            "LEGION_CONTROLLER_SECRET"
+          ],
+          "daemon_LEGION_BOOT_TOKEN_is_planted": true,
+          "tmux_server_pid": "435435",
+          "tmux_server_env_family": [],
+          "planner_pane_pid": "435848",
+          "planner_pane_env_family": [
+            "DISPATCH_TOKEN_FILE",
+            "DISPATCH_URL",
+            "LEGION_BOOT_TOKEN_FILE"
+          ],
+          "planner_pane_LEGION_BOOT_TOKEN_FILE_points_into_secrets": true,
+          "server_show_environment_g": "<none>",
+          "verdict": "PASS"
+        },
+        "note": "Default socket still lists legion-sjawharlegion (the pre-PR production daemon's session), as in round 1."
+      },
+      "2_defect_fixes": {
+        "verdict": "PASS",
+        "method": "head's processes.test.ts run against `git archive` exports of the fix commits' parents (/tmp/legion6-prefix/<name>, bun install --frozen-lockfile) with `bun test src/daemon/__tests__/processes.test.ts -t <name>`; the same three tests at head in the workspace.",
+        "C1_test": "clears a dead worker's locator on boot when the private tmux socket does not exist yet (first boot after upgrade or reboot)",
+        "C1_fix": "6729baf37b40 fix(daemon): a kill-pane that cannot connect to the private tmux socket counts as pane-gone; parent 58d8b6290a00",
+        "C1_at_parent_58d8b629": {
+          "result": "(fail) ProcessManager > clears a dead worker's locator on boot when the private tmux socket does not exist yet (first boot after upgrade or reboot) [6.42ms]",
+          "counts": [
+            "0 pass",
+            "1 fail"
+          ]
+        },
+        "C1_at_parent_reason": "StopFailed: kill-pane %7 exited 1: error connecting to /tmp/tmux-1000/legion-omp (No such file or directory) at stopProcess (processes.ts:2772) <- retireWorkerLocator <- reconnectWorkers",
+        "C1_at_6729baf3": {
+          "result": "(pass) ProcessManager > clears a dead worker's locator on boot when the private tmux socket does not exist yet (first boot after upgrade or reboot) [11.53ms]",
+          "counts": [
+            "1 pass",
+            "0 fail"
+          ]
+        },
+        "C1_at_head": {
+          "result": "(pass) ProcessManager > clears a dead worker's locator on boot when the private tmux socket does not exist yet (first boot after upgrade or reboot) [5.50ms]",
+          "counts": [
+            "1 pass",
+            "0 fail"
+          ]
+        },
+        "C2_test": "retires an older generation's launch as stale when a park-then-re-admit starts a newer one first",
+        "C2_fix": "794f38202609 fix(daemon): pane-secret prune exemption is a refcount held by the launch owner\u2026; parent 6729baf37b40",
+        "C2_at_parent_6729baf3": {
+          "result": "(fail) ProcessManager > retires an older generation's launch as stale when a park-then-re-admit starts a newer one first [5003.23ms]",
+          "counts": [
+            "0 pass",
+            "1 fail"
+          ]
+        },
+        "C2_at_parent_reason": "generation 2's writeSecretFile dies with ENOENT chmod secrets/legion-omp-legion-42-architect (withPaneSecret <- launchShimmedProcess <- spawnTree <- spawnRoot): generation 1's settle pruned the shared file while generation 2's launch was in flight, `[legion] failed to spawn LEGION-42`, generation 2 never reaches split-window, test times out at 5000ms \u2014 the prune race the fix removes, manifesting as a spawn failure rather than the reviewer's empty-secrets-dir shape",
+        "C2_at_parent_58d8b629": {
+          "result": "(fail) ProcessManager > retires an older generation's launch as stale when a park-then-re-admit starts a newer one first [5000.69ms]",
+          "counts": [
+            "0 pass",
+            "1 fail"
+          ]
+        },
+        "C2_at_head": {
+          "result": "(pass) ProcessManager > retires an older generation's launch as stale when a park-then-re-admit starts a newer one first [50.80ms]",
+          "counts": [
+            "1 pass",
+            "0 fail"
+          ]
+        },
+        "S1_test": "reaps a secret file inherited from a previous daemon process once its locator clears",
+        "S1_at_parent_6729baf3": {
+          "result": "(fail) ProcessManager > reaps a secret file inherited from a previous daemon process once its locator clears, not only at the next boot [9.54ms]",
+          "counts": [
+            "0 pass",
+            "1 fail"
+          ]
+        },
+        "S1_at_head": {
+          "result": "(pass) ProcessManager > reaps a secret file inherited from a previous daemon process once its locator clears, not only at the next boot [14.91ms]",
+          "counts": [
+            "1 pass",
+            "0 fail"
+          ]
+        },
+        "C1_live": {
+          "claimShape": "issue=LEGSMOKE-25 role=planner generation=1, no sessionId/readyConfirmedAt (never registered), locator.tmuxPaneId=%9 socketPath=<nonexistent>; private socket file /home/ubuntu/.tmux/sockets/tmux-1000/legion-sjawhar24 deleted before boot (tmux -L legion-sjawhar24 kill-pane -t %9 -> `error connecting to /home/ubuntu/.tmux/sockets/tmux-1000/legion-sjawhar24 (No such file or directory)`)",
+          "daemonLogHasStopFailed": false,
+          "daemonLogHasKillPaneError": false,
+          "daemonLogFiltered": "[legion] failed to reconnect worker legion-sjawhar24-legsmoke-25-planner: 266 |         request?.resolve(frame);\n[legion] worker-queue promotion trigger ignored: not yet enabled (still booting)\nlegion daemon listening on 127.0.0.1:19370",
+          "claimAfterBoot": {
+            "generation": 2,
+            "locator": {
+              "tmuxSession": "legion-sjawhar24",
+              "tmuxWindowId": "@1",
+              "tmuxPaneId": "%1",
+              "socketPath": "/tmp/legion6-smoke/rig/daemon/workers/planner-0d6f1468.sock",
+              "ompSessionFile": "/home/ubuntu/.omp/profiles/legion6-smoke/agent/sessions/-tmp-legion6-smoke-rig-daemon-workspaces-sjawhar-legion-smoke-legsmoke-25/2026-09-11T19-45-36-674Z_01a09201-09a2-7000-acf8-db8c5052a191.jsonl"
+            },
+            "readyConfirmedAt": 1789155938167
+          },
+          "verdict": "PASS: kill-pane against the missing socket counted as pane-gone; the dead locator (@2/%9) was cleared, the claim queued, and boot's reconcileWorkerAdmission promoted it into a fresh pane (@1/%1, generation 2) on a newly forked private server; that pane registered and confirmed ready.",
+          "secretsDirAfterRelaunch": [
+            "dispatch-token",
+            "legion-sjawhar24-controller",
+            "legion-sjawhar24-legsmoke-25-architect",
+            "legion-sjawhar24-legsmoke-25-planner"
+          ]
+        },
+        "C1_live_confirmed_claim_attempt": {
+          "claimShape": "issue=LEGSMOKE-25 role=planner sessionId=<set> readyConfirmedAt=<set> locator.socketPath=<nonexistent> ; private socket file deleted before boot",
+          "observed": "[legion] worker reconnection failed: 404 |     natsRequest: (subject, data) => nats.request(subject, data),\nTypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')\n      at revokeSessionCapability (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-6/packages/daemon/src/daemon/index.ts:409:45)\n      at retireWorkerLocator (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-6/packages/daemon/src/daemon/processes.ts:2847:10)\n      at markWorkerDeadLocked (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-6/packages/daemon/src/daemon/processes.ts:763:16)",
+          "locatorAfterBoot": "kept (unchanged)",
+          "verdict": "NOT REACHED: boot-time reconnectWorkers -> markWorkerDead -> retireWorkerLocator -> revokeRoleClaim -> deps.revokeSessionCapability -> `api.revokeSessionCapability` throws TypeError because `api` is assigned only later in startDaemonLocked (index.ts:409 vs the reconnectWorkers call at :430; api = startLegionApi at ~:575). The comment at index.ts:421-428 ('it needs no api reference') is wrong for a confirmed dead worker. Pre-existing on main 8961e443 (same ordering at main index.ts:386/402/423/570); outside LEGION-6 scope; consequence is the same locator/slot leak C1 was meant to fix, via an earlier crash."
+        },
+        "C2_live": "not reproducible deterministically on the rig (two overlapping spawnRoot generations for one root); covered by the fail-before/pass-after unit evidence above"
+      },
+      "3_gates_at_head": {
+        "verdict": "PASS",
+        "env": "LEGION_*/DISPATCH_*/ENVOY_*/PI_* unset, production legion launcher off PATH",
+        "daemon": "bunx biome check src/ \u2014 Checked 137 files, No fixes applied; bunx tsc --noEmit clean; bun test 817 pass / 0 fail (822 tests, 54 files)",
+        "envoy-client": "biome Checked 26 files clean; tsc clean; bun test 183 pass / 0 fail (14 files); bun run build 12 entry points",
+        "pi-envoy": "bunx biome lint extensions/ src/ Checked 19 files clean; tsc clean; bun test 137 pass / 0 fail (6 files); bun run build envoy.js + legion.js",
+        "smoke_harnesses": "checkpoints.test.sh 10 PASS (incl. `every tmux invocation across checkpoints 1-13 targets the private legion-<slug> socket (default-server probe excepted)` = S3); down.test.sh 2 PASS; up.test.sh 8 PASS",
+        "log": "/tmp/legion6-smoke/gates-r2/gates.log"
+      },
+      "4_pr_ci": {
+        "verdict": "PASS",
+        "command": "legion gh -- pr view 923 --json headRefOid,title,state,mergeStateStatus; legion gh -- pr checks 923; legion gh -- run list --branch legion/LEGION-6",
+        "headRefOid": "1741381a8e3a8222a341518165f140b21883e646",
+        "title": "feat(daemon): deliver pane secrets as 0600 file pointers over a private tmux socket (LEGION-6)",
+        "checks": "changes pass; claude-envoy-bridge pass; envoy-client pass; envoy-plugin pass; lint pass; pi-envoy pass; pr-title pass; test pass; typecheck pass; contracts/dispatch/envoy-go skipping (path-filtered); legion-human-approval pending (awaiting human approval)",
+        "runs": "34639249678 Tests completed success 1741381a8e3a pull_request; 34639138596 Legion Envoy and Contracts completed success 1741381a8e3a pull_request; 34639138688 Tests completed success 1741381a8e3a",
+        "mergeStateStatus": "BLOCKED (pending legion-human-approval/review), no longer DIRTY"
+      }
+    },
+    "observationsForArchitect": [
+      "PRE-EXISTING MAIN BUG, observed live (not a LEGION-6 regression, reachable only on a daemon restart with a dead *confirmed* worker): startDaemonLocked awaits processManager.reconnectWorkers() (index.ts:430) before `api = startLegionApi(...)` is assigned, but a dead confirmed claim takes markWorkerDead -> retireWorkerLocator -> revokeRoleClaim -> deps.revokeSessionCapability -> `api.revokeSessionCapability` (index.ts:409) -> TypeError: undefined is not an object. The try/catch logs `[legion] worker reconnection failed` and the dead worker keeps its locator (and running-worker slot) \u2014 the exact leak C1 was meant to close, via an earlier crash. The comment at index.ts:421-428 ('it needs no api reference') is wrong for this path. Same ordering on main 8961e443 (index.ts:386/402/423/570). Remediation: assign `api` (or a lazy revoke that defers until api exists) before reconnectWorkers, or make revokeSessionCapability a no-op-with-queue during boot; add a processes/index test with a confirmed dead claim at boot. Unconfirmed dead claims (no sessionId) are unaffected and were the shape used for the live C1 PASS.",
+      "The live C1 relaunch prompted a real planner OMP session on disposable LEGSMOKE-25 with the probe's pendingAssignment text; it was stopped by down.sh within ~2 minutes.",
+      "Round-1 rig observations still apply: up.sh ensure_root_issue needs force:true; the pinned mise OMP kills the controller at its first RPC prompt without the rpcfix override; `none` mode cannot reach checkpoints 1-3."
+    ],
+    "completed": "2026-09-11T19:47:25.000Z"
   }
 }
