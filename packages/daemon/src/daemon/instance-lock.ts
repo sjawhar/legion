@@ -38,7 +38,17 @@ export async function acquireInstanceLock(stateDir: string): Promise<InstanceLoc
   const lockFile = path.join(stateDir, "daemon.lock");
   const pid = process.pid;
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // Two attempts is not a proven-sufficient bound: a reclaim that discovers the lock changed
+  // between this contender's own stale-read and its own `rename` (another contender's fresh,
+  // live write raced in) has made no failed attempt of its own -- it is real progress by
+  // someone else -- yet the loop below still counts it against this budget before retrying.
+  // Under real scheduling variance (observed to fail under CPU/IO contention), two genuinely
+  // racing contenders can each need more than one such restore-and-retry cycle before either
+  // side's own `writeFile` lands cleanly on a definitive live-pid EEXIST. Each cycle is a cheap,
+  // local, already-bounded fs round trip (this runs once at daemon startup, never a hot path),
+  // so a generous fixed bound costs nothing while comfortably covering every interleaving two
+  // contenders can produce.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       await writeFile(lockFile, String(pid), { encoding: "utf8", flag: "wx" });
       return {
