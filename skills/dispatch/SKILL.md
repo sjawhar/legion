@@ -193,7 +193,9 @@ It returns issue or project-document owner details plus `comment` and, for write
 (`reply_to`/`reply_to_ask`) takes no `quote`; it belongs to its parent's anchor. Use `reply_to`
 to continue a comment thread at its root; a reply to a resolved thread reopens it. Use
 `reply_to_ask` to reply directly under a question asked with `dispatch_ask`. The two are
-mutually exclusive. Comments are edited only by their author from the dashboard.
+mutually exclusive. Comments are edited only by their author from the dashboard. A delivered
+`comment.created` event carries the comment `id`; reply to it with
+`dispatch_comment({ reply_to: <id> })`.
 
 Propose an exact replacement instead of describing it:
 
@@ -230,6 +232,7 @@ document; it must not include `artifact`. Exactly one of `path` and `content` is
 inline form sends JSON with `Content-Type: application/json`. It returns issue or
 project-document owner details plus `artifact`, `version`, and its write `topic`. Uploading the
 same `name` creates its next version. Use `content` when the text is already in the call.
+Address an existing artifact by the slug shown in the upload result or by its filename.
 
 ## Messages
 

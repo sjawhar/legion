@@ -296,7 +296,11 @@ async function resolveOwnerArguments(
     typeof refArgument === "string"
       ? (parseDispatchRef(refArgument) ??
         (() => {
-          throw new Error("ref must be a valid dispatch:// reference");
+          throw new Error(
+            "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
+              "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
+              "dispatch://KEY-1/artifact/<slug>, or dispatch://PROJECT/artifact/<slug>"
+          );
         })())
       : null;
   const issueArgument = args.issue;
@@ -394,10 +398,21 @@ async function resolveArtifact(
     if (artifactReference === undefined) {
       throw new Error("artifact is required for a project document");
     }
-    return {
-      owner,
-      artifact: await client.getProjectArtifact(owner.project, artifactReference),
-    };
+    try {
+      return {
+        owner,
+        artifact: await client.getProjectArtifact(owner.project, artifactReference),
+      };
+    } catch (error) {
+      // The project artifact route resolves only by slug; a caller that supplied the
+      // filename (as shown in the dispatch_artifact upload result) falls back to a
+      // name match against the project's artifact list.
+      if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
+      const artifacts = await client.listProjectArtifacts(owner.project);
+      const artifact = artifacts.find((candidate) => candidate.name === artifactReference);
+      if (!artifact) throw error;
+      return { owner, artifact };
+    }
   }
   const issue = await client.getIssue(owner.issue);
   const artifact =
@@ -406,7 +421,10 @@ async function resolveArtifact(
           (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
         )
       : issue.artifacts.find(
-          (candidate) => candidate.id === artifactReference || candidate.slug === artifactReference
+          (candidate) =>
+            candidate.id === artifactReference ||
+            candidate.slug === artifactReference ||
+            candidate.name === artifactReference
         );
   if (!artifact) {
     throw new Error(`artifact ${artifactReference ?? "spec"} was not found on issue ${issue.key}`);
@@ -880,8 +898,12 @@ export async function executeDispatchTool(
         artifactOwner.kind === "project"
           ? await client.projectArtifact(artifactOwner.project, artifactInput)
           : await client.artifact(issue(), artifactInput);
+      const artifactRef =
+        artifactOwner.kind === "project"
+          ? `dispatch://${artifactOwner.project}/artifact/${result.artifact.slug}`
+          : `dispatch://${issue()}/artifact/${result.artifact.slug}`;
       return {
-        text: `Uploaded ${result.artifact.name} as version ${result.version.number}`,
+        text: `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef})`,
         details:
           artifactOwner.kind === "project"
             ? {

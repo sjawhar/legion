@@ -381,22 +381,56 @@ describe("renderInbound dispatch events", () => {
         type: "comment.resolved",
         payload: { ...comment, resolved: true },
         expectedPayload: {
+          id: "comment-1",
           artifact_name: "spec.md",
           body: "Please update this.",
           reply_to: "comment-0",
           anchor: { quote: "old line" },
           suggestion: null,
+          author: actor,
+          created_at: "2026-09-09T00:00:00Z",
+        },
+      },
+      {
+        type: "comment.reopened",
+        payload: { ...comment, resolved: false },
+        expectedPayload: {
+          id: "comment-1",
+          artifact_name: "spec.md",
+          body: "Please update this.",
+          reply_to: "comment-0",
+          anchor: { quote: "old line" },
+          suggestion: null,
+          author: actor,
+          created_at: "2026-09-09T00:00:00Z",
+        },
+      },
+      {
+        type: "comment.edited",
+        payload: { ...comment },
+        expectedPayload: {
+          id: "comment-1",
+          artifact_name: "spec.md",
+          body: "Please update this.",
+          reply_to: "comment-0",
+          anchor: { quote: "old line" },
+          suggestion: null,
+          author: actor,
+          created_at: "2026-09-09T00:00:00Z",
         },
       },
       {
         type: "suggestion.accepted",
         payload: { ...comment, suggestion: { replace_with: "new line", accepted: true } },
         expectedPayload: {
+          id: "comment-1",
           artifact_name: "spec.md",
           body: "Please update this.",
           reply_to: "comment-0",
           anchor: { quote: "old line" },
           suggestion: { replace_with: "new line" },
+          author: actor,
+          created_at: "2026-09-09T00:00:00Z",
         },
       },
       {
@@ -408,7 +442,7 @@ describe("renderInbound dispatch events", () => {
           body: "The build is green.",
           created_at: "2026-09-09T00:00:00Z",
         },
-        expectedPayload: { body: "The build is green." },
+        expectedPayload: { id: "message-1", author: actor, body: "The build is green." },
       },
       {
         type: "child.status",
@@ -429,6 +463,27 @@ describe("renderInbound dispatch events", () => {
         payload: expectedPayload,
       });
     }
+  });
+
+  test("surfaces the comment id before the body, and the message id, in rendered dispatch payloads", () => {
+    const commentContent = renderInbound(
+      dispatchEvent("comment.created", { ...comment }),
+      reader
+    ).content;
+    expect(commentContent).toContain("comment-1");
+    expect(commentContent.indexOf("comment-1")).toBeLessThan(commentContent.indexOf("body:"));
+
+    const messageContent = renderInbound(
+      dispatchEvent("message.created", {
+        id: "message-1",
+        issue_key: "DSP-1",
+        author: actor,
+        body: "The build is green.",
+        created_at: "2026-09-09T00:00:00Z",
+      }),
+      reader
+    ).content;
+    expect(messageContent).toContain("message-1");
   });
 
   test("renders an unrecognized-shape dispatch payload as its raw structured object", () => {

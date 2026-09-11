@@ -628,6 +628,7 @@ export const AskEditedEventPayloadSchema = z.object({
 });
 
 export const CommentEventPayloadSchema = z.object({
+  id: z.string().optional(),
   artifact_name: z.string().optional(),
   body: z.string().optional(),
   reply_to: z.string().nullish(),
@@ -635,9 +636,15 @@ export const CommentEventPayloadSchema = z.object({
   ask_question: z.string().optional(),
   anchor: z.object({ quote: z.string().optional() }).nullish(),
   suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
+  author: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
+  created_at: z.string().optional(),
 });
 
-export const MessageEventPayloadSchema = z.object({ body: z.string().optional() });
+export const MessageEventPayloadSchema = z.object({
+  id: z.string().optional(),
+  body: z.string().optional(),
+  author: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
+});
 
 export const ChildStatusEventPayloadSchema = z.object({
   child_key: z.string().optional(),
