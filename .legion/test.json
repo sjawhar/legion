@@ -468,5 +468,105 @@
       "Round-1 rig observations still apply: up.sh ensure_root_issue needs force:true; the pinned mise OMP kills the controller at its first RPC prompt without the rpcfix override; `none` mode cannot reach checkpoints 1-3."
     ],
     "completed": "2026-09-11T19:47:25.000Z"
+  },
+  "round3": {
+    "head": "a01618eb0058159416bc686d7c905e641b42552f",
+    "behaviorChange": "4630c17e6252 fix(daemon): spawnRoot releases the failed launch's secret-file hold right after its rollback\u2026",
+    "r1Parent": "764e2a0a7766b497dced08d3530d4a61fb32aee5",
+    "trigger": "review.json round2 CHANGES_REQUESTED at 1741381a (R1, R2, C1 nit)",
+    "verdict": "PASS \u2014 R1 fails-before/passes-after, R2 hardening present and the C2/C1 regression tests still fail at their fix parents for the original reasons, daemon gates green at head, CI green at a01618eb with all 9 threads resolved and matching the PR body. No rig re-run: no pane/secret/socket happy-path behavior changed (only the spawnRoot catch ordering and two tests). No code patched.",
+    "items": {
+      "1_R1_throw_path": {
+        "verdict": "PASS",
+        "test": "releases the failed launch's secret-file hold even when the launch-failed publish throws, so the next persist still reaps the file",
+        "method": "head's processes.test.ts run against a `git archive` export of 764e2a0a (bun install --frozen-lockfile) and at head: `bun test src/daemon/__tests__/processes.test.ts -t \"<name>\"`",
+        "at_parent_764e2a0a": {
+          "result": "(fail) ProcessManager > releases the failed launch's secret-file hold even when the launch-failed publish throws, so the next persist still reaps the file [12.16ms]",
+          "counts": [
+            "0 pass",
+            "1 fail"
+          ]
+        },
+        "at_parent_reason": "expect(readdir(secrets)).toEqual([\"legion-omp-controller\"]) received [\"legion-omp-controller\", \"legion-omp-legion-42-architect\"] \u2014 the failed launch's hold leaked past the throwing publishController, so the next persist (ensureController's) could not reap the architect file (processes.test.ts:2049)",
+        "at_head": {
+          "result": "(pass) ProcessManager > releases the failed launch's secret-file hold even when the launch-failed publish throws, so the next persist still reaps the file [12.55ms]",
+          "counts": [
+            "1 pass",
+            "0 fail"
+          ]
+        },
+        "note": "R1 parent 764e2a0a is the reviewer's round-2 handoff commit (.legion only on top of 1741381a) \u2014 same production source as the round-2 head; the test file did not exist there (parent's own test file lacks the test name)."
+      },
+      "2_R2_and_C2_guard": {
+        "verdict": "PASS",
+        "R2_assertion_present_at_head": "expect(readFileSync(architectFile, \"utf8\")).toBe(\"boot-gen-2\") directly after flushEventLoopUntil (processes.test.ts ~1191)",
+        "C2_hardened_at_parent_6729baf3": {
+          "result": "(fail) ProcessManager > retires an older generation's launch as stale when a park-then-re-admit starts a newer one first [5001.32ms]",
+          "counts": [
+            "0 pass",
+            "1 fail"
+          ]
+        },
+        "C2_at_parent_reason": "unchanged from round 2: `[legion] failed to spawn LEGION-42: ENOENT \u2026 chmod secrets/legion-omp-legion-42-architect` from withPaneSecret <- launchShimmedProcess <- spawnTree <- spawnRoot (generation 1's prune removed the shared file mid-launch), generation 2 never splits, test times out after 5000ms with 2 expect() calls \u2014 the hardening did not weaken the failure",
+        "C2_at_764e2a0a_and_head": {
+          "764e2a0a": {
+            "result": "(pass) ProcessManager > retires an older generation's launch as stale when a park-then-re-admit starts a newer one first [13.61ms]",
+            "counts": [
+              "1 pass",
+              "0 fail"
+            ]
+          },
+          "head": {
+            "result": "(pass) ProcessManager > retires an older generation's launch as stale when a park-then-re-admit starts a newer one first [19.77ms]",
+            "counts": [
+              "1 pass",
+              "0 fail"
+            ]
+          }
+        },
+        "C1_nit_hardened": {
+          "at_parent_58d8b629": {
+            "result": "(fail) ProcessManager > clears a dead worker's locator on boot when the private tmux socket does not exist yet (first boot after upgrade or reboot) [4.98ms]",
+            "counts": [
+              "0 pass",
+              "1 fail"
+            ]
+          },
+          "at_parent_reason": "StopFailed \u2026 error connecting to /tmp/tmux-1000/legion-omp (No such file or directory) at stopProcess <- retireWorkerLocator <- markWorkerDeadLocked (now the confirmed-claim path, as the nit intended)",
+          "at_head": {
+            "result": "(pass) ProcessManager > clears a dead worker's locator on boot when the private tmux socket does not exist yet (first boot after upgrade or reboot) [5.81ms]",
+            "counts": [
+              "1 pass",
+              "0 fail"
+            ]
+          }
+        }
+      },
+      "3_daemon_gates_at_head": {
+        "verdict": "PASS",
+        "env": "LEGION_*/DISPATCH_*/ENVOY_*/PI_* unset",
+        "biome": "bunx biome check src/ \u2014 Checked 137 files in 589ms. No fixes applied.",
+        "tsc": "bunx tsc --noEmit \u2014 clean",
+        "test": "bun test \u2014 818 pass / 0 fail (823 tests, 54 files)",
+        "log": "/tmp/legion6-smoke/gates-r3/gates.log"
+      },
+      "4_pr_ci_threads": {
+        "verdict": "PASS",
+        "headRefOid": "a01618eb0058159416bc686d7c905e641b42552f",
+        "mergeStateStatus": "BLOCKED (legion-human-approval pending only)",
+        "checks": "changes, claude-envoy-bridge, envoy-client, envoy-plugin, lint, pi-envoy, pr-title, test, typecheck all pass; contracts/dispatch/envoy-go skipping (path-filtered); legion-human-approval pending",
+        "runs": "34645242891 Tests success a01618eb0058; 34645242900 Legion Envoy and Contracts success a01618eb0058",
+        "threads": "GraphQL reviewThreads totalCount 9, isResolved 9/9, unresolved []; the 9 PRRT ids in the PR body Threads line equal the GitHub set exactly (no missing, no extra); each thread's last comment names its fixing commit (6729baf3 / 794f3820 / e5844ba4 / b6be9a3e / 4630c17e)"
+      },
+      "5_main_drift": {
+        "verdict": "PASS with correction",
+        "assumptionInAssignment": "two dispatch-web-only commits behind main",
+        "actual": "as of this verification main@origin is 100588c5632c and the branch (fork point 8961e44398c2) is FOUR commits behind: ce74c5cb #931 (dispatch-web), 53c2c8d7 #930 (dispatch-web), eacc91fd #934 (daemon: cli/worker-shim.ts, cli/__tests__/worker-shim.test.ts, cli/__tests__/fixtures/fake-omp-rpc.ts, daemon/worker-rpc.ts, new daemon/socket-writer.ts), 100588c5 #935 (daemon: reducers.ts, __tests__/reducers.test.ts, api/routes/workers.ts)",
+        "fileOverlap": "none \u2014 branch touches 41 files since the fork point, main-only 30; intersection empty",
+        "trialMerge": "git merge-tree --write-tree origin/main a01618eb \u2192 clean (exit 0, tree f494e94dc4f0); merged tree exported and installed; daemon gates on it: biome Checked 138 files clean, tsc clean, bun test 820 pass / 0 fail (825 tests, 54 files) \u2014 main's #934 worker-rpc/socket-writer change coexists with the branch's processes.ts and the branch's tests",
+        "recommendation": "no rebase needed for correctness: no file overlap and the merged tree is green; the two daemon commits are worker-shim RPC framing and review-pin reducer logic, orthogonal to pane secrets/tmux socket. Note for the reviewer: the premise 'dispatch-web only' no longer holds, but the evidence above covers the daemon overlap surface."
+      }
+    },
+    "completed": "2026-09-11T20:41:36.000Z"
   }
 }
