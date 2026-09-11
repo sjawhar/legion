@@ -97,9 +97,7 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 Read only files that precede the assigned phase. There is no handoff schema (rejected
 design — no schema validation runs anywhere in this pipeline): write the phase-specific
 fields the next phase and the architect need, consistent with what predecessor phases
-already wrote. The durable copy lives in `$LEGION_WORKSPACE/.legion/<phase>.json` — the machine
-handoff between phases, not a human-readable status; post that to the issue's `progress.md`
-artifact instead (see [`skills/dispatch`'s Progress](../dispatch/SKILL.md#progress)). If a
+already wrote. The durable copy lives in `$LEGION_WORKSPACE/.legion/<phase>.json`. If a
 committed handoff conflicts with memory or a prior transcript, the committed file wins: it
 is the copy that survived.
 
