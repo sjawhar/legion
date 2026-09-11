@@ -127,4 +127,72 @@ describe("Legion human-approval status backstop", () => {
     expect(commands).toEqual([]);
     expect(tokenCalls).toEqual([]);
   });
+
+  it("reports a written outcome for a 2xx status response", async () => {
+    const result = await setApprovalStatus(
+      { repo: "acme/widgets", pr: 42, sha: "head-sha" },
+      deps()
+    );
+
+    expect(result).toEqual({ written: true });
+  });
+
+  it("classifies a 403 status write as a permanent failure with one composed warning, without throwing", async () => {
+    const failingRunner: CommandRunner = async (command) => {
+      if (command[2]?.includes("/reviews")) {
+        return {
+          stdout: JSON.stringify([
+            { user: { login: "human" }, state: "APPROVED", commit_id: "head-sha" },
+          ]),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      return {
+        stdout: "",
+        stderr: "gh: Resource not accessible by integration (HTTP 403)",
+        exitCode: 1,
+      };
+    };
+
+    const result = await setApprovalStatus(
+      { repo: "acme/widgets", pr: 42, sha: "head-sha" },
+      { ...deps(), runner: failingRunner }
+    );
+
+    if (result.written) throw new Error("expected a failed status write");
+    expect(result.permanent).toBe(true);
+    // A single, fully-composed message -- the caller's one warning -- naming the repo, sha,
+    // HTTP status, and the exact remedy, not several fragments it must assemble itself.
+    expect(result.reason).toBe(
+      "GitHub status write to acme/widgets@head-sha failed permanently (HTTP 403): " +
+        "gh: Resource not accessible by integration (HTTP 403) -- grant the App " +
+        "`Commit statuses: Read and write` and accept the installation permission update."
+    );
+  });
+
+  it("classifies a 503 status write as transient", async () => {
+    const failingRunner: CommandRunner = async (command) => {
+      if (command[2]?.includes("/reviews")) {
+        return {
+          stdout: JSON.stringify([
+            { user: { login: "human" }, state: "APPROVED", commit_id: "head-sha" },
+          ]),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      return { stdout: "", stderr: "gh: Service Unavailable (HTTP 503)", exitCode: 1 };
+    };
+
+    const result = await setApprovalStatus(
+      { repo: "acme/widgets", pr: 42, sha: "head-sha" },
+      { ...deps(), runner: failingRunner }
+    );
+
+    if (result.written) throw new Error("expected a failed status write");
+    expect(result.permanent).toBe(false);
+    expect(result.reason).toContain("acme/widgets@head-sha");
+    expect(result.reason).toContain("503");
+  });
 });

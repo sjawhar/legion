@@ -436,6 +436,52 @@ describe("TokenManager", () => {
     expect(fetchCalls).toBe(2);
   });
 
+  it("authenticates the bot identity lookup with the App JWT and caches it per app id across two owners", async () => {
+    const { privatePem } = await generateTestKeyPair();
+    let identityLookups = 0;
+
+    const fetchFn = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/app") return Response.json({ slug: "legion-implementer" });
+      if (url.pathname === "/users/legion-implementer%5Bbot%5D") {
+        identityLookups += 1;
+        expect(init?.headers).toMatchObject({
+          Authorization: expect.stringMatching(/^token ghs_/),
+        });
+        return Response.json({ id: 271566630 });
+      }
+      const installationId = url.pathname.match(/installations\/(.+)\/access_tokens$/)?.[1];
+      return new Response(
+        JSON.stringify({
+          token: `ghs_${installationId}`,
+          expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }),
+        { status: 201, headers: { "content-type": "application/json" } }
+      );
+    }) as unknown as typeof fetch;
+
+    const manager = new TokenManager(
+      {
+        implement: {
+          appId: "111",
+          privateKey: privatePem,
+          installations: { acme: "222", beta: "333" },
+        },
+      },
+      { fetchFn }
+    );
+
+    // The same App (appId "111") mints tokens for two different owners: each is its own
+    // token-cache entry (`role:owner`), so both reach `generateToken`, but the bot identity
+    // lookup is cached per app id and must run only once across both.
+    const acme = await manager.getToken("implement", "acme");
+    const beta = await manager.getToken("implement", "beta");
+
+    expect(acme.gitIdentity.name).toBe("legion-implementer[bot]");
+    expect(beta.gitIdentity.name).toBe("legion-implementer[bot]");
+    expect(identityLookups).toBe(1);
+  });
+
   it("deduplicates concurrent requests per role and owner", async () => {
     const { privatePem } = await generateTestKeyPair();
     let fetchCalls = 0;

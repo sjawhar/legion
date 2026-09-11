@@ -8,6 +8,7 @@ import {
   roleTopic,
 } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
+import type { SetApprovalStatusOutcome } from "./approval-check";
 import { createCancellableSleep } from "./cancellable-sleep";
 import type { DaemonConfig } from "./config";
 import { DispatchDecodeFailure, dispatchIssueEvent } from "./dispatch-events";
@@ -78,14 +79,18 @@ class DurableReducerFailure extends Error {
 
 /**
  * Wraps a failure from a reducer-derived event's effect dispatch (a
- * non-404 publish/controller rejection, or an `onLinger`/`onProbe`/
- * `onApprovalStatus` handler throwing) or its `saveState` — anything
- * `applyDurableEvent` hits after the reducer has already mutated live
- * state. Distinguishes this from `DurableReducerFailure` (poison, no
- * mutation risk) and from a GitHub mention's publish failure (no
- * reducer, so no mutation risk either): only this class means memory may
- * be dirty, and `processDurableMessage` responds by going fatal instead
- * of nak'ing.
+ * non-404 publish/controller rejection, or an `onLinger`/`onProbe`
+ * handler throwing) or its `saveState` — anything `applyDurableEvent`
+ * hits after the reducer has already mutated live state. Distinguishes
+ * this from `DurableReducerFailure` (poison, no mutation risk) and from
+ * a GitHub mention's publish failure (no reducer, so no mutation risk
+ * either): only this class means memory may be dirty, and
+ * `processDurableMessage` responds by going fatal instead of nak'ing.
+ * An `approval-status` effect never reaches this class: `dispatch`
+ * catches every failure from `onApprovalStatus` itself (see
+ * `applyApprovalStatusOutcome`) and records it on durable state instead
+ * of letting it propagate — a human-approval backstop write is never
+ * the merge gate itself, so it must never crash the daemon.
  */
 class DurableFatalFailure extends Error {
   constructor(cause: unknown) {
@@ -114,7 +119,9 @@ export interface EventPumpDeps {
   onException(ex: ExceptionInfo): Promise<void>;
   onLinger(tree: IssueKey): Promise<void>;
   onProbe(tree: IssueKey): Promise<void>;
-  onApprovalStatus(effect: Extract<Effect, { kind: "approval-status" }>): Promise<void>;
+  onApprovalStatus(
+    effect: Extract<Effect, { kind: "approval-status" }>
+  ): Promise<SetApprovalStatusOutcome>;
   onAdmit(issue: IssueKey): void;
 
   /**
@@ -355,6 +362,38 @@ export interface EventPump {
   drainControllerNotices(): Promise<void>;
   stop(): void;
   drain(): Promise<void>;
+}
+
+/** Records one `setApprovalStatus` attempt's outcome on durable state, keyed by `repo#pr` (the
+ * same `${repo}#${number}` convention `state.prs` uses). A write clears the pending entry; a
+ * failure (permanent or transient) records it for `resync.ts`'s `retryApprovalStatusPending` to
+ * retry every cycle -- a permission-denied write can only be fixed by a human granting the App
+ * the missing scope out of band, which this state cannot detect on its own. `attempts` counts
+ * consecutive failures for the current `sha`, resetting to 1 when a new head supersedes the one
+ * that was failing; the caller's one warning for a permanent failure (`reason` is already the
+ * full message, naming the repo, sha, HTTP status, and remedy) is logged only on that first
+ * attempt for the sha, never again on every retry of an already-diagnosed permission problem. */
+export function applyApprovalStatusOutcome(
+  state: LegionState,
+  effect: Extract<Effect, { kind: "approval-status" }>,
+  outcome: SetApprovalStatusOutcome
+): void {
+  const key = `${effect.repo}#${effect.pr}`;
+  if (outcome.written) {
+    delete state.approvalStatusPending[key];
+    return;
+  }
+  const previous = state.approvalStatusPending[key];
+  const attempts = previous?.sha === effect.sha ? previous.attempts + 1 : 1;
+  if (outcome.permanent && attempts === 1) {
+    console.warn(outcome.reason);
+  }
+  state.approvalStatusPending[key] = {
+    sha: effect.sha,
+    lastError: outcome.reason,
+    attempts,
+    at: Date.now(),
+  };
 }
 
 export function startEventPump(deps: EventPumpDeps): EventPump {
@@ -620,6 +659,27 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     }
   };
 
+  /** Runs the approval-status effect and records its outcome, never throwing: a thrown error
+   * from `deps.onApprovalStatus` itself (a minted-token failure, a malformed effect surfaced by
+   * `queryApprovalState`) is treated as transient, exactly like a 5xx or network failure the
+   * function classified on its own -- either way, this backstop status write must never take
+   * the durable lane fatal (see `DurableFatalFailure`'s own doc comment). */
+  const applyApprovalStatusEffect = async (
+    effect: Extract<Effect, { kind: "approval-status" }>
+  ): Promise<void> => {
+    let outcome: SetApprovalStatusOutcome;
+    try {
+      outcome = await deps.onApprovalStatus(effect);
+    } catch (error) {
+      outcome = {
+        written: false,
+        permanent: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    applyApprovalStatusOutcome(deps.state, effect, outcome);
+  };
+
   /** The single effect-application switch, shared by every lane; an unrecognized kind crashes loud instead of silently doing nothing. */
   const dispatch = async (effects: Effect[], effectPublisher: EffectPublisher): Promise<void> => {
     for (const effect of effects) {
@@ -629,7 +689,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       else if (effect.kind === "linger") await deps.onLinger(effect.tree);
       else if (effect.kind === "probe") await deps.onProbe(effect.tree);
       else if (effect.kind === "admit") deps.onAdmit(effect.issue);
-      else if (effect.kind === "approval-status") await deps.onApprovalStatus(effect);
+      else if (effect.kind === "approval-status") await applyApprovalStatusEffect(effect);
       else {
         const unhandled: never = effect;
         throw new Error(
@@ -665,7 +725,11 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    *   or its save has failed. The caller does not ack or nak; it calls
    *   `deps.fatal` to exit the process, so the supervisor restarts it,
    *   state reloads from the last successful save, and JetStream
-   *   redelivers this still-unacked message against that clean state.
+   *   redelivers this still-unacked message against that clean state. An
+   *   `approval-status` effect never reaches this catch
+   *   (`applyApprovalStatusEffect` records its own outcome and never
+   *   throws), so a failed human-approval backstop write is the one
+   *   effect kind that can never trigger it.
    * - A 404 no-holder effect never reaches the catch above: `publisher`
    *   (given `recoveries` here) only records it. Those recoveries run
    *   after `saveState` succeeds, one call each, best-effort - a

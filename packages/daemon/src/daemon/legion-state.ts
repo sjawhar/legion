@@ -31,6 +31,23 @@ export interface PendingStatusWrite {
   statusAtRecord?: IssueStatus;
 }
 
+/** A daemon-owned human-approval backstop status write (`approval-check.ts`'s
+ * `setApprovalStatus`) that failed its GitHub `statuses` POST -- permanently (permission denied,
+ * missing sha, bad context) or transiently (network error, 5xx). Keyed by `repo#pr` (the same
+ * `${repo}#${number}` convention `state.prs` uses). `attempts` counts consecutive failures for
+ * the current `sha`; it resets to 1 whenever `sha` changes (a new head superseded the one that
+ * was failing). Retried by `resync.ts`'s `retryApprovalStatusPending` every cycle regardless of
+ * whether the underlying failure was permanent: a permission-denied write can only be fixed by a
+ * human granting the App the missing scope out of band, which this state cannot detect on its
+ * own, so resync keeps retrying until the write actually succeeds. See `events.ts`'s
+ * `applyApprovalStatusOutcome` for how entries are recorded and cleared. */
+export interface ApprovalStatusPending {
+  sha: string;
+  lastError: string;
+  attempts: number;
+  at: number;
+}
+
 export interface IssueNode {
   key: IssueKey;
   title: string;
@@ -165,7 +182,7 @@ export interface ControllerPendingNotice {
 }
 
 export interface LegionState {
-  version: 21;
+  version: 22;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -197,6 +214,9 @@ export interface LegionState {
    * fence (`PendingStatusWrite.statusAtRecord`) lets resync discard the intent once a real
    * status change has superseded it for that issue. */
   pendingStatusWrites: Record<IssueKey, PendingStatusWrite>;
+  /** A daemon-owned human-approval backstop status write that failed its GitHub POST, keyed by
+   * `repo#pr`. See `ApprovalStatusPending`'s own doc comment. */
+  approvalStatusPending: Record<string, ApprovalStatusPending>;
 }
 
 export interface LegionStateInit {
@@ -337,7 +357,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(21),
+    version: z.literal(22),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -394,6 +414,19 @@ const LegionStateSchema = z
           .strict()
       )
       .default({}),
+    approvalStatusPending: z
+      .record(
+        z.string(),
+        z
+          .object({
+            sha: z.string(),
+            lastError: z.string(),
+            attempts: z.number().int().positive(),
+            at: z.number(),
+          })
+          .strict()
+      )
+      .default({}),
   })
   .strict();
 
@@ -405,7 +438,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 21,
+    version: 22,
     project,
     issues: {},
     trees: {},
@@ -420,6 +453,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     controllerPendingNotices: [],
     gates: {},
     pendingStatusWrites: {},
+    approvalStatusPending: {},
   };
 }
 
@@ -814,6 +848,15 @@ function migrateV20State(state: unknown, migratedAt: number): unknown {
   return { ...rest, version: 21, trees: migratedTrees };
 }
 
+/** v21 -> v22: adds `approvalStatusPending` (see its own doc comment) -- a pure version bump,
+ * since a state persisted before this change has no daemon-owned approval-status write in
+ * flight to track: every prior attempt either already succeeded or was never recorded (it threw
+ * and crashed the process instead). */
+function migrateV21State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 21) return state;
+  return { ...state, version: 22, approvalStatusPending: {} };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -848,13 +891,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV18State,
     (state) => migrateV19State(state, migratedAt),
     (state) => migrateV20State(state, migratedAt),
+    migrateV21State,
   ];
   const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 21) {
+  if (version !== 22) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

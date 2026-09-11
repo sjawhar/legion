@@ -20,7 +20,7 @@ import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
-import { setApprovalStatus } from "./approval-check";
+import { type SetApprovalStatusOutcome, setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, type GitHubAppRole, loadConfig } from "./config";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
@@ -448,6 +448,21 @@ async function startDaemonLocked(
     }
   };
 
+  // Shared by the durable dispatch path (`eventDeps.onApprovalStatus`) and resync's own retry
+  // (`emitResync`'s `setApprovalStatus`) so a failed human-approval backstop write is reissued
+  // with the exact same App-token deps regardless of which caller retries it.
+  const dispatchApprovalStatus = (effect: {
+    repo: string;
+    pr: number;
+    sha: string;
+  }): Promise<SetApprovalStatusOutcome> =>
+    setApprovalStatus(effect, {
+      runner,
+      tokenManager: deps.tokenManager,
+      appLogins: config.appLogins,
+      gatesMerge: config.gates.merge,
+    });
+
   const eventDeps: EventPumpDeps = {
     nats,
     envoyPublish: deps.envoyPublish,
@@ -461,13 +476,7 @@ async function startDaemonLocked(
     onAdmit: (issue) => {
       processManager.admit(issue);
     },
-    onApprovalStatus: (effect) =>
-      setApprovalStatus(effect, {
-        runner,
-        tokenManager: deps.tokenManager,
-        appLogins: config.appLogins,
-        gatesMerge: config.gates.merge,
-      }),
+    onApprovalStatus: dispatchApprovalStatus,
     onUndeliverable,
     config,
   };
@@ -510,6 +519,7 @@ async function startDaemonLocked(
           saveState: save,
           fetchCiStatusBatch,
           applyEffects: eventPump.applyEffects,
+          setApprovalStatus: dispatchApprovalStatus,
           now: deps.now,
         },
         options

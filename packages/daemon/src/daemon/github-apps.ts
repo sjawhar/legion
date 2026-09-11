@@ -39,8 +39,12 @@ export function getGitIdentity(appId: string, appName: string): { name: string; 
   };
 }
 
+/** Resolves the App's bot git identity. `/app` accepts only the App JWT; `/users/<slug>[bot]` does
+ * not (a JWT there is 401) and unauthenticated it draws on the shared IP's 60/hour budget, so the
+ * user lookup authenticates with the freshly minted installation token instead. */
 async function fetchGitIdentity(
   jwt: string,
+  installationToken: string,
   fetchFn: GitHubFetch
 ): Promise<{ name: string; email: string }> {
   const appResponse = await fetchFn(GITHUB_APP_URL, {
@@ -61,6 +65,7 @@ async function fetchGitIdentity(
   const botLogin = `${app.slug}[bot]`;
   const botResponse = await fetchFn(`${GITHUB_USERS_URL}/${encodeURIComponent(botLogin)}`, {
     headers: {
+      Authorization: `token ${installationToken}`,
       Accept: "application/vnd.github+json",
       "User-Agent": "legion-daemon",
     },
@@ -240,10 +245,8 @@ export class TokenManager {
     cacheKey: string
   ): Promise<CachedToken> {
     const jwt = await generateJwt(roleConfig.appId, roleConfig.privateKey);
-    const [{ token, expiresAt }, gitIdentity] = await Promise.all([
-      exchangeToken(jwt, installationId, this.fetchFn),
-      this.gitIdentity(roleConfig.appId, jwt),
-    ]);
+    const { token, expiresAt } = await exchangeToken(jwt, installationId, this.fetchFn);
+    const gitIdentity = await this.gitIdentity(roleConfig.appId, jwt, token);
     const result: CachedToken = {
       token,
       expiresAt: new Date(expiresAt),
@@ -254,14 +257,18 @@ export class TokenManager {
     return result;
   }
 
-  private async gitIdentity(appId: string, jwt: string): Promise<{ name: string; email: string }> {
+  private async gitIdentity(
+    appId: string,
+    jwt: string,
+    installationToken: string
+  ): Promise<{ name: string; email: string }> {
     const cached = this.gitIdentityCache.get(appId);
     if (cached) return cached;
 
     const pending = this.pendingGitIdentities.get(appId);
     if (pending) return await pending;
 
-    const lookup = fetchGitIdentity(jwt, this.fetchFn);
+    const lookup = fetchGitIdentity(jwt, installationToken, this.fetchFn);
     this.pendingGitIdentities.set(appId, lookup);
     try {
       const identity = await lookup;

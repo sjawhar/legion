@@ -103,9 +103,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v21 state with a valid project and admission capacity", () => {
+  it("initializes empty v22 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 21,
+      version: 22,
       project: "omp",
       issues: {},
       trees: {},
@@ -120,6 +120,7 @@ describe("legion state", () => {
       controllerPendingNotices: [],
       gates: {},
       pendingStatusWrites: {},
+      approvalStatusPending: {},
     });
   });
 
@@ -471,7 +472,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates a controller-held-events-free v17 state through v18, v19, v20, and v21", async () => {
+  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, and v22", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -485,7 +486,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(21);
+    expect(migrated.version).toBe(22);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -574,7 +575,7 @@ describe("legion state", () => {
     }
   });
 
-  it("converts a tree-less, issue-less v18 state to v19 (and onward to v21), preserving its controller notices", async () => {
+  it("converts a tree-less, issue-less v18 state to v19 (and onward to v22), preserving its controller notices", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-gates-"));
     const file = path.join(tempDir, "state.json");
     const notice = {
@@ -603,7 +604,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(21);
+    expect(migrated.version).toBe(22);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -658,7 +659,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(21);
+      expect(migrated.version).toBe(22);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -726,7 +727,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(21);
+      expect(migrated.version).toBe(22);
       expect(migrated.trees[confirmedIssue]).toEqual({
         ...current.trees[confirmedIssue],
         readyConfirmedAt: migrationTimestamp,
@@ -737,6 +738,19 @@ describe("legion state", () => {
     } finally {
       dateNowSpy.mockRestore();
     }
+  });
+
+  it("migrates v21 state to v22 by adding an empty approvalStatusPending map (a version bump only, no other field changes)", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v21-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    current.trees = {};
+    current.issues = {};
+    const { approvalStatusPending: _approvalStatusPending, ...withoutApprovalStatusPending } =
+      current;
+    await writeFile(file, JSON.stringify({ ...withoutApprovalStatusPending, version: 21 }), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
   });
 
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {

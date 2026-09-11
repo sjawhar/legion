@@ -2,7 +2,7 @@
 
 The daemon is Legion's durable coordinator. It consumes webhook envelopes from core NATS and a durable per-repo JetStream consumer, persists `LegionState`, publishes derived role events through Envoy, and owns the tmux root-process lifecycle.
 
-**Operational contract:** the daemon must run under a supervisor that restarts it on a non-zero exit — tmux alone is not one, and a durable-lane failure after a reducer has mutated live state exits the process deliberately (see `events.ts`'s `fatal` hook) expecting exactly that restart. Exactly one daemon may run per project at a time: `instance-lock.ts` enforces this with a pidfile lock scoped to `state_dir`, so every daemon for a project must share the same `state_dir`.
+**Operational contract:** the daemon must run under a supervisor that restarts it on a non-zero exit — tmux alone is not one, and a durable-lane failure after a reducer has mutated live state exits the process deliberately (see `events.ts`'s `fatal` hook) expecting exactly that restart. A failed human-approval backstop status write (`approval-check.ts`) is the one durable-lane effect exempt from this: it is never a merge gate itself (a human `APPROVED` PR review is), so a failure is recorded on `state.approvalStatusPending` and retried by `resync.ts` instead of ever going fatal. Every GitHub App's bot git identity (`github-apps.ts`'s `TokenManager`) is resolved once with the App's own JWT — never an unauthenticated request — and cached per app id for the process lifetime (it never changes), so a crash-restart loop never burns through the shared IP's unauthenticated GitHub rate limit re-deriving it. Exactly one daemon may run per project at a time: `instance-lock.ts` enforces this with a pidfile lock scoped to `state_dir`, so every daemon for a project must share the same `state_dir`.
 
 ## HTTP API
 
@@ -34,9 +34,9 @@ The localhost-only Legion API lives in `api.ts`.
 | `api.ts` | Localhost extension/controller write surface and session-bound credential grants. |
 | `legion-state.ts` | Strict versioned state schema and atomic persistence. |
 | `catchup.ts` | Derived overseer and worker catch-up payloads. |
-| `resync.ts` | Low-frequency: retries failed daemon-owned Dispatch status writes, heals Dispatch status drift this daemon's own durable consumer missed, reconciles unsettled PR check rollups, and reports root-issue anomalies. |
+| `resync.ts` | Low-frequency: retries failed daemon-owned Dispatch status writes, retries a failed human-approval backstop status write on `state.approvalStatusPending` every cycle regardless of whether the failure was permanent, heals Dispatch status drift this daemon's own durable consumer missed, reconciles unsettled PR check rollups, and reports root-issue anomalies. |
 | `dispatch-client.ts` | Thin HTTP client for Dispatch's native-tool API (`listIssues`/`getIssue`/`setStatus`) and `writeStatus`, the one helper every daemon-owned lifecycle status write goes through — a PATCH failure is logged and recorded on `state.pendingStatusWrites` for `resync.ts` to retry, never thrown back at the caller. |
-| `approval-check.ts` | Human approval status backstop for the current PR head. |
+| `approval-check.ts` | Human approval status backstop for the current PR head — `setApprovalStatus` classifies a non-2xx GitHub response as permanent (401/403/404/422: permission, missing sha, bad context) or transient (network, 5xx) and never throws for either; `events.ts` records the outcome on `state.approvalStatusPending` (never fatal) and `resync.ts` retries it every cycle until it succeeds. |
 | `worker-rpc.ts` | Minimal OMP RPC protocol v2 client (`negotiate_protocol`/`prompt`/`get_state`/`shutdown`) reached through a worker's `legion worker-shim` unix socket rather than a spawned process's stdio. |
 | `tmux.ts` | Pure tmux command construction/parsing (open/split a window, probe pane liveness and pid, kill a window or a single pane, list a session's unknown owned windows and its unrecorded worker-shim panes) over an injected `run` callback — no daemon state. |
 
