@@ -1,0 +1,92 @@
+{
+  "plan": "docs/plans/2026-09-11-dispatch-token-file-delivery.md",
+  "spec": "dispatch://LEGION-6/spec (version 9)",
+  "pr": 923,
+  "prUrl": "https://github.com/sjawhar/legion/pull/923",
+  "branch": "legion/LEGION-6",
+  "head": "693386ee93cc",
+  "summary": "Every tmux argv the daemon runs is `tmux -L legion-<project> …` (TmuxServer threaded through tmux.ts, worker-boot-watchdog.ts, processes.ts); pane secrets are 0600 files under <state_dir>/secrets (0700) named by role token, exported only as DISPATCH_TOKEN_FILE / LEGION_BOOT_TOKEN_FILE / LEGION_CONTROLLER_SECRET_FILE; dispatch-token is written by index.ts at startup; consumers (envoy-client resolveDispatchConfig, pi-envoy requiredSecret/requiredControllerCapability, CLI resolveControllerSecret) resolve X_FILE ahead of X and never fall back; kill-pane `no server running` counts as pane-gone; smoke rig gains legion_tmux, private-socket down.sh, and checkpoint 13.",
+  "commits": {
+    "task1": {
+      "change": "klsnnpnv",
+      "commit": "323526beece9",
+      "message": "feat(daemon): secrets.ts — 0700 dir / 0600 file primitives for pane secrets"
+    },
+    "task2": {
+      "change": "purvopxy",
+      "commit": "b12b6df288b7",
+      "message": "feat(daemon): every tmux command targets the private legion-<project> socket"
+    },
+    "task3": {
+      "change": "msmzmqyq",
+      "commit": "83912f2c6963",
+      "message": "feat(daemon): pane secrets are 0600 files under <state_dir>/secrets, exported as *_FILE pointers"
+    },
+    "task4": {
+      "change": "pmlukkyq",
+      "commit": "ea00018e6e48",
+      "message": "feat(cli): controller commands read LEGION_CONTROLLER_SECRET_FILE ahead of the plain variable"
+    },
+    "task5": {
+      "change": "xykmysvy",
+      "commit": "c7c99452ca90",
+      "message": "feat(envoy-client): DISPATCH_TOKEN_FILE resolves the bearer ahead of DISPATCH_TOKEN and dispatch.token"
+    },
+    "task6": {
+      "change": "smswnlkt",
+      "commit": "a67ca5294f3f",
+      "message": "feat(pi-envoy): boot token and controller secret resolve from *_FILE pointers, never falling back"
+    },
+    "task7": {
+      "change": "tkkovuql",
+      "commit": "5fe1b316b426",
+      "message": "feat(smoke): private tmux socket everywhere; checkpoint 13 proves no pane or server carries a secret"
+    },
+    "task8": {
+      "change": "ppumukmv",
+      "commit": "693386ee93cc",
+      "message": "docs(daemon): file-pointer secret delivery, private tmux socket, live-box upgrade step"
+    }
+  },
+  "gates": {
+    "daemon": {
+      "biome": "bunx biome check src/ — clean (137 files)",
+      "tsc": "bunx tsc --noEmit — clean",
+      "test": "bun test — 797 pass, 0 fail (802 tests, 54 files)",
+      "e2e": "LEGION_E2E=1 bun test src/daemon/__tests__/real-shutdown-e2e.test.ts — 3 pass; `tmux -L legion-realshutdown list-sessions` → no server running"
+    },
+    "envoy-client": {
+      "biome": "bunx biome check src/ — clean (26 files)",
+      "tsc": "bunx tsc --noEmit — clean",
+      "test": "bun test — 138 pass, 0 fail",
+      "build": "bun run build — 12 entry points including secret-file.js (bun emits to dist/src/, pre-existing layout)"
+    },
+    "pi-envoy": {
+      "biome": "bunx biome lint extensions/ src/ — clean (19 files)",
+      "tsc": "bunx tsc --noEmit — clean",
+      "test": "bun test — 130 pass, 0 fail (run with LEGION_*/DISPATCH_*/ENVOY_* unset; legion.test.ts assumes a non-Legion shell, and a worker pane's own LEGION_TREE trips classifySession's both-markers guard)",
+      "build": "bun run build — envoy.js and legion.js bundled"
+    },
+    "smoke": {
+      "checkpoints.test.sh": "10 PASS (includes the socket assertion and both checkpoint-13 cases)",
+      "down.test.sh": "2 PASS",
+      "up.test.sh": "8 PASS"
+    }
+  },
+  "deviationsFromPlan": [
+    "Steady-state prune tracks the names ProcessManager itself wrote (paneSecretFiles) instead of listing <state_dir>/secrets on every persist(): the plan's per-save readdir added real fs I/O to every save, which made processes.test.ts fixtures that fake `sleep` (deadline timers fire instantly) race against the launch chain and flake; the boot-time prune (index.ts → ProcessManager.pruneSecretFiles) still lists the directory and reaps crash leftovers. Same observable contract: a file is removed by the persist that follows its locator being cleared.",
+    "Prune acceptance test drops the plan's `sleep: async () => {}` override: with a no-op sleep the controller registration deadline fires immediately and retires the just-spawned controller, deleting the very locator the test asserts on. The default fake WorkerRpcClient closes gracefully, so closeTree needs no fake timeout.",
+    "One pre-existing test (`does not drop a queued idle-resume assignment as stale…`) awaited a single `Bun.sleep(0)` after emitting idle; it now awaits the persist that records the dequeue via a saveState override — the promotion drain's persist is no longer a pure microtask chain.",
+    "checkpoints.test.sh scrubs LEGION_BOOT_TOKEN and LEGION_CONTROLLER_SECRET (not only DISPATCH_TOKEN) from the harness-owned sleep processes, so the harness passes from inside a Legion worker pane too.",
+    "LEGION_TMUX_LIVE tests in processes.test.ts use `-L session` (their project is `duplicate<ts>` etc., not `omp`)."
+  ],
+  "observations": [
+    "Load flakes seen once each across ~8 full daemon runs and never in isolation: `acquireInstanceLock > resolves exactly one winner…` (instance-lock.test.ts, unrelated), `WorkerBootWatchdog real-timer cleanup > never accumulates a listener…` (real timers), `admits only up to the configured global cap…` (5s test timeout on the file's first test under load). Final gate runs were green.",
+    "Plan §Observations: tmux.panePid targets a window for list-panes; checkpoint 13 uses display-message -p -t %N '#{pane_pid}' — unchanged, outside scope.",
+    "The daemon writes an empty `.omp/config.yml` into the issue workspace before each worker launch (ProcessManager.writeOmpConfig); it is untracked by every prior commit and was removed from the working copy before committing so it never lands in the branch."
+  ],
+  "testerNotes": "Follow plan §Tester instructions: build the branch pi-envoy plugin, `up.sh` (mode none), checkpoints 1–3 (Dispatch auth through the file), 13 (`CHECKPOINT 13 OK`), `tmux list-sessions` vs `tmux -L legion-<slug> list-sessions`, `ls -la $SMOKE_DIR/daemon/secrets` (drwx------ / -rw-------), negative control via `tmux -L legion-<slug> set-environment -g LEGION_BOOT_TOKEN planted`, then `down.sh` → `STOPPED tmux session legion-<slug> on private socket …`. pi-envoy tests must run with LEGION_*/DISPATCH_*/ENVOY_* unset when invoked from a Legion pane.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-11T16:24:36.949Z"
+}
