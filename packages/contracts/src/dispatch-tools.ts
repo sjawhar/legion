@@ -238,9 +238,9 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_message",
     description:
-      "Post a note to the issue's Conversation for humans: a status they should see now, or a reply to a human's message. " +
-      "Not a progress ledger (the issue's progress.md artifact), a decision (dispatch_ask), or document feedback " +
-      `(dispatch_comment). Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+      "Post a note humans must read now: a reply to a human's message, a deliverable that landed, or a blocker only " +
+      "they can clear. Never progress or status updates - Dispatch is a high-signal record, not a log. Not a decision " +
+      `(dispatch_ask) or document feedback (dispatch_comment). Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       body: z.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
@@ -251,7 +251,7 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic text edits to an issue or project document. Do not use it for review feedback or for reading; use " +
       "dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. The spec (or any document) holds requirements, " +
-      `design, and decisions — record progress in the issue's progress.md artifact instead. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
+      `design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),

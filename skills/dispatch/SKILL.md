@@ -5,8 +5,9 @@ description: "Use when asking Sami a question, updating the spec, commenting on 
 
 # Dispatch
 
-Dispatch is your issue's or project document's living spec, asks, comments, and artifacts. The transcript is your scratch pad. Anything
-meant for a human goes through a `dispatch_*` tool.
+Dispatch is your issue's or project document's living spec, asks, comments, and artifacts — a high-signal record for the humans who
+decide, never a log of your work. The transcript is your scratch pad; progress and status stay there. Anything meant for a human
+goes through a `dispatch_*` tool.
 
 The server enforces high signal: an ask question is at most 800 characters with at most eight options; comment and message bodies are at
 most 2,000 characters; an artifact is at most 25 MiB. It refuses over-limit input; it never truncates it. GitHub threads and markers no
@@ -121,8 +122,8 @@ resolved. A human may reply to an open or answered ask; so may you, e.g. after f
 
 The spec holds requirements, design, acceptance, decisions, and rejected alternatives, structured per [Writing a spec](#writing-a-spec).
 It changes only when a decision or requirement changes, and every version that records one is named with `summary`. Never write
-progress, status, timestamps, an "Update HH:MMZ" section, a PR list, or handoff notes into the spec — that belongs in
-[Progress](#progress) instead.
+progress, status, timestamps, an "Update HH:MMZ" section, a PR list, or handoff notes into the spec. Progress is not a
+Dispatch object at all: it lives in your transcript and your pull request (see [Messages](#messages)).
 
 Read the current document before changing it:
 
@@ -162,28 +163,6 @@ and deleting a cell's quoted text removes only that text.
 
 Use `replace` for inline continuation. Use zero-based `occurrence` for a repeated target; re-read a missing or ambiguous target before
 retrying. Pass `summary` to name the version when recording a decision.
-
-## Progress
-
-Every issue you work has one progress artifact, `progress.md` — for humans reading later and for your own successor after compaction. It
-is never a wake signal.
-
-Create it once, on first use:
-```ts
-dispatch_artifact({ issue, name: "progress.md", content: "### 2026-09-11 15:00Z - Started\n..." })
-```
-The server slugs `progress.md` to `progress-md`; address every later edit with that slug. Append — never edit or remove an earlier
-entry:
-```ts
-dispatch_doc_edit({
-  issue,
-  artifact: "progress-md",
-  ops: [{ op: "insert", after: "end", markdown: "### 2026-09-11 16:10Z - Blocked\n..." }],
-})
-```
-Newest entry last. Each entry is `### <UTC time> - <headline>` followed by 1-5 lines: what changed (cite `dispatch://` refs or PR
-links), what is blocked and on whom, and what is next. `.legion/<phase>.json` is the durable machine handoff between phases;
-`progress.md` is the human-readable narrative for the same work — keep both, never conflate one for the other.
 
 ## Comments and suggestions
 
@@ -230,15 +209,17 @@ or by its filename.
 
 ## Messages
 
-Post a note to the issue's Conversation for humans: a short status they should see now (a deploy landed, a blocker appeared), or a reply
-to a human's message.
+Dispatch is a high-signal record for humans, not a log of what you are doing. A message is a reply to a human's message, or a
+change a human must know about now: a deliverable landed, a blocker only they can clear. Nothing else — no progress updates, no
+"starting X", no "still working", no restating the spec, no status on a timer. Your transcript is where work is narrated; the
+pull request is where it is summarised. One message that a human reads beats ten that train them to skip you.
 
 ```ts
 dispatch_message({ issue, body })
 ```
 
-It returns `details` `{ issue, topic, message }`. `body` is capped at 2,000 characters. It is not a progress ledger (`progress.md`), a
-decision (`dispatch_ask`), or document feedback (`dispatch_comment`). Your message does not wake anyone unless the issue is routed.
+It returns `details` `{ issue, topic, message }`. `body` is capped at 2,000 characters. A message is not a decision
+(`dispatch_ask`) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
 
 ## What comes back
 
@@ -299,27 +280,18 @@ dispatch_ask({
 })
 ```
 
-Before — progress typed once into a message, gone once compaction drops it from context:
+Before — a progress note that nobody needs, posted where humans look for decisions:
 
 ```ts
 dispatch_message({ issue: "LEGION-815", body: "Merged the release PR, moving to docs next." })
 ```
 
-After — append it to the progress artifact, where the record survives:
+After — nothing. The merge is visible on the pull request; the docs work shows up as its own deliverable. Post a message only when
+a human must act or a deliverable is theirs to use:
 
 ```ts
-dispatch_doc_edit({
+dispatch_message({
   issue: "LEGION-815",
-  artifact: "progress-md",
-  ops: [
-    {
-      op: "insert",
-      after: "end",
-      markdown:
-        "### 2026-09-11 15:40Z - Release PR merged\n" +
-        "- dispatch://LEGION-815/artifact/spec stays unchanged; this is progress, not a decision.\n" +
-        "- Next: docs review.",
-    },
-  ],
+  body: "Release 1.4 is live on the devbox (dispatch://LEGION-815/artifact/release-notes). Nothing needed from you.",
 })
 ```
