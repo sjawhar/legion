@@ -22,6 +22,12 @@ import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
 import type { LegionState, TreeState, WorkerLocator, WorkerRoleClaim } from "./legion-state";
 import { StopFailed, TreeClosingError } from "./process-errors";
+import {
+  DISPATCH_TOKEN_SECRET,
+  pruneSecretFiles,
+  secretFilePath,
+  writeSecretFile,
+} from "./secrets";
 import * as tmux from "./tmux";
 import { MAX_LAUNCH_FAILURES, WorkerAdmission } from "./worker-admission";
 import { WorkerBootWatchdog } from "./worker-boot-watchdog";
@@ -271,6 +277,17 @@ export class ProcessManager {
   /** The private tmux server this daemon owns — see `TmuxServer`. Socket and session share the
    * `legion-<project>` name. */
   private readonly tmux: tmux.TmuxServer;
+  /** `<state_dir>/secrets/dispatch-token`, written by `index.ts` at startup whenever
+   * `config.dispatchToken` is set; exported to every pane as `DISPATCH_TOKEN_FILE`. */
+  private readonly dispatchTokenFile: string | undefined;
+  /** Role tokens whose pane secret file has been written for a launch that has not yet stored its
+   * locator in state. `liveSecretFiles` treats them as live so a persist racing the launch
+   * (another role's save) cannot reap a file the pane is about to read. */
+  private readonly launchingSecrets = new Set<string>();
+  /** Names of every pane secret file this process has written (`withPaneSecret`), the population
+   * the steady-state prune in `persist()` walks — no directory listing per save. Files an earlier
+   * daemon process left behind are reaped by the one listing prune `index.ts` runs at boot. */
+  private readonly paneSecretFiles = new Set<string>();
 
   /**
    * The stop hierarchy every graceful-shutdown path funnels through, from lowest level up:
@@ -285,6 +302,10 @@ export class ProcessManager {
    */
   constructor(private readonly deps: ProcessManagerDeps) {
     this.tmux = { run: deps.run, socket: `legion-${deps.state.project}` };
+    this.dispatchTokenFile =
+      deps.config.dispatchToken === undefined
+        ? undefined
+        : secretFilePath(deps.config.stateDir, DISPATCH_TOKEN_SECRET);
     this.workerAdmission = new WorkerAdmission({
       state: deps.state,
       config: deps.config,
@@ -503,7 +524,7 @@ export class ProcessManager {
             // or probe/prompt the socket while a boot's readiness is still unconfirmed — queue
             // the task and let /worker/ready deliver it once the worker's boot is confirmed.
             claim.pendingAssignment = task;
-            await this.deps.saveState();
+            await this.persist();
             return { status: "resumed", roleToken: token };
           }
           const socketPath = claim.locator.socketPath;
@@ -865,7 +886,7 @@ export class ProcessManager {
     }
     if (status) tree.status = status;
     await this.releaseSlot(treeKey);
-    await this.deps.saveState();
+    await this.persist();
   }
 
   /**
@@ -936,7 +957,7 @@ export class ProcessManager {
       delete claim.locator;
       if (resumeSessionFile) claim.resumeSessionFile = resumeSessionFile;
       if (!retry) {
-        await this.deps.saveState();
+        await this.persist();
         return;
       }
       const { treeKey: retryTreeKey, issue, role } = retry;
@@ -946,7 +967,7 @@ export class ProcessManager {
       // see `launchWorker`'s own publish for why.
       if (failures === MAX_LAUNCH_FAILURES) {
         this.publishWorkerDied(retryTreeKey, issue, role);
-        await this.deps.saveState();
+        await this.persist();
         return;
       }
       // Pushed onto the queue *before* this save (not after, and not via `enqueueForRetry`'s
@@ -955,7 +976,7 @@ export class ProcessManager {
       // between them strand this claim — locator-less, unqueued, and invisible to
       // `reconnectWorkers`' locator-only filter, with nothing left to ever retry it.
       await this.workerAdmission.enqueueForRetryPending(token);
-      await this.deps.saveState();
+      await this.persist();
       this.workerAdmission.promoteWorkerQueue();
     });
   }
@@ -1042,7 +1063,7 @@ export class ProcessManager {
     if (tree.status !== "lingering") {
       tree.status = "lingering";
       tree.lingerUntil = new Date(this.deps.now()).toISOString();
-      await this.deps.saveState();
+      await this.persist();
     }
     const stopRoot = options?.stopRoot ?? true;
     let anyFailed = false;
@@ -1144,7 +1165,7 @@ export class ProcessManager {
     if (anyFailed) {
       tree.status = "lingering";
       tree.lingerUntil = new Date(this.deps.now()).toISOString();
-      await this.deps.saveState();
+      await this.persist();
       throw new StopFailed(
         treeKey,
         `Legion tree ${treeKey} has a process that could not be stopped`
@@ -1188,7 +1209,7 @@ export class ProcessManager {
         delete this.deps.state.spawnCapabilities[key];
       }
     }
-    await this.deps.saveState();
+    await this.persist();
     // Deleting this tree's claims may have freed running-worker slots other trees' queues are
     // waiting on.
     this.workerAdmission.promoteWorkerQueue();
@@ -1306,7 +1327,7 @@ export class ProcessManager {
       this.settlePromotionSpawn(issue);
       if (this.promotionSweep) await this.advancePromotionSweep();
       else await this.beginPromotionSweep(issue);
-      await this.deps.saveState();
+      await this.persist();
       throw error;
     }
 
@@ -1327,7 +1348,7 @@ export class ProcessManager {
     this.settlePromotionSpawn(issue);
     if (this.promotionSweep?.inFlight === 0) this.promotionSweep = undefined;
     try {
-      await this.deps.saveState();
+      await this.persist();
     } catch (error) {
       if (tree.locator) {
         await tmux.killWindow(this.tmux, tree.locator.tmuxWindowId);
@@ -2009,7 +2030,6 @@ export class ProcessManager {
       LEGION_ROLE: "architect",
       LEGION_ROOT_WORKSPACE: workspace.workspaceDir,
       LEGION_GENERATION: String(generation),
-      LEGION_BOOT_TOKEN: bootToken,
       LEGION_DAEMON_URL: `http://127.0.0.1:${this.deps.config.port}`,
       LEGION_PROJECT: this.deps.state.project,
       ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
@@ -2022,7 +2042,7 @@ export class ProcessManager {
       GIT_TERMINAL_PROMPT: "0",
       PATH: this.deps.panePath,
       DISPATCH_URL: this.deps.config.dispatchUrl,
-      DISPATCH_TOKEN: this.deps.config.dispatchToken,
+      DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
     });
     const addressingPrompt = addressingFragment(
       this.deps.state.project,
@@ -2048,6 +2068,7 @@ export class ProcessManager {
       promptPath,
       addressingPrompt,
       env,
+      bootToken,
       priorSessionFile,
       "resurrecting"
     );
@@ -2329,6 +2350,9 @@ export class ProcessManager {
    * caller's OMP invocation with its resume argument and system prompt. Shared by the root
    * architect (a worker of its own issue) and every phase worker: the issue's first process
    * opens a fresh window named for the issue; every later process on that issue splits into it.
+   * Writes the pane's boot token to `<state_dir>/secrets/<role token>` first and exports only
+   * `LEGION_BOOT_TOKEN_FILE`; the write happens before any tmux call, so an fs failure is an
+   * ordinary launch failure.
    */
   private async launchShimmedProcess(
     issue: IssueKey,
@@ -2337,6 +2361,7 @@ export class ProcessManager {
     promptPath: string,
     addressingPrompt: string,
     envPairs: string[],
+    bootToken: string,
     resumeSessionFile: string | undefined,
     logVerb: string
   ): Promise<WorkerLocator> {
@@ -2347,28 +2372,31 @@ export class ProcessManager {
     const shellCommand = this.shimmedShellCommand(workspaceDir, socketPath, innerCommand);
 
     const session = this.tmux.socket;
-    const { tmuxWindowId, tmuxPaneId } = await this.serialize(
-      this.issueLaunchQueue,
-      issue,
-      async () => {
-        const existingWindowId = await this.probedWindowId(issue);
-        if (existingWindowId) {
-          const { paneId } = await tmux.splitWindow(this.tmux, existingWindowId, [
-            ...envPairs,
-            shellCommand,
-          ]);
-          return { tmuxWindowId: existingWindowId, tmuxPaneId: paneId };
-        }
-        const window = await tmux.openWindow(
-          this.tmux,
-          session,
-          treeName(issue),
-          [...envPairs, shellCommand],
-          session
-        );
-        this.rewriteIssueWindowId(issue, window.windowId);
-        return { tmuxWindowId: window.windowId, tmuxPaneId: window.paneId };
-      }
+    const token = roleToken(this.deps.state.project, issue, role);
+    const { tmuxWindowId, tmuxPaneId } = await this.withPaneSecret(
+      token,
+      bootToken,
+      (bootTokenFile) =>
+        this.serialize(this.issueLaunchQueue, issue, async () => {
+          const pairs = [...envPairs, ...tmuxEnv({ LEGION_BOOT_TOKEN_FILE: bootTokenFile })];
+          const existingWindowId = await this.probedWindowId(issue);
+          if (existingWindowId) {
+            const { paneId } = await tmux.splitWindow(this.tmux, existingWindowId, [
+              ...pairs,
+              shellCommand,
+            ]);
+            return { tmuxWindowId: existingWindowId, tmuxPaneId: paneId };
+          }
+          const window = await tmux.openWindow(
+            this.tmux,
+            session,
+            treeName(issue),
+            [...pairs, shellCommand],
+            session
+          );
+          this.rewriteIssueWindowId(issue, window.windowId);
+          return { tmuxWindowId: window.windowId, tmuxPaneId: window.paneId };
+        })
     );
 
     return { tmuxSession: session, tmuxWindowId, tmuxPaneId, socketPath };
@@ -2409,7 +2437,6 @@ export class ProcessManager {
         LEGION_ISSUE: issue,
         LEGION_ROLE: role,
         LEGION_WORKSPACE: workspace.workspaceDir,
-        LEGION_BOOT_TOKEN: bootToken,
         LEGION_GENERATION: String(generation),
         LEGION_DAEMON_URL: `http://127.0.0.1:${this.deps.config.port}`,
         LEGION_PROJECT: this.deps.state.project,
@@ -2421,7 +2448,7 @@ export class ProcessManager {
         GIT_TERMINAL_PROMPT: "0",
         PATH: this.deps.panePath,
         DISPATCH_URL: this.deps.config.dispatchUrl,
-        DISPATCH_TOKEN: this.deps.config.dispatchToken,
+        DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       });
       const addressingPrompt = addressingFragment(this.deps.state.project, treeKey, issue, role);
       const locator = await this.launchShimmedProcess(
@@ -2431,6 +2458,7 @@ export class ProcessManager {
         promptPath,
         addressingPrompt,
         env,
+        bootToken,
         resumeSessionFile,
         "respawning"
       );
@@ -2477,10 +2505,10 @@ export class ProcessManager {
         // successful retire clears it; `closeTree`'s own fixed-point loop or the periodic sweep
         // retries the stop from whatever this leaves behind on failure.
         this.deps.state.roles[token] = freshClaim;
-        await this.deps.saveState();
+        await this.persist();
         await this.retireWorkerLocator(token, freshLocator);
         delete this.deps.state.roles[token];
-        await this.deps.saveState();
+        await this.persist();
         throw new TreeClosingError(treeKey);
       }
 
@@ -2499,7 +2527,7 @@ export class ProcessManager {
       // slot as durably occupied, instead of trusting an in-memory claim that might still
       // vanish on a crash.
       try {
-        await this.deps.saveState();
+        await this.persist();
       } catch (saveError) {
         // The pane already exists at this point (opened, locator and `pendingAssignment`
         // already written above) -- a failure here is a durable-state persistence failure, not
@@ -2517,7 +2545,7 @@ export class ProcessManager {
           saveError
         );
         try {
-          await this.deps.saveState();
+          await this.persist();
         } catch (retryError) {
           console.error(
             `[legion] retry-persist for ${token} also failed; in-memory claim remains authoritative:`,
@@ -2546,7 +2574,7 @@ export class ProcessManager {
           JSON.stringify({ type: "launch-failed", issue, role, failures })
         );
       }
-      await this.deps.saveState();
+      await this.persist();
       throw error;
     }
   }
@@ -2560,32 +2588,35 @@ export class ProcessManager {
     const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
     const shellCommand = this.shimmedShellCommand(controllerDir, socketPath, innerCommand);
     const session = this.tmux.socket;
-    const env = tmuxEnv({
-      LEGION_CONTROLLER: "1",
-      LEGION_ROLE: "controller",
-      LEGION_CONTROLLER_SECRET: controllerSecret,
-      LEGION_DAEMON_URL: `http://127.0.0.1:${this.deps.config.port}`,
-      LEGION_PROJECT: this.deps.state.project,
-      ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
-      ENVOY_URL: this.deps.config.envoyUrl,
-      PATH: this.deps.panePath,
-      DISPATCH_URL: this.deps.config.dispatchUrl,
-      DISPATCH_TOKEN: this.deps.config.dispatchToken,
+    const token = controllerToken(this.deps.state.project);
+    await this.withPaneSecret(token, controllerSecret, async (secretFile) => {
+      const env = tmuxEnv({
+        LEGION_CONTROLLER: "1",
+        LEGION_ROLE: "controller",
+        LEGION_CONTROLLER_SECRET_FILE: secretFile,
+        LEGION_DAEMON_URL: `http://127.0.0.1:${this.deps.config.port}`,
+        LEGION_PROJECT: this.deps.state.project,
+        ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
+        ENVOY_URL: this.deps.config.envoyUrl,
+        PATH: this.deps.panePath,
+        DISPATCH_URL: this.deps.config.dispatchUrl,
+        DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
+      });
+      const window = await tmux.openWindow(
+        this.tmux,
+        session,
+        "controller",
+        [...env, shellCommand],
+        session
+      );
+      this.deps.state.controllerLocator = {
+        tmuxSession: session,
+        tmuxWindowId: window.windowId,
+        tmuxPaneId: window.paneId,
+        socketPath,
+      };
     });
-    const window = await tmux.openWindow(
-      this.tmux,
-      session,
-      "controller",
-      [...env, shellCommand],
-      session
-    );
-    this.deps.state.controllerLocator = {
-      tmuxSession: session,
-      tmuxWindowId: window.windowId,
-      tmuxPaneId: window.paneId,
-      socketPath,
-    };
-    await this.deps.saveState();
+    await this.persist();
   }
 
   /** Connects the controller's shim socket on `/controller/ready`, exactly as `markTreeReady`
@@ -2858,7 +2889,76 @@ export class ProcessManager {
     );
   }
 
-  private persist(): Promise<void> {
-    return this.deps.saveState();
+  /** Writes `<state_dir>/secrets/<token>` for a pane about to launch, tracks it in
+   * `paneSecretFiles`, and keeps it exempt from pruning until `body` resolves. Callers store the
+   * locator `body` returns into state synchronously (no `await` in between), so by the next
+   * `persist()` the file is referenced by a live locator; a `body` that throws leaves the file for
+   * that persist's prune to reap. */
+  private async withPaneSecret<T>(
+    token: string,
+    value: string,
+    body: (secretFile: string) => Promise<T>
+  ): Promise<T> {
+    this.launchingSecrets.add(token);
+    try {
+      const secretFile = await writeSecretFile(this.deps.config.stateDir, token, value);
+      this.paneSecretFiles.add(token);
+      return await body(secretFile);
+    } finally {
+      this.launchingSecrets.delete(token);
+    }
+  }
+
+  /** Every secret file some live process still needs: the shared Dispatch bearer, one per tree
+   * root with a locator, one per worker claim with a locator, the controller's when it has a
+   * locator, and every launch currently in flight. */
+  private liveSecretFiles(): Set<string> {
+    const project = this.deps.state.project;
+    const live = new Set<string>([DISPATCH_TOKEN_SECRET, ...this.launchingSecrets]);
+    if (this.deps.state.controllerLocator) live.add(controllerToken(project));
+    for (const tree of Object.values(this.deps.state.trees)) {
+      if (tree.locator) live.add(roleToken(project, tree.root, "architect"));
+    }
+    for (const [token, claim] of Object.entries(this.deps.state.roles)) {
+      if ("issue" in claim && claim.locator) live.add(token);
+    }
+    return live;
+  }
+
+  /** The boot-time half of secret-file hygiene (`index.ts`): lists `<state_dir>/secrets` and
+   * removes everything no live locator references — files a previous daemon process left behind
+   * between clearing a locator and its save's prune. Best-effort and never throws. */
+  async pruneSecretFiles(): Promise<void> {
+    try {
+      await pruneSecretFiles(this.deps.config.stateDir, this.liveSecretFiles());
+    } catch (error) {
+      console.error("[legion] failed to prune pane secret files:", error);
+    }
+  }
+
+  /** The steady-state half, run by every `persist()`: removes exactly the files this process
+   * wrote (`paneSecretFiles`) that no live locator references any more — no directory listing,
+   * so a save that clears no locator costs no extra I/O. A file whose removal fails stays tracked
+   * and is retried on the next persist; the failure is logged, never thrown, because hygiene must
+   * never turn a successful save into a failed one. */
+  private async pruneWrittenSecretFiles(): Promise<void> {
+    const live = this.liveSecretFiles();
+    const stale = [...this.paneSecretFiles].filter((name) => !live.has(name));
+    if (stale.length === 0) return;
+    await Promise.all(
+      stale.map(async (name) => {
+        try {
+          await rm(secretFilePath(this.deps.config.stateDir, name), { force: true });
+          this.paneSecretFiles.delete(name);
+        } catch (error) {
+          console.error(`[legion] failed to remove pane secret file ${name}:`, error);
+        }
+      })
+    );
+  }
+
+  private async persist(): Promise<void> {
+    await this.deps.saveState();
+    await this.pruneWrittenSecretFiles();
   }
 }

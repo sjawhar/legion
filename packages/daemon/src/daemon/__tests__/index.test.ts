@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { controllerToken, roleTopic } from "@legion/contracts";
@@ -157,11 +158,12 @@ function daemonTestDependencies(
             exitCode: 0,
           };
         }
-        const controllerSecret = command.find((part) =>
-          part.startsWith("LEGION_CONTROLLER_SECRET=")
-        );
-        if (controllerSecret)
-          onControllerSecret(controllerSecret.slice("LEGION_CONTROLLER_SECRET=".length));
+        const pointer = command.find((part) => part.startsWith("LEGION_CONTROLLER_SECRET_FILE="));
+        if (pointer) {
+          onControllerSecret(
+            readFileSync(pointer.slice("LEGION_CONTROLLER_SECRET_FILE=".length), "utf8")
+          );
+        }
         if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
           return { stdout: "", stderr: "", exitCode: 1 };
         }
@@ -240,6 +242,8 @@ function config(stateDir: string): DaemonConfig {
     workerRpcTimeoutSeconds: 5,
     gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    dispatchUrl: "http://127.0.0.1:18766",
+    dispatchToken: "test-dispatch-token",
     stateDir,
   };
 }
@@ -659,6 +663,10 @@ describe("startDaemon", () => {
           controllerSecret = secret;
         })
       );
+      const dispatchTokenFile = path.join(stateDir, "secrets", "dispatch-token");
+      expect(await readFile(dispatchTokenFile, "utf8")).toBe("test-dispatch-token");
+      expect((await stat(dispatchTokenFile)).mode & 0o777).toBe(0o600);
+      expect((await stat(path.join(stateDir, "secrets"))).mode & 0o777).toBe(0o700);
       const controller = controllerToken(daemonConfig.project);
       firstNats.emit(
         `notifications.envoy.exceptions.notifications.role.${controller}`,

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -593,8 +593,6 @@ describe("ProcessManager", () => {
         "-e",
         "LEGION_GENERATION=1",
         "-e",
-        "LEGION_BOOT_TOKEN=boot-token",
-        "-e",
         "LEGION_DAEMON_URL=http://127.0.0.1:13999",
         "-e",
         "LEGION_PROJECT=omp",
@@ -619,7 +617,9 @@ describe("ProcessManager", () => {
         "-e",
         "DISPATCH_URL=http://127.0.0.1:18766",
         "-e",
-        "DISPATCH_TOKEN=test-dispatch-token",
+        `DISPATCH_TOKEN_FILE=${path.join(stateDir, "secrets", "dispatch-token")}`,
+        "-e",
+        `LEGION_BOOT_TOKEN_FILE=${path.join(stateDir, "secrets", roleToken("omp", root, "architect"))}`,
         `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       ],
       ["tmux", "-L", "legion-omp", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
@@ -668,7 +668,7 @@ describe("ProcessManager", () => {
     expect(tmuxWindowEnvironment(controllerWindow)).toEqual({
       LEGION_CONTROLLER: "1",
       LEGION_ROLE: "controller",
-      LEGION_CONTROLLER_SECRET: "controller-secret",
+      LEGION_CONTROLLER_SECRET_FILE: path.join(stateDir, "secrets", "legion-omp-controller"),
       LEGION_DAEMON_URL: "http://127.0.0.1:13999",
       LEGION_PROJECT: "omp",
       ENVOY_NATS_URL: "nats://127.0.0.1:4222",
@@ -681,7 +681,7 @@ describe("ProcessManager", () => {
       LEGION_ROLE: "architect",
       LEGION_ROOT_WORKSPACE: path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42"),
       LEGION_GENERATION: "1",
-      LEGION_BOOT_TOKEN: "boot-token",
+      LEGION_BOOT_TOKEN_FILE: path.join(stateDir, "secrets", roleToken("omp", root, "architect")),
       LEGION_DAEMON_URL: "http://127.0.0.1:13999",
       LEGION_PROJECT: "omp",
       ENVOY_NATS_URL: "nats://127.0.0.1:4222",
@@ -719,6 +719,122 @@ describe("ProcessManager", () => {
       expect(command.slice(0, 3)).toEqual(["tmux", "-L", "legion-omp"]);
     }
     expect(tmuxCommands.map((command) => command[3])).toContain("list-windows");
+  });
+  it("delivers every pane secret as a 0600 file pointer inside a 0700 secrets dir, never as a -e value", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    let sessionExists = false;
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir, {
+        dispatchUrl: "http://127.0.0.1:18766",
+        dispatchToken: "test-dispatch-token",
+      }),
+      mintControllerCapability: async () => "controller-secret",
+      mintBootToken: async () => "root-boot-token",
+      mintWorkerBootToken: async () => "worker-boot-token",
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") {
+          return { stdout: `@${commands.length} %${commands.length} 12345\n`, exitCode: 0 };
+        }
+        if (command[3] === "split-window") {
+          return { stdout: `%${commands.length} 12345\n`, exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    const secrets = [
+      "test-dispatch-token",
+      "root-boot-token",
+      "worker-boot-token",
+      "controller-secret",
+    ];
+    const tmuxCommands = commands.filter((command) => command[0] === "tmux");
+    for (const command of tmuxCommands) {
+      expect(command.slice(0, 3)).toEqual(["tmux", "-L", "legion-omp"]);
+      for (const part of command) for (const secret of secrets) expect(part).not.toContain(secret);
+    }
+    const launches = tmuxCommands.filter((c) => c[3] === "new-window" || c[3] === "split-window");
+    expect(launches).toHaveLength(3);
+    const [controller, architect, tester] = launches.map(tmuxWindowEnvironment);
+    if (!controller || !architect || !tester) throw new Error("missing launches");
+    const dir = path.join(stateDir, "secrets");
+    expect(controller).toMatchObject({
+      DISPATCH_TOKEN_FILE: path.join(dir, "dispatch-token"),
+      LEGION_CONTROLLER_SECRET_FILE: path.join(dir, "legion-omp-controller"),
+    });
+    expect(architect).toMatchObject({
+      DISPATCH_TOKEN_FILE: path.join(dir, "dispatch-token"),
+      LEGION_BOOT_TOKEN_FILE: path.join(dir, roleToken("omp", root, "architect")),
+    });
+    expect(tester).toMatchObject({
+      DISPATCH_TOKEN_FILE: path.join(dir, "dispatch-token"),
+      LEGION_BOOT_TOKEN_FILE: path.join(dir, roleToken("omp", root, "tester")),
+    });
+    for (const environment of [controller, architect, tester]) {
+      expect(environment.DISPATCH_TOKEN).toBeUndefined();
+      expect(environment.LEGION_BOOT_TOKEN).toBeUndefined();
+      expect(environment.LEGION_CONTROLLER_SECRET).toBeUndefined();
+    }
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    for (const [file, value] of [
+      [controller.LEGION_CONTROLLER_SECRET_FILE, "controller-secret"],
+      [architect.LEGION_BOOT_TOKEN_FILE, "root-boot-token"],
+      [tester.LEGION_BOOT_TOKEN_FILE, "worker-boot-token"],
+    ] as const) {
+      if (!file) throw new Error("pointer missing");
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+      expect(await readFile(file, "utf8")).toBe(value);
+    }
+  });
+  it("prunes a pane's secret file once no locator references it, keeping the others", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    let sessionExists = false;
+    const { manager: processes } = manager(newLegionState("omp", 1), {
+      config: config(stateDir, {
+        dispatchUrl: "http://127.0.0.1:18766",
+        dispatchToken: "test-dispatch-token",
+      }),
+      run: async (command) => {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "split-window") return { stdout: "%2 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+    const dir = path.join(stateDir, "secrets");
+    const architectFile = path.join(dir, roleToken("omp", root, "architect"));
+    const testerFile = path.join(dir, roleToken("omp", root, "tester"));
+    expect((await readdir(dir)).sort()).toEqual(
+      [
+        roleToken("omp", root, "architect"),
+        roleToken("omp", root, "tester"),
+        "legion-omp-controller",
+      ].sort()
+    );
+
+    await processes.markProcessDead(root);
+
+    expect(await stat(architectFile).catch(() => undefined)).toBeUndefined();
+    expect(await readFile(testerFile, "utf8")).toBe("worker-boot-token");
+
+    await processes.closeTree(root);
+
+    expect((await readdir(dir)).sort()).toEqual(["legion-omp-controller"]);
   });
   it("writes the tree's Dispatch status to in_progress on a successful spawn, then to done on close", async () => {
     const stateDir = await temporaryDir();
@@ -3478,6 +3594,7 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     const commands: string[][] = [];
+    const launchedSecrets: string[] = [];
     let controllerLive = false;
     let mints = 0;
     const { manager: processes } = manager(state, {
@@ -3494,6 +3611,8 @@ describe("ProcessManager", () => {
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
           controllerLive = true;
+          const pointer = tmuxWindowEnvironment(command).LEGION_CONTROLLER_SECRET_FILE;
+          if (pointer) launchedSecrets.push(await readFile(pointer, "utf8"));
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -3504,10 +3623,8 @@ describe("ProcessManager", () => {
     controllerLive = false;
     await processes.ensureController();
 
-    const windows = commands.filter((command) => command[3] === "new-window");
     expect(mints).toBe(2);
-    expect(windows[0]).toContain("LEGION_CONTROLLER_SECRET=controller-secret-1");
-    expect(windows[1]).toContain("LEGION_CONTROLLER_SECRET=controller-secret-2");
+    expect(launchedSecrets).toEqual(["controller-secret-1", "controller-secret-2"]);
   });
 
   it("ensureController's registration-deadline callback leaves an alive controller alone once its role claim arrives before the deadline elapses", async () => {
@@ -5382,7 +5499,7 @@ describe("ProcessManager", () => {
       LEGION_ISSUE: root,
       LEGION_ROLE: "tester",
       LEGION_WORKSPACE: workspace,
-      LEGION_BOOT_TOKEN: "worker-boot-token",
+      LEGION_BOOT_TOKEN_FILE: path.join(stateDir, "secrets", roleToken("omp", root, "tester")),
       LEGION_GENERATION: "1",
       LEGION_DAEMON_URL: "http://127.0.0.1:13999",
       LEGION_PROJECT: "omp",
@@ -8385,7 +8502,7 @@ describe("ProcessManager", () => {
     expect(claim.pendingAssignment).toBe("verify #41");
   });
 
-  it("passes DISPATCH_URL and DISPATCH_TOKEN to a spawned phase worker, never the retired DISPATCH_MCP_URL alias", async () => {
+  it("passes DISPATCH_URL and a DISPATCH_TOKEN_FILE pointer to a spawned phase worker, never the token or the retired DISPATCH_MCP_URL alias", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     await mkdir(workspace, { recursive: true });
@@ -8418,11 +8535,12 @@ describe("ProcessManager", () => {
     if (!windowCommand) throw new Error("worker spawn did not open a tmux window");
     const environment = tmuxWindowEnvironment(windowCommand);
     expect(environment.DISPATCH_URL).toBe("http://127.0.0.1:18766");
-    expect(environment.DISPATCH_TOKEN).toBe("test-dispatch-token");
+    expect(environment.DISPATCH_TOKEN).toBeUndefined();
+    expect(environment.DISPATCH_TOKEN_FILE).toBe(path.join(stateDir, "secrets", "dispatch-token"));
     expect(environment.DISPATCH_MCP_URL).toBeUndefined();
   });
 
-  it("passes DISPATCH_URL and DISPATCH_TOKEN to the controller pane, never the retired DISPATCH_MCP_URL alias", async () => {
+  it("passes DISPATCH_URL and a DISPATCH_TOKEN_FILE pointer to the controller pane, never the token or the retired DISPATCH_MCP_URL alias", async () => {
     const stateDir = await temporaryDir();
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
       config: config(stateDir, {
@@ -8439,7 +8557,8 @@ describe("ProcessManager", () => {
     if (!windowCommand) throw new Error("controller spawn did not open a tmux window");
     const environment = tmuxWindowEnvironment(windowCommand);
     expect(environment.DISPATCH_URL).toBe("http://127.0.0.1:18766");
-    expect(environment.DISPATCH_TOKEN).toBe("test-dispatch-token");
+    expect(environment.DISPATCH_TOKEN).toBeUndefined();
+    expect(environment.DISPATCH_TOKEN_FILE).toBe(path.join(stateDir, "secrets", "dispatch-token"));
     expect(environment.DISPATCH_MCP_URL).toBeUndefined();
   });
 
@@ -9145,8 +9264,14 @@ describe("ProcessManager", () => {
   it("does not drop a queued idle-resume assignment as stale when its client is alive but not currently idle, only stops the drain until it goes idle", async () => {
     const token = roleToken("omp", root, "tester");
     const client = fakeWorkerRpcClient();
+    const dequeued = Promise.withResolvers<void>();
     const { processes, state, managedState } = await workerCapFixture(2, {
       connectWorkerRpc: async () => client,
+      saveState: async () => {
+        if (client.prompts.length > 0 && managedState.workerAdmission.queue.length === 0) {
+          dequeued.resolve();
+        }
+      },
     });
     state.roles[token] = {
       issue: root,
@@ -9178,9 +9303,10 @@ describe("ProcessManager", () => {
     expect(claim.locator).toBeDefined();
     expect(client.prompts).toEqual([]);
 
-    // Once it genuinely goes idle, the exact same queued assignment promotes normally.
+    // Once it genuinely goes idle, the exact same queued assignment promotes normally. The
+    // signal is the persist that follows the dequeue, not a guessed number of ticks.
     client.emitRunState("idle");
-    await Bun.sleep(0);
+    await dequeued.promise;
 
     expect(managedState.workerAdmission.queue).toEqual([]);
     expect(client.prompts).toEqual(["verify #41"]);

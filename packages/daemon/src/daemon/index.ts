@@ -46,6 +46,7 @@ import {
   withOmpLaunchPrefix,
 } from "./processes";
 import { runResync } from "./resync";
+import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
 import { connectWorkerRpc } from "./worker-rpc";
 
 const LINGER_SWEEP_INTERVAL_MS = 60_000;
@@ -333,6 +334,12 @@ async function startDaemonLocked(
     stateDir: config.stateDir,
   });
   const runner = createDaemonRunner(environment, deps.runner);
+  // The one Dispatch bearer every pane shares, delivered as a 0600 file pointer
+  // (`DISPATCH_TOKEN_FILE`) rather than a `-e` argv value — see `secrets.ts`. An fs failure here
+  // refuses startup exactly like a missing `DISPATCH_TOKEN` does: no pane may launch without it.
+  if (config.dispatchToken !== undefined) {
+    await writeSecretFile(config.stateDir, DISPATCH_TOKEN_SECRET, config.dispatchToken);
+  }
   await verifyOmpAgentsCapability(environment.ompInvocation, config.ompLaunchPrefix, runner);
   await verifyLegionPluginLoaded(
     environment.ompInvocation,
@@ -404,6 +411,8 @@ async function startDaemonLocked(
   } catch (error) {
     console.error(`[legion] worker reconnection failed:`, error);
   }
+  // Reaps pane secret files a crash left behind between clearing a locator and its save's prune.
+  await processManager.pruneSecretFiles();
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
     const payload = await overseerCatchup(state, tree);
     await deps.envoyPublish(

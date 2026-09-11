@@ -154,13 +154,14 @@ describe("resolveDaemonEnvironment", () => {
     }
   });
 
-  it("strips DISPATCH_TOKEN, DISPATCH_URL, and DISPATCH_MCP_URL from paneEnv regardless of source", async () => {
+  it("strips DISPATCH_TOKEN, DISPATCH_TOKEN_FILE, DISPATCH_URL, and DISPATCH_MCP_URL from paneEnv regardless of source", async () => {
     const environment = await resolveDaemonEnvironment(
       `mise x ${OMP_PIN} -- omp`,
       dependencies({
         env: {
           PATH: "/narrow/bin",
           DISPATCH_TOKEN: "leaked-from-daemon-process",
+          DISPATCH_TOKEN_FILE: "/leaked/dispatch-token",
           DISPATCH_URL: "http://leaked-from-daemon-process",
         },
         run: async (command) => {
@@ -170,6 +171,7 @@ describe("resolveDaemonEnvironment", () => {
                 PATH: "/full/bin:/usr/bin",
                 HOME: "/home/legion",
                 DISPATCH_TOKEN: "leaked-from-mise",
+                DISPATCH_TOKEN_FILE: "/leaked/dispatch-token",
                 DISPATCH_URL: "http://leaked-from-mise",
                 DISPATCH_MCP_URL: "http://leaked-from-mise/mcp",
               }),
@@ -186,6 +188,7 @@ describe("resolveDaemonEnvironment", () => {
     );
 
     expect(environment.paneEnv).not.toHaveProperty("DISPATCH_TOKEN");
+    expect(environment.paneEnv).not.toHaveProperty("DISPATCH_TOKEN_FILE");
     expect(environment.paneEnv).not.toHaveProperty("DISPATCH_URL");
     expect(environment.paneEnv).not.toHaveProperty("DISPATCH_MCP_URL");
     expect(environment.paneEnv).toMatchObject({
@@ -201,6 +204,7 @@ describe("resolveDaemonEnvironment", () => {
     await runner(["tmux", "new-session"]);
 
     expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_TOKEN");
+    expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_TOKEN_FILE");
     expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_URL");
     expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_MCP_URL");
   });
