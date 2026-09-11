@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -190,6 +191,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this owner")
 			return
 		}
+		if _, err := uuid.Parse(*input.ReplyTo); err != nil {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this owner")
+			return
+		}
 		root, err := s.loadCommentForUpdate(r.Context(), tx, *input.ReplyTo)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !commentHasOwner(root, owner)) {
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this owner")
@@ -208,6 +213,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	var askQuestion string
 	if input.AskID != nil {
 		if strings.TrimSpace(*input.AskID) == "" {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this owner")
+			return
+		}
+		if _, err := uuid.Parse(*input.AskID); err != nil {
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this owner")
 			return
 		}
@@ -364,7 +373,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		event, err := s.appendEvent(r.Context(), tx, owner.event(
 			"comment.reopened",
 			actor,
-			commentEventPayload(*reopenedRoot, reopenedArtifactName, ""),
+			commentEventPayload(*reopenedRoot, reopenedArtifactName, "", ""),
 		))
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -372,10 +381,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 		events = append(events, event)
 	}
+	threadRootID := ""
+	if replyRoot != nil {
+		threadRootID = replyRoot.ID
+	}
 	event, err := s.appendEvent(r.Context(), tx, owner.event(
 		"comment.created",
 		actor,
-		commentEventPayload(comment, artifactName, askQuestion),
+		commentEventPayload(comment, artifactName, askQuestion, threadRootID),
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -479,7 +492,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.reopened",
 		actor,
-		commentEventPayload(comment, artifactName, ""),
+		commentEventPayload(comment, artifactName, "", ""),
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -587,7 +600,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.edited",
 		actor,
-		commentEventPayload(comment, artifactName, ""),
+		commentEventPayload(comment, artifactName, "", ""),
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -814,7 +827,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		eventType,
 		actor,
-		commentEventPayload(comment, artifactName, ""),
+		commentEventPayload(comment, artifactName, "", ""),
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -936,8 +949,8 @@ func commentTimestamp(value time.Time) *string {
 	return &text
 }
 
-func commentEventPayload(comment model.Comment, artifactName, askQuestion string) model.CommentEventPayload {
-	return model.CommentEventPayload{Comment: comment, ArtifactName: artifactName, AskQuestion: askQuestion}
+func commentEventPayload(comment model.Comment, artifactName, askQuestion, threadRootID string) model.CommentEventPayload {
+	return model.CommentEventPayload{Comment: comment, ArtifactName: artifactName, AskQuestion: askQuestion, ThreadRootID: threadRootID}
 }
 
 func (s *server) commentArtifactName(ctx context.Context, tx pgx.Tx, comment model.Comment) (string, error) {

@@ -102,7 +102,7 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	}
 }
 
-func TestRunPublishesDocumentEventsOnTheDocumentTopicOnly(t *testing.T) {
+func TestRunRoutesDocumentEventsToTheDocumentTopicAndTheirAuthor(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t)
 	broker := events.NewBroker()
@@ -137,22 +137,30 @@ func TestRunPublishesDocumentEventsOnTheDocumentTopicOnly(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
+	// Project documents have no route, so the ask author route is the only way the
+	// asking session ever learns about this human reply.
 	waitFor(t, time.Second, "document event publication", func() bool {
-		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) != nil
+		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
 	})
-	item := publisher.all()[0]
-	if item.Topic != "notifications.dispatch.document.TT.notes-md.comment.created" {
-		t.Fatalf("document topic = %q", item.Topic)
+	items := publisher.all()
+	if items[0].Topic != "notifications.dispatch.document.TT.notes-md.comment.created" {
+		t.Fatalf("document topic = %q", items[0].Topic)
 	}
-	if !strings.HasPrefix(item.PayloadSummary, "TT/notes-md comment created") {
-		t.Fatalf("document payload summary = %q", item.PayloadSummary)
+	if !strings.HasPrefix(items[0].PayloadSummary, "TT/notes-md comment created") {
+		t.Fatalf("document payload summary = %q", items[0].PayloadSummary)
 	}
 	var payload model.Event
-	if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+	if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
 		t.Fatalf("decode event payload: %v", err)
 	}
 	if payload.IssueKey != nil || payload.ArtifactID == nil || *payload.ArtifactID != artifactID || payload.Project != "TT" {
 		t.Fatalf("document event payload owner = issue %v artifact %v project %q, want nil issue %q artifact and TT project", payload.IssueKey, payload.ArtifactID, payload.Project, artifactID)
+	}
+	if items[1].Topic != "notifications.agent.session-asker" {
+		t.Fatalf("document ask author route topic = %q, want %q", items[1].Topic, "notifications.agent.session-asker")
+	}
+	if items[1].InReplyTo != askID {
+		t.Fatalf("document ask author route in_reply_to = %q, want %q", items[1].InReplyTo, askID)
 	}
 }
 
@@ -262,6 +270,128 @@ func TestRunRoutesAskReplyToAuthorEvenWhenIssueRoutedElsewhere(t *testing.T) {
 	}
 	if items[2].InReplyTo != askID {
 		t.Fatalf("ask author route in_reply_to = %q, want %q", items[2].InReplyTo, askID)
+	}
+}
+
+func TestRunRoutesHumanReplyToCommentAuthor(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
+	replyID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID:       replyID,
+			IssueKey: new("T-1"),
+			Body:     "Looks great, ship it.",
+			ReplyTo:  &rootID,
+		}},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	// The root author is not subscribed to the issue's route (there is none here), so
+	// without a direct author route the session that wrote the root comment never
+	// learns a human replied to it.
+	waitFor(t, time.Second, "comment author route publication", func() bool {
+		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if items[0].Topic != "notifications.dispatch.issue.T-1.comment.created" {
+		t.Fatalf("issue topic = %q", items[0].Topic)
+	}
+	if items[1].Topic != "notifications.agent.session-writer" {
+		t.Fatalf("comment author route topic = %q, want %q", items[1].Topic, "notifications.agent.session-writer")
+	}
+}
+
+func TestRunRoutesReplyToReplyToBothTheRootAndParentAuthors(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
+	midID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-editor"}, "One nit.", &rootID)
+	replyID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID:       replyID,
+			IssueKey: new("T-1"),
+			Body:     "Fixed the nit.",
+			ReplyTo:  &midID,
+		}},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	// A reply to a reply must still reach the thread root's author (the comment
+	// humans reply under), not just the comment it directly targets.
+	waitFor(t, time.Second, "nested reply author route publication", func() bool {
+		return len(publisher.all()) == 3 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if items[1].Topic != "notifications.agent.session-writer" {
+		t.Fatalf("root author route topic = %q, want %q", items[1].Topic, "notifications.agent.session-writer")
+	}
+	if items[2].Topic != "notifications.agent.session-editor" {
+		t.Fatalf("parent author route topic = %q, want %q", items[2].Topic, "notifications.agent.session-editor")
+	}
+}
+
+func TestRunRoutesCommentResolutionToRootAuthor(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Please confirm the approach.", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "comment.resolved",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID:       rootID,
+			IssueKey: new("T-1"),
+			Body:     "Please confirm the approach.",
+			Resolved: true,
+		}},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	// A resolved root comment carries neither reply_to nor ask_id, so the root
+	// author route must key off the resolved comment's own id.
+	waitFor(t, time.Second, "comment resolution author route publication", func() bool {
+		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if items[1].Topic != "notifications.agent.session-writer" {
+		t.Fatalf("comment resolution author route topic = %q, want %q", items[1].Topic, "notifications.agent.session-writer")
+	}
+}
+
+func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
+	database := openTestStore(t)
+	seedIssue(t, database, "T-1", nil)
+	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
+	publisher := &recordingPublisher{}
+	deps := Deps{Store: database, Publisher: publisher}
+	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.comment.created"}
+	event := model.Event{
+		Type:    "comment.created",
+		Actor:   model.Actor{Kind: "session", ID: "session-writer"},
+		Payload: map[string]any{"reply_to": rootID},
+	}
+	publishAuthorRoutes(context.Background(), deps, item, event)
+
+	if got := publisher.all(); len(got) != 0 {
+		t.Fatalf("published %d author route(s) for an agent replying to itself, want 0: %#v", len(got), got)
 	}
 }
 
@@ -563,6 +693,21 @@ func seedAsk(t *testing.T, database *store.Store, issueKey string, author model.
 		insert into asks (issue_key, author, question) values ($1, $2, $3) returning id
 	`, issueKey, authorJSON, question).Scan(&id); err != nil {
 		t.Fatalf("create ask: %v", err)
+	}
+	return id
+}
+
+func seedComment(t *testing.T, database *store.Store, issueKey string, author model.Actor, body string, replyTo *string) string {
+	t.Helper()
+	authorJSON, err := json.Marshal(author)
+	if err != nil {
+		t.Fatalf("encode comment author: %v", err)
+	}
+	var id string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body, reply_to) values ($1, $2, $3, $4) returning id::text
+	`, issueKey, authorJSON, body, replyTo).Scan(&id); err != nil {
+		t.Fatalf("create comment: %v", err)
 	}
 	return id
 }

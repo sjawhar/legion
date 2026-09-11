@@ -155,6 +155,28 @@ func TestReplyMustTargetThreadRoot(t *testing.T) {
 	}
 }
 
+func TestCreateCommentRejectsMalformedReplyToAndAskID(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Malformed thread ids", "before")
+
+	invalidReply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "reply", "reply_to": "not-a-uuid",
+	}, "alice")
+	if invalidReply.Code != http.StatusBadRequest || !strings.Contains(invalidReply.Body.String(), `"code":"INVALID_COMMENT"`) {
+		t.Fatalf("malformed reply_to: status=%d body=%s", invalidReply.Code, invalidReply.Body.String())
+	}
+
+	invalidAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "reply", "ask_id": "not-a-uuid",
+	}, "alice")
+	if invalidAsk.Code != http.StatusBadRequest || !strings.Contains(invalidAsk.Body.String(), `"code":"INVALID_COMMENT"`) {
+		t.Fatalf("malformed ask_id: status=%d body=%s", invalidAsk.Code, invalidAsk.Body.String())
+	}
+	if rows := countCommentRows(t, handler, issue.Key); rows != 0 {
+		t.Fatalf("comments after rejected malformed ids = %d, want 0", rows)
+	}
+}
+
 func TestEditCommentIsAuthorOnly(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Edit comment", "before")
