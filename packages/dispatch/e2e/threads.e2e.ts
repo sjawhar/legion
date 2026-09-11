@@ -78,7 +78,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
     {
       anchor: { artifact: "spec", quote: "production" },
       options: [{ label: "Ship" }, { label: "Hold" }],
-      question: "Ship the change?",
+      question: "Ship the **change**?",
     },
     bobSession
   );
@@ -97,6 +97,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   const margin = alicePage.getByTestId("margin-sheet");
   const card = margin.getByTestId(`ask-${ask.id}`);
   await expect(card).toContainText("Ship the change?");
+  await expect(card.locator("strong")).toHaveText("change");
   const thread = margin.getByTestId(`thread-${ask.id}`);
 
   // Alice replies before answering - the question is a thread from the start.

@@ -43,7 +43,8 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { actorLabel, describeAskResolution } from "../refs/actor";
+import { actorLabel, describeAskResolutionActor } from "../refs/actor";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskOptionList } from "./AskOptionList";
@@ -115,7 +116,9 @@ function AskEditHistory({
             Show previous question
           </summary>
           <div className="mt-2">
-            <p className={`font-medium ${textPrimaryOnSurface}`}>{previous.question}</p>
+            <div className={`font-medium ${textPrimaryOnSurface}`}>
+              <MarkdownBody markdown={previous.question} />
+            </div>
             <AskOptionList options={previous.options} selected={[]} />
           </div>
         </details>
@@ -178,12 +181,16 @@ function AnsweredAsk({
         </blockquote>
       )}
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
-      <p className={`font-medium ${textPrimaryOnSuccessCallout}`}>{ask.question}</p>
+      <div className={`font-medium ${textPrimaryOnSuccessCallout}`}>
+        <MarkdownBody markdown={ask.question} />
+      </div>
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
       <AskEditHistory ask={ask} previous={previous} />
       <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
       {answer === null || answer.text === null || answer.text === "" ? null : (
-        <p className="mt-1 whitespace-pre-wrap">{answer.text}</p>
+        <div className="mt-1">
+          <MarkdownBody markdown={answer.text} />
+        </div>
       )}
       {answer === null ? (
         <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
@@ -214,7 +221,9 @@ function ResolvedAsk({
           {ask.anchor.quote}
         </blockquote>
       )}
-      <p className={`font-medium ${textPrimaryOnSurface}`}>{ask.question}</p>
+      <div className={`font-medium ${textPrimaryOnSurface}`}>
+        <MarkdownBody markdown={ask.question} />
+      </div>
       <span
         className={`mt-2 inline-block rounded-full px-2.5 py-1 text-xs font-medium ${badgeLow.bg} ${badgeLow.text}`}
         data-testid="ask-resolution-badge"
@@ -225,7 +234,8 @@ function ResolvedAsk({
       <AskOptionList options={ask.options} selected={[]} />
       <AskEditHistory ask={ask} previous={previous} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
-        Asked <Timestamp at={ask.created_at} /> · {describeAskResolution(resolution)}
+        Asked <Timestamp at={ask.created_at} /> · {describeAskResolutionActor(resolution)} -{" "}
+        <MarkdownBody markdown={resolution.reason} variant="inline" />
       </p>
     </article>
   );
@@ -389,7 +399,9 @@ export function AskCard({
         <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className={`font-medium ${textPrimaryOnSurface}`}>{ask.question}</p>
+            <div className={`font-medium ${textPrimaryOnSurface}`}>
+              <MarkdownBody markdown={ask.question} />
+            </div>
             <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
               {actorLabel(ask.author)} · <Timestamp at={ask.created_at} />
             </p>
@@ -440,10 +452,12 @@ export function AskCard({
                       type={ask.multiple ? "checkbox" : "radio"}
                     />
                     <span>
-                      <span className={`font-medium ${textPrimaryOnSurface}`}>{option.label}</span>
+                      <span className={`font-medium ${textPrimaryOnSurface}`}>
+                        <MarkdownBody markdown={option.label} variant="inline" />
+                      </span>
                       {option.description === undefined ? null : (
                         <span className={`mt-0.5 block text-sm ${textMutedOnSurface}`}>
-                          {option.description}
+                          <MarkdownBody markdown={option.description} variant="inline" />
                         </span>
                       )}
                     </span>

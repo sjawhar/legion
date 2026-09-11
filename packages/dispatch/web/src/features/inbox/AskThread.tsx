@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api } from "../../api/client";
-import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
+import type { Ask, AskRead, AskResolution, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   borderDefault,
@@ -16,7 +16,8 @@ import {
   textSecondaryOnSurface,
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
-import { actorLabel, describeAskResolution } from "../refs/actor";
+import { actorLabel, describeAskResolutionActor } from "../refs/actor";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
 const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
@@ -27,10 +28,10 @@ function replyAuthorLabel(comment: Comment): string {
   return actorLabel(comment.author);
 }
 
-function resolutionLine(ask: Ask): string | null {
+function resolvedInfo(ask: Ask): AskResolution | null {
   if (ask.state !== "resolved") return null;
   if (ask.resolution === undefined) throw new Error("resolved ask is missing its resolution");
-  return describeAskResolution(ask.resolution);
+  return ask.resolution;
 }
 
 interface UseAskThreadResult {
@@ -123,7 +124,7 @@ export function AskThread({
     reply,
     getThread
   );
-  const resolution = resolutionLine(ask);
+  const resolution = resolvedInfo(ask);
 
   return (
     <section
@@ -135,14 +136,17 @@ export function AskThread({
         <p
           className={`rounded-lg px-3 py-2 text-sm ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
         >
-          {resolution}
+          {describeAskResolutionActor(resolution)} -{" "}
+          <MarkdownBody markdown={resolution.reason} variant="inline" />
         </p>
       ) : null}
       {replies.length === 0 ? null : (
         <ul className="space-y-2">
           {replies.map((comment) => (
             <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`} key={comment.id}>
-              <p className={`whitespace-pre-wrap ${textPrimaryOnSurfaceMuted}`}>{comment.body}</p>
+              <div className={textPrimaryOnSurfaceMuted}>
+                <MarkdownBody markdown={comment.body} />
+              </div>
               <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
                 {replyAuthorLabel(comment)} · <Timestamp at={comment.created_at} />
               </p>

@@ -16,7 +16,7 @@ production build from `web/dist`.
 - `web/src/main.tsx` installs React Router and the shared Query client.
 - `web/src/features/search/` owns the global palette, rail `Search` control, and `Ctrl/Cmd+K` shortcut. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node.
 
-Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. The Conversation renders Markdown text bodies and coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
+Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. `features/refs/MarkdownBody.tsx` renders every question, answer, comment, reply, and message through Proof's own parser, in every surface that shows one (Inbox, margin, Conversation, and the phone review sheet), not just the Conversation tab; its `inline` variant drops the wrapping block for option labels and clamped previews. The Conversation coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
 
 ## Margin threads
 

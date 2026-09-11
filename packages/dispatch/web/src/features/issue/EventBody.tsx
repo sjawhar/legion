@@ -1,73 +1,12 @@
-import type { HeadlessProofEditor } from "@sjawhar/proof-editor/headless";
-import { DOMSerializer } from "prosemirror-model";
-import { type ReactNode, useEffect, useRef } from "react";
+import type { ReactNode } from "react";
 
 import type { Event } from "../../api/types";
 import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { actorLabel } from "../refs/actor";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import { eventDescription } from "./event-description";
-
-let headlessProof: Promise<HeadlessProofEditor> | undefined;
-
-function loadHeadlessProof(): Promise<HeadlessProofEditor> {
-  headlessProof ??= import("@sjawhar/proof-editor/headless").then(({ createHeadlessProof }) =>
-    createHeadlessProof()
-  );
-  return headlessProof;
-}
-
-function escapeUnsupportedHtml(markdown: string): string {
-  return markdown.replace(/<\/?[A-Za-z][A-Za-z0-9-]*(?=\s|\/?>)[^<>]*>/g, (html) =>
-    html.replaceAll("<", "\\<").replaceAll(">", "\\>")
-  );
-}
-
-function MarkdownBody({
-  markdown,
-  onRendered,
-}: {
-  markdown: string;
-  onRendered?: () => void;
-}): ReactNode {
-  const onRenderedRef = useRef(onRendered);
-  onRenderedRef.current = onRendered;
-  const root = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    void loadHeadlessProof().then((proof) => {
-      if (!mounted) {
-        return;
-      }
-      if (root.current === null) {
-        throw new Error("EventBody's Markdown root is unavailable.");
-      }
-      const document = proof.parseMarkdown(escapeUnsupportedHtml(markdown));
-      root.current.replaceChildren(
-        DOMSerializer.fromSchema(proof.schema).serializeFragment(document.content)
-      );
-      for (const item of root.current.querySelectorAll("li[data-spread='false']")) {
-        const paragraph = item.firstElementChild;
-        if (item.childElementCount === 1 && paragraph?.tagName === "P") {
-          paragraph.replaceWith(...paragraph.childNodes);
-        }
-      }
-      onRenderedRef.current?.();
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [markdown]);
-
-  return (
-    <div
-      className="prose prose-sm prose-slate max-w-none break-words dark:prose-invert"
-      ref={root}
-    />
-  );
-}
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
 
@@ -109,7 +48,8 @@ function AskEventBody({
       )}
       {resolution === undefined ? null : (
         <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-          Resolved by {actorLabel(resolution.actor)} ({resolution.reason}){" "}
+          Resolved by {actorLabel(resolution.actor)} (
+          <MarkdownBody markdown={resolution.reason} onRendered={onRendered} variant="inline" />){" "}
           <Timestamp at={resolution.at} />
         </p>
       )}

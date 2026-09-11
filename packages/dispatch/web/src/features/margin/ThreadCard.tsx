@@ -27,6 +27,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { actorLabel } from "../refs/actor";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { Unfurl } from "../refs/Unfurl";
@@ -101,7 +102,7 @@ function CommentBody({
         </blockquote>
       )}
       {orphanNotice}
-      {suggestion === null ? <p className="whitespace-pre-wrap">{comment.body}</p> : null}
+      {suggestion === null ? <MarkdownBody markdown={comment.body} /> : null}
       {suggestion !== null && anchor !== null ? (
         <div className="space-y-1 font-mono text-xs">
           <del
@@ -113,9 +114,9 @@ function CommentBody({
             {suggestion.replace_with}
           </ins>
           {comment.body === "Suggested replacement." ? null : (
-            <p className={`whitespace-pre-wrap font-sans ${textSecondaryOnSurface}`}>
-              {comment.body}
-            </p>
+            <div className={`font-sans ${textSecondaryOnSurface}`}>
+              <MarkdownBody markdown={comment.body} />
+            </div>
           )}
         </div>
       ) : null}
@@ -322,7 +323,9 @@ export function ThreadCard({
             onClick={onToggle}
             type="button"
           >
-            <p className="line-clamp-2 whitespace-pre-wrap">{root.body}</p>
+            <p className="line-clamp-2">
+              <MarkdownBody markdown={root.body} variant="inline" />
+            </p>
             {thread.replies.length === 0 ? null : (
               <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
                 {thread.replies.length} {thread.replies.length === 1 ? "reply" : "replies"} · last

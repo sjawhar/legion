@@ -75,7 +75,7 @@ function renderCard(node: ReactNode) {
 // The same open anchored ask renders in more than one place at once (the issue board and
 // the margin both show it) - each mounted AskCard's own answer field must stay independently
 // labeled, not collide on an ask.id-derived id shared by every instance.
-test("AskCard marks an edited question and reveals its previous question and options", () => {
+test("AskCard marks an edited question and reveals its previous question and options", async () => {
   const editedAt = new Date().toISOString();
   const input = ask({
     edited_at: editedAt,
@@ -131,7 +131,7 @@ test("AskCard marks an edited question and reveals its previous question and opt
     expect(disclosure.open).toBe(false);
     fireEvent.click(summary);
     expect(disclosure.open).toBe(true);
-    expect(within(disclosure).getByText("Should we use polling?")).toBeTruthy();
+    expect(await within(disclosure).findByText("Should we use polling?")).toBeTruthy();
     expect(within(disclosure).getByRole("list", { name: "Options" }).textContent).toContain(
       "Polling"
     );
@@ -159,6 +159,23 @@ test("two AskCard instances for the same ask keep independently labeled answer f
   }
 });
 
+test("AskCard renders Markdown in the question, including bold text and a list", async () => {
+  const input = ask({ question: "Ship **bold** or `code`?\n\n- item one\n- item two" });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    expect(await within(card).findByText("bold", { selector: "strong" })).toBeTruthy();
+    expect(
+      within(card)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent)
+    ).toEqual(["item one", "item two"]);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard submits the selected single option", async () => {
   const submitted: Array<{ id: string; input: { selected: string[]; text?: string } }> = [];
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
@@ -178,7 +195,7 @@ test("AskCard submits the selected single option", async () => {
     const submit = view.getByRole("button", { name: "Submit answer" });
     expect(submit.hasAttribute("disabled")).toBe(true);
 
-    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
     expect(submit.hasAttribute("disabled")).toBe(false);
     fireEvent.click(submit);
 
@@ -205,7 +222,7 @@ test("AskCard submits every checked multiple option", async () => {
   );
 
   try {
-    fireEvent.click(view.getByRole("checkbox", { name: "Docs" }));
+    fireEvent.click(await view.findByRole("checkbox", { name: "Docs" }));
     fireEvent.click(view.getByRole("checkbox", { name: "Tests" }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
@@ -253,7 +270,7 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
   queryClient.setQueryData<Ask[]>(["inbox"], [input]);
 
   try {
-    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
     await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([]));
@@ -264,7 +281,7 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
   }
 });
 
-test("an answered ask lists every option, marks the selection, and shows when it was asked and answered", () => {
+test("an answered ask lists every option, marks the selection, and shows when it was asked and answered", async () => {
   const input = ask({
     created_at: "2026-09-10T09:00:00Z",
     options: [{ label: "Ship" }, { description: "Wait for QA", label: "Hold" }],
@@ -277,7 +294,7 @@ test("an answered ask lists every option, marks the selection, and shows when it
     const options = within(view.getByRole("list", { name: "Options" })).getAllByRole("listitem");
     expect(options.map((option) => option.dataset.selected)).toEqual(["true", "false"]);
     expect(within(options[0] as HTMLElement).getByLabelText("Selected")).toBeTruthy();
-    expect(options[1]?.textContent).toContain("Wait for QA");
+    await waitFor(() => expect(options[1]?.textContent).toContain("Wait for QA"));
 
     const card = view.getByTestId("ask-ask-1");
     expect(card.textContent).toMatch(/Asked .* · Answered by alice/);
@@ -304,7 +321,7 @@ test("AskCard shows submitted free text in its answered card", async () => {
   );
 
   try {
-    fireEvent.click(view.getByRole("radio", { name: /^Ship/ }));
+    fireEvent.click(await view.findByRole("radio", { name: /^Ship/ }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
     await waitFor(() => expect(view.getByText(/Answered by/)).toBeTruthy());
@@ -337,7 +354,7 @@ test("AskCard retries a failed answer without losing its form", async () => {
   );
 
   try {
-    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
     await view.findByRole("alert");
     fireEvent.click(view.getByRole("button", { name: "Retry" }));
@@ -364,7 +381,7 @@ test("AskCard ignores a same-task duplicate answer submit", async () => {
   );
 
   try {
-    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
     const submit = view.getByRole("button", { name: "Submit answer" });
     fireEvent.click(submit);
     fireEvent.click(submit);
@@ -411,7 +428,7 @@ test("AskCard keeps the thread and reply composer visible after the ask is answe
   );
 
   try {
-    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
     await waitFor(() => expect(view.getByText(/Answered by/)).toBeTruthy());
@@ -483,7 +500,7 @@ test("AskCard surfaces a retryable error when posting a reply fails", async () =
   }
 });
 
-test("a resolved ask keeps its question and options and carries a resolution badge", () => {
+test("a resolved ask keeps its question and options and carries a resolution badge", async () => {
   const input = {
     ...ask({
       options: [{ label: "Ship" }, { label: "Hold" }],
@@ -499,11 +516,11 @@ test("a resolved ask keeps its question and options and carries a resolution bad
   const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
 
   try {
-    expect(view.getByText(input.question)).toBeTruthy();
+    expect(await view.findByText(input.question)).toBeTruthy();
     expect(view.getByRole("list", { name: "Options" }).children).toHaveLength(2);
     expect(view.getByTestId("ask-resolution-badge").textContent).toBe("Retracted");
     const resolution = "Retracted by session-1 - Superseded.";
-    expect(view.getByTestId("ask-ask-1").textContent).toContain(resolution);
+    await waitFor(() => expect(view.getByTestId("ask-ask-1").textContent).toContain(resolution));
     expect(view.getByTestId("thread-ask-1").textContent).not.toContain(resolution);
     expect(view.queryByRole("button", { name: "Reply" })).toBeNull();
   } finally {
@@ -611,7 +628,7 @@ test("answering a document ask invalidates the document and projects, not an iss
   const invalidate = spyOn(queryClient, "invalidateQueries");
 
   try {
-    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
     await waitFor(() => expect(view.getByText(/Answered by/)).toBeTruthy());
     const invalidated = invalidate.mock.calls.map((call) => call[0]?.queryKey);

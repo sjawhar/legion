@@ -161,3 +161,50 @@ a {
     color: #f1f5f9; /* slate-100 */
   }
 }
+
+/* MarkdownBody (features/refs/MarkdownBody.tsx) renders every Markdown-bearing field - ask
+   questions and answers, options, comments, replies, and messages - through Tailwind
+   Typography's `prose`. Its fixed slate palette, fixed font size, and page-scale heading sizes
+   are built for a full document, not a card's own text (or, for the `inline` variant, a
+   `text-xs` metadata line like a resolution reason), so `.dispatch-markdown` overrides
+   body/heading/bold/quote/lead/caption text and font size to inherit from the surrounding
+   element and caps headings to a bold version of that inherited size; code keeps its own
+   accent color and links keep the app's link blue rather than prose's own near-black default. */
+.dispatch-markdown {
+  font-size: inherit;
+  line-height: inherit;
+  --tw-prose-body: inherit;
+  --tw-prose-headings: inherit;
+  --tw-prose-lead: inherit;
+  --tw-prose-bold: inherit;
+  --tw-prose-quotes: inherit;
+  --tw-prose-captions: inherit;
+  --tw-prose-links: #0069a8; /* sky-700 */
+  --tw-prose-invert-body: inherit;
+  --tw-prose-invert-headings: inherit;
+  --tw-prose-invert-lead: inherit;
+  --tw-prose-invert-bold: inherit;
+  --tw-prose-invert-quotes: inherit;
+  --tw-prose-invert-captions: inherit;
+  --tw-prose-invert-links: #00bcff; /* sky-400 */
+}
+
+.dispatch-markdown :where(h1, h2, h3, h4, h5, h6) {
+  font-size: inherit;
+  font-weight: 600;
+}
+
+/* Tailwind Typography's default `code` styling wraps every inline code span in a literal
+   backtick via `code::before`/`code::after { content: "\`" }` - visible (and reported as a
+   bug) in both `.dispatch-markdown` (MarkdownBody, above) and `.dispatch-doc` (the live Proof
+   editor, which mounts its content with the library's own `prose` class): a rendered
+   `` `code` `` span shows the surrounding backtick characters twice over, once from the
+   Markdown source already being parsed into a real `<code>` element and once from this pseudo
+   content. Both surfaces already give inline code its own font/background via the library's or
+   Typography's `code` styling, so only the pseudo-content needs suppressing. */
+.dispatch-markdown code::before,
+.dispatch-markdown code::after,
+.dispatch-doc code::before,
+.dispatch-doc code::after {
+  content: none;
+}

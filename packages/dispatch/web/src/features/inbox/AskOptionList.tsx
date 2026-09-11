@@ -9,6 +9,7 @@ import {
   textOptionDescription,
   textPrimaryOnSurface,
 } from "../../theme/classes";
+import { MarkdownBody } from "../refs/MarkdownBody";
 
 export function AskOptionList({
   options,
@@ -39,10 +40,12 @@ export function AskOptionList({
               <span aria-hidden className="w-3" />
             )}
             <span>
-              <span className={`font-medium ${textPrimaryOnSurface}`}>{option.label}</span>
+              <span className={`font-medium ${textPrimaryOnSurface}`}>
+                <MarkdownBody markdown={option.label} variant="inline" />
+              </span>
               {option.description === undefined ? null : (
                 <span className={`mt-0.5 block text-sm ${textOptionDescription}`}>
-                  {option.description}
+                  <MarkdownBody markdown={option.description} variant="inline" />
                 </span>
               )}
             </span>

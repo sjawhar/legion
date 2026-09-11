@@ -541,8 +541,8 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
 
   try {
     const needsYou = await screen.findByRole("region", { name: "Needs you" });
-    expect(within(needsYou).getByText(unanchoredAsk.question)).toBeTruthy();
-    const shipOption = within(needsYou).getByRole("radio", { name: "Ship" });
+    expect(await within(needsYou).findByText(unanchoredAsk.question)).toBeTruthy();
+    const shipOption = await within(needsYou).findByRole("radio", { name: "Ship" });
     fireEvent.click(shipOption);
     expect((shipOption as HTMLInputElement).checked).toBe(true);
     fireEvent.click(within(needsYou).getByRole("button", { name: "Submit answer" }));
@@ -591,7 +591,7 @@ test("Margin clears an answered anchored ask from Needs you without an event str
 
   try {
     const needsYou = await screen.findByRole("region", { name: "Needs you" });
-    fireEvent.click(within(needsYou).getByRole("radio", { name: "Ship" }));
+    fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
     fireEvent.click(within(needsYou).getByRole("button", { name: "Submit answer" }));
     await waitFor(() =>
       expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, { selected: ["Ship"] })
@@ -773,7 +773,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
     const card = await screen.findByTestId(`ask-${answeredAsk.id}`);
     expect(listIssueAsks).toHaveBeenCalledWith(issue.key, "all");
     expect(card.textContent).toContain("Answered by alice");
-    expect(card.textContent).toContain("Because it is precise.");
+    await waitFor(() => expect(card.textContent).toContain("Because it is precise."));
     expect(
       Array.from(
         screen
@@ -828,7 +828,7 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
   try {
     await screen.findByTestId("ask-ask-1");
     await screen.findByTestId(`thread-${anchoredAsk.id}`);
-    expect(screen.getAllByText("Any blockers first?")).toHaveLength(1);
+    await waitFor(() => expect(screen.getAllByText("Any blockers first?")).toHaveLength(1));
     expect(screen.queryByTestId(`margin-comment-${askReply.id}`)).toBeNull();
   } finally {
     view.unmount();
