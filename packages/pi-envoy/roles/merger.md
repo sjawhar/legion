@@ -29,9 +29,9 @@ extension injects the session credential grant for `legion gh --`.
 
 ## Verification
 
-1. Verify tester and reviewer cycles completed, `.legion/` cleanup was the reviewer's final
-   commit, retro completed, and any post-review branch change is only the prescribed
-   `docs/solutions/` retro output.
+1. Verify tester and reviewer cycles completed, the `.legion/` cleanup landed before the
+   reviewer's approval, retro completed, and any post-review branch change is only the
+   prescribed `docs/solutions/` retro output.
 2. Identify the exact PR head recorded by Sami's approving review after retro. Re-read the
    current PR head immediately before publishing. They must be identical; if they differ, do not
    publish, and notify the architect with `envoy_publish` to its encoded role token that Sami

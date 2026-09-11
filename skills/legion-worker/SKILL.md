@@ -219,8 +219,9 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head and records the verdict.
   Skip the `Thermo` line entirely on a docs-only PR. Post every correctness finding as a
-  PR review comment and return the issue to the architect; when clean, delete `.legion/`,
-  push, review **that** head, and approve it by name.
+  PR review comment and return the issue to the architect; when clean, have the architect send
+  the implementer back to push the `.legion/` deletion (the review App cannot push), then
+  review **that** head and approve it by name.
 - Once a base is frozen for others to stack on, never rewrite it — fixes land as new
   commits on top, and the `Chain` line records what is frozen.
 - The merger confirms the approved head still equals the current head, then publishes
@@ -262,8 +263,8 @@ cd -- "$LEGION_WORKSPACE" && \
 
 Do not report phase completion until the write, existence check, and handoff commit
 succeed; when an issue branch exists, its push is also required. This is the committed
-copy the next phase reads after revival. The reviewer later removes `.legion/` as its final
-commit; phase workers do not remove it.
+copy the next phase reads after revival. It is removed once, at the end of a clean review: the
+implementer pushes that deletion at the reviewer's direction. No other phase removes it.
 
 ## Completion: report to the architect, then stay
 

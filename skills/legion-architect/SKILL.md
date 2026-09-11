@@ -173,7 +173,9 @@ deferred. Make the sign-off comment explicit about that evidence.
 When the config-armed final merge gate applies, preserve this order exactly:
 
 1. tester green and review cycles complete;
-2. reviewer pushes the `.legion/` deletion as its final commit and approves that head;
+2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
+   deletion (the review App holds no `contents` permission), then the reviewer approves that
+   head. The deletion must land before any human approval, which is head-pinned;
 3. retro completes without dirtying the branch;
 4. enter the Sami-approval step by calling
    `legion({ op: "merge_gate", pr: <pull request number> })`. The daemon performs one
