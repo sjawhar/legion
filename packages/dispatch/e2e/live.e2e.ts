@@ -13,7 +13,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("live: bob's ask appears in alice's inbox and sidebar without reload", async ({
+test("live: bob's ask updates alice's Inbox and project badges without reload", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -30,12 +30,10 @@ test("live: bob's ask appears in alice's inbox and sidebar without reload", asyn
   if (testInfo.project.name === "iphone") {
     await issuePage.getByRole("button", { name: "Open navigation" }).click();
   }
-  // With zero items, #844 hides the whole "Needs you" group (heading included) —
-  // rather than rendering it empty. The issue instead sits, un-flagged, in
-  // "Everything else".
-  await expect(issuePage.getByRole("heading", { exact: true, name: "Needs you" })).toHaveCount(0);
-  const nav = issuePage.getByRole("navigation", { name: "Issues" });
-  await expect(nav.locator("li", { hasText: targetIssue.key })).toBeVisible();
+  // The sidebar now provides project navigation; an open ask updates its Inbox and
+  // project badges without changing the issue route in the other tab.
+  const navigation = issuePage.getByRole("navigation", { name: "Navigation" });
+  await expect(navigation.locator('a[href="/projects/CORE"]')).toBeVisible();
 
   const ask = await createAsk(
     targetIssue.key,
@@ -43,13 +41,8 @@ test("live: bob's ask appears in alice's inbox and sidebar without reload", asyn
     bob
   );
 
-  // alice never navigated — the sidebar on readingIssue's page and the inbox on a
-  // separate tab both pick up bob's ask purely from the event stream.
-  await expect(issuePage.getByRole("heading", { name: "Needs you (1)" })).toBeVisible();
-  const needsYou = issuePage.locator("section", {
-    has: issuePage.getByRole("heading", { name: /^Needs you/ }),
-  });
-  await expect(needsYou.getByText(targetIssue.key, { exact: true })).toBeVisible();
+  await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("1");
+  await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
   expect(issuePage.url()).toContain(readingIssue.key);
 
   await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
@@ -57,7 +50,7 @@ test("live: bob's ask appears in alice's inbox and sidebar without reload", asyn
 
   await issuePage.screenshot({
     fullPage: true,
-    path: testInfo.outputPath("sidebar-needs-you-live.png"),
+    path: testInfo.outputPath("sidebar-project-badge-live.png"),
   });
   await inboxPage.screenshot({
     fullPage: true,
@@ -67,7 +60,7 @@ test("live: bob's ask appears in alice's inbox and sidebar without reload", asyn
   await alice.close();
 });
 
-test("live: answering an ask moves the issue out of Needs you immediately", async ({
+test("live: answering an ask updates the Inbox and project badges immediately", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -87,7 +80,9 @@ test("live: answering an ask moves the issue out of Needs you immediately", asyn
   if (testInfo.project.name === "iphone") {
     await issuePage.getByRole("button", { name: "Open navigation" }).click();
   }
-  await expect(issuePage.getByRole("heading", { name: "Needs you (1)" })).toBeVisible();
+  const navigation = issuePage.getByRole("navigation", { name: "Navigation" });
+  await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("1");
+  await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
 
   await inboxPage.getByTestId(`ask-${ask.id}`).getByRole("radio", { name: "Yes" }).check();
   await inboxPage
@@ -97,15 +92,10 @@ test("live: answering an ask moves the issue out of Needs you immediately", asyn
   await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
 
   // The answer happened on a different tab (inboxPage) than the one displaying the
-  // sidebar (issuePage) — the row moving proves the update came from the stream, not
-  // from the mutation's own optimistic cache update.
-  // The group empties back out to zero items, so #844 hides it (and its heading)
-  // entirely rather than rendering it with a "(0)" or bare label.
-  await expect(issuePage.getByRole("heading", { exact: true, name: "Needs you" })).toHaveCount(0);
-  const nav = issuePage.getByRole("navigation", { name: "Issues" });
-  const targetRow = nav.locator("li", { hasText: targetIssue.key });
-  await expect(targetRow).toBeVisible();
-  await expect(targetRow.getByText(/^\d+$/)).toHaveCount(0);
+  // sidebar (issuePage), so both badges changing proves the update came from the
+  // stream rather than from the mutation's optimistic cache update.
+  await expect(navigation.getByRole("link", { name: "Inbox" })).toHaveText("Inbox");
+  await expect(navigation.locator('a[href="/projects/CORE"]')).not.toContainText("1");
   expect(issuePage.url()).toContain(readingIssue.key);
 
   await issuePage.screenshot({
@@ -159,7 +149,7 @@ test("live: the stream recovers after the connection drops", async ({ browser },
   // D10: the pill must never move the reading surface. It has to render as an
   // overlay (not push content in flow), so the main heading's box stays put both
   // while it appears and after it goes away.
-  const heading = page.getByRole("heading", { name: "Inbox" });
+  const heading = page.locator("main").getByRole("heading", { name: "Inbox" });
   const boundsBeforeOutage = await heading.boundingBox();
 
   await alice.setOffline(true);
@@ -262,15 +252,15 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 11 on desktop (chromium): whoami, issues, me/state, issue detail, the shared inbox
-  // query for the margin's open-ask count, the stream connection, two active-sessions/Conversation
-  // event reads, the primary artifact's comments, the margin's own issue-asks list, and
-  // Conversation's live-agent query. The phone project (iphone) does not fetch the bare
-  // `/api/v1/issues` list because its closed drawer has no sidebar, so it uses 10. Asserted exactly
-  // (not a ceiling) so a panel that starts eagerly fetching before its tab is ever opened — e.g.
-  // Spec's ProofDocument or Children — trips this immediately instead of only breaking some looser
-  // upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 10 : 11);
+  // Exactly 12 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // and Projects queries, me/state, issue detail, the shared inbox query for the
+  // margin's open-ask count, the stream connection, two active-sessions/Conversation
+  // event reads, the primary artifact's comments, the margin's own issue-asks list,
+  // and Conversation's live-agent query. The phone project (iphone) does not fetch
+  // the sidebar while its drawer is closed, so it uses 10. Asserted exactly (not a
+  // ceiling) so a panel that starts eagerly fetching before its tab is ever opened
+  // trips this immediately instead of only breaking some looser upper bound.
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 10 : 12);
 
   await alice.close();
 });

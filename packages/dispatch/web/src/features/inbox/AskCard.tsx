@@ -320,6 +320,14 @@ export function AskCard({
     onSuccess: (updatedAsk) => {
       setJustAnswered(updatedAsk);
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+      if (ask.issue_key === null) {
+        if (ask.artifact_id === null || ask.artifact_id === undefined) {
+          throw new Error("document ask is missing its artifact id");
+        }
+        void queryClient.invalidateQueries({ queryKey: ["artifact", ask.artifact_id] });
+        void queryClient.invalidateQueries({ queryKey: ["projects"] });
+        return;
+      }
       void queryClient.invalidateQueries({ queryKey: ["asks", ask.issue_key] });
       void queryClient.invalidateQueries({ queryKey: ["issue", ask.issue_key] });
       void queryClient.invalidateQueries({ queryKey: ["issues"] });

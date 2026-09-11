@@ -24,6 +24,7 @@ import type {
   Event,
   Issue,
   IssueDetails,
+  IssueReferences,
   IssueSummary,
   Message,
   Project,
@@ -79,6 +80,7 @@ export function isRetryableQueryError(error: unknown): boolean {
 }
 
 export interface ListIssuesOptions {
+  pinned?: boolean;
   project?: string;
   status?: string;
   parent?: string;
@@ -92,6 +94,8 @@ export interface ListEventsOptions {
   limit?: number;
   order?: "desc";
 }
+
+export type ArtifactOwner = { issue: string } | { project: string };
 
 function normalizeAsk(ask: Ask): Ask {
   return Array.isArray(ask.options) ? ask : { ...ask, options: [] };
@@ -113,7 +117,7 @@ function pathWithQuery(path: string, values: object): string {
   const query = new URLSearchParams();
 
   for (const [key, value] of Object.entries(values)) {
-    if (typeof value === "string" || typeof value === "number") {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
       query.set(key, String(value));
     }
   }
@@ -280,8 +284,20 @@ export class DispatchApiClient {
     return this.json<Artifact[]>(`/api/v1/issues/${pathSegment(key)}/artifacts`);
   }
 
-  async uploadArtifact(key: string, input: CreateArtifactInput): Promise<ArtifactUploadResponse> {
-    const path = `/api/v1/issues/${pathSegment(key)}/artifacts`;
+  listProjectArtifacts(key: string, unlinked?: boolean): Promise<Artifact[]> {
+    return this.json<Artifact[]>(
+      pathWithQuery(`/api/v1/projects/${pathSegment(key)}/artifacts`, { unlinked })
+    );
+  }
+
+  async uploadArtifact(
+    owner: ArtifactOwner,
+    input: CreateArtifactInput
+  ): Promise<ArtifactUploadResponse> {
+    const path =
+      "issue" in owner
+        ? `/api/v1/issues/${pathSegment(owner.issue)}/artifacts`
+        : `/api/v1/projects/${pathSegment(owner.project)}/artifacts`;
     if ("content" in input) {
       return this.post<ArtifactUploadResponse>(path, {
         actor: input.actor,
@@ -310,6 +326,12 @@ export class DispatchApiClient {
     return this.json<ArtifactDetails>(`/api/v1/artifacts/${pathSegment(id)}`);
   }
 
+  getProjectArtifact(key: string, slug: string): Promise<ArtifactDetails> {
+    return this.json<ArtifactDetails>(
+      `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}`
+    );
+  }
+
   getArtifactText(id: string): Promise<ArtifactText> {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
   }
@@ -333,6 +355,39 @@ export class DispatchApiClient {
 
   editArtifact(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
     return this.post<EditArtifactResponse>(`/api/v1/artifacts/${pathSegment(id)}/edits`, input);
+  }
+
+  async listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
+    const asks = await this.json<Ask[]>(
+      pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/asks`, { state })
+    );
+    return asks.map(normalizeAsk);
+  }
+
+  async createArtifactAsk(id: string, input: CreateAskInput): Promise<Ask> {
+    return normalizeAsk(await this.post<Ask>(`/api/v1/artifacts/${pathSegment(id)}/asks`, input));
+  }
+
+  listArtifactComments(id: string): Promise<Comment[]> {
+    return this.json<Comment[]>(`/api/v1/artifacts/${pathSegment(id)}/comments`);
+  }
+
+  createArtifactComment(id: string, input: CreateCommentInput): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/artifacts/${pathSegment(id)}/comments`, input);
+  }
+
+  getArtifactEvents(id: string, options: ListEventsOptions = {}): Promise<Event[]> {
+    const { ids, ...query } = options;
+    return this.json<Event[]>(
+      pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/events`, {
+        ...query,
+        ids: ids?.join(","),
+      })
+    );
+  }
+
+  getIssueReferences(key: string): Promise<IssueReferences> {
+    return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
   }
 
   getMyState(): Promise<UserState> {

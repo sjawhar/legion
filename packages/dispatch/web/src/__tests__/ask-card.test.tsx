@@ -1,9 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
+
+import { api } from "../api/client";
 import type { Ask, AskRead, Comment, Event } from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
+import { Inbox } from "../features/inbox/Inbox";
 
 function ask(overrides: Partial<Ask> = {}): Ask {
   return {
@@ -560,5 +564,61 @@ test("a collapsed thread with no replies offers Reply, and a failed thread fetch
   } finally {
     view.unmount();
     failed.unmount();
+  }
+});
+
+test("a document ask labels its project and document without an unavailable document page link", async () => {
+  const input = ask({
+    artifact_id: "artifact-1",
+    document: { name: "Design notes", project: "CORE", slug: "design-notes" },
+    issue_key: null,
+  });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([input]);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("CORE · Design notes");
+    expect(screen.queryByRole("link", { name: "CORE · Design notes" })).toBeNull();
+  } finally {
+    view.unmount();
+    getInbox.mockRestore();
+  }
+});
+
+test("answering a document ask invalidates the document and projects, not an issue", async () => {
+  const input = ask({
+    artifact_id: "artifact-1",
+    document: { name: "Design notes", project: "CORE", slug: "design-notes" },
+    issue_key: null,
+    options: [{ label: "Ship" }],
+  });
+  const { queryClient, view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => answered(input, submission.selected)}
+      getAskThread={emptyThread(input)}
+    />
+  );
+  const invalidate = spyOn(queryClient, "invalidateQueries");
+
+  try {
+    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+    await waitFor(() => expect(view.getByText(/Answered by/)).toBeTruthy());
+    const invalidated = invalidate.mock.calls.map((call) => call[0]?.queryKey);
+    expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
+    expect(invalidated).toContainEqual(["projects"]);
+    expect(invalidated).not.toContainEqual(["issue", null]);
+    expect(invalidated).not.toContainEqual(["issues"]);
+  } finally {
+    invalidate.mockRestore();
+    view.unmount();
   }
 });

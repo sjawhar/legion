@@ -27,7 +27,7 @@ function artifactAsk(): Ask {
   };
 }
 
-test("Inbox labels an artifact-owned ask with its project and document name", async () => {
+test("Inbox labels an artifact-owned ask with its project and document name without a document-page link", async () => {
   const ask = artifactAsk();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([ask]);
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask, replies: [] });
@@ -41,8 +41,8 @@ test("Inbox labels an artifact-owned ask with its project and document name", as
   );
 
   try {
-    await screen.findByText("CORE / Design notes");
-    expect(screen.queryByRole("link", { name: "CORE / Design notes" })).toBeNull();
+    await screen.findByText("CORE · Design notes");
+    expect(screen.queryByRole("link", { name: "CORE · Design notes" })).toBeNull();
   } finally {
     view.unmount();
     getAsk.mockRestore();

@@ -94,3 +94,69 @@ test("signing out shows the sign-in page without a reload and tears down the eve
     fetchSpy.mockRestore();
   }
 });
+
+test("project routes render the project page while the future document route is not found", async () => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
+    { created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
+  ]);
+  const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
+  function streamFetch(_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
+    return new Promise<Response>(() => {});
+  }
+  streamFetch.preconnect = () => {};
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(streamFetch);
+
+  const renderRoute = (path: string) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <MemoryRouter initialEntries={[path]}>
+        <QueryClientProvider client={queryClient}>
+          <AuthGate />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+  };
+
+  try {
+    const issues = renderRoute("/projects/CORE");
+    await screen.findByRole("heading", { name: "Core" });
+    expect(screen.getByRole("tab", { name: "Issues" }).getAttribute("aria-selected")).toBe("true");
+    issues.unmount();
+
+    const documents = renderRoute("/projects/CORE/documents");
+    await screen.findByRole("heading", { name: "Core" });
+    expect(screen.getByRole("tab", { name: "Documents" }).getAttribute("aria-selected")).toBe(
+      "true"
+    );
+    documents.unmount();
+
+    const unavailableDocument = renderRoute("/projects/CORE/documents/design-notes");
+    await screen.findByRole("heading", { name: "Page not found" });
+    unavailableDocument.unmount();
+  } finally {
+    fetchSpy.mockRestore();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    listProjectArtifacts.mockRestore();
+    listProjects.mockRestore();
+    whoAmI.mockRestore();
+    window.matchMedia = originalMatchMedia;
+  }
+});

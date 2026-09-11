@@ -59,7 +59,7 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
     const page = await alice.newPage();
 
     // D13: the phone drawer moves focus in, traps Tab in both directions, and restores
-    // focus to Menu on Escape. D17: the issue key renders on a single line, never wrapping.
+    // focus to Menu on Escape. D17: the project key renders on a single line.
     if (isPhone) {
       await page.goto("/");
       const menuButton = page.getByRole("button", { name: "Open navigation" });
@@ -68,7 +68,7 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       await expect(closeButton).toBeFocused();
       await assertTabTrapped(page, '[aria-label="Navigation"]');
 
-      const keySpan = page.getByText(issue.key, { exact: true });
+      const keySpan = page.getByText("CORE", { exact: true });
       const [keyBox, lineHeight] = await Promise.all([
         keySpan.boundingBox(),
         keySpan.evaluate((element) => Number.parseFloat(getComputedStyle(element).lineHeight)),

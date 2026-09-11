@@ -37,21 +37,25 @@ export function Inbox(): ReactNode {
     <ul className="space-y-3">
       {inbox.data.map((ask) => {
         const owner = ask.issue?.key ?? ask.issue_key;
-        const documentOwner =
-          ask.document === undefined ? undefined : `${ask.document.project} / ${ask.document.name}`;
-        const title = ask.issue?.title ?? owner ?? documentOwner ?? "Unassigned ask";
+        const title = ask.issue?.title ?? owner ?? "Unassigned ask";
         return (
           <li key={ask.id}>
-            {owner === null ? (
-              <p className={`mb-2 text-sm ${textMutedOnCanvas}`}>{title}</p>
+            {ask.document === undefined ? (
+              owner === null ? (
+                <p className={`mb-2 text-sm ${textMutedOnCanvas}`}>{title}</p>
+              ) : (
+                <Link
+                  className={`mb-2 flex flex-col items-start gap-1 text-sm md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
+                  to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
+                >
+                  <span className="font-semibold">{owner}</span>
+                  <span>{title}</span>
+                </Link>
+              )
             ) : (
-              <Link
-                className={`mb-2 flex flex-col items-start gap-1 text-sm md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
-                to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
-              >
-                <span className="font-semibold">{owner}</span>
-                <span>{title}</span>
-              </Link>
+              <p className={`mb-2 text-sm font-semibold ${textMutedOnCanvas}`}>
+                {ask.document.project} · {ask.document.name}
+              </p>
             )}
             <AskCard ask={ask} />
           </li>

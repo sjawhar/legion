@@ -64,6 +64,9 @@ interface EventPages {
 }
 
 export function prependEventToLog(queryClient: QueryClient, event: Event): void {
+  if (event.issue_key === null) {
+    return;
+  }
   queryClient.setQueryData<EventPages>(["events", event.issue_key], (current) => {
     if (current === undefined) {
       return current;
@@ -80,6 +83,24 @@ export function prependEventToLog(queryClient: QueryClient, event: Event): void 
 }
 
 function eventQueryKeys(event: Event): (readonly unknown[])[] {
+  if (event.issue_key === null) {
+    if (event.artifact_id === null || event.artifact_id === undefined) {
+      throw new Error("document event is missing its artifact id");
+    }
+    if (event.project === undefined) {
+      throw new Error("document event is missing its project");
+    }
+    const keys: (readonly unknown[])[] = [
+      ["artifact", event.artifact_id],
+      ["project", event.project, "artifacts"],
+      ["projects"],
+    ];
+    if (event.type.startsWith("ask.")) {
+      keys.push(["inbox"]);
+    }
+    return keys;
+  }
+
   const keys: (readonly unknown[])[] = [
     ["issue", event.issue_key],
     ["events", event.issue_key],
@@ -111,7 +132,7 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     event.type === "ask.answered" ||
     event.type === "ask.resolved"
   ) {
-    keys.push(["asks", event.issue_key]);
+    keys.push(["asks", event.issue_key], ["projects"]);
     if (event.type === "ask.resolved" && typeof event.payload.id === "string") {
       keys.push(["ask-thread", event.payload.id]);
     }

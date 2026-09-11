@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { ApiError, api } from "../../api/client";
-import { Composer } from "./Composer";
+import { Composer, composerReferences } from "./Composer";
 
 test("Composer uploads dropped files and inserts their references", async () => {
   const queryClient = new QueryClient({
@@ -57,6 +57,23 @@ test("Composer uploads dropped files and inserts their references", async () => 
   } finally {
     uploadArtifact.mockRestore();
   }
+});
+
+test("Composer ignores a pasted project page URL because only documents are references", () => {
+  const origin = "https://dispatch.test";
+
+  expect(composerReferences(`${origin}/projects/CORE`, origin)).toEqual([]);
+});
+
+test("Composer preserves a project document reference without an unavailable page href", () => {
+  const origin = "https://dispatch.test";
+
+  expect(composerReferences(`${origin}/projects/CORE/documents/design-notes`, origin)).toEqual([
+    { reference: "dispatch://CORE/artifact/design-notes" },
+  ]);
+  expect(composerReferences("dispatch://CORE/artifact/design-notes", origin)).toEqual([
+    { reference: "dispatch://CORE/artifact/design-notes" },
+  ]);
 });
 
 function renderComposer(kind: "ask" | "comment" | "suggestion") {

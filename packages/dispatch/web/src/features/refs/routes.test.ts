@@ -3,10 +3,12 @@ import { expect, test } from "bun:test";
 import {
   buildDispatchReference,
   buildIssuePath,
+  buildProjectPath,
   isLegacyLogPath,
   issueTabForRoute,
   parseDispatchReference,
   parseIssuePath,
+  parseProjectPath,
 } from "./routes";
 
 function browserPath(path: string): string {
@@ -18,9 +20,10 @@ test("artifact references normalize to the plural browser route", () => {
   const route = parseDispatchReference("dispatch://CORE-1/artifact/design@v3");
 
   expect(route).toEqual({ key: "CORE-1", kind: "artifact", slug: "design", version: 3 });
-  expect(route === undefined ? undefined : buildIssuePath(route)).toBe(
-    browserPath("issues/CORE-1/artifacts/design?v=3")
-  );
+  if (route?.kind !== "artifact") {
+    throw new Error("artifact reference did not parse as an artifact route");
+  }
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/artifacts/design?v=3"));
 });
 
 test("dispatch references reject plural artifact paths", () => {
@@ -112,4 +115,57 @@ test("agent references keep the dispatch://KEY/log grammar for the conversation"
   expect(buildDispatchReference({ key: "CORE-1", kind: "conversation" })).toBe(
     "dispatch://CORE-1/log"
   );
+});
+
+test("parses and builds project, documents, and document routes with version and item query", () => {
+  expect(parseProjectPath("/projects/CORE")).toEqual({ kind: "project", project: "CORE" });
+  expect(parseProjectPath("/projects/CORE/documents")).toEqual({
+    kind: "documents",
+    project: "CORE",
+  });
+  expect(
+    parseProjectPath("/projects/CORE/documents/design-notes", "?version=3&comment=note-1")
+  ).toEqual({
+    item: { id: "note-1", kind: "comment" },
+    kind: "document",
+    project: "CORE",
+    slug: "design-notes",
+    version: 3,
+  });
+  expect(
+    buildProjectPath({
+      item: { id: "ask-1", kind: "ask" },
+      kind: "document",
+      project: "CORE",
+      slug: "design-notes",
+      version: 2,
+    })
+  ).toBe("/projects/CORE/documents/design-notes?version=2&ask=ask-1");
+});
+
+test("maps dispatch project artifact references onto the document path and back", () => {
+  const route = parseDispatchReference("dispatch://CORE/artifact/design-notes@v3/comment/note-1");
+
+  expect(route).toEqual({
+    item: { id: "note-1", kind: "comment" },
+    kind: "document",
+    project: "CORE",
+    slug: "design-notes",
+    version: 3,
+  });
+  if (route?.kind !== "document") {
+    throw new Error("project artifact reference did not parse as a document route");
+  }
+  expect(buildProjectPath(route)).toBe(
+    "/projects/CORE/documents/design-notes?version=3&comment=note-1"
+  );
+  expect(buildDispatchReference(route)).toBe(
+    "dispatch://CORE/artifact/design-notes@v3/comment/note-1"
+  );
+});
+
+test("a dashed key is never a project route and a bare project is never an issue route", () => {
+  expect(parseProjectPath("/projects/CORE-1")).toBeUndefined();
+  expect(parseIssuePath("/issues/CORE")).toBeUndefined();
+  expect(parseDispatchReference("dispatch://CORE")).toBeUndefined();
 });

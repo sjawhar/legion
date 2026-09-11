@@ -5,86 +5,79 @@ import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { IssueSummary, UserState } from "../api/types";
-import { arrangeIssues, Sidebar } from "../features/sidebar/Sidebar";
+import type { IssueSummary, Project } from "../api/types";
+import { Sidebar } from "../features/sidebar/Sidebar";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
     key: "CORE-1",
-    open_asks: 0,
+    labels: [],
+    last_seq: 0,
+    open_asks: 1,
     parent: null,
     status: "todo",
-    last_seq: 0,
-    title: "Core work",
-    updated_at: "2026-09-09T00:00:00Z",
+    title: "Pinned work",
+    updated_at: "2026-09-10T00:00:00Z",
     ...overrides,
   };
 }
 
-test("sidebar ranks pinned, needs you, unread, and remaining issues by activity", () => {
-  const issues = [
-    issue({ key: "CORE-1", title: "Older", updated_at: "2026-09-09T01:00:00Z" }),
-    issue({ key: "CORE-2", title: "Needs you", open_asks: 2, updated_at: "2026-09-09T02:00:00Z" }),
-    issue({ key: "CORE-3", title: "Unread", updated_at: "2026-09-09T03:00:00Z" }),
-    issue({ key: "CORE-4", title: "Pinned", updated_at: "2026-09-09T00:00:00Z" }),
-    issue({ key: "CORE-5", title: "Newer", updated_at: "2026-09-09T04:00:00Z" }),
-  ];
-  const state: UserState = {
-    "CORE-3": { dismissed: [], last_read_seq: 1, pinned: false },
-    "CORE-4": { dismissed: [], last_read_seq: 8, pinned: true },
+function project(overrides: Partial<Project> = {}): Project {
+  return {
+    created_at: "2026-09-10T00:00:00Z",
+    key: "CORE",
+    name: "Core",
+    open_asks: 3,
+    ...overrides,
   };
+}
 
-  expect(arrangeIssues(issues, state, { "CORE-3": 2 })).toEqual([
-    { count: 1, items: ["CORE-4"], label: "Pinned" },
-    { count: 2, items: ["CORE-2"], label: "Needs you" },
-    { count: 1, items: ["CORE-3"], label: "Unread" },
-    { count: 2, items: ["CORE-5", "CORE-1"], label: "Everything else" },
-  ]);
-});
-
-test("sidebar nests children under a listed parent", () => {
-  const issues = [
-    issue({ key: "CORE-1", title: "Parent", updated_at: "2026-09-09T01:00:00Z" }),
-    issue({
-      key: "CORE-2",
-      parent: "CORE-1",
-      title: "Child with an ask",
-      open_asks: 1,
-      updated_at: "2026-09-09T02:00:00Z",
-    }),
-  ];
-
-  expect(arrangeIssues(issues, {}, {})).toEqual([
+function renderSidebar(pathname = "/") {
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([
     {
-      count: 1,
-      items: [
-        {
-          children: ["CORE-2"],
-          key: "CORE-1",
-        },
-      ],
-      label: "Needs you",
+      anchor: null,
+      answer: null,
+      author: { id: "alice", kind: "user" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-1",
+      issue_key: "CORE-1",
+      multiple: false,
+      opened_event_id: 1,
+      options: [],
+      question: "Ship?",
+      state: "open",
+      urgency: "med",
+    },
+    {
+      anchor: null,
+      answer: null,
+      author: { id: "alice", kind: "user" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-2",
+      issue_key: "OPS-1",
+      multiple: false,
+      opened_event_id: 2,
+      options: [],
+      question: "Review?",
+      state: "open",
+      urgency: "med",
     },
   ]);
-});
-
-test("sidebar hides groups with no issues instead of rendering a dangling header", () => {
-  const issues = [issue({ key: "CORE-1", title: "Only issue" })];
-
-  expect(arrangeIssues(issues, {}, {}).map((group) => group.label)).toEqual(["Everything else"]);
-});
-
-test("sidebar renders listed issues without fetching individual issue details", async () => {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(undefined as never);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([issue()]);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
+    project(),
+    project({ key: "OPS", name: "Operations", open_asks: 0 }),
+  ]);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
   const view = render(
     createElement(
       MemoryRouter,
-      { initialEntries: ["/"] },
+      { initialEntries: [pathname] },
       createElement(
         QueryClientProvider,
         { client: queryClient },
@@ -92,14 +85,58 @@ test("sidebar renders listed issues without fetching individual issue details", 
       )
     )
   );
+  return { getInbox, getIssue, listIssues, listProjects, view };
+}
+
+test("sidebar lists Inbox, Pinned, Projects, and Settings with open-ask badges and renders no full issue list", async () => {
+  const sidebar = renderSidebar();
 
   try {
-    await screen.findByRole("link", { name: /CORE-1.*Core work/ });
-    expect(getIssue).not.toHaveBeenCalled();
+    await screen.findByRole("link", { name: /CORE.*Core/ });
+    expect(screen.getByRole("link", { name: /Inbox/ }).textContent).toContain("2");
+    expect(screen.getByRole("heading", { name: "Pinned" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /CORE-1.*Pinned work/ }).textContent).toContain("1");
+    expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /CORE.*Core/ }).textContent).toContain("3");
+    expect(screen.getByRole("link", { name: /OPS.*Operations/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Settings" })).toBeTruthy();
   } finally {
-    view.unmount();
-    getIssue.mockRestore();
-    getMyState.mockRestore();
-    listIssues.mockRestore();
+    sidebar.view.unmount();
+    sidebar.getInbox.mockRestore();
+    sidebar.getIssue.mockRestore();
+    sidebar.listIssues.mockRestore();
+    sidebar.listProjects.mockRestore();
+  }
+});
+
+test("sidebar marks the current project", async () => {
+  const sidebar = renderSidebar("/projects/CORE/documents");
+
+  try {
+    const core = await screen.findByRole("link", { name: /CORE.*Core/ });
+    expect(core.getAttribute("aria-current")).toBe("page");
+  } finally {
+    sidebar.view.unmount();
+    sidebar.getInbox.mockRestore();
+    sidebar.getIssue.mockRestore();
+    sidebar.listIssues.mockRestore();
+    sidebar.listProjects.mockRestore();
+  }
+});
+
+test("sidebar never requests the full issue list", async () => {
+  const sidebar = renderSidebar();
+
+  try {
+    await screen.findByRole("link", { name: /CORE.*Core/ });
+    expect(sidebar.listIssues).toHaveBeenCalledTimes(1);
+    expect(sidebar.listIssues).toHaveBeenCalledWith({ pinned: true });
+    expect(sidebar.getIssue).not.toHaveBeenCalled();
+  } finally {
+    sidebar.view.unmount();
+    sidebar.getInbox.mockRestore();
+    sidebar.getIssue.mockRestore();
+    sidebar.listIssues.mockRestore();
+    sidebar.listProjects.mockRestore();
   }
 });

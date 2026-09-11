@@ -48,6 +48,7 @@ const originalApi = {
   listComments: api.listComments,
   listIssueAsks: api.listIssueAsks,
   listIssues: api.listIssues,
+  listProjects: api.listProjects,
   whoAmI: api.whoAmI,
 };
 const originalEventSource = globalThis.EventSource;
@@ -90,6 +91,9 @@ function renderShellAt(width: number): void {
   api.getMyState = async () => ({ "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false } });
   api.getIssue = async () => issue;
   api.getInbox = async () => [];
+  api.listProjects = async () => [
+    { created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
+  ];
   api.listIssueAsks = async () => [];
   api.listComments = async () => [];
   globalThis.EventSource = TestEventSource as unknown as typeof EventSource;
@@ -130,7 +134,9 @@ test("tablet uses the drawer and bottom-sheet controls instead of hidden desktop
 test("desktop exposes the persistent sidebar navigation and review margin", async () => {
   renderShellAt(1280);
 
-  await waitFor(() => expect(screen.queryByRole("navigation", { name: "Issues" })).not.toBeNull());
+  await waitFor(() =>
+    expect(screen.queryByRole("navigation", { name: "Navigation" })).not.toBeNull()
+  );
   expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull();
   expect(screen.queryByRole("button", { name: "Open navigation" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Open review panel/ })).toBeNull();
