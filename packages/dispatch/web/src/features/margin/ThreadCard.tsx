@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import type { Comment } from "../../api/types";
@@ -51,6 +51,10 @@ export interface ThreadCardProps {
   pendingAction: boolean;
   thread: Thread;
   viewerLogin: string;
+  /** The comment whose inline editor is open; owned by the margin so a card that moves between
+   *  the anchored and discussion lists (a remount) keeps an edit in progress. */
+  editingCommentId: string | undefined;
+  onEditingChange(id: string | undefined): void;
 }
 
 function CommentBody({
@@ -146,8 +150,9 @@ export function ThreadCard({
   pendingAction,
   thread,
   viewerLogin,
+  editingCommentId: editingId,
+  onEditingChange: setEditingId,
 }: ThreadCardProps): ReactNode {
-  const [editingId, setEditingId] = useState<string>();
   const root = thread.root.comment;
   const rootSuggestion = root.suggestion;
   const terminalSuggestion = rootSuggestion !== null && rootSuggestion.accepted !== null;

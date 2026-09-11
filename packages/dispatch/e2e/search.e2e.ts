@@ -225,9 +225,13 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     await expect(page).toHaveURL(
       new RegExp(`/issues/${fixture.commentIssueKey}/comments/${fixture.commentID}$`)
     );
-    await expect(
-      page.getByRole("region", { name: "Conversation" }).getByText("Move the astrolabe diagram.")
-    ).toBeVisible();
+    // The deep link loads the Conversation, then pages events until the comment is found; start
+    // the text assertion's clock once the region is mounted so a loaded runner does not fail it.
+    const conversation = page.getByRole("region", { name: "Conversation" });
+    await expect(conversation).toBeVisible();
+    await expect(conversation.getByText("Move the astrolabe diagram.")).toBeVisible({
+      timeout: 15_000,
+    });
     await expect(page.getByTestId("margin-sheet")).not.toContainText("Move the astrolabe diagram.");
   } finally {
     await context.close();

@@ -41,7 +41,12 @@ async function setSheet(page: Page, project: string, open: boolean): Promise<voi
 async function expandedThread(page: Page, rootId: string): Promise<Locator> {
   const card = threadCard(page, rootId);
   if ((await card.getAttribute("aria-expanded")) !== "true") {
-    await card.getByRole("button").click();
+    // Only the collapsed card's toggle - an expanded card holds Resolve/Edit/Reply buttons too.
+    await card.locator('button[aria-expanded="false"]').click();
+    // The card re-renders as the margin's selection and the page's first live events land
+    // together; a click that hits mid-render can be dropped, so wait for the state, not the
+    // click, before handing out a locator whose buttons only exist once expanded.
+    await expect(card).toHaveAttribute("aria-expanded", "true");
   }
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   return (await phoneThread.count()) === 0 ? card : phoneThread;

@@ -194,6 +194,8 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
                 commentsPending={commentsPending}
                 composer={composer}
                 expandedThreadKey={selection.expandedThreadKey}
+                editingCommentId={selection.editingCommentId}
+                onEditingChange={actions.onEditingChange}
                 historicalAsks={historicalAsks}
                 hoveredItemId={selection.hoveredItemId}
                 hoveredMarkId={selection.hoveredMarkId}
@@ -249,6 +251,8 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
                 composerClassName={`fixed inset-x-0 bottom-0 z-10 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
                 expanded
                 hovered={selection.hoveredMarkId === phoneThread.anchor?.mark_id}
+                editingCommentId={selection.editingCommentId}
+                onEditingChange={actions.onEditingChange}
                 isClosed={isClosed}
                 onAction={actions.onAction}
                 onEdit={actions.onEdit}
