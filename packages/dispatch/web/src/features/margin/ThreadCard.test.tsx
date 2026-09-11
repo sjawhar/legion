@@ -8,7 +8,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import type { ComponentProps } from "react";
+import { type ComponentProps, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
@@ -68,6 +68,24 @@ function listThread(): Thread {
   return thread({ replies: [], root: { comment: listRoot, kind: "comment" } });
 }
 
+type EditableCardProps = Omit<
+  ComponentProps<typeof ThreadCard>,
+  "editingCommentId" | "onEditingChange"
+> &
+  Partial<Pick<ComponentProps<typeof ThreadCard>, "editingCommentId" | "onEditingChange">>;
+
+/** Owns the edit-in-progress id the way the margin does, so these tests drive the card alone. */
+function EditableCard(props: EditableCardProps) {
+  const [editingCommentId, setEditingCommentId] = useState<string>();
+  return (
+    <ThreadCard
+      {...props}
+      editingCommentId={props.editingCommentId ?? editingCommentId}
+      onEditingChange={props.onEditingChange ?? setEditingCommentId}
+    />
+  );
+}
+
 function renderCard(
   currentThread = thread(),
   overrides: Partial<ComponentProps<typeof ThreadCard>> = {}
@@ -77,7 +95,7 @@ function renderCard(
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <ThreadCard
+      <EditableCard
         actionError={false}
         artifactSlug="spec"
         expanded
@@ -183,7 +201,7 @@ test("the author can edit a comment and an edited comment carries its marker", a
 
     view.rerender(
       <QueryClientProvider client={new QueryClient()}>
-        <ThreadCard
+        <EditableCard
           actionError={false}
           artifactSlug="spec"
           expanded

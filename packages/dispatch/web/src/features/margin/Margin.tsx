@@ -74,6 +74,7 @@ export interface MarginSheetModel {
     onRetryComments: () => void;
     onRetryIssue: () => void;
     onToggleThread: (key: string) => void;
+    onEditingChange: (id: string | undefined) => void;
     onToggleResolved: () => void;
   };
   composer: MarginComposer | undefined;
@@ -105,6 +106,7 @@ export interface MarginSheetModel {
   };
   selection: {
     expandedThreadKey: string | undefined;
+    editingCommentId: string | undefined;
     hoveredItemId: string | undefined;
     hoveredMarkId: string | undefined;
     selectedItemId: string | undefined;
@@ -295,6 +297,7 @@ function useMarginSheet(): MarginSheetModel {
   const [composer, setComposer] = useState<MarginComposer>();
   const [expandedOwnerId, setExpandedOwnerId] = useState<string>();
   const [expandedThreadKey, setExpandedThreadKey] = useState<string>();
+  const [editingCommentId, setEditingCommentId] = useState<string>();
   const [sheetThreadKey, setSheetThreadKey] = useState<string>();
   const [showResolved, setShowResolved] = useState(false);
   const marginRef = useRef<HTMLElement>(null);
@@ -532,6 +535,7 @@ function useMarginSheet(): MarginSheetModel {
 
   return {
     actions: {
+      onEditingChange: setEditingCommentId,
       closeComposer,
       onAction,
       onComposerSaved,
@@ -572,6 +576,7 @@ function useMarginSheet(): MarginSheetModel {
     },
     selection: {
       expandedThreadKey,
+      editingCommentId,
       hoveredItemId,
       hoveredMarkId,
       selectedItemId,

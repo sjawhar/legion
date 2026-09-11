@@ -51,6 +51,8 @@ function renderList(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) 
   return render(
     <QueryClientProvider client={queryClient}>
       <ThreadList
+        editingCommentId={undefined}
+        onEditingChange={() => {}}
         actionErrorId={undefined}
         artifactSlug="spec"
         expandedThreadKey={open.key}

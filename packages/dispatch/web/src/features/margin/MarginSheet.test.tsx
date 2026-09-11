@@ -33,6 +33,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           onRetryIssue: () => {},
           onToggleResolved: () => {},
           onToggleThread: () => {},
+          onEditingChange: () => {},
         },
         composer: undefined,
         items: {
@@ -63,6 +64,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
         },
         selection: {
           expandedThreadKey: undefined,
+          editingCommentId: undefined,
           hoveredItemId: undefined,
           hoveredMarkId: undefined,
           selectedItemId: undefined,
@@ -125,6 +127,7 @@ test("a document owner shows the Comments tab only and no message composer", () 
             onRetryIssue: () => {},
             onToggleResolved: () => {},
             onToggleThread: () => {},
+            onEditingChange: () => {},
           },
           composer: { anchor: undefined, kind: "message" },
           items: {
@@ -163,6 +166,7 @@ test("a document owner shows the Comments tab only and no message composer", () 
           placement: { markPlacements: new Map() },
           selection: {
             expandedThreadKey: undefined,
+            editingCommentId: undefined,
             hoveredItemId: undefined,
             hoveredMarkId: undefined,
             selectedItemId: undefined,
@@ -241,6 +245,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
             onRetryIssue: () => {},
             onToggleResolved: () => {},
             onToggleThread: () => {},
+            onEditingChange: () => {},
           },
           composer: undefined,
           items: {
@@ -278,6 +283,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
           placement: { markPlacements: new Map() },
           selection: {
             expandedThreadKey: root.id,
+            editingCommentId: undefined,
             hoveredItemId: undefined,
             hoveredMarkId: undefined,
             selectedItemId: root.id,

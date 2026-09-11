@@ -49,7 +49,9 @@ test("a human creates a project from Settings and immediately creates an issue u
 
   try {
     await page.goto("/settings");
-    await expect(page.getByRole("heading", { exact: true, name: "Projects" })).toBeVisible();
+    await expect(
+      page.locator("main").getByRole("heading", { exact: true, name: "Projects" })
+    ).toBeVisible();
     await page.getByLabel("Key").fill("qa");
     await page.getByLabel("Name").fill("Quality");
     await page.getByRole("button", { name: "New project" }).click();

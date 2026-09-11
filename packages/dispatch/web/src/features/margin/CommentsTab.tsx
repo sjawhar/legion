@@ -29,6 +29,8 @@ interface CommentsTabProps {
   commentsPending: boolean;
   composer: MarginComposer | undefined;
   expandedThreadKey: string | undefined;
+  editingCommentId: string | undefined;
+  onEditingChange(id: string | undefined): void;
   historicalAsks: Ask[];
   hoveredItemId: string | undefined;
   hoveredMarkId: string | undefined;
@@ -87,6 +89,8 @@ export function CommentsTab({
   commentsPending,
   composer,
   expandedThreadKey,
+  editingCommentId,
+  onEditingChange,
   historicalAsks,
   hoveredItemId,
   hoveredMarkId,
@@ -166,6 +170,8 @@ export function CommentsTab({
               actionErrorId={actionErrorId}
               artifactSlug={artifactSlug}
               expandedThreadKey={expandedThreadKey}
+              editingCommentId={editingCommentId}
+              onEditingChange={onEditingChange}
               hoveredItemId={hoveredItemId}
               hoveredMarkId={hoveredMarkId}
               isClosed={isClosed}
