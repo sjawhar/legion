@@ -195,6 +195,22 @@ type AskEditPrevious struct {
 	Urgency  string      `json:"urgency"`
 }
 
+// AskEdit is one recorded rewording of an ask, read back from its ask.edited
+// events: the question as it stood before the edit, who edited it, and when.
+type AskEdit struct {
+	Previous AskEditPrevious `json:"previous"`
+	EditedBy Actor           `json:"edited_by"`
+	At       string          `json:"at"`
+}
+
+// AskLastReply is the newest comment in an ask's thread, carried on inbox rows so
+// a human can see who spoke last: a human reply on an open ask means the asker
+// owes the next turn.
+type AskLastReply struct {
+	Author    Actor  `json:"author"`
+	CreatedAt string `json:"created_at"`
+}
+
 // AskEditEventPayload is the full edited ask plus its prior mutable content
 // and the actor who made the edit.
 type AskEditEventPayload struct {
@@ -264,6 +280,11 @@ type CommentEventPayload struct {
 	// notification renderer can show "re: <question>" instead of a bare UUID.
 	// Empty when the comment does not reply to an ask.
 	AskQuestion string `json:"ask_question,omitempty"`
+	// AskState is that ask's state when the comment was posted. A human reply
+	// while the ask is still "open" is a request for clarification: the asker
+	// answers in the thread or rewords the question. Empty when the comment does
+	// not reply to an ask.
+	AskState string `json:"ask_state,omitempty"`
 	// ThreadRootID is the id of the comment thread's root (Comment.ReplyTo's
 	// target) for a comment.created event that replies to another comment, so
 	// a routed agent can reply under the same root humans use. Empty when the

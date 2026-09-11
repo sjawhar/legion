@@ -228,6 +228,9 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   );
   await alicePage.goto("/");
   const textOnlyCard = alicePage.getByTestId(`ask-${textOnlyAsk.id}`);
+  // Free text is a choice of its own: the Other row reveals the answer field.
+  await expect(textOnlyCard.getByLabel("Your answer")).toHaveCount(0);
+  await textOnlyCard.getByRole("radio", { name: "Other" }).check();
   await textOnlyCard
     .getByLabel("Your answer")
     .fill("Neither option fits; going with a third path.");
@@ -263,6 +266,59 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
 
   await bob.close();
   await alice.close();
+});
+
+test("a clarification moves an ask under Waiting on agents until the asker replies", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "spec", title: "Turns" });
+  const untouched = await createAsk(issue.key, { question: "Untouched ask" }, session);
+  const clarifying = await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }, { label: "Hold" }], question: "Clarifying ask" },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    // Nothing is waiting on an agent yet: one flat list, no section headings.
+    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(2);
+    await expect(page.getByRole("heading", { name: "Needs you" })).toHaveCount(0);
+
+    // Alice asks for clarification instead of answering.
+    const card = page.getByTestId(`ask-${clarifying.id}`);
+    const thread = page.getByTestId(`thread-${clarifying.id}`);
+    await thread.getByLabel("Ask for clarification").fill("Ship what, exactly?");
+    await thread.getByRole("button", { name: "Send" }).click();
+    await expect(thread.getByText("Ship what, exactly?")).toBeVisible();
+    await expect(card).toBeVisible();
+
+    // The ask is no longer hers to answer: it waits on its asker, below what needs her.
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Needs you" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Waiting on agents" })).toBeVisible();
+    await expect(page.getByText("Waiting on e2e-session-title")).toBeVisible();
+    const cards = page.locator("[data-testid^=ask-]");
+    await expect(cards).toHaveCount(2);
+    await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
+    await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
+
+    // The agent replies in the thread: the ask is back in front of her, on top.
+    await createComment(
+      issue.key,
+      { ask_id: clarifying.id, body: "The release candidate." },
+      session
+    );
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Waiting on agents" })).toHaveCount(0);
+    await expect(page.getByText("e2e-session-title replied")).toBeVisible();
+    await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
+    await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
+  } finally {
+    await alice.close();
+  }
 });
 
 test("an unanchored issue-level comment reaches Conversation, not document review", async ({

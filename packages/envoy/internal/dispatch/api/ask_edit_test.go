@@ -123,6 +123,31 @@ func TestEditOpenAskByAuthorPersistsUpdatedAskAndEditEvent(t *testing.T) {
 	if persisted.Question != "Which transport should we implement?" || persisted.Previous.Question != "Which implementation?" || !unpublished {
 		t.Fatalf("persisted ask.edited payload=%#v unpublished=%t", persisted, unpublished)
 	}
+
+	// Every rewording is readable back as a version, not only the latest one.
+	again := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+ask.ID, map[string]any{
+		"question": "Which transport, REST or gRPC?", "actor": sessionActor(),
+	})
+	if again.Code != http.StatusOK {
+		t.Fatalf("second edit: status=%d body=%s", again.Code, again.Body.String())
+	}
+	versions := decodeBody[struct {
+		Edits []struct {
+			Previous struct {
+				Question string `json:"question"`
+				Options  []struct {
+					Label string `json:"label"`
+				} `json:"options"`
+			} `json:"previous"`
+			EditedBy struct {
+				Kind string `json:"kind"`
+			} `json:"edited_by"`
+			At string `json:"at"`
+		} `json:"edits"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice"))
+	if len(versions.Edits) != 2 || versions.Edits[0].Previous.Question != "Which implementation?" || len(versions.Edits[0].Previous.Options) != 2 || versions.Edits[1].Previous.Question != "Which transport should we implement?" || versions.Edits[1].Previous.Options[0].Label != "REST" || versions.Edits[0].EditedBy.Kind != "session" || versions.Edits[0].At == "" {
+		t.Fatalf("ask edits = %#v, want both previous versions oldest first", versions.Edits)
+	}
 }
 
 func TestEditAskRejectsAnsweredAsk(t *testing.T) {

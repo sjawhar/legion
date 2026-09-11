@@ -19,6 +19,17 @@ production build from `web/dist`.
 
 Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. `features/refs/MarkdownBody.tsx` renders every question, answer, comment, reply, and message through Proof's own parser, in every surface that shows one (Inbox, margin, Conversation, and the phone review sheet), not just the Conversation tab; its `inline` variant drops the wrapping block for option labels and clamped previews. The Conversation coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
 
+Answering and asking for clarification are different acts on an ask card (`features/inbox/`). Answering: when an ask offers
+options, free text is an explicit **Other** choice - the last row of the option list, which reveals the `Your answer` field;
+a chosen Other is recorded as `{selected: [], text}` (single) or `{selected, text}` (multiple) and renders under an `Other` label
+once answered. An ask with no options keeps the free-text field alone. Clarifying: the reply thread under an open ask is labelled
+`Ask for clarification` / `Send` (answered asks keep `Reply`) and says `Replying does not answer the question.` The Inbox
+partitions the server-ordered rows by `last_reply`: asks whose newest reply is a human's are listed under `Waiting on agents`
+with a `Waiting on <asker>` chip (the agent owes the next turn), everything else under `Needs you` with a `<agent> replied` chip
+when an agent spoke last; both headings appear only when the waiting section is non-empty. The card, its collapsed disclosure,
+and its inline thread share one `["ask-thread", id]` query of `GET /api/v1/asks/{id}`, whose `edits` list every rewording; the
+card's `Show N previous versions` disclosure renders each with its editor and time.
+
 ## Margin threads
 
 The document margin groups each issue-owned anchored root comment and all of its replies into one

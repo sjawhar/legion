@@ -1,17 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useId, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type {
   AnswerAskInput,
   Ask,
-  AskEditPrevious,
+  AskEdit,
   AskRead,
   AskResolution,
   Comment,
   CreateCommentInput,
-  Event,
 } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -48,15 +47,14 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskOptionList } from "./AskOptionList";
-import { AskThread, type AskThreadProps } from "./AskThread";
+import { AskThread, type AskThreadQuery } from "./AskThread";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
+const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
 
 export interface AskCardProps {
   artifactSlug?: string;
   ask: Ask;
-  /** Loaded issue events let the card disclose the latest pre-edit question. */
-  events?: Event[];
   thread?: "inline" | "collapsed";
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
@@ -78,30 +76,7 @@ const URGENCY_LABELS: Record<Ask["urgency"], string> = {
   med: "Medium",
 };
 
-function latestPreviousQuestion(
-  askID: string,
-  events: Event[] | undefined
-): AskEditPrevious | undefined {
-  let latest: Extract<Event, { type: "ask.edited" }> | undefined;
-  for (const event of events ?? []) {
-    if (
-      event.type === "ask.edited" &&
-      event.payload.id === askID &&
-      (latest === undefined || event.seq > latest.seq)
-    ) {
-      latest = event;
-    }
-  }
-  return latest?.payload.previous;
-}
-
-function AskEditHistory({
-  ask,
-  previous,
-}: {
-  ask: Ask;
-  previous: AskEditPrevious | undefined;
-}): ReactNode {
+function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): ReactNode {
   if (ask.edited_at === null) {
     return null;
   }
@@ -110,16 +85,25 @@ function AskEditHistory({
       <p>
         Edited <Timestamp at={ask.edited_at} />
       </p>
-      {previous === undefined ? null : (
+      {edits.length === 0 ? null : (
         <details className="mt-1">
           <summary className={`cursor-pointer font-medium ${linkText} ${linkHoverText}`}>
-            Show previous question
+            {edits.length === 1
+              ? "Show 1 previous version"
+              : `Show ${edits.length} previous versions`}
           </summary>
-          <div className="mt-2">
-            <div className={`font-medium ${textPrimaryOnSurface}`}>
-              <MarkdownBody markdown={previous.question} />
-            </div>
-            <AskOptionList options={previous.options} selected={[]} />
+          <div className="mt-2 space-y-3">
+            {edits.map((edit) => (
+              <div key={edit.at}>
+                <div className={`font-medium ${textPrimaryOnSurface}`}>
+                  <MarkdownBody markdown={edit.previous.question} />
+                </div>
+                <AskOptionList options={edit.previous.options} selected={[]} />
+                <p className="mt-1">
+                  Reworded by {actorLabel(edit.edited_by)} · <Timestamp at={edit.at} />
+                </p>
+              </div>
+            ))}
           </div>
         </details>
       )}
@@ -161,13 +145,19 @@ function OrphanedAnchorNotice({
 function AnsweredAsk({
   artifactSlug,
   ask,
-  previous,
+  edits,
 }: {
   artifactSlug: string | undefined;
   ask: Ask;
-  previous: AskEditPrevious | undefined;
+  edits: AskEdit[];
 }): ReactNode {
   const { answer } = ask;
+  // A chosen "Other" answer carries no real option (answer.selected is empty) but still has
+  // free text - render it under an Other label so the record reads as a chosen option, not an
+  // unlabeled addendum. An ask with no options at all has no Other row to have chosen, so its
+  // free text is always the plain answer instead.
+  const otherText =
+    ask.options.length > 0 && answer !== null && answer.selected.length === 0 ? answer.text : null;
   return (
     <article
       className={`rounded-xl p-4 text-sm ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
@@ -185,9 +175,16 @@ function AnsweredAsk({
         <MarkdownBody markdown={ask.question} />
       </div>
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
-      <AskEditHistory ask={ask} previous={previous} />
+      <AskEditHistory ask={ask} edits={edits} />
       <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
-      {answer === null || answer.text === null || answer.text === "" ? null : (
+      {otherText !== null && otherText !== "" ? (
+        <div className="mt-2">
+          <p className={`text-sm font-medium ${textPrimaryOnSuccessCallout}`}>Other</p>
+          <div className="mt-1">
+            <MarkdownBody markdown={otherText} />
+          </div>
+        </div>
+      ) : answer === null || answer.text === null || answer.text === "" ? null : (
         <div className="mt-1">
           <MarkdownBody markdown={answer.text} />
         </div>
@@ -208,10 +205,10 @@ function AnsweredAsk({
 
 function ResolvedAsk({
   ask,
-  previous,
+  edits,
 }: {
   ask: Ask & { resolution: AskResolution };
-  previous: AskEditPrevious | undefined;
+  edits: AskEdit[];
 }): ReactNode {
   const { resolution } = ask;
   return (
@@ -232,7 +229,7 @@ function ResolvedAsk({
       </span>
       <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(ask.author)}</p>
       <AskOptionList options={ask.options} selected={[]} />
-      <AskEditHistory ask={ask} previous={previous} />
+      <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Asked <Timestamp at={ask.created_at} /> · {describeAskResolutionActor(resolution)} -{" "}
         <MarkdownBody markdown={resolution.reason} variant="inline" />
@@ -241,15 +238,16 @@ function ResolvedAsk({
   );
 }
 
-function AskThreadDisclosure(props: AskThreadProps): ReactNode {
+function AskThreadDisclosure({
+  ask,
+  thread,
+  createReply,
+}: {
+  ask: Ask;
+  thread: AskThreadQuery;
+  createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+}): ReactNode {
   const [open, setOpen] = useState(false);
-  const thread = useQuery({
-    queryKey: ["ask-thread", props.ask.id],
-    queryFn: () =>
-      props.getAskThread === undefined
-        ? api.getAsk(props.ask.id)
-        : props.getAskThread(props.ask.id),
-  });
 
   if (thread.isError) {
     const message =
@@ -273,7 +271,7 @@ function AskThreadDisclosure(props: AskThreadProps): ReactNode {
   return (
     <>
       <button
-        aria-controls={`thread-${props.ask.id}`}
+        aria-controls={`thread-${ask.id}`}
         aria-expanded={open}
         className={`mt-3 min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
         onClick={() => {
@@ -284,8 +282,8 @@ function AskThreadDisclosure(props: AskThreadProps): ReactNode {
         {count === 0 ? "Reply" : count === 1 ? "1 reply" : `${count} replies`}
       </button>
       {open ? (
-        <div id={`thread-${props.ask.id}`}>
-          <AskThread {...props} showResolution={false} />
+        <div id={`thread-${ask.id}`}>
+          <AskThread ask={ask} createReply={createReply} showResolution={false} thread={thread} />
         </div>
       ) : null}
     </>
@@ -295,21 +293,27 @@ function AskThreadDisclosure(props: AskThreadProps): ReactNode {
 export function AskCard({
   artifactSlug,
   ask,
-  events,
   thread = "inline",
   answerAsk: answer = answerAsk,
   createReply: reply,
-  getAskThread: getThread,
+  getAskThread: getThread = getAskThread,
 }: AskCardProps): ReactNode {
   const queryClient = useQueryClient();
   // Each AskCard instance owns its answer field label so cards with the same
   // ask id never collide when a responsive transition briefly renders both.
   const answerFieldId = `${useId()}-answer`;
   const [selected, setSelected] = useState<string[]>([]);
+  const [otherSelected, setOtherSelected] = useState(false);
   const [answerText, setAnswerText] = useState("");
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const submitGuard = useSubmitGuard();
-  const previous = useMemo(() => latestPreviousQuestion(ask.id, events), [ask.id, events]);
+  // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
+  // thread — one fetch instead of each consumer issuing its own.
+  const threadQuery = useQuery<AskRead, Error>({
+    queryKey: ["ask-thread", ask.id],
+    queryFn: () => getThread(ask.id),
+  });
+  const edits = threadQuery.data?.edits ?? [];
   const mutation = useMutation({
     mutationFn: (input: AnswerAskInput) => answer(ask.id, input),
     onMutate: async () => {
@@ -344,20 +348,64 @@ export function AskCard({
     },
   });
 
+  const hasOptions = ask.options.length > 0;
+
+  const selectRealOption = (label: string) => {
+    if (ask.multiple) {
+      setSelected((current) =>
+        current.includes(label)
+          ? current.filter((current) => current !== label)
+          : [...current, label]
+      );
+      return;
+    }
+    setSelected([label]);
+    setOtherSelected(false);
+    setAnswerText("");
+  };
+
+  const toggleOther = () => {
+    if (ask.multiple) {
+      setOtherSelected((current) => {
+        const next = !current;
+        if (!next) {
+          setAnswerText("");
+        }
+        return next;
+      });
+      return;
+    }
+    setSelected([]);
+    setOtherSelected(true);
+  };
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = answerText.trim();
-    submitGuard.guard(() => mutation.mutate(text === "" ? { selected } : { selected, text }));
+    submitGuard.guard(() => {
+      if (hasOptions) {
+        mutation.mutate(otherSelected ? { selected, text } : { selected });
+        return;
+      }
+      mutation.mutate(text === "" ? { selected } : { selected, text });
+    });
   };
-  const canSubmit = selected.length > 0 || answerText.trim() !== "";
+  const canSubmit = hasOptions
+    ? selected.length > 0 || (otherSelected && answerText.trim() !== "")
+    : answerText.trim() !== "";
+  const showTextarea = !hasOptions || otherSelected;
   const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
 
   const completed = justAnswered ?? (ask.state === "open" ? null : ask);
+  // The thread's own "still open?" wording must track the post-answer ask, not the possibly
+  // stale prop passed to this instance: `justAnswered` renders before an invalidated `ask` prop
+  // round-trips down from the parent.
+  const currentAsk = completed ?? ask;
   const threadNode =
     thread === "collapsed" ? (
-      <AskThreadDisclosure ask={ask} createReply={reply} getAskThread={getThread} />
+      <AskThreadDisclosure ask={currentAsk} createReply={reply} thread={threadQuery} />
     ) : (
-      <AskThread ask={ask} createReply={reply} getAskThread={getThread} showResolution={false} />
+      <AskThread ask={currentAsk} createReply={reply} showResolution={false} thread={threadQuery} />
     );
 
   if (completed !== null) {
@@ -366,10 +414,7 @@ export function AskCard({
         throw new Error("resolved ask is missing its resolution");
       return (
         <>
-          <ResolvedAsk
-            ask={{ ...completed, resolution: completed.resolution }}
-            previous={previous}
-          />
+          <ResolvedAsk ask={{ ...completed, resolution: completed.resolution }} edits={edits} />
           {threadNode}
         </>
       );
@@ -379,7 +424,7 @@ export function AskCard({
         <AnsweredAsk
           artifactSlug={artifactSlug}
           ask={{ ...completed, answer: completed.answer }}
-          previous={previous}
+          edits={edits}
         />
         {threadNode}
       </>
@@ -405,7 +450,7 @@ export function AskCard({
             <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
               {actorLabel(ask.author)} · <Timestamp at={ask.created_at} />
             </p>
-            <AskEditHistory ask={ask} previous={previous} />
+            <AskEditHistory ask={ask} edits={edits} />
           </div>
           <span
             className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[ask.urgency].bg} ${URGENCY_STYLES[ask.urgency].text}`}
@@ -439,16 +484,7 @@ export function AskCard({
                       checked={checked}
                       disabled={mutation.isPending}
                       name={`ask-${ask.id}`}
-                      onChange={() => {
-                        setSelected((current) => {
-                          if (!ask.multiple) {
-                            return [option.label];
-                          }
-                          return current.includes(option.label)
-                            ? current.filter((label) => label !== option.label)
-                            : [...current, option.label];
-                        });
-                      }}
+                      onChange={() => selectRealOption(option.label)}
                       type={ask.multiple ? "checkbox" : "radio"}
                     />
                     <span>
@@ -464,21 +500,35 @@ export function AskCard({
                   </label>
                 );
               })}
+              <label
+                className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
+              >
+                <input
+                  checked={otherSelected}
+                  disabled={mutation.isPending}
+                  name={`ask-${ask.id}`}
+                  onChange={toggleOther}
+                  type={ask.multiple ? "checkbox" : "radio"}
+                />
+                <span className={`font-medium ${textPrimaryOnSurface}`}>Other</span>
+              </label>
             </fieldset>
           )}
-          <label
-            className={`block text-sm font-medium ${textSecondaryOnSurface}`}
-            htmlFor={answerFieldId}
-          >
-            Your answer
-            <textarea
-              className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
-              disabled={mutation.isPending}
-              id={answerFieldId}
-              onChange={(event) => setAnswerText(event.target.value)}
-              value={answerText}
-            />
-          </label>
+          {showTextarea ? (
+            <label
+              className={`block text-sm font-medium ${textSecondaryOnSurface}`}
+              htmlFor={answerFieldId}
+            >
+              Your answer
+              <textarea
+                className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
+                disabled={mutation.isPending}
+                id={answerFieldId}
+                onChange={(event) => setAnswerText(event.target.value)}
+                value={answerText}
+              />
+            </label>
+          ) : null}
           <button
             className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
             disabled={!canSubmit || mutation.isPending}

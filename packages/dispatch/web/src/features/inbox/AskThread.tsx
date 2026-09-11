@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { UseQueryResult } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api } from "../../api/client";
@@ -20,7 +21,6 @@ import { actorLabel, describeAskResolutionActor } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
-const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
 const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
   api.createComment(issueKey, input);
 
@@ -34,6 +34,10 @@ function resolvedInfo(ask: Ask): AskResolution | null {
   return ask.resolution;
 }
 
+/** The `["ask-thread", ask.id]` query AskCard fetches once and shares with its collapsed
+ *  disclosure and this inline thread, so no consumer here issues its own duplicate fetch. */
+export type AskThreadQuery = UseQueryResult<AskRead, Error>;
+
 interface UseAskThreadResult {
   replies: Comment[];
   body: string;
@@ -44,23 +48,16 @@ interface UseAskThreadResult {
   retry: () => void;
 }
 
-/** Query + reply mutation for an ask's thread, kept separate from AskThread's markup so it can
- * be reasoned about (and, if ever needed, reused) independently of the JSX. */
+/** Reply mutation for an ask's thread, kept separate from AskThread's markup so it can be
+ * reasoned about (and, if ever needed, reused) independently of the JSX. Reads replies from
+ * the shared `thread` query AskCard owns rather than fetching its own copy. */
 function useAskThread(
   ask: Ask,
   createReply: (issueKey: string, input: CreateCommentInput) => Promise<Comment>,
-  getAskThread: (id: string) => Promise<AskRead>
+  thread: AskThreadQuery
 ): UseAskThreadResult {
   const queryClient = useQueryClient();
   const [body, setBody] = useState("");
-  // A distinct queryKey from ["asks", issueKey] (the issue-wide asks list
-  // useAnsweredAsks queries): the two consumers expect incompatible shapes
-  // (Ask[] vs. {ask, replies}), and react-query caches by key alone, so
-  // sharing a key would silently corrupt whichever read second.
-  const thread = useQuery({
-    queryKey: ["ask-thread", ask.id],
-    queryFn: () => getAskThread(ask.id),
-  });
   const submit = useMutation({
     mutationFn: (text: string) => {
       if (ask.issue_key === null) {
@@ -99,21 +96,24 @@ function useAskThread(
 }
 export interface AskThreadProps {
   ask: Ask;
+  /** The shared ask-thread query AskCard already fetched; this component never fetches its
+   *  own copy. */
+  thread: AskThreadQuery;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
-  getAskThread?: (id: string) => Promise<AskRead>;
   showResolution?: boolean;
 }
 
 /**
  * The reply thread under a question: every comment that replies directly to
- * the ask (Comment.ask_id) plus their own reply chains, oldest first. Open
- * and answered asks keep an inline reply form; a resolved ask keeps its
- * history and recorded resolution without a composer.
+ * the ask (Comment.ask_id) plus their own reply chains, oldest first. An open ask's composer
+ * is framed as asking for clarification (replying never answers the question); an answered
+ * ask keeps the plain reply composer. A resolved ask keeps its history and recorded
+ * resolution without a composer.
  */
 export function AskThread({
   ask,
+  thread,
   createReply: reply = createReply,
-  getAskThread: getThread = getAskThread,
   showResolution = true,
 }: AskThreadProps): ReactNode {
   // Each AskThread instance owns its reply field label so transient duplicate
@@ -122,9 +122,10 @@ export function AskThread({
   const { replies, body, setBody, submitReply, isPending, isError, retry } = useAskThread(
     ask,
     reply,
-    getThread
+    thread
   );
   const resolution = resolvedInfo(ask);
+  const isOpen = ask.state === "open";
 
   return (
     <section
@@ -156,11 +157,16 @@ export function AskThread({
       )}
       {resolution === null && ask.issue_key !== null ? (
         <form className="flex flex-col gap-2" onSubmit={submitReply}>
+          {isOpen ? (
+            <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
+              Replying does not answer the question.
+            </p>
+          ) : null}
           <label
             className={`block text-sm font-medium ${textSecondaryOnCanvas}`}
             htmlFor={replyFieldId}
           >
-            Reply
+            {isOpen ? "Ask for clarification" : "Reply"}
             <textarea
               className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
               disabled={isPending}
@@ -174,7 +180,7 @@ export function AskThread({
             disabled={body.trim() === "" || isPending}
             type="submit"
           >
-            {isPending ? "Replying…" : "Reply"}
+            {isOpen ? (isPending ? "Sending…" : "Send") : isPending ? "Replying…" : "Reply"}
           </button>
           {isError ? (
             <QueryError message="Could not post your reply." onRetry={retry} retrying={isPending} />

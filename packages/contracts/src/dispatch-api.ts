@@ -132,7 +132,15 @@ export interface Ask {
   readonly created_at: string;
   readonly issue?: Pick<Issue, "key" | "title">;
   readonly document?: InboxDocument;
+  /** Inbox rows only: the newest reply in the ask's thread, or null when nobody has replied.
+   *  A human reply on an open ask means the asker owes the next turn (a clarification). */
+  readonly last_reply?: AskLastReply | null;
   readonly edited_at: string | null;
+}
+
+export interface AskLastReply {
+  readonly author: Actor;
+  readonly created_at: string;
 }
 
 export interface InboxDocument {
@@ -172,6 +180,13 @@ export type AskEditEventPayload = Ask & {
   readonly edited_by: Actor;
 };
 
+/** One recorded rewording of an ask: what the question was before this edit, who edited, when. */
+export interface AskEdit {
+  readonly previous: AskEditPrevious;
+  readonly edited_by: Actor;
+  readonly at: string;
+}
+
 export interface Comment {
   readonly id: string;
   readonly issue_key: string | null;
@@ -198,6 +213,9 @@ export interface CommentEventPayload extends Comment {
   readonly artifact_name: string;
   /** The question text of the ask this comment replies to (Comment.ask_id); empty otherwise. */
   readonly ask_question?: string;
+  /** The state of that ask when the comment was posted. A human reply while it is still `open`
+   *  is a request for clarification: the asker answers in the thread or rewords the question. */
+  readonly ask_state?: Ask["state"];
 }
 
 export interface Message {
@@ -548,6 +566,8 @@ export interface CommentRead {
 export interface AskRead {
   readonly ask: Ask;
   readonly replies: Comment[];
+  /** Every rewording of the question, oldest first; empty when never edited. */
+  readonly edits: AskEdit[];
 }
 
 export interface MessageRead {
@@ -685,6 +705,7 @@ export const CommentEventPayloadSchema = z.object({
   reply_to: z.string().nullish(),
   ask_id: z.string().nullish(),
   ask_question: z.string().optional(),
+  ask_state: z.enum(["open", "answered", "resolved"]).optional(),
   anchor: z.object({ quote: z.string().optional() }).nullish(),
   suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),

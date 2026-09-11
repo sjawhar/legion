@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { Ask, AskRead, Comment, Event } from "../api/types";
+import type { Ask, AskEdit, AskRead, Comment } from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
 import { Inbox } from "../features/inbox/Inbox";
 
@@ -61,7 +61,7 @@ function reply(
 // never falls through to the default getAskThread, which would issue a real
 // fetch in this test environment.
 function emptyThread(input: Ask): () => Promise<AskRead> {
-  return async () => ({ ask: input, replies: [] });
+  return async () => ({ ask: input, edits: [], replies: [] });
 }
 
 function renderCard(node: ReactNode) {
@@ -75,21 +75,26 @@ function renderCard(node: ReactNode) {
 // The same open anchored ask renders in more than one place at once (the issue board and
 // the margin both show it) - each mounted AskCard's own answer field must stay independently
 // labeled, not collide on an ask.id-derived id shared by every instance.
-test("AskCard marks an edited question and reveals its previous question and options", async () => {
+test("AskCard shows every previous version of an edited question, oldest first", async () => {
   const editedAt = new Date().toISOString();
   const input = ask({
     edited_at: editedAt,
     options: [{ label: "SSE" }],
     question: "Should we use SSE?",
   });
-  const edited: Extract<Event, { type: "ask.edited" }> = {
-    actor: { id: "session-1", kind: "session" },
-    created_at: editedAt,
-    id: 2,
-    issue_key: "CORE-1",
-    notify: false,
-    payload: {
-      ...input,
+  const edits: AskEdit[] = [
+    {
+      at: "2026-09-10T00:00:00Z",
+      edited_by: { id: "session-1", kind: "session" },
+      previous: {
+        multiple: false,
+        options: [{ label: "Email" }],
+        question: "Should we use email?",
+        urgency: "med",
+      },
+    },
+    {
+      at: "2026-09-10T01:00:00Z",
       edited_by: { id: "session-1", kind: "session" },
       previous: {
         multiple: false,
@@ -98,32 +103,15 @@ test("AskCard marks an edited question and reveals its previous question and opt
         urgency: "med",
       },
     },
-    seq: 2,
-    type: "ask.edited",
-  };
-  const earlier: Extract<Event, { type: "ask.edited" }> = {
-    ...edited,
-    created_at: "2026-09-10T00:00:00Z",
-    id: 1,
-    payload: {
-      ...edited.payload,
-      previous: {
-        multiple: false,
-        options: [{ label: "Email" }],
-        question: "Should we use email?",
-        urgency: "med",
-      },
-    },
-    seq: 1,
-  };
+  ];
   const { view } = renderCard(
-    <AskCard ask={input} events={[earlier, edited]} getAskThread={emptyThread(input)} />
+    <AskCard ask={input} getAskThread={async () => ({ ask: input, edits, replies: [] })} />
   );
 
   try {
     const card = view.getByTestId("ask-ask-1");
-    expect(card.textContent).toContain("Edited just now");
-    const summary = view.getByText("Show previous question");
+    await waitFor(() => expect(card.textContent).toContain("Edited just now"));
+    const summary = await view.findByText("Show 2 previous versions");
     const disclosure = summary.closest("details");
     if (!(disclosure instanceof HTMLDetailsElement)) {
       throw new Error("previous question disclosure is missing");
@@ -131,9 +119,10 @@ test("AskCard marks an edited question and reveals its previous question and opt
     expect(disclosure.open).toBe(false);
     fireEvent.click(summary);
     expect(disclosure.open).toBe(true);
-    expect(await within(disclosure).findByText("Should we use polling?")).toBeTruthy();
-    expect(within(disclosure).getByRole("list", { name: "Options" }).textContent).toContain(
-      "Polling"
+    expect(await within(disclosure).findByText("Should we use email?")).toBeTruthy();
+    expect(within(disclosure).getByText("Should we use polling?")).toBeTruthy();
+    expect(within(disclosure).getAllByRole("list", { name: "Options" })[0]?.textContent).toContain(
+      "Email"
     );
   } finally {
     view.unmount();
@@ -191,7 +180,8 @@ test("AskCard submits the selected single option", async () => {
   );
 
   try {
-    expect(view.getByLabelText("Your answer")).toBeTruthy();
+    // Options exist, so the free-text field stays hidden until Other is picked.
+    expect(view.queryByLabelText("Your answer")).toBeNull();
     const submit = view.getByRole("button", { name: "Submit answer" });
     expect(submit.hasAttribute("disabled")).toBe(true);
 
@@ -253,6 +243,85 @@ test("AskCard submits free-text without inventing a selected option", async () =
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
     await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Take the third path" }]));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard reveals the Other field only once Other is picked, and submits its text with no real option", async () => {
+  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    expect(view.queryByLabelText("Your answer")).toBeNull();
+    fireEvent.click(await view.findByRole("radio", { name: "Other" }));
+    expect(view.getByLabelText("Your answer")).toBeTruthy();
+    const submit = view.getByRole("button", { name: "Submit answer" });
+    expect(submit.hasAttribute("disabled")).toBe(true);
+
+    fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "Try a hybrid" } });
+    expect(submit.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Try a hybrid" }]));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard hides the Other field and drops its text once a real option is picked instead", async () => {
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Other" }));
+    fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "Try a hybrid" } });
+
+    fireEvent.click(view.getByRole("radio", { name: "Ship" }));
+    expect(view.queryByLabelText("Your answer")).toBeNull();
+
+    fireEvent.click(view.getByRole("radio", { name: "Other" }));
+    expect(view.getByLabelText("Your answer")).toHaveProperty("value", "");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard submits checked options alongside Other's free text for a multiple-select ask", async () => {
+  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const input = ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("checkbox", { name: "Docs" }));
+    fireEvent.click(view.getByRole("checkbox", { name: "Other" }));
+    fireEvent.change(view.getByLabelText("Your answer"), {
+      target: { value: "Also update the wiki" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+
+    await waitFor(() =>
+      expect(submitted).toEqual([{ selected: ["Docs"], text: "Also update the wiki" }])
+    );
   } finally {
     view.unmount();
   }
@@ -336,6 +405,24 @@ test("AskCard shows submitted free text in its answered card", async () => {
   }
 });
 
+test("an answered ask records a chosen Other answer under an Other label, not as an addendum", async () => {
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={answered(input, [], "Neither, let's wait a week")}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    expect(await within(card).findByText("Other")).toBeTruthy();
+    expect(within(card).getByText("Neither, let's wait a week")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard retries a failed answer without losing its form", async () => {
   let attempts = 0;
   const input = ask({ options: [{ label: "Ship" }] });
@@ -400,6 +487,7 @@ test("AskCard renders the reply thread under the question before it is answered"
       ask={input}
       getAskThread={async () => ({
         ask: input,
+        edits: [],
         replies: [reply({ id: "comment-1", body: "Any update?" })],
       })}
     />
@@ -410,8 +498,10 @@ test("AskCard renders the reply thread under the question before it is answered"
     expect(
       within(view.getByTestId("thread-ask-1")).getByText("alice", { exact: false })
     ).toBeTruthy();
-    // The composer stays available alongside existing replies.
-    expect(view.getByRole("button", { name: "Reply" })).toBeTruthy();
+    // The composer stays available alongside existing replies, and an open ask frames it as a
+    // clarification, not an answer.
+    expect(view.getByRole("button", { name: "Send" })).toBeTruthy();
+    expect(view.getByText("Replying does not answer the question.")).toBeTruthy();
   } finally {
     view.unmount();
   }
@@ -441,6 +531,33 @@ test("AskCard keeps the thread and reply composer visible after the ask is answe
   }
 });
 
+test("the reply form asks for clarification on an open ask, and stays a plain Reply once answered", async () => {
+  const openAsk = ask();
+  const { view: openView } = renderCard(
+    <AskCard ask={openAsk} getAskThread={emptyThread(openAsk)} />
+  );
+  const answeredInput = ask({ options: [{ label: "Ship" }] });
+  const answeredAsk = answered(answeredInput, ["Ship"]);
+  const { view: answeredView } = renderCard(
+    <AskCard ask={answeredAsk} getAskThread={emptyThread(answeredAsk)} />
+  );
+
+  try {
+    const openScope = within(openView.container);
+    const answeredScope = within(answeredView.container);
+    expect(await openScope.findByLabelText("Ask for clarification")).toBeTruthy();
+    expect(openScope.getByRole("button", { name: "Send" })).toBeTruthy();
+    expect(openScope.getByText("Replying does not answer the question.")).toBeTruthy();
+
+    expect(await answeredScope.findByLabelText("Reply")).toBeTruthy();
+    expect(answeredScope.getByRole("button", { name: "Reply" })).toBeTruthy();
+    expect(answeredScope.queryByText("Replying does not answer the question.")).toBeNull();
+  } finally {
+    openView.unmount();
+    answeredView.unmount();
+  }
+});
+
 test("AskCard posts a reply to the ask and clears the composer on success", async () => {
   const input = ask();
   const posted: Array<{ issueKey: string; body: string; askId?: string }> = [];
@@ -456,15 +573,17 @@ test("AskCard posts a reply to the ask and clears the composer on success", asyn
   );
 
   try {
-    fireEvent.change(view.getByLabelText("Reply"), {
+    fireEvent.change(view.getByLabelText("Ask for clarification"), {
       target: { value: "Any update on this?" },
     });
-    fireEvent.click(view.getByRole("button", { name: "Reply" }));
+    fireEvent.click(view.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
       expect(posted).toEqual([{ issueKey: "CORE-1", body: "Any update on this?", askId: "ask-1" }])
     );
-    await waitFor(() => expect(view.getByLabelText("Reply")).toHaveProperty("value", ""));
+    await waitFor(() =>
+      expect(view.getByLabelText("Ask for clarification")).toHaveProperty("value", "")
+    );
   } finally {
     view.unmount();
   }
@@ -488,8 +607,10 @@ test("AskCard surfaces a retryable error when posting a reply fails", async () =
   );
 
   try {
-    fireEvent.change(view.getByLabelText("Reply"), { target: { value: "Retry me" } });
-    fireEvent.click(view.getByRole("button", { name: "Reply" }));
+    fireEvent.change(view.getByLabelText("Ask for clarification"), {
+      target: { value: "Retry me" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Send" }));
     const alert = await view.findByRole("alert");
     expect(alert.textContent).toContain("Could not post your reply.");
     fireEvent.click(view.getByRole("button", { name: "Retry" }));
@@ -532,6 +653,7 @@ test("a collapsed thread shows the reply count and expands to the thread on dema
   const input = ask();
   const thread = async () => ({
     ask: input,
+    edits: [],
     replies: [reply({ body: "Any update?" }), reply({ body: "Soon.", id: "c2" })],
   });
   const { view } = renderCard(<AskCard ask={input} getAskThread={thread} thread="collapsed" />);
@@ -544,7 +666,7 @@ test("a collapsed thread shows the reply count and expands to the thread on dema
     fireEvent.click(trigger);
     await waitFor(() => expect(view.getByText("Any update?")).toBeTruthy());
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    expect(view.getByLabelText("Reply")).toBeTruthy();
+    expect(view.getByLabelText("Ask for clarification")).toBeTruthy();
   } finally {
     view.unmount();
   }
@@ -563,7 +685,7 @@ test("a collapsed thread with no replies offers Reply, and a failed thread fetch
       getAskThread={async () => {
         attempts += 1;
         if (attempts === 1) throw new Error("boom");
-        return { ask: failedInput, replies: [] };
+        return { ask: failedInput, edits: [], replies: [] };
       }}
       thread="collapsed"
     />

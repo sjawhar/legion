@@ -43,7 +43,7 @@ test("ask events refresh the issue, its asks list, user state, and the inbox", (
     ["projects"],
   ]);
 });
-test("an ask edit refreshes the issue, its asks list, user state, and the inbox", () => {
+test("an ask edit refreshes the issue, its asks list, user state, the inbox, and the ask's own read", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -88,6 +88,7 @@ test("an ask edit refreshes the issue, its asks list, user state, and the inbox"
     ["inbox"],
     ["asks", "CORE-1"],
     ["projects"],
+    ["ask-thread", "ask-1"],
   ]);
 });
 
