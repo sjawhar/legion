@@ -1,0 +1,190 @@
+{
+  "spec": "dispatch://LEGION-6/spec (version 9)",
+  "plan": "docs/plans/2026-09-11-dispatch-token-file-delivery.md",
+  "pr": 923,
+  "prUrl": "https://github.com/sjawhar/legion/pull/923",
+  "branch": "legion/LEGION-6",
+  "headTested": "52e8243b62a79981cf27c24eb7e0b7a9c0f57418",
+  "verdict": "PASS \u2014 all five acceptance criteria proven on the real surface (smoke rig with the branch daemon + branch pi-envoy plugin build) plus bare unit gates; no code patched.",
+  "criteria": {
+    "A1_daemon_unit_test": {
+      "verdict": "PASS",
+      "command": "cd packages/daemon && bunx biome check src/ && bunx tsc --noEmit && bun test  (bare, LEGION_*/DISPATCH_*/ENVOY_* unset)",
+      "output": "Checked 137 files in 807ms. No fixes applied. | tsc clean | 797 pass, 0 fail, Ran 802 tests across 54 files. [33.59s]",
+      "realSurfaceCorroboration": "Live rig: /tmp/legion6-smoke/rig/daemon/secrets is 700; dispatch-token (64 B), legion-sjawhar24-controller (36 B), legion-sjawhar24-legsmoke-23-architect (36 B) are 600; sha256(secrets/dispatch-token) == sha256 of the configured DISPATCH_TOKEN bearer; controller pane environ carries only DISPATCH_TOKEN_FILE + LEGION_CONTROLLER_SECRET_FILE, architect pane environ only DISPATCH_TOKEN_FILE + LEGION_BOOT_TOKEN_FILE."
+    },
+    "A2_checkpoint13": {
+      "verdict": "PASS",
+      "command": "SMOKE_DIR=/tmp/legion6-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 bash scripts/smoke/checkpoints.sh 13",
+      "exit": 0,
+      "output": "CHECKPOINT 13 OK: 3 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24",
+      "perProcess": [
+        {
+          "process": "tmux server",
+          "pid": "767315",
+          "secret_names_in_environ": [],
+          "secret_names_in_cmdline": [],
+          "file_pointers_in_environ": [],
+          "cmdline_head": "/home/ubuntu/.dotfiles/bin/tmux -L legion-sjawhar24 new-session -d -s legion-sjawhar24 -n __legion_bootstrap sleep 3600"
+        },
+        {
+          "process": "controller pane %1",
+          "pid": "770004",
+          "secret_names_in_environ": [],
+          "secret_names_in_cmdline": [],
+          "file_pointers_in_environ": [
+            "LEGION_CONTROLLER_SECRET_FILE",
+            "DISPATCH_TOKEN_FILE"
+          ],
+          "cmdline_head": "/home/ubuntu/.mise/installs/bun/1.3.14/bin/bun /home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion"
+        },
+        {
+          "process": "tree LEGSMOKE-23 architect pane %2",
+          "pid": "852104",
+          "secret_names_in_environ": [],
+          "secret_names_in_cmdline": [],
+          "file_pointers_in_environ": [
+            "LEGION_BOOT_TOKEN_FILE",
+            "DISPATCH_TOKEN_FILE"
+          ],
+          "cmdline_head": "/home/ubuntu/.mise/installs/bun/1.3.14/bin/bun /home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion"
+        }
+      ],
+      "privateServerGlobalEnv": {
+        "command": "tmux -L legion-sjawhar24 show-environment -g | grep -E '^(DISPATCH_TOKEN|LEGION_BOOT_TOKEN|LEGION_CONTROLLER_SECRET)=' || echo '<none>'",
+        "exit": 0,
+        "output": "<none>"
+      }
+    },
+    "A3_checkpoints_1_to_3": {
+      "verdict": "PASS",
+      "checkpoint1": {
+        "command": "DISPATCH_TOKEN=<from ~/.config/opencode/envoy.json .dispatch.token> DISPATCH_URL=http://localhost:8766 SMOKE_DIR=/tmp/legion6-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 bash scripts/smoke/checkpoints.sh 1",
+        "exit": 0,
+        "output": "CHECKPOINT 1 OK: Dispatch tracks LEGSMOKE-23 past triage; controller locator is live"
+      },
+      "checkpoint2": {
+        "command": "DISPATCH_TOKEN=<from ~/.config/opencode/envoy.json .dispatch.token> DISPATCH_URL=http://localhost:8766 SMOKE_DIR=/tmp/legion6-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 bash scripts/smoke/checkpoints.sh 2",
+        "exit": 0,
+        "output": "CHECKPOINT 2 OK: Dispatch reports LEGSMOKE-23 in_progress; architect locator is live"
+      },
+      "checkpoint3": {
+        "command": "DISPATCH_TOKEN=<from ~/.config/opencode/envoy.json .dispatch.token> DISPATCH_URL=http://localhost:8766 SMOKE_DIR=/tmp/legion6-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 bash scripts/smoke/checkpoints.sh 3",
+        "exit": 0,
+        "output": "CHECKPOINT 3 OK: posted spec artifact, open design gate, and child issue observed"
+      },
+      "note": "Controller (pane %1) triaged LEGSMOKE-23 -> todo via `legion status`; architect (pane %2, LEGION_BOOT_TOKEN_FILE only) posted spec.md (3 versions), opened design-gate ask 0359fa41 with Approve/Change scope, posted messages and created child LEGSMOKE-24 \u2014 every Dispatch write from a pane whose environ has no DISPATCH_TOKEN, only DISPATCH_TOKEN_FILE. The architect first chose a single-issue tree (no children); checkpoint 3's child sub-assertion passed after an operator nudge published to notifications.role.legion-sjawhar24-legsmoke-23-architect through the rig listener (/v1/messages/publish); the architect then created LEGSMOKE-24."
+    },
+    "A4_sockets": {
+      "verdict": "PASS (with note)",
+      "defaultSocket": {
+        "command": "tmux list-sessions",
+        "exit": 0,
+        "output": "bmev: 1 windows (created Wed Sep  9 20:00:56 2026)\ndev: 5 windows (created Wed Sep  9 13:58:37 2026) (group dev) (attached)\ndev2: 5 windows (created Wed Sep  9 13:58:42 2026) (group dev) (attached)\ndev3: 5 windows (created Thu Sep 10 02:40:18 2026) (group dev) (attached)\ndev4: 5 windows (created Wed Sep  9 13:58:43 2026) (group dev) (attached)\nlegion-sjawharlegion: 2 windows (created Fri Sep 11 04:45:27 2026)"
+      },
+      "privateSocket": {
+        "command": "tmux -L legion-sjawhar24 list-sessions",
+        "exit": 0,
+        "output": "legion-sjawhar24: 2 windows (created Fri Sep 11 16:57:55 2026)"
+      },
+      "secretsDir": {
+        "command": "ls -la /tmp/legion6-smoke/rig/daemon/secrets && stat -c '%a %n' /tmp/legion6-smoke/rig/daemon/secrets /tmp/legion6-smoke/rig/daemon/secrets/*",
+        "exit": 0,
+        "output": "total 20\ndrwx------ 2 ubuntu ubuntu 4096 Sep 11 16:59 .\ndrwxr-xr-x 8 ubuntu ubuntu 4096 Sep 11 17:30 ..\n-rw------- 1 ubuntu ubuntu   64 Sep 11 16:57 dispatch-token\n-rw------- 1 ubuntu ubuntu   36 Sep 11 16:57 legion-sjawhar24-controller\n-rw------- 1 ubuntu ubuntu   36 Sep 11 16:59 legion-sjawhar24-legsmoke-23-architect\n700 /tmp/legion6-smoke/rig/daemon/secrets\n600 /tmp/legion6-smoke/rig/daemon/secrets/dispatch-token\n600 /tmp/legion6-smoke/rig/daemon/secrets/legion-sjawhar24-controller\n600 /tmp/legion6-smoke/rig/daemon/secrets/legion-sjawhar24-legsmoke-23-architect"
+      },
+      "dispatchTokenFile": {
+        "command": "[ \"$(sha256sum < /tmp/legion6-smoke/rig/daemon/secrets/dispatch-token | cut -d' ' -f1)\" = \"$(printf %s \"$DISPATCH_TOKEN\" | sha256sum | cut -d' ' -f1)\" ] && echo 'sha256(secrets/dispatch-token) == sha256(DISPATCH_TOKEN bearer)' || echo MISMATCH",
+        "exit": 0,
+        "output": "sha256(secrets/dispatch-token) == sha256(DISPATCH_TOKEN bearer)"
+      },
+      "negativeControl": [
+        {
+          "command": "tmux -L legion-sjawhar24 set-environment -g LEGION_BOOT_TOKEN planted",
+          "exit": 0,
+          "output": ""
+        },
+        {
+          "command": "tmux -L legion-sjawhar24 show-environment -g LEGION_BOOT_TOKEN",
+          "exit": 0,
+          "output": "LEGION_BOOT_TOKEN=planted"
+        },
+        {
+          "command": "bash scripts/smoke/checkpoints.sh 13",
+          "exit": 1,
+          "output": "CHECKPOINT 13 FAILED: private tmux server global environment carries LEGION_BOOT_TOKEN"
+        },
+        {
+          "command": "tmux -L legion-sjawhar24 set-environment -g -u LEGION_BOOT_TOKEN",
+          "exit": 0,
+          "output": ""
+        },
+        {
+          "command": "tmux -L legion-sjawhar24 show-environment -g LEGION_BOOT_TOKEN",
+          "exit": 1,
+          "output": "unknown variable: LEGION_BOOT_TOKEN"
+        },
+        {
+          "command": "bash scripts/smoke/checkpoints.sh 13",
+          "exit": 0,
+          "output": "CHECKPOINT 13 OK: 3 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24"
+        }
+      ],
+      "down": {
+        "command": "SMOKE_DIR=/tmp/legion6-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 bash scripts/smoke/down.sh",
+        "exit": 0,
+        "output": "STOPPED tmux session legion-sjawhar24 on private socket legion-sjawhar24\nSTOPPED NATS container legion-smoke-nats\nRIG DOWN"
+      },
+      "privateSocketAfterDown": {
+        "command": "tmux -L legion-sjawhar24 list-sessions 2>&1",
+        "exit": 1,
+        "output": "no server running on /home/ubuntu/.tmux/sockets/tmux-1000/legion-sjawhar24"
+      },
+      "rigProcessesAfterDown": {
+        "command": "pgrep -af 'legion6-smoke/rig' | grep -v pgrep || echo '<no rig processes>'",
+        "exit": 0,
+        "output": "<no rig processes>"
+      },
+      "note": "Default socket shows no legion-sjawhar24 (the rig's slug). It does list `legion-sjawharlegion` \u2014 the PRODUCTION Legion daemon on this box still runs pre-PR code on the default socket; that is exactly the session the PR's live-box upgrade runbook has the operator kill once (daemon AGENTS.md). Not a rig artifact."
+    },
+    "A5_gates_and_pr": {
+      "verdict": "PASS",
+      "daemon": "bunx biome check src/ clean (137 files); bunx tsc --noEmit clean; bun test 797 pass / 0 fail (802 tests, 54 files)",
+      "envoyClient": "bunx biome check src/ clean (26 files); bunx tsc --noEmit clean; bun test 138 pass / 0 fail (14 files); bun run build 12 entry points incl. secret-file.js",
+      "piEnvoy": "bunx biome lint extensions/ src/ clean (19 files); bunx tsc --noEmit clean; bun test 130 pass / 0 fail (6 files) with LEGION_*/DISPATCH_*/ENVOY_* unset; bun run build envoy.js + legion.js",
+      "gatesLog": "/tmp/legion6-smoke/gates/gates.log",
+      "prHead": "legion gh -- pr view 923 --json headRefOid -> 52e8243b62a79981cf27c24eb7e0b7a9c0f57418; jj log -r legion/LEGION-6@origin -> 52e8243b62a79981cf27c24eb7e0b7a9c0f57418 (implement: record handoff); one PR against sjawhar/legion, base main, OPEN",
+      "ci": "not re-verified by the tester: the production Legion daemon that mints `legion gh` grants was down/flapping for most of this phase (127.0.0.1:13370 -> HTTP 000); reviewer verifies CI against GitHub directly per the worker skill."
+    }
+  },
+  "environment": {
+    "branchPluginBuild": "bun build extensions/envoy.ts extensions/legion.ts --outdir /tmp/legion6-smoke/pi-legion-envoy/dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils; skills copied to dist/skills; manifest omp.extensions=[dist/envoy.js,dist/legion.js], version 0.41.1-legion6.52e8243b",
+    "ompProfile": "~/.omp/profiles/legion6-smoke: agent/ mirrors the `legion` profile (config.yml copied; agents/hooks/prompts/models.yml/keybindings.yml/WATCHDOG.md symlinked); plugins/package.json = legion profile's pins with @sjawhar/pi-legion-envoy -> file:/tmp/legion6-smoke/pi-legion-envoy; `OMP_PROFILE=legion6-smoke omp plugin list` shows @sjawhar/pi-legion-envoy@0.41.1-legion6.52e8243b; pane omp logs show `extension instance loaded file:///tmp/legion6-smoke/pi-legion-envoy/dist/{envoy,legion}.js`. The shared ~/.omp/plugins and the production `legion` profile were not touched.",
+    "rigLaunch": "Operator-like shell built with subprocess env: every LEGION_*/PI_* var, TMUX/TMUX_PANE, DISPATCH_TOKEN, provider API keys, GH_CONFIG_DIR and SECRETSD_SESSION_TOKEN_FILE removed (this tester pane is a pre-PR production worker pane whose own environ carries plain LEGION_BOOT_TOKEN and DISPATCH_TOKEN \u2014 they would have been inherited by the rig daemon's private tmux server and tainted checkpoint 13); PATH stripped of the production legion launcher; OMP_PROFILE=legion6-smoke; TMUX_TMPDIR=/home/ubuntu/.tmux/sockets; JJ_CONFIG=~/.config/jj/config.toml:~/.dotfiles/.jjconfig.toml; SMOKE_DIR=/tmp/legion6-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 SMOKE_WEBHOOK_MODE=envoy DISPATCH_URL=http://localhost:8766 LEGION_OMP_PATH=/home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix; secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" DISPATCH_TOKEN=\"$(jq -r .dispatch.token ~/.config/opencode/envoy.json)\" exec bash scripts/smoke/up.sh'",
+    "rootIssue": "LEGSMOKE-23 (child LEGSMOKE-24); LEGSMOKE-21/22 were earlier attempts never ingested by a daemon. All four set to done and the design-gate ask retracted after the run.",
+    "leftForReviewer": "/tmp/legion6-smoke (rig dir with daemon.log/listener.log/envoy-bridge.log, plugin build, gates log) and ~/.omp/profiles/legion6-smoke are left in place for re-runs; down.sh has been run (RIG DOWN)."
+  },
+  "deviationsFromTesterInstructions": [
+    "SMOKE_WEBHOOK_MODE=envoy instead of `none`: in none mode nothing feeds Dispatch issue events into the rig's isolated NATS, and resync's healStatusDrift skips keys the daemon never ingested, so the root issue is never tracked and checkpoints 1-3 cannot start. The bridge (production NATS -> rig NATS) is the documented live path.",
+    "LEGION_OMP_PATH set to the production `omp-18.1.15-sami.9bff2014-rpcfix` binary (the same override /home/ubuntu/.config/legion/sjawhar-legion/run-daemon.sh uses): with the rig's pinned mise OMP 18.1.15-sami.20260908-220934 the controller pane died at its first RPC prompt with `Unhandled rejection: send did not invoke the agent` (profile log omp.2026-09-11.186520.log) and the private server exited with it. Unrelated to this PR; the pin lacks the rpc send fix.",
+    "DISPATCH_TOKEN is not a secretsd key on this box (`secrets list` has no DISPATCH_TOKEN), so checkpoints 1-3 were run with DISPATCH_TOKEN injected from ~/.config/opencode/envoy.json (.dispatch.token) \u2014 the README's documented source \u2014 via the subprocess environment, never printed.",
+    "up.sh's ensure_root_issue 409s (POSSIBLE_DUPLICATE against the ~20 prior 'Legion smoke exercise' roots in LEGSMOKE); the root issue was created by hand with the same payload plus `force: true`, recorded at ${SMOKE_DIR}/root-issue, and up.sh re-run (REUSED everything, RIG READY).",
+    "Checkpoint 3's child-issue sub-assertion needed an operator nudge (see A3 note); a Dispatch message on LEGSMOKE-23 did not wake the architect because its session had no LEGSMOKE-23 topic interest in the rig listener (it drove Dispatch through eval, bypassing the tool_result subscribe hook)."
+  ],
+  "observationsForArchitect": [
+    "SECURITY (caused by this tester, resolved per Sami): while enumerating omp processes I printed 60-char prefixes of /proc/<pid>/environ entries for PRE-PR production panes, so the raw transcript briefly contained 45/64 chars of the production DISPATCH_TOKEN, two full production worker LEGION_BOOT_TOKENs and 35/36 chars of the production LEGION_CONTROLLER_SECRET. Sami's decision on ask a9ddd62f: no rotation, redact the transcripts. Done in place (same byte length, JSONL structure intact) on ~/.omp/profiles/legion/agent/sessions/\u2026/2026-09-11T16-28-14-878Z_01a0914c-589e-7000-99d4-6be7fc70f1dd.jsonl; no subagent transcripts existed. This is the F1 exposure the PR fixes, observed on the not-yet-upgraded production daemon.",
+    "Production Legion daemon (sjawhar/legion) was down/flapping from ~16:49 UTC through this phase (127.0.0.1:13370 HTTP 000, `ps` shows only worker-shims). Likely cause, seen on the rig daemon: github-apps.ts fetchGitIdentity does an UNAUTHENTICATED GET https://api.github.com/users/<slug>[bot] at every startup (resolveConfiguredAppLogins); this box's shared IP had x-ratelimit-remaining: 0 (60/hr) and the rig daemon died at boot with `GitHub App bot identity lookup failed (403)` twice until the window reset. A supervised restart loop burns the same budget. Pre-existing; not in LEGION-6 scope.",
+    "scripts/smoke/up.sh ensure_root_issue must send `force: true` (Dispatch duplicate detection now trips on every new smoke root). Pre-existing rig bug.",
+    "scripts/smoke/up.sh pins mise OMP 18.1.15-sami.20260908-220934, which lacks the rpc send fix production runs with (LEGION_OMP_PATH override in run-daemon.sh); the rig cannot get past controller boot without the same override.",
+    "The rig's `none` mode cannot exercise checkpoints 1-4 as README claims: no Dispatch event reaches the isolated NATS and resync skips unknown keys.",
+    "After down.sh the three pane secret files remain under secrets/ (daemon SIGTERMed before the panes were killed, so no persist ran with cleared locators); the boot-time prune reaps them on the next start \u2014 matches the documented contract, noted for completeness."
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-11T17:35:25.855Z",
+  "transcriptRedaction": {
+    "decision": "Sami on ask a9ddd62f (relayed by the architect 2026-09-11T17:52:57Z): no rotation; redact the transcripts.",
+    "method": "regex (DISPATCH_TOKEN=|LEGION_BOOT_TOKEN=|LEGION_CONTROLLER_SECRET=)([0-9a-fA-F][0-9a-fA-F-]{19,}) over the session JSONL; each value replaced by [REDACTED-LEGION-6] padded to the original length, written back in place (r+b, same size, fsync) \u2014 no truncation, no inode swap, line count unchanged. *_FILE pointers and the negative-control literal `planted` do not match the pattern.",
+    "before": "20 matches (DISPATCH_TOKEN 10, LEGION_BOOT_TOKEN 6, LEGION_CONTROLLER_SECRET 4) over 4 distinct values",
+    "verification": "after rewrite: regex matches 0; exact occurrences of each of the 4 leaked values 0 in the transcript; 0 in every other file under the session directory, ~/.omp/profiles/legion/agent (agent.db/history/sessions) and ~/.omp/profiles/legion/logs; every JSONL line still parses. Values were never echoed after the original tool output and were purged from the eval kernel."
+  }
+}
