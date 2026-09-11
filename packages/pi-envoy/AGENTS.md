@@ -21,7 +21,9 @@ The twelve native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch
 configuration resolves a URL and bearer token. Set
 `dispatch.enabled: true`, `dispatch.serverUrl`, and `dispatch.token` in
 `~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`; `DISPATCH_URL`
-and `DISPATCH_TOKEN` override those settings. A successful mutation returns
+and `DISPATCH_TOKEN` override those settings; `DISPATCH_TOKEN_FILE` (a path whose
+trimmed contents are the token — how the Legion daemon delivers it to a pane) wins
+over both and never falls back when unreadable. A successful mutation returns
 `details.topic`, and the `tool_result` hook subscribes to that exact retained
 Dispatch topic — a new subscription also tells the model (`pi.sendMessage`
 with `deliverAs: "steer"`, the same channel `deliver` uses for inbound

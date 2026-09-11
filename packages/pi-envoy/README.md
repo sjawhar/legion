@@ -104,7 +104,9 @@ Configure the shared `envoy.json` with:
 
 The user file is `~/.config/opencode/envoy.json`; a
 `<cwd>/.opencode/envoy.json` file shallow-merges over it. `DISPATCH_URL` and
-`DISPATCH_TOKEN` override the file values for one process. Omitting
+`DISPATCH_TOKEN` override the file values for one process; `DISPATCH_TOKEN_FILE`
+(a path whose trimmed contents are the token — how the Legion daemon delivers it
+to a pane) wins over both and never falls back when unreadable. Omitting
 `dispatch.serverUrl` while `dispatch.enabled` is true targets
 `http://localhost:8766`, the Go server's listen address. Invalid configuration,
 an invalid URL, or an empty token leaves the twelve tools unavailable and reports

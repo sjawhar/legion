@@ -19,8 +19,9 @@ until that PR merges, this skill's contract is not yet runnable on `main`.
 
 The daemon spawns you as a separate `omp --mode rpc` process (behind `legion worker-shim`,
 in a tmux pane) with `LEGION_TREE`, `LEGION_ISSUE`, `LEGION_ROLE`, `LEGION_GENERATION`,
-`LEGION_BOOT_TOKEN`, `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, and `LEGION_WORKSPACE` in your
-environment (`LEGION_PROJECT` is also supplied, but nothing reads it). The extension
+`LEGION_BOOT_TOKEN_FILE` (a 0600 file under `$LEGION_STATE_DIR/secrets` holding your boot token;
+the extension reads it for you), `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, and `LEGION_WORKSPACE`
+in your environment (`LEGION_PROJECT` is also supplied, but nothing reads it). The extension
 completes the boot handshake for you at session start — it registers with the daemon, claims
 your role, and signals readiness. You never call `envoy_role_set` yourself.
 
