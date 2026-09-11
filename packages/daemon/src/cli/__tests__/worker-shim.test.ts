@@ -113,6 +113,33 @@ describe("cmdWorkerShim", () => {
     second.close();
   });
 
+  it("delivers a chunked agent_end whole across the socket so the daemon client goes idle", async () => {
+    // Each rpc_chunk line is ~350 KiB, larger than a unix socket's send buffer; a shim that
+    // dropped the bytes the kernel refused would leave the daemon with unparseable lines and a
+    // worker that never reads as idle.
+    const target = await socketPath();
+    const deps = defaultWorkerShimDeps();
+    const shimExit = cmdWorkerShim(target, ["bun", FAKE_OMP], deps);
+    await waitForSocket(target);
+
+    const client = await connectWorkerRpc(target);
+    await client.negotiate();
+    const idle = Promise.withResolvers<void>();
+    client.onIdle(() => idle.resolve());
+    await client.prompt("chunked: long turn");
+    await Promise.race([
+      idle.promise,
+      Bun.sleep(5_000).then(() => {
+        throw new Error(`client never went idle (runState=${client.runState})`);
+      }),
+    ]);
+    expect(client.runState).toBe("idle");
+
+    client.shutdown();
+    expect(await shimExit).toBe(0);
+    client.close();
+  });
+
   it("rejects invocation without a wrapped command", async () => {
     const target = await socketPath();
     await expect(cmdWorkerShim(target, [], defaultWorkerShimDeps())).rejects.toThrow(

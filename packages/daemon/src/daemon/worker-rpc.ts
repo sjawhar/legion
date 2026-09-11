@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createSocketLineWriter } from "./socket-writer";
 
 const DEFAULT_RPC_TIMEOUT_MS = 5_000;
 
@@ -280,7 +281,11 @@ export async function connectWorkerRpc(
           index = buffer.indexOf("\n");
         }
       },
+      drain() {
+        writer.drain();
+      },
       close() {
+        writer.clear();
         failAllPending(new Error("Worker RPC socket closed"));
         // Conservative, not idle: the daemon has not yet confirmed this worker is actually
         // gone (it may reconnect), so its slot must keep counting as occupied until
@@ -290,11 +295,15 @@ export async function connectWorkerRpc(
         closedResolvers.resolve();
       },
       error(_socket, error) {
+        writer.clear();
         failAllPending(error);
         closedResolvers.reject(error);
       },
     },
   });
+  // Assigned synchronously after the connect resolves; the handlers above only run on later
+  // ticks, so none observes it uninitialized.
+  const writer = createSocketLineWriter(socket);
 
   const request = (
     type: string,
@@ -309,7 +318,7 @@ export async function connectWorkerRpc(
         settled.reject(new Error(`Worker RPC "${type}" timed out after ${timeoutMs}ms`));
       }
     }, timeoutMs);
-    socket.write(`${JSON.stringify({ id, type, ...extra })}\n`);
+    writer.write(JSON.stringify({ id, type, ...extra }));
     return settled.promise.finally(() => clearTimeout(timer));
   };
 
@@ -362,7 +371,7 @@ export async function connectWorkerRpc(
       });
     },
     shutdown() {
-      socket.write(`${JSON.stringify({ type: "shutdown" })}\n`);
+      writer.write(JSON.stringify({ type: "shutdown" }));
     },
     close() {
       socket.end();

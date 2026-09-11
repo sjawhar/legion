@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createSocketLineWriter, type SocketLineWriter } from "../daemon/socket-writer";
 import { CliError } from "./errors";
 
 export interface WorkerShimSpawnedProcess {
@@ -158,14 +159,20 @@ export function defaultWorkerShimDeps(): WorkerShimDeps {
     listen: (socketPath, handlers) => {
       fs.rmSync(socketPath, { force: true });
       let buffer = "";
+      const writers = new WeakMap<object, SocketLineWriter>();
       const server = Bun.listen({
         unix: socketPath,
         socket: {
           open(socket) {
+            const writer = createSocketLineWriter(socket);
+            writers.set(socket, writer);
             handlers.onConnect({
-              write: (line) => socket.write(`${line}\n`),
+              write: (line) => writer.write(line),
               end: () => socket.end(),
             });
+          },
+          drain(socket) {
+            writers.get(socket)?.drain();
           },
           data(_socket, data) {
             buffer += data.toString("utf8");
@@ -177,7 +184,9 @@ export function defaultWorkerShimDeps(): WorkerShimDeps {
               index = buffer.indexOf("\n");
             }
           },
-          close() {
+          close(socket) {
+            writers.get(socket)?.clear();
+            writers.delete(socket);
             buffer = "";
             handlers.onDisconnect();
           },
