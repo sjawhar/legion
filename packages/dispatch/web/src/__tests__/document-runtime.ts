@@ -91,6 +91,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         editor.focused.push(markId);
       },
       getMarkdown: () => editor.markdown ?? root.textContent ?? "",
+      markOffsets() {
+        return new Map<string, number>();
+      },
       removeMark() {},
       setMarkdown(markdown: string) {
         editor.markdown = markdown;

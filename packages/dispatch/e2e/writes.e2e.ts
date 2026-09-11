@@ -119,7 +119,7 @@ test("double-clicking Submit posts exactly one comment", async ({ browser }) => 
   await context.close();
 });
 
-test("Resolve shows a pending state before settling", async ({ browser }, testInfo) => {
+test("Resolve moves a comment thread behind the resolved toggle", async ({ browser }, testInfo) => {
   await createProject({ key: "WR", name: "Writes" });
   const issue = await createIssue({
     project: "WR",
@@ -147,16 +147,23 @@ test("Resolve shows a pending state before settling", async ({ browser }, testIn
     await page.getByRole("button", { name: /Open review panel/ }).click();
   }
   const card = page.getByTestId(`margin-comment-${comment.id}`);
+  await card.click();
   await card.getByRole("button", { name: "Resolve" }).click();
-
-  // Pending: optimistic flip to "Resolved" plus an explicit in-flight indicator.
-  await expect(card.getByRole("status")).toHaveText("Saving…");
-  await expect(card.getByText("Resolved", { exact: true })).toBeVisible();
-  await expect(card.getByRole("button", { name: "Resolve" })).toHaveCount(0);
-
-  // Done: the in-flight indicator clears once the (delayed) request settles.
-  await expect(card.getByRole("status")).toHaveCount(0, { timeout: 2000 });
-  await expect(card.getByText("Resolved", { exact: true })).toBeVisible();
+  if (testInfo.project.name === "iphone") {
+    await page
+      .getByRole("dialog", { name: "Thread" })
+      .getByRole("button", { name: "Back" })
+      .click();
+  }
+  await expect(card).toHaveCount(0);
+  await page.getByRole("button", { name: "Resolved (1)" }).click();
+  const resolvedCard = page.getByTestId(`margin-comment-${comment.id}`);
+  await resolvedCard.click();
+  const resolvedThread =
+    testInfo.project.name === "iphone"
+      ? page.getByRole("dialog", { name: "Thread" })
+      : resolvedCard;
+  await expect(resolvedThread).toContainText(/Resolved by alice/, { timeout: 2000 });
   await expect
     .poll(() => listComments(issue.key, issue.primary_artifact_id))
     .toContainEqual(expect.objectContaining({ id: comment.id, resolved: true }));

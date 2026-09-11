@@ -8,6 +8,7 @@ import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/d
 import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { MarginProvider, useMargin } from "../margin/Margin";
+import type { MarkPlacement } from "../margin/useMarginItems";
 import { colorForLogin } from "./connection";
 import { ProofDocument } from "./ProofDocument";
 import { DocumentRuntime } from "./runtime";
@@ -54,7 +55,7 @@ function renderProofDocument({
             | undefined;
           focusRequest: { markId: string; seq: number } | undefined;
           hoveredMarkId: string | undefined;
-          markPositions: ReadonlyMap<string, number>;
+          markPlacements: ReadonlyMap<string, MarkPlacement>;
           pendingCompose:
             | {
                 anchor: { artifact: string; mark_id: string; quote: string };
@@ -490,7 +491,7 @@ test("the marks projection reaches the editor on sync and on every change", asyn
   }
 });
 
-test("mark positions are published to the margin after document changes", async () => {
+test("mark placements are published to the margin after document changes", async () => {
   const schema = new Schema({
     marks: {
       dispatchAsk: { attrs: { by: {}, id: {} } },
@@ -517,6 +518,11 @@ test("mark positions are published to the margin after document changes", async 
     const handle = await createEditor(root, options);
     editorState = handle.view.state as unknown as { doc: ProseMirrorNode };
     editorState.doc = initialDocument;
+    handle.markOffsets = () =>
+      new Map([
+        ["c-1", 40],
+        ["a-1", 72],
+      ]);
     return handle;
   };
   const { connections, editors, margin, sync, view } = renderProofDocument({ fake });
@@ -524,7 +530,9 @@ test("mark positions are published to the margin after document changes", async 
   try {
     sync();
     await waitFor(() => expect(editors).toHaveLength(1));
-    await waitFor(() => expect(margin.current?.markPositions.get("c-1")).toBe(5));
+    await waitFor(() =>
+      expect(margin.current?.markPlacements.get("c-1")).toEqual({ pos: 5, top: 40 })
+    );
 
     if (editorState === undefined) {
       throw new Error("The editor state was not captured.");
@@ -532,8 +540,8 @@ test("mark positions are published to the margin after document changes", async 
     editorState.doc = changedDocument;
     act(() => connections[0]?.doc.getXmlFragment("prosemirror").delete(0, 1));
     await waitFor(() => {
-      expect(margin.current?.markPositions.get("c-1")).toBeUndefined();
-      expect(margin.current?.markPositions.get("a-1")).toBe(5);
+      expect(margin.current?.markPlacements.get("c-1")).toBeUndefined();
+      expect(margin.current?.markPlacements.get("a-1")).toEqual({ pos: 5, top: 72 });
     });
   } finally {
     view.unmount();

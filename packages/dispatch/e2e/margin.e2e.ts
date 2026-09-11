@@ -16,7 +16,9 @@ import {
   documentEditor,
   marginCard,
   markSpan,
+  replyInThread,
   selectEditorText,
+  threadCard,
 } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -135,6 +137,10 @@ test("the selection bar comments, suggests, and asks on marks that both users se
       expectMark(bobPage, comment.anchor.mark_id, "brown"),
     ]);
     await setSheet(bobPage, testInfo.project.name, true);
+    await Promise.all([
+      marginCard(alicePage, comment.id).getByRole("button").click(),
+      marginCard(bobPage, comment.id).getByRole("button").click(),
+    ]);
     await Promise.all([
       expect(marginCard(alicePage, comment.id)).toContainText("brown"),
       expect(marginCard(bobPage, comment.id)).toContainText("brown"),
@@ -322,6 +328,7 @@ test("highlights follow edits in the other browser and orphan to their original 
 
     await setSheet(bobPage, testInfo.project.name, true);
     const orphanedCard = marginCard(bobPage, fox.id);
+    await orphanedCard.click();
     await expect(orphanedCard).toContainText("Text changed");
     await orphanedCard.getByRole("link", { name: "View original text" }).click();
     const versionView = bobPage.getByRole("region", { name: "Document version 1" });
@@ -373,7 +380,16 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     }
 
     await setSheet(alicePage, testInfo.project.name, true);
+    await marginCard(alicePage, accepted.id).getByRole("button").click();
     await marginCard(alicePage, accepted.id).getByRole("button", { name: "Accept" }).click();
+    if (testInfo.project.name === "iphone") {
+      const thread = alicePage.getByRole("dialog", { name: "Thread" });
+      await expect(thread.getByRole("button", { name: "Reopen" })).toHaveCount(0);
+      await thread.getByRole("button", { name: "Back" }).click();
+    } else {
+      await alicePage.getByRole("button", { name: "Resolved (1)" }).click();
+      await expect(alicePage.getByRole("button", { name: "Reopen" })).toHaveCount(0);
+    }
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox", { timeout: 1000 }),
       expect(bobEditor).toContainText("The quick red fox", { timeout: 1000 }),
@@ -409,6 +425,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     }
 
     await setSheet(alicePage, testInfo.project.name, true);
+    await marginCard(alicePage, rejected.id).getByRole("button").click();
     await marginCard(alicePage, rejected.id).getByRole("button", { name: "Reject" }).click();
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox", { timeout: 1000 }),
@@ -512,7 +529,13 @@ test("margin cards and document highlights focus each other", async ({ browser }
 
     if (testInfo.project.name === "chromium") {
       await span.hover();
-      await expect(card).toHaveAttribute("aria-current", "true");
+      await expect(card).toHaveAttribute("data-hovered", "true");
+      const cardBox = await card.boundingBox();
+      const markBox = await span.boundingBox();
+      if (cardBox === null || markBox === null) {
+        throw new Error("The focused card or its document mark has no layout box.");
+      }
+      expect(Math.abs(cardBox.y - markBox.y)).toBeLessThanOrEqual(1);
       await card.hover();
       await expect(span).toHaveClass(/dispatch-mark-active/);
     }
@@ -556,23 +579,26 @@ test("a reply to an agent's anchored comment carries no anchor and lands in the 
     await setSheet(alicePage, testInfo.project.name, true);
     await setSheet(bobPage, testInfo.project.name, true);
 
-    await marginCard(alicePage, root.id).getByRole("button", { name: "Reply" }).click();
-    const composer = alicePage.getByRole("form", { name: "Comment composer" });
-    await expect(composer.locator("blockquote")).toHaveCount(0);
-    await composer.getByLabel("Comment").fill("ok");
-    await composer.getByRole("button", { exact: true, name: "Comment" }).click();
+    await replyInThread(alicePage, root.id, "ok");
     const reply = await commentWithBody(issue.key, undefined, "ok");
     expect(reply.reply_to).toBe(root.id);
     expect(reply.anchor).toBeNull();
-    const aliceReply = marginCard(alicePage, reply.id);
-    const bobReply = marginCard(bobPage, reply.id);
+    const aliceThread =
+      testInfo.project.name === "iphone"
+        ? alicePage.getByRole("dialog", { name: "Thread" })
+        : threadCard(alicePage, root.id);
+    await threadCard(bobPage, root.id).getByRole("button").click();
+    const bobThread =
+      testInfo.project.name === "iphone"
+        ? bobPage.getByRole("dialog", { name: "Thread" })
+        : threadCard(bobPage, root.id);
     await Promise.all([
-      expect(aliceReply).toContainText("ok"),
-      expect(bobReply).toContainText("ok", { timeout: 1000 }),
+      expect(aliceThread).toContainText("ok"),
+      expect(bobThread).toContainText("ok", { timeout: 1000 }),
     ]);
     await Promise.all([
-      expect(aliceReply).toHaveCSS("margin-left", "12px"),
-      expect(bobReply).toHaveCSS("margin-left", "12px"),
+      expect(aliceThread.getByText("ok").locator("..")).toHaveCSS("margin-left", "0px"),
+      expect(bobThread.getByText("ok").locator("..")).toHaveCSS("margin-left", "0px"),
     ]);
   } finally {
     await bob.close();

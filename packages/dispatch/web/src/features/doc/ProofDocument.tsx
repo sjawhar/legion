@@ -9,7 +9,7 @@ import { buildIssuePath } from "../refs/routes";
 import { type ConnectionState, colorForLogin } from "./connection";
 import type { EditorHandle, StoredMark } from "./editor";
 import type { Highlight } from "./highlight";
-import { composerKindFor, markPositions, setActiveMarkClass } from "./marks";
+import { composerKindFor, markPlacements, setActiveMarkClass } from "./marks";
 import { DocumentRuntime } from "./runtime";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
@@ -97,18 +97,23 @@ export function ProofDocument({
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [showDiff, setShowDiff] = useState(false);
   const { connect, createEditor } = useContext(DocumentRuntime);
-  const { composeForMark, focusItemForMark, hoverItemForMark, registerDocument, setMarkPositions } =
-    useMargin();
+  const {
+    composeForMark,
+    focusItemForMark,
+    hoverItemForMark,
+    registerDocument,
+    setMarkPlacements,
+  } = useMargin();
   const composeForMarkRef = useRef(composeForMark);
   const focusItemForMarkRef = useRef(focusItemForMark);
   const hoverItemForMarkRef = useRef(hoverItemForMark);
   const registerDocumentRef = useRef(registerDocument);
-  const setMarkPositionsRef = useRef(setMarkPositions);
+  const setMarkPlacementsRef = useRef(setMarkPlacements);
   composeForMarkRef.current = composeForMark;
   focusItemForMarkRef.current = focusItemForMark;
   hoverItemForMarkRef.current = hoverItemForMark;
   registerDocumentRef.current = registerDocument;
-  setMarkPositionsRef.current = setMarkPositions;
+  setMarkPlacementsRef.current = setMarkPlacements;
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
   const artifactQuery = useQuery({
@@ -246,19 +251,24 @@ export function ProofDocument({
           refreshSearchHighlights();
           fragment.observeDeep(refreshSearchHighlights);
           let frame = 0;
-          const publishPositions = () => {
+          const publishPlacements = () => {
             cancelAnimationFrame(frame);
             frame = requestAnimationFrame(() => {
-              setMarkPositionsRef.current(markPositions(handle.view.state.doc));
+              setMarkPlacementsRef.current(
+                markPlacements(handle.view.state.doc, handle.markOffsets())
+              );
             });
           };
-          publishPositions();
-          fragment.observeDeep(publishPositions);
+          const resizeObserver = new ResizeObserver(publishPlacements);
+          resizeObserver.observe(handle.view.dom);
+          publishPlacements();
+          fragment.observeDeep(publishPlacements);
           disposeEditorBindings = () => {
             cancelAnimationFrame(frame);
             cancelAnimationFrame(searchFrame);
+            resizeObserver.disconnect();
             marks.unobserve(project);
-            fragment.unobserveDeep(publishPositions);
+            fragment.unobserveDeep(publishPlacements);
             fragment.unobserveDeep(refreshSearchHighlights);
             registerDocumentRef.current(undefined);
           };

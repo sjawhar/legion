@@ -113,11 +113,14 @@ function submittedAskOptions(options: readonly AskOptionDraft[]): AskOption[] {
 interface ComposerProps {
   anchor?: ComposerAnchor;
   autoFocus?: boolean;
+  edit?: { body: string; id: string };
+  inline?: boolean;
   kind: ComposerKind;
   issueKey: string;
   onClose: () => void;
   onSaved?: () => void;
   replyTo?: string;
+  saveEdit?: (id: string, body: string) => Promise<unknown>;
 }
 
 function trimReference(value: string): string {
@@ -206,11 +209,14 @@ export function canSubmitComposer(
 export function Composer({
   anchor,
   autoFocus,
+  edit,
+  inline = false,
   kind,
   issueKey,
   onClose,
   onSaved,
   replyTo,
+  saveEdit,
 }: ComposerProps): ReactNode {
   const queryClient = useQueryClient();
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -219,7 +225,7 @@ export function Composer({
   const formRef = useRef<HTMLFormElement>(null);
   const lastFocusedField = useRef<HTMLElement | null>(null);
   const focusAddedOption = useRef(false);
-  const [body, setBody] = useState("");
+  const [body, setBody] = useState(edit?.body ?? "");
   const [replacement, setReplacement] = useState("");
   const [askOptions, setAskOptions] = useState<AskOptionDraft[]>(() => [emptyAskOption()]);
   const [multiple, setMultiple] = useState(false);
@@ -227,6 +233,10 @@ export function Composer({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pendingUploads, setPendingUploads] = useState(0);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const compact = inline || edit !== undefined;
+  useEffect(() => {
+    setBody(edit?.body ?? "");
+  }, [edit?.body]);
   useEffect(() => {
     if (autoFocus) {
       textarea.current?.focus();
@@ -271,6 +281,11 @@ export function Composer({
   const submitGuard = useSubmitGuard();
   const save = useMutation({
     mutationFn: async () => {
+      if (edit !== undefined) {
+        return saveEdit === undefined
+          ? api.editComment(edit.id, { body: body.trim() })
+          : saveEdit(edit.id, body.trim());
+      }
       const selection =
         anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
       if (kind === "message") {
@@ -304,6 +319,10 @@ export function Composer({
       void queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
       void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
+      if (inline) {
+        setBody("");
+        return;
+      }
       onClose();
     },
   });
@@ -375,7 +394,7 @@ export function Composer({
   };
   const canSubmit = canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads);
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    if (!compact && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       setPickerOpen(true);
       return;
@@ -383,7 +402,7 @@ export function Composer({
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
       if (canSubmit) {
-        save.mutate();
+        submitGuard.guard(() => save.mutate());
       }
     }
   };
@@ -394,30 +413,52 @@ export function Composer({
     }
   };
   const title =
-    kind === "ask"
-      ? "Ask"
-      : kind === "suggestion"
-        ? "Suggest"
-        : kind === "message"
-          ? "Message"
-          : "Comment";
+    edit !== undefined
+      ? "Save"
+      : inline
+        ? "Reply"
+        : kind === "ask"
+          ? "Ask"
+          : kind === "suggestion"
+            ? "Suggest"
+            : kind === "message"
+              ? "Message"
+              : "Comment";
+  const bodyLabel =
+    edit !== undefined
+      ? "Edit comment"
+      : inline
+        ? "Reply"
+        : kind === "ask"
+          ? "Question"
+          : kind === "suggestion"
+            ? "Reason"
+            : kind === "message"
+              ? "Message"
+              : "Comment";
 
   return (
     <form
       aria-label={`${title} composer`}
-      className={`space-y-3 rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`}
+      className={
+        compact
+          ? "space-y-2"
+          : `space-y-3 rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`
+      }
       onSubmit={submit}
       ref={formRef}
     >
-      <div className="flex items-center justify-between gap-3">
-        <p className={`text-sm font-semibold ${calloutInfoTitleText}`}>{title}</p>
-        {anchor === undefined ? null : (
-          <button className={`text-sm ${dismissButtonText}`} onClick={onClose} type="button">
-            Close
-          </button>
-        )}
-      </div>
-      {anchor === undefined ? null : (
+      {compact ? null : (
+        <div className="flex items-center justify-between gap-3">
+          <p className={`text-sm font-semibold ${calloutInfoTitleText}`}>{title}</p>
+          {anchor === undefined ? null : (
+            <button className={`text-sm ${dismissButtonText}`} onClick={onClose} type="button">
+              Close
+            </button>
+          )}
+        </div>
+      )}
+      {compact || anchor === undefined ? null : (
         <blockquote className={`border-l-2 pl-2 text-sm ${quoteAccentBorder} ${quoteBodyText}`}>
           {anchor.quote}
         </blockquote>
@@ -459,32 +500,28 @@ export function Composer({
         </label>
       ) : null}
       <label className={`block text-sm font-medium ${textSecondaryOnSurface}`}>
-        {kind === "ask"
-          ? "Question"
-          : kind === "suggestion"
-            ? "Reason (optional)"
-            : kind === "message"
-              ? "Message"
-              : "Comment"}
+        {compact ? null : bodyLabel}
         <textarea
-          aria-label={
-            kind === "ask"
-              ? "Question"
-              : kind === "suggestion"
-                ? "Reason"
-                : kind === "message"
-                  ? "Message"
-                  : "Comment"
-          }
-          className={`mt-1 block min-h-24 w-full rounded-lg border px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
+          aria-label={bodyLabel}
+          className={`mt-1 block w-full rounded-lg border px-3 py-2 font-normal outline-none ${
+            inline ? "min-h-11 resize-none" : "min-h-24"
+          } ${inputClasses(true)}`}
           maxLength={kind === "ask" ? 800 : 2000}
           onChange={(event) => {
             setBody(event.target.value);
             setConfirmingDiscard(false);
           }}
-          onDrop={handleDrop}
+          onDrop={compact ? undefined : handleDrop}
+          onInput={
+            inline
+              ? (event) => {
+                  event.currentTarget.style.height = "auto";
+                  event.currentTarget.style.height = `${event.currentTarget.scrollHeight}px`;
+                }
+              : undefined
+          }
           onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
+          onPaste={compact ? undefined : handlePaste}
           ref={textarea}
           value={body}
         />
@@ -568,41 +605,45 @@ export function Composer({
           </section>
         </>
       ) : null}
-      <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
-        Paste or drop a file to add it as an artifact. Ctrl+K inserts a reference.
-      </p>
-      {references.length === 0 ? null : (
-        <section aria-label="References" className="flex flex-wrap gap-2">
-          {references.map((reference) => (
-            <a
-              className={`rounded-full border px-2 py-1 text-xs font-medium ${referencePillBorder} ${surfaceRecessedBg} ${badgeMed.text} ${controlHoverBorder}`}
-              href={reference.href}
-              key={reference.reference}
-            >
-              {reference.reference}
-            </a>
-          ))}
-        </section>
+      {compact ? null : (
+        <>
+          <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
+            Paste or drop a file to add it as an artifact. Ctrl+K inserts a reference.
+          </p>
+          {references.length === 0 ? null : (
+            <section aria-label="References" className="flex flex-wrap gap-2">
+              {references.map((reference) => (
+                <a
+                  className={`rounded-full border px-2 py-1 text-xs font-medium ${referencePillBorder} ${surfaceRecessedBg} ${badgeMed.text} ${controlHoverBorder}`}
+                  href={reference.href}
+                  key={reference.reference}
+                >
+                  {reference.reference}
+                </a>
+              ))}
+            </section>
+          )}
+          {pickerOpen ? (
+            <ReferencePicker
+              issueKey={issueKey}
+              onClose={() => setPickerOpen(false)}
+              onSelect={addReference}
+            />
+          ) : null}
+          {pendingUploads > 0 ? (
+            <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
+              Uploading file…
+            </p>
+          ) : null}
+          {upload.isError ? (
+            <QueryError
+              message={uploadErrorMessage(upload.error)}
+              onRetry={() => uploadRetryGuard.retryLast(upload)}
+              retrying={upload.isPending}
+            />
+          ) : null}
+        </>
       )}
-      {pickerOpen ? (
-        <ReferencePicker
-          issueKey={issueKey}
-          onClose={() => setPickerOpen(false)}
-          onSelect={addReference}
-        />
-      ) : null}
-      {pendingUploads > 0 ? (
-        <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
-          Uploading file…
-        </p>
-      ) : null}
-      {upload.isError ? (
-        <QueryError
-          message={uploadErrorMessage(upload.error)}
-          onRetry={() => uploadRetryGuard.retryLast(upload)}
-          retrying={upload.isPending}
-        />
-      ) : null}
       {save.isError ? (
         <QueryError
           message={

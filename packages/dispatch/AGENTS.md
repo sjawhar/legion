@@ -18,6 +18,20 @@ production build from `web/dist`.
 
 Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. The Conversation renders Markdown text bodies and coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
 
+## Margin threads
+
+The document margin groups each issue-owned anchored root comment and all of its replies into one
+flat thread card. A collapsed card shows a two-line root preview and reply summary; selecting it
+expands the replies and an inline reply composer. An expanded card and its Proof mark
+cross-highlight, and the card aligns to the mark. Project-document thread replies are handled by
+the margin-by-owner surface.
+
+Resolved comment threads are hidden until the `Resolved (N)` control is opened. Their cards name
+the resolving actor and time, expose `Reopen`, and allow a reply to reopen the thread through the
+normal server rule. Only the comment author sees `Edit`; saved edits carry an `edited` marker.
+On compact screens the sheet lists thread summaries; opening one presents a full-height thread
+view with a bottom-pinned reply composer and Back control.
+
 `AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the GitHub
 sign-in link at `/auth/start`. Authenticated humans can create native projects
 (key + name) and manage external repository-to-project mappings at `/settings`.

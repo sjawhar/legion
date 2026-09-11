@@ -13,18 +13,20 @@ import {
 import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, Ask, Comment, Event } from "../../api/types";
+import type { Artifact, Ask, Event } from "../../api/types";
 import { parseIssuePath } from "../refs/routes";
 import type { MarginComposer } from "./CommentsTab";
-import type { ComposerAnchor, ComposerKind } from "./Composer";
+import type { ComposerAnchor } from "./Composer";
 import { MarginSheet } from "./MarginSheet";
 import {
   type MarginItem,
   type MarginItemAction,
   type MarginTab,
+  type MarkPlacement,
   marginItemId,
   marginItemMarkId,
-  threadRootId,
+  type Thread,
+  threadMarkId,
   useMarginItems,
 } from "./useMarginItems";
 import { useMarginListeners } from "./useMarginListeners";
@@ -47,7 +49,7 @@ interface MarginContextValue {
   hoverItemForMark(markId: string | null): void;
   hoveredItemId: string | undefined;
   hoveredMarkId: string | undefined;
-  markPositions: ReadonlyMap<string, number>;
+  markPlacements: ReadonlyMap<string, MarkPlacement>;
   pendingCompose: (MarkComposeRequest & { seq: number }) | undefined;
   registerDocument(bridge: DocumentBridge | undefined): void;
   replaceCompose(): void;
@@ -55,7 +57,7 @@ interface MarginContextValue {
   selectedItemId: string | undefined;
   setHoveredItemId(id: string | undefined): void;
   setMarkItemIds(markItemIds: ReadonlyMap<string, string>): void;
-  setMarkPositions(positions: ReadonlyMap<string, number>): void;
+  setMarkPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
   settleCompose(outcome: "saved" | "cancelled"): void;
 }
 
@@ -64,20 +66,22 @@ export interface MarginSheetModel {
     closeComposer: () => void;
     onAction: (id: string, action: MarginItemAction) => void;
     onComposerSaved: () => void;
-    onReply: (comment: Comment) => void;
+    onEdit: (id: string, body: string) => Promise<unknown>;
     onRetryAction: () => void;
     onRetryAnsweredAsk: (() => void) | undefined;
     onRetryComments: () => void;
     onRetryIssue: () => void;
+    onToggleThread: (key: string) => void;
+    onToggleResolved: () => void;
   };
   composer: MarginComposer | undefined;
   items: {
     actionErrorId: string | undefined;
     answeredAsksPending: boolean;
     asksPending: boolean;
-    comments: MarginItem[];
     commentsError: boolean;
     commentsPending: boolean;
+    historicalAsks: Ask[];
     marginRef: RefObject<HTMLElement | null>;
     isClosed: boolean;
     issueError: boolean;
@@ -89,14 +93,25 @@ export interface MarginSheetModel {
     pendingActionId: string | undefined;
     pinned: Event[];
     pinnedIds: string[];
+    resolvedThreads: Thread[];
+    threads: Thread[];
+    viewerLogin: string;
     visibleArtifact: Artifact | undefined;
   };
+  placement: {
+    markPlacements: ReadonlyMap<string, MarkPlacement>;
+  };
   selection: {
+    expandedThreadKey: string | undefined;
     hoveredItemId: string | undefined;
+    hoveredMarkId: string | undefined;
     selectedItemId: string | undefined;
+    showResolved: boolean;
   };
   sheet: {
+    closeThread: () => void;
     expanded: boolean;
+    threadKey: string | undefined;
     toggle: (expanded?: boolean) => void;
   };
   tab: {
@@ -116,7 +131,7 @@ const MarginContext = createContext<MarginContextValue>({
   hoverItemForMark: unavailableMargin,
   hoveredItemId: undefined,
   hoveredMarkId: undefined,
-  markPositions: new Map(),
+  markPlacements: new Map(),
   pendingCompose: undefined,
   registerDocument: unavailableMargin,
   replaceCompose: unavailableMargin,
@@ -124,7 +139,7 @@ const MarginContext = createContext<MarginContextValue>({
   selectedItemId: undefined,
   setHoveredItemId: unavailableMargin,
   setMarkItemIds: unavailableMargin,
-  setMarkPositions: unavailableMargin,
+  setMarkPlacements: unavailableMargin,
   settleCompose: unavailableMargin,
 });
 
@@ -133,7 +148,9 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const [focusRequest, setFocusRequest] = useState<{ markId: string; seq: number }>();
   const [hoveredItemId, setHoveredItemId] = useState<string>();
   const [hoveredMarkId, setHoveredMarkId] = useState<string>();
-  const [markPositions, setMarkPositions] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const [markPlacements, setMarkPlacements] = useState<ReadonlyMap<string, MarkPlacement>>(
+    () => new Map()
+  );
   const [pendingCompose, setPendingCompose] = useState<
     (MarkComposeRequest & { seq: number }) | undefined
   >();
@@ -200,7 +217,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       hoverItemForMark,
       hoveredItemId,
       hoveredMarkId,
-      markPositions,
+      markPlacements,
       pendingCompose,
       registerDocument,
       replaceCompose,
@@ -208,7 +225,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       selectedItemId,
       setHoveredItemId: selectHoveredItem,
       setMarkItemIds,
-      setMarkPositions,
+      setMarkPlacements,
       settleCompose,
     }),
     [
@@ -219,7 +236,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       hoverItemForMark,
       hoveredItemId,
       hoveredMarkId,
-      markPositions,
+      markPlacements,
       pendingCompose,
       registerDocument,
       replaceCompose,
@@ -242,14 +259,14 @@ function useMarginSheet(): MarginSheetModel {
     documentBridge,
     focusRequest,
     hoveredItemId,
-    markPositions,
+    hoveredMarkId,
+    markPlacements,
     pendingCompose,
     selectItem,
     selectedItemId,
     setHoveredItemId,
     setMarkItemIds,
     settleCompose,
-    replaceCompose,
   } = useMargin();
   const { pathname } = useLocation();
   const route = parseIssuePath(pathname);
@@ -259,11 +276,18 @@ function useMarginSheet(): MarginSheetModel {
   const [tab, setTab] = useState<MarginTab>("comments");
   const [composer, setComposer] = useState<MarginComposer>();
   const [expandedIssueKey, setExpandedIssueKey] = useState<string>();
+  const [expandedThreadKey, setExpandedThreadKey] = useState<string>();
+  const [sheetThreadKey, setSheetThreadKey] = useState<string>();
+  const [showResolved, setShowResolved] = useState(false);
   const marginRef = useRef<HTMLElement>(null);
   const issue = useQuery({
     enabled: issueKey !== undefined,
     queryKey: ["issue", issueKey],
     queryFn: () => api.getIssue(issueKey ?? ""),
+  });
+  const viewer = useQuery({
+    queryKey: ["whoami"],
+    queryFn: () => api.whoAmI(),
   });
   const visibleArtifact =
     routeArtifactSlug === undefined
@@ -275,7 +299,7 @@ function useMarginSheet(): MarginSheetModel {
     asksPending,
     commentsError,
     commentsPending,
-    commentRecords,
+    editComment,
     items,
     marginItems,
     mutateItem,
@@ -284,10 +308,20 @@ function useMarginSheet(): MarginSheetModel {
     openAskCount,
     pinned,
     pinnedIds,
+    resolvedThreads,
     retryAnsweredAsk,
     retryComments,
     retryItem,
-  } = useMarginItems(issueKey, tab, visibleArtifact, markPositions);
+    threads,
+  } = useMarginItems(issueKey, tab, visibleArtifact, markPlacements);
+
+  const historicalAsks = useMemo(
+    () =>
+      items
+        .filter((item): item is Extract<MarginItem, { kind: "ask" }> => item.kind === "ask")
+        .map((item) => item.ask),
+    [items]
+  );
   const markItemIds = useMemo(() => {
     const ids = new Map<string, string>();
     for (const item of marginItems) {
@@ -303,11 +337,56 @@ function useMarginSheet(): MarginSheetModel {
     return () => setMarkItemIds(new Map());
   }, [markItemIds, setMarkItemIds]);
   const isClosed = issue.data !== undefined && issue.data.closed_at !== null;
+  const selectMarginItem = useCallback(
+    (id: string) => {
+      selectItem(id);
+      const thread = [...threads, ...resolvedThreads].find((candidate) => candidate.key === id);
+      if (thread === undefined) {
+        setExpandedThreadKey(undefined);
+        return;
+      }
+      if (thread.resolved) {
+        setShowResolved(true);
+      }
+      setExpandedThreadKey(thread.key);
+      if (issueKey !== undefined && window.matchMedia("(max-width: 767px)").matches) {
+        setExpandedIssueKey(issueKey);
+        setSheetThreadKey(thread.key);
+      }
+    },
+    [issueKey, resolvedThreads, selectItem, threads]
+  );
+  const onToggleThread = useCallback(
+    (key: string) => {
+      const thread = [...threads, ...resolvedThreads].find((candidate) => candidate.key === key);
+      if (thread === undefined) {
+        return;
+      }
+      selectItem(key);
+      if (thread.resolved) {
+        setShowResolved(true);
+      }
+      const markId = threadMarkId(thread);
+      if (markId !== undefined) {
+        documentBridge?.focusMark(markId);
+      }
+      if (issueKey !== undefined && window.matchMedia("(max-width: 767px)").matches) {
+        setExpandedIssueKey(issueKey);
+        setSheetThreadKey(key);
+        return;
+      }
+      setExpandedThreadKey((current) => (current === key ? undefined : key));
+    },
+    [documentBridge, issueKey, resolvedThreads, selectItem, threads]
+  );
   const sheetExpanded = issueKey !== undefined && expandedIssueKey === issueKey;
   const toggleSheet = useCallback(
     (expanded?: boolean) => {
       const nextExpanded = expanded ?? !sheetExpanded;
       setExpandedIssueKey(nextExpanded ? issueKey : undefined);
+      if (!nextExpanded) {
+        setSheetThreadKey(undefined);
+      }
     },
     [issueKey, sheetExpanded]
   );
@@ -318,13 +397,6 @@ function useMarginSheet(): MarginSheetModel {
   const onComposerSaved = useCallback(() => {
     settleCompose("saved");
   }, [settleCompose]);
-  const openComposer = useCallback(
-    (kind: ComposerKind, anchor: ComposerAnchor | undefined, replyTo?: string) => {
-      replaceCompose();
-      setComposer({ anchor, kind, replyTo });
-    },
-    [replaceCompose]
-  );
 
   useEffect(() => {
     if (pendingCompose === undefined) {
@@ -367,12 +439,12 @@ function useMarginSheet(): MarginSheetModel {
       return;
     }
     handledFocusSequence.current = focusRequest.seq;
-    selectItem(marginItemId(item));
+    selectMarginItem(marginItemId(item));
     setTab("comments");
     if (issueKey !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
       setExpandedIssueKey(issueKey);
     }
-  }, [focusRequest, issueKey, marginItems, selectItem]);
+  }, [focusRequest, issueKey, marginItems, selectMarginItem]);
   useEffect(() => {
     const markIds = [selectedItemId, hoveredItemId]
       .map((itemId) => {
@@ -391,20 +463,14 @@ function useMarginSheet(): MarginSheetModel {
   );
   const onSelectCard = useCallback(
     (id: string) => {
-      selectItem(id);
+      selectMarginItem(id);
       const item = marginItems.find((candidate) => marginItemId(candidate) === id);
       const markId = item === undefined ? undefined : marginItemMarkId(item);
       if (markId !== undefined) {
         documentBridge?.focusMark(markId);
       }
     },
-    [documentBridge, marginItems, selectItem]
-  );
-  const onReply = useCallback(
-    (comment: Comment) => {
-      openComposer("comment", undefined, threadRootId(commentRecords, comment));
-    },
-    [commentRecords, openComposer]
+    [documentBridge, marginItems, selectMarginItem]
   );
   const focus =
     focusRequest === undefined
@@ -424,7 +490,7 @@ function useMarginSheet(): MarginSheetModel {
     margin: marginRef,
     onSelectCard,
     routeItemId,
-    selectItem,
+    selectItem: selectMarginItem,
     setHoveredItemId,
     setTab,
     sheetExpanded,
@@ -437,20 +503,22 @@ function useMarginSheet(): MarginSheetModel {
       closeComposer,
       onAction,
       onComposerSaved,
-      onReply,
+      onEdit: editComment,
       onRetryAction: retryItem,
       onRetryAnsweredAsk: retryAnsweredAsk,
       onRetryComments: retryComments,
       onRetryIssue: () => void issue.refetch(),
+      onToggleResolved: () => setShowResolved((current) => !current),
+      onToggleThread,
     },
     composer,
     items: {
       actionErrorId,
       answeredAsksPending,
       asksPending,
-      comments: items,
       commentsError,
       commentsPending,
+      historicalAsks,
       marginRef,
       isClosed,
       issueError: issue.isError,
@@ -462,14 +530,25 @@ function useMarginSheet(): MarginSheetModel {
       pendingActionId,
       pinned,
       pinnedIds,
+      resolvedThreads,
+      threads,
+      viewerLogin: viewer.data?.login ?? "",
       visibleArtifact,
     },
+    placement: {
+      markPlacements,
+    },
     selection: {
+      expandedThreadKey,
       hoveredItemId,
+      hoveredMarkId,
       selectedItemId,
+      showResolved,
     },
     sheet: {
+      closeThread: () => setSheetThreadKey(undefined),
       expanded: sheetExpanded,
+      threadKey: sheetThreadKey,
       toggle: toggleSheet,
     },
     tab: {

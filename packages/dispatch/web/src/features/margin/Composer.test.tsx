@@ -393,3 +393,64 @@ test("Composer reports onSaved before onClose", async () => {
     createComment.mockRestore();
   }
 });
+
+test("inline Composer posts a reply to its thread root with Ctrl+Enter", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Composer inline issueKey="CORE-1" kind="comment" onClose={() => {}} replyTo="root-1" />
+    </QueryClientProvider>
+  );
+
+  try {
+    const reply = screen.getByLabelText("Reply");
+    fireEvent.change(reply, { target: { value: "Inline reply" } });
+    fireEvent.keyDown(reply, { ctrlKey: true, key: "Enter" });
+
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", {
+        body: "Inline reply",
+        reply_to: "root-1",
+      })
+    );
+    expect(screen.getByRole("button", { name: "Reply" })).not.toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("edit Composer PATCHes the author comment body and reads Save", async () => {
+  const editComment = spyOn(api, "editComment").mockResolvedValue(undefined as never);
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Composer
+        edit={{ body: "Original comment", id: "comment-1" }}
+        issueKey="CORE-1"
+        kind="comment"
+        onClose={() => {}}
+      />
+    </QueryClientProvider>
+  );
+
+  try {
+    expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
+    const comment = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
+    expect(comment.value).toBe("Original comment");
+    fireEvent.change(comment, { target: { value: "Revised comment" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(editComment).toHaveBeenCalledWith("comment-1", { body: "Revised comment" })
+    );
+  } finally {
+    view.unmount();
+    editComment.mockRestore();
+  }
+});

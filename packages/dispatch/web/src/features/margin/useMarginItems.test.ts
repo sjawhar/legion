@@ -126,8 +126,8 @@ function OrderedItems() {
     "comments",
     artifact,
     new Map([
-      ["m-b", 4],
-      ["m-a", 12],
+      ["m-b", { pos: 4, top: 40 }],
+      ["m-a", { pos: 12, top: 72 }],
     ])
   );
   return createElement(
@@ -168,6 +168,55 @@ test("useMarginItems orders found and missing document anchors while excluding u
 
   try {
     expect(screen.getByLabelText("Margin item order").textContent).toBe("B,A,C");
+  } finally {
+    view.unmount();
+  }
+});
+
+function ThreadItems() {
+  const { resolvedThreads, threads } = useMarginItems("CORE-1", "comments", artifact, new Map());
+  return createElement(
+    "output",
+    { "aria-label": "Margin thread groups" },
+    [...threads, ...resolvedThreads]
+      .map((thread) => `${thread.key}:${thread.replies.map((reply) => reply.id).join(",")}`)
+      .join("|")
+  );
+}
+
+test("useMarginItems groups replies flat under their root and separates resolved roots", () => {
+  const root = comment("root", "mark-root", "2026-09-09T00:00:00Z");
+  const reply = {
+    ...comment("reply", null, "2026-09-09T00:01:00Z"),
+    reply_to: root.id,
+  };
+  const deeperReply = {
+    ...comment("deeper", null, "2026-09-09T00:02:00Z"),
+    reply_to: reply.id,
+  };
+  const resolved = {
+    ...comment("resolved", "mark-resolved", "2026-09-09T00:03:00Z"),
+    resolved: true,
+  };
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", "CORE-1"], [root, reply, deeperReply, resolved]);
+
+  const view = render(
+    createElement(
+      MemoryRouter,
+      { initialEntries: ["/issues/CORE-1/spec"] },
+      createElement(QueryClientProvider, { client: queryClient }, createElement(ThreadItems))
+    )
+  );
+
+  try {
+    expect(screen.getByLabelText("Margin thread groups").textContent).toBe(
+      "root:reply,deeper|resolved:"
+    );
   } finally {
     view.unmount();
   }

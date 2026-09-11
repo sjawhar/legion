@@ -1,17 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
 import { api } from "../../api/client";
-import type { Artifact, Ask, Comment, Event } from "../../api/types";
+import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { pinnedEventIds } from "../issue/pins";
 import { useAnsweredAsks } from "./useAnsweredAsks";
 
 export type MarginTab = "comments" | "pinned";
-export type MarginItemAction = "accept" | "reject" | "resolve";
+export type MarginItemAction = "accept" | "reject" | "resolve" | "reopen";
 export type MarginItem =
-  | { ask: Ask; depth: number; kind: "ask" }
-  | { comment: Comment; depth: number; kind: "comment"; threadRootId: string };
+  | { ask: Ask; kind: "ask" }
+  | { comment: Comment; kind: "comment"; threadRootId: string };
+
+export interface MarkPlacement {
+  pos: number;
+  top: number;
+}
+
+export interface Thread {
+  anchor: Anchor | null;
+  key: string;
+  lastReplyAt: string | undefined;
+  replies: Comment[];
+  resolved: boolean;
+  root: { comment: Comment; kind: "comment" };
+}
 
 const pinnedEventBatchSize = 50;
 
@@ -93,42 +107,32 @@ export function threadRootId(comments: readonly Comment[], comment: Comment): st
   return root.id;
 }
 
-function commentThreads(
-  comments: Comment[]
-): Array<Array<Extract<MarginItem, { kind: "comment" }>>> {
-  const byParent = new Map<string, Comment[]>();
-  const roots: Comment[] = [];
-  const known = new Set(comments.map((comment) => comment.id));
+function commentThreads(comments: Comment[]): Thread[] {
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const threads = new Map<string, { replies: Comment[]; root: Comment }>();
   for (const comment of comments) {
-    if (comment.reply_to === null || !known.has(comment.reply_to)) {
-      roots.push(comment);
+    const rootId = threadRootId(comments, comment);
+    const root = byId.get(rootId);
+    if (root === undefined) {
       continue;
     }
-    const replies = byParent.get(comment.reply_to) ?? [];
-    replies.push(comment);
-    byParent.set(comment.reply_to, replies);
+    const entry = threads.get(rootId) ?? { replies: [], root };
+    if (comment.id !== rootId) {
+      entry.replies.push(comment);
+    }
+    threads.set(rootId, entry);
   }
-
-  return [...roots]
-    .sort((left, right) => right.created_at.localeCompare(left.created_at))
-    .map((root) => {
-      const thread: Array<{ comment: Comment; depth: number }> = [];
-      const append = (comment: Comment, depth: number) => {
-        thread.push({ comment, depth });
-        for (const reply of [...(byParent.get(comment.id) ?? [])].sort((left, right) =>
-          right.created_at.localeCompare(left.created_at)
-        )) {
-          append(reply, depth + 1);
-        }
-      };
-      append(root, 0);
-      return thread.map(({ comment, depth }) => ({
-        comment,
-        depth,
-        kind: "comment" as const,
-        threadRootId: root.id,
-      }));
-    });
+  return [...threads.values()].map(({ replies, root }) => {
+    replies.sort((left, right) => left.created_at.localeCompare(right.created_at));
+    return {
+      anchor: root.anchor,
+      key: root.id,
+      lastReplyAt: replies.at(-1)?.created_at,
+      replies,
+      resolved: root.resolved || (root.suggestion !== null && root.suggestion.accepted !== null),
+      root: { comment: root, kind: "comment" },
+    };
+  });
 }
 
 export function marginItemId(item: MarginItem): string {
@@ -139,11 +143,15 @@ export function marginItemMarkId(item: MarginItem): string | undefined {
   return item.kind === "ask" ? item.ask.anchor?.mark_id : item.comment.anchor?.mark_id;
 }
 
+export function threadMarkId(thread: Thread): string | undefined {
+  return thread.anchor?.mark_id;
+}
+
 export function useMarginItems(
   issueKey: string | undefined,
   tab: MarginTab,
   visibleArtifact: Artifact | undefined,
-  markPositions: ReadonlyMap<string, number>
+  markPlacements: ReadonlyMap<string, MarkPlacement>
 ) {
   const queryClient = useQueryClient();
   const asks = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
@@ -183,57 +191,69 @@ export function useMarginItems(
     [answeredAsks.asks]
   );
   /** Issue-level (unanchored) comments belong to the Conversation tab; the margin shows document-anchored review. */
+  const allThreads = useMemo(
+    () =>
+      commentThreads(
+        withoutAskThreadReplies(anchoredThreadComments(comments.data ?? [], visibleArtifact?.id))
+      ),
+    [comments.data, visibleArtifact?.id]
+  );
+  const compareThreads = useCallback(
+    (left: Thread, right: Thread) => {
+      const leftMarkId = threadMarkId(left);
+      const rightMarkId = threadMarkId(right);
+      const leftPlacement = leftMarkId === undefined ? undefined : markPlacements.get(leftMarkId);
+      const rightPlacement =
+        rightMarkId === undefined ? undefined : markPlacements.get(rightMarkId);
+      if (leftPlacement !== undefined && rightPlacement !== undefined) {
+        return leftPlacement.pos - rightPlacement.pos;
+      }
+      if (leftPlacement !== undefined || rightPlacement !== undefined) {
+        return leftPlacement === undefined ? 1 : -1;
+      }
+      return right.root.comment.created_at.localeCompare(left.root.comment.created_at);
+    },
+    [markPlacements]
+  );
+  const sortedThreads = useMemo(
+    () => [...allThreads].sort(compareThreads),
+    [allThreads, compareThreads]
+  );
+  const threads = useMemo(
+    () => sortedThreads.filter((thread) => !thread.resolved),
+    [sortedThreads]
+  );
+  const resolvedThreads = useMemo(
+    () => sortedThreads.filter((thread) => thread.resolved),
+    [sortedThreads]
+  );
   const items = useMemo<MarginItem[]>(() => {
-    const anchoredItems = anchoredAsks.map((ask) => ({ ask, depth: 0, kind: "ask" as const }));
-    const visibleComments = withoutAskThreadReplies(
-      anchoredThreadComments(comments.data ?? [], visibleArtifact?.id)
+    const commentItems = sortedThreads.map(({ root }) => ({
+      comment: root.comment,
+      kind: "comment" as const,
+      threadRootId: root.comment.id,
+    }));
+    return [...anchoredAsks.map((ask) => ({ ask, kind: "ask" as const })), ...commentItems].sort(
+      (left, right) => {
+        const leftMarkId = marginItemMarkId(left);
+        const rightMarkId = marginItemMarkId(right);
+        const leftPlacement = leftMarkId === undefined ? undefined : markPlacements.get(leftMarkId);
+        const rightPlacement =
+          rightMarkId === undefined ? undefined : markPlacements.get(rightMarkId);
+        if (leftPlacement !== undefined && rightPlacement !== undefined) {
+          return leftPlacement.pos - rightPlacement.pos;
+        }
+        if (leftPlacement !== undefined || rightPlacement !== undefined) {
+          return leftPlacement === undefined ? 1 : -1;
+        }
+        return (
+          right.kind === "ask" ? right.ask.created_at : right.comment.created_at
+        ).localeCompare(left.kind === "ask" ? left.ask.created_at : left.comment.created_at);
+      }
     );
-    const roots: MarginItem[][] = [
-      ...anchoredItems.map((ask) => [ask]),
-      ...commentThreads(visibleComments),
-    ];
-    return roots
-      .sort((left, right) => {
-        const leftRoot = left[0];
-        const rightRoot = right[0];
-        if (leftRoot === undefined || rightRoot === undefined) {
-          return 0;
-        }
-        const leftMarkId = marginItemMarkId(leftRoot);
-        const rightMarkId = marginItemMarkId(rightRoot);
-        const leftPosition = leftMarkId === undefined ? undefined : markPositions.get(leftMarkId);
-        const rightPosition =
-          rightMarkId === undefined ? undefined : markPositions.get(rightMarkId);
-        if (leftPosition !== undefined && rightPosition !== undefined) {
-          if (leftPosition !== rightPosition) {
-            return leftPosition - rightPosition;
-          }
-        } else if (leftPosition !== undefined || rightPosition !== undefined) {
-          return leftPosition === undefined ? 1 : -1;
-        }
-        const leftAnchor = leftRoot.kind === "ask" ? leftRoot.ask.anchor : leftRoot.comment.anchor;
-        const rightAnchor =
-          rightRoot.kind === "ask" ? rightRoot.ask.anchor : rightRoot.comment.anchor;
-        const leftCreatedAt =
-          leftRoot.kind === "ask" ? leftRoot.ask.created_at : leftRoot.comment.created_at;
-        const rightCreatedAt =
-          rightRoot.kind === "ask" ? rightRoot.ask.created_at : rightRoot.comment.created_at;
-        // Every anchored ask is always anchored (unanchored asks never enter this list, see
-        // useAnsweredAsks), while the comment filter admits only document-anchored threads.
-        // This puts document review in reading order; an item whose text has changed sorts
-        // after found anchors.
-        if (leftAnchor !== null && rightAnchor !== null) {
-          return leftCreatedAt.localeCompare(rightCreatedAt);
-        }
-        if (leftAnchor !== null || rightAnchor !== null) {
-          return leftAnchor !== null ? -1 : 1;
-        }
-        return rightCreatedAt.localeCompare(leftCreatedAt);
-      })
-      .flat();
-  }, [anchoredAsks, comments.data, markPositions, visibleArtifact]);
+  }, [anchoredAsks, markPlacements, sortedThreads]);
   const marginItems = useMemo<MarginItem[]>(
-    () => [...needsYou.map((ask) => ({ ask, depth: 0, kind: "ask" as const })), ...items],
+    () => [...needsYou.map((ask) => ({ ask, kind: "ask" as const })), ...items],
     [items, needsYou]
   );
   const actionGuard = useSubmitGuard();
@@ -244,6 +264,9 @@ export function useMarginItems(
       }
       if (kind === "reject") {
         return api.rejectComment(id);
+      }
+      if (kind === "reopen") {
+        return api.reopenComment(id);
       }
       return api.resolveComment(id);
     },
@@ -258,6 +281,9 @@ export function useMarginItems(
         current?.map((comment) => {
           if (comment.id !== id) {
             return comment;
+          }
+          if (kind === "reopen") {
+            return { ...comment, resolved: false, resolved_at: null, resolved_by: null };
           }
           if (kind === "resolve") {
             return { ...comment, resolved: true };
@@ -281,6 +307,12 @@ export function useMarginItems(
       void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
     },
   });
+  const edit = useMutation({
+    mutationFn: ({ body, id }: { body: string; id: string }) => api.editComment(id, { body }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
+    },
+  });
 
   const answeredAskError = answeredAsks.error;
   const retryAnsweredAsk =
@@ -293,17 +325,20 @@ export function useMarginItems(
     commentsError: comments.isError,
     commentsPending: comments.isPending,
     commentRecords: comments.data ?? [],
+    editComment: (id: string, body: string) => edit.mutateAsync({ body, id }),
     items,
     marginItems,
     needsYou,
     mutateItem: (input: { id: string; kind: MarginItemAction }) =>
       actionGuard.guard(() => action.mutate(input)),
-    pendingActionId: action.isPending ? action.variables?.id : undefined,
     openAskCount,
+    pendingActionId: action.isPending ? action.variables?.id : undefined,
     pinned: pinned.data ?? [],
     pinnedIds,
+    resolvedThreads,
     retryAnsweredAsk,
     retryComments: () => void comments.refetch(),
     retryItem: () => actionGuard.retryLast(action),
+    threads,
   };
 }

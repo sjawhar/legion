@@ -1,39 +1,18 @@
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
 
-import type { Ask, Comment } from "../../api/types";
+import type { Ask } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   borderDefault,
-  card,
-  dangerHoverText,
-  dangerText,
   highlightRing,
-  inlineWarningText,
-  linkHoverText,
-  linkText,
-  quoteAccentBorder,
-  quoteBodyText,
-  secondaryButtonDisabledText,
-  selectedCardBg,
-  selectedCardBorder,
-  successHoverText,
-  successText,
-  suggestionAddedBg,
-  suggestionAddedText,
-  suggestionRemovedBg,
-  suggestionRemovedText,
   textMutedOnSurface,
-  textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
-  textSecondaryOnSurface,
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
-import { actorLabel } from "../refs/actor";
-import { buildIssuePath } from "../refs/routes";
 import { Unfurl } from "../refs/Unfurl";
 import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
-import { type MarginItem, type MarginItemAction, marginItemId } from "./useMarginItems";
+import { ThreadList } from "./ThreadList";
+import type { MarginItemAction, MarkPlacement, Thread } from "./useMarginItems";
 
 export interface MarginComposer {
   anchor: ComposerAnchor | undefined;
@@ -49,162 +28,30 @@ interface CommentsTabProps {
   commentsError: boolean;
   commentsPending: boolean;
   composer: MarginComposer | undefined;
+  expandedThreadKey: string | undefined;
+  historicalAsks: Ask[];
   hoveredItemId: string | undefined;
+  hoveredMarkId: string | undefined;
   isClosed: boolean;
   issueKey: string;
-  items: MarginItem[];
+  markPlacements: ReadonlyMap<string, MarkPlacement>;
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
   onCloseComposer: () => void;
   onComposerSaved: () => void;
-  onReply: (comment: Comment) => void;
+  onEdit: (id: string, body: string) => Promise<unknown>;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
+  onSelectCard: (id: string) => void;
+  onToggleThread: (key: string) => void;
+  onToggleResolved: () => void;
   pendingActionId: string | undefined;
+  resolvedThreads: Thread[];
   selectedItemId: string | undefined;
-}
-
-function CommentCard({
-  actionError,
-  artifactSlug,
-  comment,
-  depth,
-  onAction,
-  onReply,
-  onRetryAction,
-  pendingAction,
-  selected,
-}: {
-  actionError: boolean;
-  artifactSlug: string;
-  comment: Comment;
-  depth: number;
-  onAction: (id: string, action: MarginItemAction) => void;
-  onReply: (comment: Comment) => void;
-  onRetryAction: () => void;
-  pendingAction: boolean;
-  selected: boolean;
-}): ReactNode {
-  const suggestion = comment.suggestion;
-  const anchor = comment.anchor;
-  return (
-    <article
-      aria-current={selected ? "true" : undefined}
-      className={`rounded-xl border p-3 text-sm shadow-sm ${
-        selected ? `${selectedCardBorder} ${selectedCardBg}` : card
-      }`}
-      data-margin-item={comment.id}
-      data-testid={`margin-comment-${comment.id}`}
-      style={{ marginLeft: `${depth * 12}px` }}
-    >
-      {anchor === null ? null : (
-        <blockquote className={`mb-2 border-l-2 pl-2 ${quoteAccentBorder} ${quoteBodyText}`}>
-          {anchor.quote}
-        </blockquote>
-      )}
-      {anchor?.orphaned && comment.issue_key !== null ? (
-        <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>
-          Text changed.{" "}
-          <Link
-            className="underline"
-            to={`${buildIssuePath({
-              key: comment.issue_key,
-              kind: "artifact",
-              slug: artifactSlug,
-              version: anchor.version,
-            })}&comment=${comment.id}`}
-          >
-            View original text
-          </Link>
-        </p>
-      ) : null}
-      {suggestion === null ? <p className="whitespace-pre-wrap">{comment.body}</p> : null}
-      {suggestion !== null && anchor !== null ? (
-        <div className="space-y-1 font-mono text-xs">
-          <del
-            className={`block rounded px-2 py-1 ${suggestionRemovedBg} ${suggestionRemovedText}`}
-          >
-            {anchor.quote}
-          </del>
-          <ins className={`block rounded px-2 py-1 ${suggestionAddedBg} ${suggestionAddedText}`}>
-            {suggestion.replace_with}
-          </ins>
-          {comment.body === "Suggested replacement." ? null : (
-            <p className={`whitespace-pre-wrap font-sans ${textSecondaryOnSurface}`}>
-              {comment.body}
-            </p>
-          )}
-        </div>
-      ) : null}
-      <Unfurl body={comment.body} />
-      <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
-        {actorLabel(comment.author)} · {new Date(comment.created_at).toLocaleString()}
-      </p>
-      <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
-        {suggestion !== null && suggestion.accepted === null && !comment.resolved ? (
-          <>
-            <button
-              className={`font-medium disabled:cursor-not-allowed ${successText} ${successHoverText} ${secondaryButtonDisabledText}`}
-              disabled={pendingAction}
-              onClick={() => onAction(comment.id, "accept")}
-              type="button"
-            >
-              Accept
-            </button>
-            <button
-              className={`font-medium disabled:cursor-not-allowed ${dangerText} ${dangerHoverText} ${secondaryButtonDisabledText}`}
-              disabled={pendingAction}
-              onClick={() => onAction(comment.id, "reject")}
-              type="button"
-            >
-              Reject
-            </button>
-          </>
-        ) : suggestion === null && !comment.resolved ? (
-          <button
-            className={`font-medium disabled:cursor-not-allowed ${linkText} ${linkHoverText} ${secondaryButtonDisabledText}`}
-            disabled={pendingAction}
-            onClick={() => onAction(comment.id, "resolve")}
-            type="button"
-          >
-            Resolve
-          </button>
-        ) : (
-          <span className={`font-medium ${textMutedOnSurfaceMuted}`}>
-            {suggestion?.accepted === true
-              ? "Accepted"
-              : suggestion?.accepted === false
-                ? "Rejected"
-                : "Resolved"}
-          </span>
-        )}
-        {pendingAction ? (
-          <span className={`text-xs ${textMutedOnSurfaceMuted}`} role="status">
-            Saving…
-          </span>
-        ) : null}
-        {comment.resolved ? null : (
-          <button
-            className={`font-medium ${linkText} ${linkHoverText}`}
-            onClick={() => onReply(comment)}
-            type="button"
-          >
-            Reply
-          </button>
-        )}
-      </div>
-      {actionError ? (
-        <div className="mt-2">
-          <QueryError
-            message="Could not save this action."
-            onRetry={onRetryAction}
-            retrying={pendingAction}
-          />
-        </div>
-      ) : null}
-    </article>
-  );
+  showResolved: boolean;
+  threads: Thread[];
+  viewerLogin: string;
 }
 
 function AskCardItem({
@@ -239,20 +86,30 @@ export function CommentsTab({
   commentsError,
   commentsPending,
   composer,
+  expandedThreadKey,
+  historicalAsks,
   hoveredItemId,
+  hoveredMarkId,
   isClosed,
   issueKey,
-  items,
+  markPlacements,
   needsYou,
   onAction,
   onCloseComposer,
   onComposerSaved,
-  onReply,
+  onEdit,
   onRetryAction,
   onRetryAnsweredAsk,
   onRetryComments,
+  onSelectCard,
+  onToggleResolved,
+  onToggleThread,
   pendingActionId,
+  resolvedThreads,
   selectedItemId,
+  showResolved,
+  threads,
+  viewerLogin,
 }: CommentsTabProps): ReactNode {
   return (
     <div className="space-y-3 pt-3">
@@ -295,30 +152,37 @@ export function CommentsTab({
           />
         ) : (
           <>
-            {items.map((item) => {
-              const id = marginItemId(item);
-              const active = selectedItemId === id || hoveredItemId === id;
-              return (
-                <div key={id}>
-                  {item.kind === "ask" ? (
-                    <AskCardItem artifactSlug={artifactSlug} ask={item.ask} selected={active} />
-                  ) : (
-                    <CommentCard
-                      actionError={actionErrorId === item.comment.id}
-                      artifactSlug={artifactSlug}
-                      comment={item.comment}
-                      depth={item.depth}
-                      onAction={onAction}
-                      onReply={onReply}
-                      onRetryAction={onRetryAction}
-                      pendingAction={pendingActionId === item.comment.id}
-                      selected={active}
-                    />
-                  )}
-                </div>
-              );
-            })}
-            {items.length === 0 &&
+            {historicalAsks.map((ask) => (
+              <AskCardItem
+                artifactSlug={artifactSlug}
+                ask={ask}
+                key={ask.id}
+                selected={selectedItemId === ask.id || hoveredItemId === ask.id}
+              />
+            ))}
+            <ThreadList
+              actionErrorId={actionErrorId}
+              artifactSlug={artifactSlug}
+              expandedThreadKey={expandedThreadKey}
+              hoveredItemId={hoveredItemId}
+              hoveredMarkId={hoveredMarkId}
+              isClosed={isClosed}
+              markPlacements={markPlacements}
+              onAction={onAction}
+              onEdit={onEdit}
+              onRetryAction={onRetryAction}
+              onSelect={onSelectCard}
+              onToggle={onToggleThread}
+              onToggleResolved={onToggleResolved}
+              pendingActionId={pendingActionId}
+              resolvedThreads={resolvedThreads}
+              showResolved={showResolved}
+              threads={threads}
+              viewerLogin={viewerLogin}
+            />
+            {threads.length === 0 &&
+            resolvedThreads.length === 0 &&
+            historicalAsks.length === 0 &&
             needsYou.length === 0 &&
             !asksPending &&
             !commentsPending &&

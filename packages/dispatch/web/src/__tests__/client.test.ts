@@ -141,6 +141,21 @@ test("API client sends the documented method and JSON body for mutations", async
   });
 });
 
+test("API client sends comment edits and reopen actions to their endpoints", async () => {
+  const stub = stubFetch();
+  const api = createApiClient(stub.fetch);
+
+  await api.editComment("comment-1", { body: "Revised comment" });
+  await api.reopenComment("comment-1");
+
+  expect(stub.requests.map(({ init, path }) => [init?.method, path])).toEqual([
+    ["PATCH", "/api/v1/comments/comment-1"],
+    ["POST", "/api/v1/comments/comment-1/reopen"],
+  ]);
+  expect(JSON.parse(stub.requests[0]?.body as string)).toEqual({ body: "Revised comment" });
+  expect(JSON.parse(stub.requests[1]?.body as string)).toEqual({});
+});
+
 test("API client sends repository project mapping requests to their settings routes", async () => {
   const stub = stubFetch(() => Response.json({ repo: "owner/repo", project: "CORE" }));
   const settingsApi = createApiClient(stub.fetch);
