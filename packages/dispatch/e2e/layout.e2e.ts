@@ -53,7 +53,7 @@ test("tablet keeps the Conversation readable and exposes the review sheet", asyn
     await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
 
     await page.setViewportSize({ height: 1024, width: 1280 });
-    await expect(page.getByRole("navigation", { name: "Issues" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
     await expect(page.getByRole("complementary", { name: "Review margin" })).toBeVisible();
     const desktopScreenshot = testInfo.outputPath("desktop-1280.png");
     await page.screenshot({ path: desktopScreenshot, fullPage: true });

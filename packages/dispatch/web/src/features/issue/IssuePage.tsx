@@ -55,7 +55,7 @@ import { shortSessionId } from "../conversation/conversation-model";
 import { useAgents } from "../conversation/useAgents";
 import {
   buildIssuePath,
-  type DispatchRoute,
+  type IssueRoute,
   type IssueTab,
   isLegacyLogPath,
   isPrimaryDocumentArtifactRoute,
@@ -525,7 +525,7 @@ export function IssuePage(): ReactNode {
   return <IssueDetail key={route.key} route={route} />;
 }
 
-function IssueDetail({ route }: { route: DispatchRoute }): ReactNode {
+function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const { search } = useLocation();
   const artifactRoute = route.kind === "artifact" ? route : undefined;
   const navigate = useNavigate();

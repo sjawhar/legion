@@ -364,7 +364,7 @@ export function ArtifactsTab(): ReactNode {
 
   return (
     <div className="space-y-1 pt-3">
-      <Upload issueKey={issueKey} />
+      <Upload owner={{ issue: issueKey }} />
       {orderedArtifacts.map((artifact) => (
         <ArtifactCard artifact={artifact} issueKey={issueKey} key={artifact.id} />
       ))}

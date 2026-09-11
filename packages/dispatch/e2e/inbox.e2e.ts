@@ -7,7 +7,7 @@ import {
   createComment,
   createIssue,
   createProject,
-  createProjectArtifact,
+  createProjectDocument,
   getAsk,
   getIssue,
   getIssueEvents,
@@ -122,7 +122,9 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Open navigation" }).click();
   }
-  await expect(alicePage.getByRole("heading", { name: "Needs you (2)" })).toBeVisible();
+  const navigation = alicePage.getByRole("navigation", { name: "Navigation" });
+  await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("2");
+  await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("2");
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Close navigation" }).click();
   }
@@ -235,7 +237,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
       },
     });
 
-  const document = await createProjectArtifact("CORE", {
+  const document = await createProjectDocument("CORE", {
     content: "# Design notes\n",
     name: "Design notes",
   });
@@ -248,7 +250,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   await expect(alicePage.getByTestId(`ask-${documentAsk.id}`)).toContainText(
     "Does this design need review?"
   );
-  await expect(alicePage.getByText("CORE / Design notes", { exact: true })).toBeVisible();
+  await expect(alicePage.getByText("CORE · Design notes", { exact: true })).toBeVisible();
 
   await bob.close();
   await alice.close();

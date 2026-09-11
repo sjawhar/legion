@@ -97,3 +97,51 @@ test("Unfurl reads the immutable document version named by a reference", async (
     getIssue.mockRestore();
   }
 });
+
+test("Unfurl reads a project document by project artifact reference", async () => {
+  const artifact: Artifact = {
+    created_at: "2026-09-10T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    id: "artifact-1",
+    issue_key: null,
+    project: "CORE",
+    kind: "doc",
+    name: "Design notes",
+    primary: false,
+    slug: "design-notes",
+    versions: [],
+  };
+  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue({
+    ...artifact,
+    referenced_by: [],
+  });
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
+    authors: [],
+    created_at: "2026-09-10T00:00:00Z",
+    markdown: "Project version three",
+    named: true,
+    number: 3,
+    summary: "Version three",
+  });
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(undefined as never);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Unfurl body="See dispatch://CORE/artifact/design-notes@v3" />
+      </QueryClientProvider>
+    );
+
+    await screen.findByText("Project version three");
+    expect(getProjectArtifact).toHaveBeenCalledWith("CORE", "design-notes");
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(screen.queryByRole("link", { name: "Design notes" })).toBeNull();
+  } finally {
+    getIssue.mockRestore();
+    getArtifactVersion.mockRestore();
+    getProjectArtifact.mockRestore();
+  }
+});

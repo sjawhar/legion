@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ChangeEvent, type DragEvent, type ReactNode, useRef, useState } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, type ArtifactOwner, api } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
 import {
   borderDefault,
@@ -24,11 +24,11 @@ interface UploadFileOptions {
 }
 
 export async function uploadFile(
-  issueKey: string,
+  owner: ArtifactOwner,
   file: File,
   options: UploadFileOptions = {}
 ): Promise<UploadResult> {
-  return api.uploadArtifact(issueKey, {
+  return api.uploadArtifact(owner, {
     file,
     name: file.name || "artifact",
     summary: options.summary,
@@ -46,19 +46,23 @@ export function uploadErrorMessage(error: unknown): string {
 }
 
 interface UploadProps {
-  issueKey: string;
+  owner: ArtifactOwner;
 }
 
-export function Upload({ issueKey }: UploadProps): ReactNode {
+export function Upload({ owner }: UploadProps): ReactNode {
   const queryClient = useQueryClient();
   const input = useRef<HTMLInputElement>(null);
   const [summary, setSummary] = useState("");
   const upload = useMutation({
     mutationFn: (file: File) =>
-      uploadFile(issueKey, file, { summary: summary.trim() === "" ? undefined : summary.trim() }),
+      uploadFile(owner, file, { summary: summary.trim() === "" ? undefined : summary.trim() }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["artifacts", issueKey] });
-      void queryClient.invalidateQueries({ queryKey: ["issue", issueKey] });
+      if ("issue" in owner) {
+        void queryClient.invalidateQueries({ queryKey: ["artifacts", owner.issue] });
+        void queryClient.invalidateQueries({ queryKey: ["issue", owner.issue] });
+        return;
+      }
+      void queryClient.invalidateQueries({ queryKey: ["project", owner.project, "artifacts"] });
     },
   });
   const selectFile = (event: ChangeEvent<HTMLInputElement>) => {
@@ -108,7 +112,7 @@ export function Upload({ issueKey }: UploadProps): ReactNode {
       </button>
       <input
         aria-label="Upload artifact"
-        className="sr-only"
+        className="sr-only left-0"
         onChange={selectFile}
         ref={input}
         type="file"

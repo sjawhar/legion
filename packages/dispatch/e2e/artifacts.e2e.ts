@@ -115,7 +115,7 @@ test("artifacts upload, version, references, and phone layout", async ({ page },
     const openNavigation = page.getByRole("button", { name: "Open navigation" });
     await expect(openNavigation).toBeVisible();
     await openNavigation.click();
-    await expect(page.getByRole("navigation", { name: "Issues" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
     await page.getByRole("button", { name: "Close navigation" }).click();
     await page.goto(`/issues/${issue.key}`);
     const openMargin = page.getByRole("button", { name: /review panel/i });

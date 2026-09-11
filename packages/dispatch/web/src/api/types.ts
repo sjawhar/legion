@@ -47,6 +47,7 @@ export type {
   IssueChild,
   IssueDetails,
   IssueRead,
+  IssueReferences,
   IssueSummary,
   Message,
   Project,

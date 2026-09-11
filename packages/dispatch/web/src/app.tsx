@@ -8,7 +8,7 @@ import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
 import { Inbox } from "./features/inbox/Inbox";
 import { Margin, MarginProvider } from "./features/margin/Margin";
-import { parseIssuePath } from "./features/refs/routes";
+import { parseIssuePath, parseProjectPath } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
 import { SearchPalette } from "./features/search/SearchPalette";
 import { useSearchShortcut } from "./features/search/useSearchShortcut";
@@ -52,6 +52,10 @@ import {
 
 const IssuePage = lazy(() =>
   import("./features/issue/IssuePage").then((module) => ({ default: module.IssuePage }))
+);
+
+const ProjectPage = lazy(() =>
+  import("./features/project/ProjectPage").then((module) => ({ default: module.ProjectPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -287,7 +291,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // Tabs within the same issue manage their own focus (roving tabindex); only a
   // genuine page change — a different issue, or a different top-level route —
   // should move focus to the main region.
-  const pageIdentity = parseIssuePath(location.pathname)?.key ?? location.pathname;
+  const pageIdentity =
+    parseIssuePath(location.pathname)?.key ??
+    parseProjectPath(location.pathname)?.project ??
+    location.pathname;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-run only to move focus to main on a real page change
   useEffect(() => {
@@ -394,6 +401,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <Routes>
               <Route element={<InboxPage />} path="/" />
               <Route element={<IssuePage />} path="/issues/:key/*" />
+              <Route element={<ProjectPage />} path="/projects/:key" />
+              <Route element={<ProjectPage />} path="/projects/:key/documents" />
               <Route element={<SettingsPage />} path="/settings" />
               <Route element={<NotFoundPage />} path="*" />
             </Routes>

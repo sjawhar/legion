@@ -54,12 +54,15 @@ import { ReferencePicker } from "../refs/ReferencePicker";
 import {
   buildDispatchReference,
   buildIssuePath,
+  type DispatchRoute,
+  isProjectRoute,
   parseDispatchReference,
   parseIssuePath,
+  parseProjectPath,
 } from "../refs/routes";
 
 export interface ComposerReference {
-  href: string;
+  href?: string;
   reference: string;
 }
 
@@ -127,6 +130,13 @@ function trimReference(value: string): string {
   return value.replace(/[),.;:!?]+$/, "");
 }
 
+function composerReference(route: DispatchRoute): ComposerReference | undefined {
+  if (isProjectRoute(route)) {
+    return route.kind === "document" ? { reference: buildDispatchReference(route) } : undefined;
+  }
+  return { href: buildIssuePath(route), reference: buildDispatchReference(route) };
+}
+
 function appReference(value: string, appOrigin: string): ComposerReference | undefined {
   let url: URL;
   try {
@@ -137,10 +147,9 @@ function appReference(value: string, appOrigin: string): ComposerReference | und
   if (url.origin !== appOrigin) {
     return undefined;
   }
-  const route = parseIssuePath(url.pathname, url.search);
-  return route === undefined
-    ? undefined
-    : { href: buildIssuePath(route), reference: buildDispatchReference(route) };
+  const route =
+    parseIssuePath(url.pathname, url.search) ?? parseProjectPath(url.pathname, url.search);
+  return route === undefined ? undefined : composerReference(route);
 }
 
 export function composerReferences(
@@ -153,10 +162,7 @@ export function composerReferences(
     let reference: ComposerReference | undefined;
     if (value.startsWith("dispatch://")) {
       const route = parseDispatchReference(value);
-      reference =
-        route === undefined
-          ? undefined
-          : { href: buildIssuePath(route), reference: buildDispatchReference(route) };
+      reference = route === undefined ? undefined : composerReference(route);
     } else {
       reference = appReference(value, appOrigin);
     }
@@ -328,7 +334,7 @@ export function Composer({
   });
   const uploadRetryGuard = useSubmitGuard();
   const upload = useMutation({
-    mutationFn: (file: File) => uploadFile(issueKey, file),
+    mutationFn: (file: File) => uploadFile({ issue: issueKey }, file),
     onMutate: () => {
       setPendingUploads((count) => count + 1);
     },

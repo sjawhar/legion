@@ -86,11 +86,14 @@ test("API client uploads inline artifact content as JSON and files as multipart"
   const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
   const api = createApiClient(stub.fetch);
 
-  await api.uploadArtifact("CORE-1", { content: "# Spec\n", name: "spec.md" });
-  await api.uploadArtifact("CORE-1", {
-    file: new File(["spec"], "spec.md", { type: "text/markdown" }),
-    name: "spec.md",
-  });
+  await api.uploadArtifact({ issue: "CORE-1" }, { content: "# Spec\n", name: "spec.md" });
+  await api.uploadArtifact(
+    { issue: "CORE-1" },
+    {
+      file: new File(["spec"], "spec.md", { type: "text/markdown" }),
+      name: "spec.md",
+    }
+  );
 
   const [inline, multipart] = stub.requests;
   expect(inline?.path).toBe("/api/v1/issues/CORE-1/artifacts");
@@ -176,7 +179,14 @@ test("API client sends inline artifacts as JSON", async () => {
   const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
   const api = createApiClient(stub.fetch);
 
-  await api.uploadArtifact("CORE-1", { content: "# Draft", name: "spec.md", summary: "Initial" });
+  await api.uploadArtifact(
+    { issue: "CORE-1" },
+    {
+      content: "# Draft",
+      name: "spec.md",
+      summary: "Initial",
+    }
+  );
 
   expect(stub.requests.map(({ init, path }) => [init?.method, path])).toEqual([
     ["POST", "/api/v1/issues/CORE-1/artifacts"],
@@ -194,6 +204,7 @@ test("API client encodes list filters and artifact version query parameters", as
   const api = createApiClient(stub.fetch);
 
   await api.listIssues({
+    pinned: true,
     project: "CORE",
     status: "in progress",
     parent: "CORE-1",
@@ -206,7 +217,7 @@ test("API client encodes list filters and artifact version query parameters", as
   await api.resolveIssue("owner/repo#42");
 
   expect(stub.requests.map(({ path }) => path)).toEqual([
-    "/api/v1/issues?project=CORE&status=in+progress&parent=CORE-1&updated_since=2026-09-10T12%3A00%3A00Z",
+    "/api/v1/issues?pinned=true&project=CORE&status=in+progress&parent=CORE-1&updated_since=2026-09-10T12%3A00%3A00Z",
     "/api/v1/issues/CORE-1/events?after=3&limit=20",
     "/api/v1/issues/CORE-1/events?before=40&order=desc",
     "/api/v1/issues/CORE-1/events?ids=42%2C10",
@@ -223,6 +234,45 @@ test("API client searches with the documented query parameters", async () => {
   expect(stub.requests.map(({ path }) => path)).toEqual([
     "/api/v1/search?q=astrolabe&project=LEGION&limit=5",
   ]);
+});
+test("API client reaches project artifact and owner-scoped document endpoints", async () => {
+  const stub = stubFetch((request) =>
+    request.path.startsWith("/api/v1/artifacts/artifact-1/asks?")
+      ? Response.json([])
+      : Response.json({})
+  );
+  const api = createApiClient(stub.fetch);
+
+  await api.listProjectArtifacts("CORE");
+  await api.listProjectArtifacts("CORE", true);
+  await api.uploadArtifact(
+    { project: "CORE" },
+    { content: "# Design notes\n", name: "Design notes" }
+  );
+  await api.getProjectArtifact("CORE", "design-notes");
+  await api.listArtifactAsks("artifact-1", "open");
+  await api.createArtifactAsk("artifact-1", { question: "Ship?" });
+  await api.listArtifactComments("artifact-1");
+  await api.createArtifactComment("artifact-1", { body: "Looks good" });
+  await api.getArtifactEvents("artifact-1", { after: 2, limit: 10 });
+  await api.getIssueReferences("CORE-1");
+
+  expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
+    ["GET", "/api/v1/projects/CORE/artifacts"],
+    ["GET", "/api/v1/projects/CORE/artifacts?unlinked=true"],
+    ["POST", "/api/v1/projects/CORE/artifacts"],
+    ["GET", "/api/v1/projects/CORE/artifacts/design-notes"],
+    ["GET", "/api/v1/artifacts/artifact-1/asks?state=open"],
+    ["POST", "/api/v1/artifacts/artifact-1/asks"],
+    ["GET", "/api/v1/artifacts/artifact-1/comments"],
+    ["POST", "/api/v1/artifacts/artifact-1/comments"],
+    ["GET", "/api/v1/artifacts/artifact-1/events?after=2&limit=10"],
+    ["GET", "/api/v1/issues/CORE-1/references"],
+  ]);
+  expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({
+    content: "# Design notes\n",
+    name: "Design notes",
+  });
 });
 
 test("API client exposes response status and server error code on failure", async () => {
@@ -318,10 +368,13 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.createMessage("CORE-1", { body: "Ready" });
   await api.listArtifacts("CORE-1");
   await api.listAgents();
-  await api.uploadArtifact("CORE-1", {
-    file: new File(["spec"], "spec.md", { type: "text/markdown" }),
-    name: "spec.md",
-  });
+  await api.uploadArtifact(
+    { issue: "CORE-1" },
+    {
+      file: new File(["spec"], "spec.md", { type: "text/markdown" }),
+      name: "spec.md",
+    }
+  );
   await api.getArtifact("artifact-1");
   await api.getArtifactText("artifact-1");
   await api.getArtifactVersion("artifact-1", 3);

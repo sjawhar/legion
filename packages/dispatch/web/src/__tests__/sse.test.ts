@@ -40,6 +40,7 @@ test("ask events refresh the issue, its asks list, user state, and the inbox", (
     ["user-state"],
     ["inbox"],
     ["asks", "CORE-1"],
+    ["projects"],
   ]);
 });
 test("an ask edit refreshes the issue, its asks list, user state, and the inbox", () => {
@@ -86,6 +87,7 @@ test("an ask edit refreshes the issue, its asks list, user state, and the inbox"
     ["user-state"],
     ["inbox"],
     ["asks", "CORE-1"],
+    ["projects"],
   ]);
 });
 
@@ -252,6 +254,29 @@ test("a resolved ask refreshes the inbox, issue count, and its reply thread", ()
     ["user-state"],
     ["inbox"],
     ["asks", "CORE-1"],
+    ["projects"],
     ["ask-thread", "ask-1"],
+  ]);
+});
+
+test("a document event invalidates the artifact, its project's documents, projects, and the inbox for asks", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
+
+  applyEventInvalidations(
+    queryClient,
+    event("ask.opened", {}, { artifact_id: "artifact-1", issue_key: null, project: "CORE" })
+  );
+
+  expect(invalidated).toEqual([
+    ["artifact", "artifact-1"],
+    ["project", "CORE", "artifacts"],
+    ["projects"],
+    ["inbox"],
   ]);
 });

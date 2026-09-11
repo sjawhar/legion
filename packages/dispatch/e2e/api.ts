@@ -1,6 +1,7 @@
 import type {
   Actor,
   Artifact,
+  ArtifactDetails,
   ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
@@ -120,7 +121,7 @@ export function createAsk(
   return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
 }
 
-export function createProjectArtifact(
+export function createProjectDocument(
   project: string,
   input: CreateArtifactInput,
   options: ApiOptions = {}
@@ -129,6 +130,44 @@ export function createProjectArtifact(
     `/api/v1/projects/${encodeURIComponent(project)}/artifacts`,
     "POST",
     input,
+    options
+  );
+}
+
+export function createIssueArtifact(
+  issue: string,
+  input: CreateArtifactInput,
+  options: ApiOptions = {}
+): Promise<ArtifactUploadResponse> {
+  return request<ArtifactUploadResponse>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/artifacts`,
+    "POST",
+    input,
+    options
+  );
+}
+
+export function listProjectArtifacts(
+  project: string,
+  options: ApiOptions = {}
+): Promise<Artifact[]> {
+  return request<Artifact[]>(
+    `/api/v1/projects/${encodeURIComponent(project)}/artifacts`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+export function getProjectArtifact(
+  project: string,
+  slug: string,
+  options: ApiOptions = {}
+): Promise<ArtifactDetails> {
+  return request<ArtifactDetails>(
+    `/api/v1/projects/${encodeURIComponent(project)}/artifacts/${encodeURIComponent(slug)}`,
+    "GET",
+    undefined,
     options
   );
 }

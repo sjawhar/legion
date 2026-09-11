@@ -379,7 +379,9 @@ test("a session retraction leaves its reason on the card and removes the human's
   if (testInfo.project.name === "iphone") {
     await issuePage.getByRole("button", { name: "Open navigation" }).click();
   }
-  await expect(issuePage.getByRole("heading", { name: "Needs you (1)" })).toBeVisible();
+  const navigation = issuePage.getByRole("navigation", { name: "Navigation" });
+  await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("1");
+  await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
   if (testInfo.project.name === "iphone") {
     await issuePage.getByRole("button", { name: "Close navigation" }).click();
   }

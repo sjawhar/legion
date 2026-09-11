@@ -12,7 +12,7 @@ import {
 } from "../../theme/classes";
 
 import { type ComposerReference, composerReferences } from "../margin/Composer";
-import { parseDispatchReference } from "./routes";
+import { isProjectRoute, parseDispatchReference } from "./routes";
 
 interface UnfurlProps {
   body: string;
@@ -30,16 +30,26 @@ function excerpt(markdown: string | null | undefined): string | undefined {
 
 function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {
   const route = parseDispatchReference(reference.reference);
-  const key = route?.key;
-  const version = route?.kind === "artifact" ? route.version : undefined;
+  const issueKey = route === undefined || isProjectRoute(route) ? undefined : route.key;
+  const document = route?.kind === "document" ? route : undefined;
+  const version =
+    route?.kind === "artifact" || route?.kind === "document" ? route.version : undefined;
   const issue = useQuery({
-    enabled: key !== undefined,
-    queryKey: ["issue", key],
-    queryFn: () => api.getIssue(key ?? ""),
+    enabled: issueKey !== undefined,
+    queryKey: ["issue", issueKey],
+    queryFn: () => api.getIssue(issueKey ?? ""),
   });
-  const artifact = issue.data?.artifacts.find(
-    (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
-  );
+  const projectArtifact = useQuery({
+    enabled: document !== undefined,
+    queryKey: ["project", document?.project, "artifact", document?.slug],
+    queryFn: () => api.getProjectArtifact(document?.project ?? "", document?.slug ?? ""),
+  });
+  const artifact =
+    document === undefined
+      ? issue.data?.artifacts.find(
+          (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
+        )
+      : projectArtifact.data;
   const text = useQuery<ArtifactText | ArtifactVersionContent>({
     enabled: artifact?.kind === "doc",
     queryKey: ["artifact", artifact?.id, version ?? "text"],
@@ -54,6 +64,18 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
   const description =
     excerpt(markdown) ?? (artifact === undefined ? issue.data?.status : undefined);
 
+  if (document !== undefined) {
+    return (
+      <div
+        className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault}`}
+      >
+        <span className={`block font-medium ${linkText}`}>{title ?? reference.reference}</span>
+        {description === undefined ? null : (
+          <span className={`mt-1 block ${textSecondaryOnSurface}`}>{description}</span>
+        )}
+      </div>
+    );
+  }
   return (
     <a
       className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault} ${cardHoverBorder}`}
