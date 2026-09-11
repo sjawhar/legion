@@ -628,10 +628,7 @@ export async function executeDispatchTool(
           marks.length === 0
             ? document.markdown
             : `${document.markdown}\n\nOpen anchored asks/comments: ${marks.join(", ")}`,
-        details: {
-          issue: resolved.issue.key,
-          topic: dispatchIssueSubject(resolved.issue.key, ">"),
-        },
+        details: { issue: resolved.issue.key },
       };
     }
     case "dispatch_artifact": {
@@ -664,43 +661,38 @@ export async function executeDispatchTool(
         },
       };
     }
+    // Reads report the issue but no `topic`: only a write subscribes the session to the issue.
     case "dispatch_read": {
       if (issueArguments.ref?.kind === "ask") {
         const askRead = await client.getAsk(issueArguments.ref.id);
         return {
           text: askSummary(askRead),
-          details: {
-            issue: askRead.ask.issue_key,
-            topic: dispatchIssueSubject(askRead.ask.issue_key, ">"),
-          },
+          details: { issue: askRead.ask.issue_key },
         };
       }
       if (issueArguments.ref?.kind === "comment") {
         const comment = await client.getComment(issueArguments.ref.id);
         return {
           text: commentSummary(comment),
-          details: {
-            issue: comment.comment.issue_key,
-            topic: dispatchIssueSubject(comment.comment.issue_key, ">"),
-          },
+          details: { issue: comment.comment.issue_key },
         };
       }
       const read = await client.read(issue());
       if (issueArguments.ref?.kind === "log") {
         return {
           text: logSummary(read.issue, read.events),
-          details: { issue: read.issue.key, topic: dispatchIssueSubject(read.issue.key, ">") },
+          details: { issue: read.issue.key },
         };
       }
       if (issueArguments.ref?.kind === "children") {
         return {
           text: childrenSummary(read.issue),
-          details: { issue: read.issue.key, topic: dispatchIssueSubject(read.issue.key, ">") },
+          details: { issue: read.issue.key },
         };
       }
       return {
         text: issueSummary(read.issue, read.events),
-        details: { issue: read.issue.key, topic: dispatchIssueSubject(read.issue.key, ">") },
+        details: { issue: read.issue.key },
       };
     }
     default:

@@ -417,12 +417,9 @@ describe("executeDispatchTool", () => {
 
     expect(result).toEqual({
       text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
-      details: {
-        issue: "DSP-42",
-        topic: dispatchIssueSubject("DSP-42", ">"),
-      },
+      details: { issue: "DSP-42" },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
+    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
@@ -802,12 +799,9 @@ describe("executeDispatchTool", () => {
         "comment-1 · user sami",
         "Body: JSON, please.",
       ].join("\n"),
-      details: {
-        issue: "DSP-42",
-        topic: dispatchIssueSubject("DSP-42", ">"),
-      },
+      details: { issue: "DSP-42" },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
+    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/asks/ask-42"]);
   });
 
@@ -944,15 +938,12 @@ describe("executeDispatchTool", () => {
         "> Revised wording",
         "Body: Revised.",
       ].join("\n"),
-      details: {
-        issue: "DSP-42",
-        topic: dispatchIssueSubject("DSP-42", ">"),
-      },
+      details: { issue: "DSP-42" },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
+    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/comments/comment-42"]);
   });
-  test("returns a subscription topic when reading an issue summary", async () => {
+  test("reading an issue summary does not subscribe the session to the issue", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       if (target.pathname === "/api/v1/issues/DSP-42") {
@@ -980,11 +971,8 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.details).toEqual({
-      issue: "DSP-42",
-      topic: dispatchIssueSubject("DSP-42", ">"),
-    });
-    expect(dispatchSubscriptionTopic(result.details)).toBe(dispatchIssueSubject("DSP-42", ">"));
+    expect(result.details).toEqual({ issue: "DSP-42" });
+    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
   });
 
   test("reads recent events from a Dispatch log reference", async () => {
@@ -1031,7 +1019,7 @@ describe("executeDispatchTool", () => {
         "Events:",
         "- #3 comment.created · user sami · 2026-09-09T00:02:00Z",
       ].join("\n"),
-      details: { issue: "DSP-42", topic: dispatchIssueSubject("DSP-42", ">") },
+      details: { issue: "DSP-42" },
     });
   });
 
@@ -1066,7 +1054,7 @@ describe("executeDispatchTool", () => {
 
     expect(result).toEqual({
       text: ["Key: DSP-42", "Children:", "- DSP-43: A child issue (todo)"].join("\n"),
-      details: { issue: "DSP-42", topic: dispatchIssueSubject("DSP-42", ">") },
+      details: { issue: "DSP-42" },
     });
   });
 });

@@ -23,7 +23,8 @@ configuration resolves a URL and bearer token. Set
 `~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`; `DISPATCH_URL`
 and `DISPATCH_TOKEN` override those settings. A successful mutation returns
 `details.topic`, and the `tool_result` hook subscribes to that exact retained
-Dispatch issue topic.
+Dispatch issue topic. Reads (`dispatch_read`, `dispatch_doc_read`) return only
+`details.issue`: surveying the board never subscribes the session.
 
 ## Where to look
 
