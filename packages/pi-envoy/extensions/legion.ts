@@ -20,7 +20,13 @@ import { installWorkerGhShim, workerGhEnvironment } from "../src/legion/gh-shim"
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import { createLegionTool } from "../src/legion/tools";
 import { setJjIdentity } from "../src/legion/workspace-helpers";
-import type { CommandContext, PiApi, SessionContext, ToolCallEventResult } from "../src/pi-types";
+import type {
+  CommandContext,
+  PiApi,
+  SessionContext,
+  ToolCallEvent,
+  ToolCallEventResult,
+} from "../src/pi-types";
 import { claimEnvoyRole } from "./envoy";
 
 interface LegionCapability {
@@ -145,10 +151,24 @@ function isSingleLegionCommand(command: unknown): boolean {
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
 /** Code-mutation tools blocked for an architect session (root or sub-architect) and a reviewer
- * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`). */
+ * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`).
+ * `write` here means a real filesystem write; see `isToolDeviceInvocation` for the `xd://`
+ * tool-device carve-out. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
 /** The merger verifies and reports only: no code mutation, and no further Legion spawns. */
 const MERGER_BLOCKED_TOOLS = [...CODE_MUTATION_TOOLS, "task"];
+
+/** OMP's "tool device" convention invokes extension-registered tools (e.g. the nine Dispatch
+ * tools) as a `write` whose `path` is an `xd://<tool>` URI carrying the tool's JSON args as
+ * `content`. That `write` is a tool invocation, not a file mutation -- it must never trip the
+ * `CODE_MUTATION_TOOLS` gate below for any role. */
+function isToolDeviceInvocation(toolCall: ToolCallEvent): boolean {
+  return (
+    toolCall.toolName === "write" &&
+    typeof toolCall.input.path === "string" &&
+    toolCall.input.path.startsWith("xd://")
+  );
+}
 
 export default function legionExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -478,10 +498,15 @@ export default function legionExtension(pi: PiApi): void {
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
     const sessionID = context.sessionManager.getSessionId();
     const active = capability?.sessionID === sessionID ? capability : undefined;
+    // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
+    // nine Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
+    // below so the architect/reviewer/merger role checks apply only to real file writes.
+    const isToolDevice = isToolDeviceInvocation(toolCall);
     // `role === "architect"` covers both kinds: the root architect and a sub-architect (a
     // phase worker with role "architect") both delegate all code work to phase workers.
     if (
       active?.role === "architect" &&
+      !isToolDevice &&
       (CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
         (toolCall.toolName === "bash" && !isSingleLegionCommand(toolCall.input.command)))
     ) {
@@ -490,13 +515,21 @@ export default function legionExtension(pi: PiApi): void {
     // Only a phase-worker session (never the root or sub-architect kinds above) is further
     // restricted by role below.
     if (active?.kind === "phase-worker") {
-      if (active.role === "reviewer" && CODE_MUTATION_TOOLS.includes(toolCall.toolName)) {
+      if (
+        active.role === "reviewer" &&
+        !isToolDevice &&
+        CODE_MUTATION_TOOLS.includes(toolCall.toolName)
+      ) {
         return {
           block: true,
           reason: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
         };
       }
-      if (active.role === "merger" && MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)) {
+      if (
+        active.role === "merger" &&
+        !isToolDevice &&
+        MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)
+      ) {
         return { block: true, reason: "the merger only verifies and reports" };
       }
     }

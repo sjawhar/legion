@@ -1114,6 +1114,69 @@ describe("Legion OMP extension", () => {
       }
     }
   });
+  test("allows xd:// tool-device writes through the mutation gate but still blocks real file writes", async () => {
+    const blockedReason = (role: LegionRole): string =>
+      role === "merger"
+        ? "the merger only verifies and reports"
+        : role === "reviewer"
+          ? "the reviewer edits nothing except the final .legion/ cleanup commit via bash"
+          : "the architect delegates all code work to phase workers";
+
+    for (const role of ["architect", "reviewer", "merger"] as const) {
+      const workspace = await createJjWorkspace();
+      const { toolCall, context } = await bootWorker({
+        role,
+        workspace,
+        sessionId: `ses_${role}_xd`,
+        extraRoutes: (url) => {
+          if (url.pathname === "/legion/v1/grants") {
+            return Response.json({
+              grantId: `grant-${role}`,
+              expiresAt: "2099-01-01T00:00:00.000Z",
+            });
+          }
+          return undefined;
+        },
+      });
+
+      // A tool-device invocation (write to an `xd://` path) is a tool call, not a file
+      // mutation, and must pass for every gated role.
+      await expect(
+        toolCall(
+          {
+            toolName: "write",
+            toolCallId: `call-${role}-xd-ok`,
+            input: { path: "xd://dispatch_ask", content: "{}" },
+          },
+          context
+        )
+      ).resolves.toBeUndefined();
+
+      // A real filesystem write is still blocked.
+      await expect(
+        toolCall(
+          {
+            toolName: "write",
+            toolCallId: `call-${role}-fs`,
+            input: { path: "/tmp/whatever.ts", content: "x" },
+          },
+          context
+        )
+      ).resolves.toEqual({ block: true, reason: blockedReason(role) });
+
+      // A malformed/missing `path` never qualifies as a tool-device invocation: it is still
+      // treated as a mutation and blocked.
+      await expect(
+        toolCall(
+          { toolName: "write", toolCallId: `call-${role}-bad-path`, input: { path: 42 } },
+          context
+        )
+      ).resolves.toEqual({ block: true, reason: blockedReason(role) });
+      await expect(
+        toolCall({ toolName: "write", toolCallId: `call-${role}-no-path`, input: {} }, context)
+      ).resolves.toEqual({ block: true, reason: blockedReason(role) });
+    }
+  });
   test("rewrites a booted worker's bash calls with a fresh daemon grant and a PATH-scoped gh shim", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
