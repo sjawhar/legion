@@ -576,16 +576,20 @@ export const IssueEventPayloadSchema = z.object({
 });
 
 export const ArtifactCreatedEventPayloadSchema = z.object({
-  artifact: z.object({ name: z.string().optional() }).optional(),
+  artifact: z
+    .object({ id: z.string().optional(), slug: z.string().optional(), name: z.string().optional() })
+    .optional(),
 });
 
 export const ArtifactVersionEventPayloadSchema = z.object({
+  artifact_id: z.string().optional(),
   name: z.string().optional(),
   version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
   diff: z.string().optional(),
 });
 
 const askEventPayloadFields = {
+  id: z.string().optional(),
   opened_event_id: z.number().int().positive(),
   question: z.string().optional(),
   options: z.array(z.object({ label: z.string().optional() })).nullish(),
@@ -636,14 +640,14 @@ export const CommentEventPayloadSchema = z.object({
   ask_question: z.string().optional(),
   anchor: z.object({ quote: z.string().optional() }).nullish(),
   suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
-  author: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
+  author: z.object({ kind: z.string(), id: z.string() }).optional(),
   created_at: z.string().optional(),
 });
 
 export const MessageEventPayloadSchema = z.object({
   id: z.string().optional(),
   body: z.string().optional(),
-  author: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
+  author: z.object({ kind: z.string(), id: z.string() }).optional(),
 });
 
 export const ChildStatusEventPayloadSchema = z.object({

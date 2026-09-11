@@ -226,7 +226,7 @@ dispatch_artifact({ issue?, project?, name: "spec.md", content: "# Design\n..." 
 Exactly one of `issue` and `project` is required. A project upload creates an unlinked project document; it must not include `artifact`.
 Exactly one of `path` and `content` is required. It returns issue or project-document owner details plus `artifact`, `version`, and its
 write `topic`. Uploading the same `name` creates its next version. Address an existing artifact by the slug shown in the upload result
-or by its filename.
+or by its filename; the slug also arrives on `artifact.created` events.
 
 ## Messages
 

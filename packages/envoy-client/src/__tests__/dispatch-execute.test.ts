@@ -520,7 +520,7 @@ describe("executeDispatchTool", () => {
     };
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const request = new URL(String(url));
-      paths.push(request.pathname);
+      paths.push(request.pathname + request.search);
       if (request.pathname === "/api/v1/projects/CORE/artifacts/garrett-reply-draft.md") {
         return new Response(JSON.stringify({ code: "ARTIFACT_NOT_FOUND", error: "not found" }), {
           status: 404,
@@ -549,7 +549,117 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe("# Garrett reply");
-    expect(paths).toContain("/api/v1/projects/CORE/artifacts");
+    expect(paths).toContain("/api/v1/projects/CORE/artifacts?unlinked=true");
+  });
+
+  test("resolves a project document by filename, never an issue-owned artifact of the same name", async () => {
+    const paths: string[] = [];
+    const projectDoc = {
+      id: "artifact-99",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/notes-md",
+      slug: "notes-md",
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: { kind: "user", id: "alice" },
+      created_at: "2026-09-11T00:00:00Z",
+      versions: [],
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const request = new URL(String(url));
+      paths.push(request.pathname + request.search);
+      if (request.pathname === "/api/v1/projects/CORE/artifacts/notes.md") {
+        return new Response(JSON.stringify({ code: "ARTIFACT_NOT_FOUND", error: "not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (request.pathname === "/api/v1/projects/CORE/artifacts") {
+        // The unlinked-only route excludes CORE-1's same-named artifact; a caller
+        // that forgot the `unlinked=true` flag would see it here and could match it.
+        return request.search === "?unlinked=true"
+          ? response([projectDoc])
+          : response([
+              {
+                id: "artifact-1",
+                issue_key: "CORE-1",
+                project: "CORE",
+                ref_key: "CORE-1/notes-md",
+                slug: "notes-md-issue",
+                name: "notes.md",
+                kind: "doc",
+                primary: false,
+                created_by: { kind: "user", id: "alice" },
+                created_at: "2026-09-11T00:00:00Z",
+                versions: [],
+              },
+              projectDoc,
+            ]);
+      }
+      if (request.pathname.endsWith("/text")) return response({ markdown: "# Notes", version: 1 });
+      if (request.pathname.endsWith("/asks") || request.pathname.endsWith("/comments")) {
+        return response([]);
+      }
+      throw new Error(`unexpected request: ${request.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { project: "CORE", artifact: "notes.md" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toMatchObject({ project: "CORE", document: "CORE/notes-md" });
+    expect(paths).toContain("/api/v1/projects/CORE/artifacts?unlinked=true");
+  });
+
+  test("rejects a filename shared by more than one unlinked project document", async () => {
+    const duplicateDoc = (id: string) => ({
+      id,
+      issue_key: null,
+      project: "CORE",
+      ref_key: `CORE/${id}`,
+      slug: id,
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: { kind: "user", id: "alice" },
+      created_at: "2026-09-11T00:00:00Z",
+      versions: [],
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const request = new URL(String(url));
+      if (request.pathname === "/api/v1/projects/CORE/artifacts/notes.md") {
+        return new Response(JSON.stringify({ code: "ARTIFACT_NOT_FOUND", error: "not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (request.pathname === "/api/v1/projects/CORE/artifacts") {
+        return response([duplicateDoc("artifact-a"), duplicateDoc("artifact-b")]);
+      }
+      throw new Error(`unexpected request: ${request.pathname}`);
+    };
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { project: "CORE", artifact: "notes.md" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(/ambiguous/);
   });
 
   test("renders a no-new-version document edit and forwards its summary", async () => {
