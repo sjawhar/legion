@@ -289,7 +289,6 @@ omp_invocation: mise x ${omp_pin} -- omp
 ${omp_launch_prefix_yaml}
 gates:
   design: root-issues
-  merge: human
 github_apps:
   implement:
     app_id: "${LEGION_IMPLEMENT_APP_ID}"
