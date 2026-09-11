@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { EnvelopeSchema } from "./envelope";
 import {
   agentSubject,
+  dispatchDocumentSubject,
   GHOSTWISPR_TOPIC_PREFIX,
   ghostWisprSubject,
   githubPushSubject,
@@ -170,6 +171,12 @@ describe("EnvelopeSchema", () => {
   test("rejects non-integer timestamps", () => {
     expectInvalidFields({ issued_at: 1.5, expires_at: 2.5 }, ["issued_at", "expires_at"]);
   });
+});
+
+test("builds a project document Dispatch subject", () => {
+  expect(dispatchDocumentSubject("CORE", "runbook-md", ">")).toBe(
+    "notifications.dispatch.document.CORE.runbook-md.>"
+  );
 });
 
 describe("githubResourceSubject", () => {

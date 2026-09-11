@@ -222,3 +222,20 @@ test("requires previous fields on ask edit events", () => {
     }).success
   ).toBe(false);
 });
+
+test("accepts a document event with an unlinked owner", () => {
+  expect(
+    DispatchEventSchema.safeParse({
+      id: 12,
+      issue_key: null,
+      artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      project: "CORE",
+      seq: 4,
+      type: "artifact.version",
+      actor: { kind: "session", id: "session-1" },
+      notify: true,
+      created_at: "2026-09-11T04:05:29Z",
+      payload: {},
+    }).success
+  ).toBe(true);
+});

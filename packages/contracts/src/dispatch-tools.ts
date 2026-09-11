@@ -24,6 +24,32 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 
 const ISSUE_REFERENCE =
   "An issue is a native KEY or external owner/repo#n reference; an external reference creates its native issue in the repository's dashboard-configured project or, failing that, the default project (DISPATCH_DEFAULT_PROJECT).";
+
+const OWNER_REFERENCE =
+  "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
+
+function documentOwnerValidation(
+  requireArtifact: boolean
+): NonNullable<DispatchToolSpec["validation"]> {
+  return {
+    check: (value) => {
+      const input = value as {
+        readonly issue?: unknown;
+        readonly project?: unknown;
+        readonly artifact?: unknown;
+        readonly ref?: unknown;
+      };
+      const hasIssue = typeof input.issue === "string";
+      const hasProject = typeof input.project === "string";
+      return (
+        (hasIssue !== hasProject || (!hasIssue && !hasProject && typeof input.ref === "string")) &&
+        (!hasProject || !requireArtifact || typeof input.artifact === "string")
+      );
+    },
+    message:
+      "Exactly one of issue and project is required; with project, artifact names the document.",
+  };
+}
 export const SPEC_SECTIONS = [
   "Decisions needed",
   "Acceptance",
@@ -70,10 +96,12 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_ask",
     description:
-      "Open a durable, answerable decision on an issue. Do not use it for a status update or discussion; " +
-      `use dispatch_message instead. Question is at most 800 characters and has at most 8 options. ${ISSUE_REFERENCE}`,
+      "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
+      `use dispatch_message instead. Question is at most 800 characters and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
-      issue: z.string().describe(ISSUE_REFERENCE),
+      issue: z.string().describe(ISSUE_REFERENCE).optional(),
+      project: z.string().describe("Project key owning the document.").optional(),
+      artifact: z.string().describe("Project document slug or id.").optional(),
       question: z.string({ max: 800 }).describe("Decision question, at most 800 characters."),
       options: z
         .array(
@@ -99,6 +127,7 @@ export const dispatchToolSpecs = [
         .describe("Optional document location for the question.")
         .optional(),
     }),
+    validation: documentOwnerValidation(true),
   },
   {
     name: "dispatch_edit_ask",
@@ -158,11 +187,12 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     description:
-      "Add review feedback to an issue or document quote, or reply to a question asked with dispatch_ask. " +
+      "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch_suggest instead. Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+      `dispatch_suggest instead. Body is at most 2,000 characters. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
-      issue: z.string().describe(ISSUE_REFERENCE),
+      issue: z.string().describe(ISSUE_REFERENCE).optional(),
+      project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Artifact slug or id required when quote is given.").optional(),
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z
@@ -179,14 +209,16 @@ export const dispatchToolSpecs = [
         )
         .optional(),
     }),
+    validation: documentOwnerValidation(true),
   },
   {
     name: "dispatch_suggest",
     description:
       "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " +
-      `dispatch_comment instead. Optional explanation is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+      `dispatch_comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
-      issue: z.string().describe(ISSUE_REFERENCE),
+      issue: z.string().describe(ISSUE_REFERENCE).optional(),
+      project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Artifact slug or id containing the quoted text."),
       quote: z.string().describe("Exact document text to replace."),
       replace_with: z.string().describe("Replacement text."),
@@ -199,6 +231,7 @@ export const dispatchToolSpecs = [
         .describe("Optional zero-based occurrence of quote.")
         .optional(),
     }),
+    validation: documentOwnerValidation(true),
   },
   {
     name: "dispatch_message",
@@ -213,10 +246,11 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_doc_edit",
     description:
-      "Apply deterministic text edits to a document. Do not use it for review feedback or for reading; use " +
-      `dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. ${ISSUE_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
+      "Apply deterministic text edits to an issue or project document. Do not use it for review feedback or for reading; use " +
+      `dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
-      issue: z.string().describe(ISSUE_REFERENCE),
+      issue: z.string().describe(ISSUE_REFERENCE).optional(),
+      project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Artifact slug or id for the document."),
       ops: z
         .array(
@@ -236,30 +270,34 @@ export const dispatchToolSpecs = [
         .describe("Flat tagged edits; the server validates fields required for each operation."),
       summary: z.string().describe("Optional named-version summary.").optional(),
     }),
+    validation: documentOwnerValidation(true),
   },
   {
     name: "dispatch_doc_read",
     description:
       "Read a live document or a named document version. Do not use it for issue status, asks, or events; " +
-      "use dispatch_read instead. Supply ref or issue; issue plus an omitted artifact reads the primary document. " +
-      `${ISSUE_REFERENCE}`,
+      "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
+      OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
+      project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Optional artifact slug or id; primary document by default.")
+        .describe("Optional artifact slug or id; primary document by default for an issue.")
         .optional(),
       version: z.number({ int: true, min: 1 }).describe("Optional version number.").optional(),
       ref: z.string().describe("Optional dispatch:// document reference.").optional(),
     }),
+    validation: documentOwnerValidation(true),
   },
   {
     name: "dispatch_artifact",
     description:
-      "Attach a local file or inline text as an issue artifact. Do not use it to edit a live document; use " +
-      `dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. ${ISSUE_REFERENCE}`,
+      "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
+      `dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
-      issue: z.string().describe(ISSUE_REFERENCE),
+      issue: z.string().describe(ISSUE_REFERENCE).optional(),
+      project: z.string().describe("Project key for an unlinked document.").optional(),
       name: z.string().describe("Artifact filename shown in Dispatch."),
       path: z.string().describe("Local path to the file to upload.").optional(),
       content: z.string().describe("Inline text to store as a Markdown document.").optional(),
@@ -267,22 +305,34 @@ export const dispatchToolSpecs = [
     }),
     validation: {
       check: (value) => {
-        const input = value as { readonly path?: unknown; readonly content?: unknown };
-        return (typeof input.path === "string") !== (typeof input.content === "string");
+        const input = value as {
+          readonly issue?: unknown;
+          readonly project?: unknown;
+          readonly path?: unknown;
+          readonly content?: unknown;
+        };
+        return (
+          documentOwnerValidation(false).check(value) &&
+          (typeof input.path === "string") !== (typeof input.content === "string")
+        );
       },
-      message: "Exactly one of path or content is required.",
+      message:
+        "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.",
     },
   },
   {
     name: "dispatch_read",
     description:
-      "Read an issue summary, targeted ask, or targeted comment reply chain. Do not use it for document " +
-      "contents; use dispatch_doc_read instead. Supply issue or ref. " +
-      ISSUE_REFERENCE,
+      "Read an issue or project-document summary, targeted ask, or targeted comment reply chain. Do not use it for document " +
+      "contents; use dispatch_doc_read instead. Supply ref, issue, or project plus artifact. " +
+      OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
-      ref: z.string().describe("Optional dispatch:// issue reference.").optional(),
+      project: z.string().describe("Project key owning the document.").optional(),
+      artifact: z.string().describe("Project document slug or id.").optional(),
+      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
     }),
+    validation: documentOwnerValidation(true),
   },
   {
     name: "dispatch_search",

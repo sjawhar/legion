@@ -1,7 +1,9 @@
 export const AGENT_TOPIC_PREFIX = "notifications.agent." as const;
 export const ROLE_TOPIC_PREFIX = "notifications.role." as const;
 
-export const DISPATCH_ISSUE_TOPIC_PREFIX = "notifications.dispatch.issue." as const;
+export const DISPATCH_TOPIC_PREFIX = "notifications.dispatch." as const;
+export const DISPATCH_ISSUE_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}issue.` as const;
+export const DISPATCH_DOCUMENT_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}document.` as const;
 
 export type DispatchIssueSubject<
   IssueKey extends string = string,
@@ -14,6 +16,21 @@ export function dispatchIssueSubject<IssueKey extends string, Type extends strin
 ): DispatchIssueSubject<IssueKey, Type>;
 export function dispatchIssueSubject(issueKey: string, type: string) {
   return `${DISPATCH_ISSUE_TOPIC_PREFIX}${issueKey}.${type}`;
+}
+
+export type DispatchDocumentSubject<
+  Project extends string = string,
+  Slug extends string = string,
+  Type extends string = string,
+> = `${typeof DISPATCH_DOCUMENT_TOPIC_PREFIX}${Project}.${Slug}.${Type}`;
+
+export function dispatchDocumentSubject<
+  Project extends string,
+  Slug extends string,
+  Type extends string,
+>(project: Project, slug: Slug, type: Type): DispatchDocumentSubject<Project, Slug, Type>;
+export function dispatchDocumentSubject(project: string, slug: string, type: string) {
+  return `${DISPATCH_DOCUMENT_TOPIC_PREFIX}${project}.${slug}.${type}`;
 }
 
 export type AgentSubject<Session extends string = string> =
@@ -209,6 +226,7 @@ export function whatsappSubject(phone: string, jid: string, kind: string) {
 export type Subject =
   | AgentSubject
   | DispatchIssueSubject
+  | DispatchDocumentSubject
   | GithubSubject
   | GithubResourceSubject
   | GithubPushSubject

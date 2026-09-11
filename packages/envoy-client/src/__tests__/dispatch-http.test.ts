@@ -78,6 +78,55 @@ describe("DispatchClient", () => {
       headers: { Authorization: "Bearer secret", Accept: "application/json" },
     });
   });
+
+  test("maps project document and reference routes to authenticated API requests", async () => {
+    const { fetchImpl, requests } = fakeFetch(
+      Array.from({ length: 11 }, () => jsonResponse({ ok: true }))
+    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await client.listProjectArtifacts("CORE", true);
+    await client.projectArtifact("CORE", { name: "runbook.md", content: "# Runbook", actor });
+    await client.getProjectArtifact("CORE", "runbook-md");
+    await client.getArtifactAsks("artifact-1");
+    await client.artifactAsk("artifact-1", { question: "Publish?", actor });
+    await client.getArtifactComments("artifact-1");
+    await client.artifactComment("artifact-1", { body: "Looks good.", actor });
+    await client.artifactSuggest("artifact-1", {
+      anchor: { artifact: "artifact-1", quote: "draft" },
+      replace_with: "final",
+      actor,
+    });
+    await client.getArtifactEvents("artifact-1");
+    await client.getIssueReferences("CORE-1");
+    await client.getArtifactReferences("artifact-1");
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/projects/CORE/artifacts?unlinked=true",
+      "/api/v1/projects/CORE/artifacts",
+      "/api/v1/projects/CORE/artifacts/runbook-md",
+      "/api/v1/artifacts/artifact-1/asks",
+      "/api/v1/artifacts/artifact-1/asks",
+      "/api/v1/artifacts/artifact-1/comments",
+      "/api/v1/artifacts/artifact-1/comments",
+      "/api/v1/artifacts/artifact-1/comments",
+      "/api/v1/artifacts/artifact-1/events?after=0&limit=200",
+      "/api/v1/issues/CORE-1/references",
+      "/api/v1/artifacts/artifact-1/references",
+    ]);
+    expect(requestBody(requests[1] as RecordedRequest)).toEqual({
+      name: "runbook.md",
+      content: "# Runbook",
+      actor,
+    });
+    expect(requestBody(requests[7] as RecordedRequest)).toEqual({
+      anchor: { artifact: "artifact-1", quote: "draft" },
+      suggestion: { replace_with: "final" },
+      actor,
+    });
+  });
   test("maps dispatch operations to authenticated JSON and multipart API requests", async () => {
     const { fetchImpl, requests } = fakeFetch([
       ...Array.from({ length: 15 }, () => jsonResponse({ ok: true })),

@@ -103,7 +103,7 @@ function CommentCard({
           {anchor.quote}
         </blockquote>
       )}
-      {anchor?.orphaned ? (
+      {anchor?.orphaned && comment.issue_key !== null ? (
         <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>
           Text changed.{" "}
           <Link

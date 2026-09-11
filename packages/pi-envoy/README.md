@@ -110,18 +110,17 @@ The user file is `~/.config/opencode/envoy.json`; a
 an invalid URL, or an empty token leaves the twelve tools unavailable and reports
 the source of the error.
 
-Issue-scoped calls use a native `KEY` or an external `owner/repo#n` reference. A Legion
-session may omit `issue` when `LEGION_ISSUE` identifies its root issue and its working
-directory resolves to a repository. `dispatch_doc_read` and `dispatch_read` also accept
-`dispatch://` references. `dispatch_search` needs only its query and returns no subscription
-topic. `dispatch_edit_ask` and `dispatch_resolve_ask` instead identify an existing ask with
-`ask`.
-
-Every mutation result carries `details.topic`. Issue writes use
-`notifications.dispatch.issue.<KEY>.>`; mutations of a document ask use its
-`notifications.dispatch.document.<PROJECT>.<SLUG>.>` topic. The extension's `tool_result` hook
+Owner-scoped calls use either an issue (a native `KEY` or external `owner/repo#n` reference) or
+an unlinked project document (`project` plus its `artifact` slug). A Legion session may omit
+`issue` when `LEGION_ISSUE` identifies its root issue and its working directory resolves to a
+repository. `dispatch_doc_read` and `dispatch_read` also accept `dispatch://` references,
+including `dispatch://PROJECT/artifact/<slug>`. `dispatch_search` needs only its query and
+returns no subscription topic. `dispatch_edit_ask` and `dispatch_resolve_ask` instead identify
+an existing ask with `ask`. Every mutation result carries `details.topic`: issue writes use
+`notifications.dispatch.issue.<KEY>.>` and project-document writes use
+`notifications.dispatch.document.<PROJECT>.<SLUG>.>`. The extension's `tool_result` hook
 subscribes to that exact topic, then registers the session so retained events arrive as Pi
-steering. `dispatch_doc_read` and `dispatch_read` return issue details without a subscription
+steering. `dispatch_doc_read` and `dispatch_read` return owner details without a subscription
 topic.
 
 The shared contract supplies the model-facing schemas and descriptions. The

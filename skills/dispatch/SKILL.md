@@ -44,13 +44,16 @@ transcript of your thinking. Use exactly these document headings in this order.
 - [ ] The spec covers one implementation plan's worth of work.
 - [ ] Every requirement has exactly one reading.
 
-## Your issue
+## Your owner
 
-Every session works on an issue. Legion pre-fills `issue` from `LEGION_ISSUE`: use a native issue key
-such as `LEGION-3`, an external `owner/repo#n` reference, or a bare positive number (resolved
-against the cwd repository). Otherwise pass the issue to every issue-scoped tool as its native key
-or an external `owner/repo#n` reference. On first use, an external reference creates its native issue in the
-project configured for that repository in Dispatch Settings, then falls back to `DISPATCH_DEFAULT_PROJECT`.
+Every session works on an issue or project document. Legion pre-fills `issue` from
+`LEGION_ISSUE`: use a native issue key such as `LEGION-3`, an external `owner/repo#n`
+reference, or a bare positive number (resolved against the cwd repository). Otherwise pass
+exactly one owner to every owner-scoped tool: `issue` for an issue, or `project` and
+`artifact` for an unlinked project document. A project key such as `CORE` with artifact
+`design-notes` identifies `dispatch://CORE/artifact/design-notes`. On first use, an external
+issue reference creates its native issue in the project configured for that repository in
+Dispatch Settings, then falls back to `DISPATCH_DEFAULT_PROJECT`.
 
 Architects create newly tracked child work with:
 ```ts
@@ -78,7 +81,9 @@ call with `force: true` when it is genuinely new work.
 Open a decision with:
 ```ts
 dispatch_ask({
-  issue,
+  issue?,
+  project?,
+  artifact?,
   question,
   options?: { label, description? }[],
   multiple?,
@@ -86,7 +91,8 @@ dispatch_ask({
   anchor?: { artifact, quote, occurrence? },
 })
 ```
-It returns `details` `{ issue, topic, ask }`. Options are buttons: never enumerate choices in
+It returns `details` `{ issue, topic, ask }` for an issue or `{ project, artifact, document,
+topic, ask }` for a project document. Options are buttons: never enumerate choices in
 prose. Put the recommendation in `question`, and put each selectable choice in `options`.
 Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence` is
 zero-based and selects a repeated quote. The server writes the resulting mark. The HTTP API also
@@ -132,16 +138,16 @@ Write and update the issue specification according to [Writing a spec](#writing-
 Read the current document before changing it:
 
 ```ts
-dispatch_doc_read({ issue?, artifact?, version?, ref? })
+dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
 ```
-It returns live or versioned markdown with open marks and `details` `{ issue }`; omit `artifact`
-with `issue` to read the issue specification. Then write narrative with:
-
+It returns live or versioned markdown with open marks. `issue` with an omitted `artifact`
+reads the issue specification; a project needs `artifact`; and a
+`dispatch://PROJECT/artifact/<slug>` ref supplies both. Then write narrative with:
 ```ts
-dispatch_doc_edit({ issue, artifact, ops, summary? })
+dispatch_doc_edit({ issue?, project?, artifact, ops, summary? })
 ```
-It returns `details` `{ issue, topic, applied, version? }`. `ops` is an array of this exact
-`EditOp` shape:
+It returns issue or project-document owner details plus `applied`, optional `version`, and its
+write `topic`. `ops` is an array of this exact `EditOp` shape:
 
 ```ts
 type EditOp = {
@@ -171,23 +177,24 @@ into a message.
 Add feedback with:
 
 ```ts
-dispatch_comment({ issue, artifact?, quote?, occurrence?, body, reply_to?, reply_to_ask? })
+dispatch_comment({ issue?, project?, artifact?, quote?, occurrence?, body, reply_to?, reply_to_ask? })
 ```
 
-It returns `details` `{ issue, topic, comment }`. `quote` requires `artifact`; omit both for a
-floating issue comment. A reply (`reply_to`/`reply_to_ask`) takes no `quote`; it belongs to its
-parent's anchor. Use `reply_to` to continue a comment thread at its root; a reply to a resolved
-thread reopens it. Use `reply_to_ask` to reply directly under a question asked with
-`dispatch_ask`. The two are mutually exclusive. Comments are edited only by their author from the
-dashboard.
+It returns issue or project-document owner details plus `comment` and, for writes, `topic`.
+`quote` requires `artifact`; omit both for a floating issue comment. A reply
+(`reply_to`/`reply_to_ask`) takes no `quote`; it belongs to its parent's anchor. Use `reply_to`
+to continue a comment thread at its root; a reply to a resolved thread reopens it. Use
+`reply_to_ask` to reply directly under a question asked with `dispatch_ask`. The two are
+mutually exclusive. Comments are edited only by their author from the dashboard.
 
 Propose an exact replacement instead of describing it:
 
 ```ts
-dispatch_suggest({ issue, artifact, quote, replace_with, body?, occurrence? })
+dispatch_suggest({ issue?, project?, artifact, quote, replace_with, body?, occurrence? })
 ```
 
-It returns `details` `{ issue, topic, comment }`. A human accepts or rejects a suggestion. On
+It returns issue or project-document owner details plus `comment` and its write `topic`. A
+human accepts or rejects a suggestion. On
 `TARGET_AMBIGUOUS`, add zero-based `occurrence`. On `TARGET_NOT_FOUND`, re-read the document
 before retrying. `INVALID_ANCHOR` requires exactly one nonempty anchor `quote` or `mark_id`;
 `ANCHOR_MISSING` means a browser mark was not observed in the live tree, and
@@ -201,19 +208,20 @@ reject an invalid actor or route.
 Attach an image, diagram, or local file with:
 
 ```ts
-dispatch_artifact({ issue, name, path, summary? })
+dispatch_artifact({ issue?, project?, name, path, summary? })
 ```
 
 Or, when the text is already in the call, post a Markdown document directly:
 
 ```ts
-dispatch_artifact({ issue, name: "spec.md", content: "# Design\n..." })
+dispatch_artifact({ issue?, project?, name: "spec.md", content: "# Design\n..." })
 ```
 
-Exactly one of `path` and `content` is required. The inline form sends JSON with
-`Content-Type: application/json`. It returns `details` `{ issue, topic, artifact, version }`.
-Uploading the same `name` creates its next version. Use `content` when the text is already in
-the call.
+Exactly one of `issue` and `project` is required. A project upload creates an unlinked project
+document; it must not include `artifact`. Exactly one of `path` and `content` is required. The
+inline form sends JSON with `Content-Type: application/json`. It returns issue or
+project-document owner details plus `artifact`, `version`, and its write `topic`. Uploading the
+same `name` creates its next version. Use `content` when the text is already in the call.
 
 ## Messages
 
@@ -228,23 +236,20 @@ message does not wake anyone. Do not use it for status, a decision, or document 
 
 ## What comes back
 
-A write result's `details.topic` subscribes the host to the issue. Events render as:
-
-```text
-dispatch <KEY> · <type> · by <actor>
-```
-
-The issue topic carries every Dispatch event; `notify` only controls agent wake and routed delivery.
-After a restart, catch up with:
+A write result's `details.topic` subscribes the host to its owner. Issue writes use
+`notifications.dispatch.issue.<KEY>.>`; project-document writes use
+`notifications.dispatch.document.<PROJECT>.<SLUG>.>`. The owner topic carries every Dispatch
+event; `notify` only controls agent wake and routed delivery. After a restart, catch up with:
 
 ```ts
-dispatch_read({ issue?, ref? })
+dispatch_read({ issue?, project?, artifact?, ref? })
 ```
 
-With an issue ref, it returns the issue summary, open asks, and recent events with `details`
-`{ issue }`. With an ask ref, it returns that ask's question, options, state, answer, and its
-reply thread. With a comment ref, it returns that comment and its quoted reply chain. Use
-`dispatch_doc_read` for document contents.
+With an issue ref, it returns the issue summary, open asks, references, and recent events with
+`details` `{ issue }`. With a project document owner or ref, it returns a document summary with
+`details` `{ project, document }`. With an ask ref, it returns that ask's question, options,
+state, answer, and its reply thread. With a comment ref, it returns that comment and its quoted
+reply chain. Reads do not subscribe; use `dispatch_doc_read` for document contents.
 
 ## References
 
@@ -256,6 +261,9 @@ dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
 dispatch://KEY/comment/<id>
+dispatch://PROJECT/artifact/<slug>[@vN]
+dispatch://PROJECT/artifact/<slug>/ask/<id>
+dispatch://PROJECT/artifact/<slug>/comment/<id>
 ```
 
 ## Before / after

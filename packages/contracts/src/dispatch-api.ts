@@ -42,6 +42,7 @@ export type AnchorInput =
 export interface Project {
   readonly key: string;
   readonly name: string;
+  readonly open_asks?: number;
   readonly created_at: string;
 }
 
@@ -77,6 +78,7 @@ export interface Issue {
 
 export interface IssueSummary
   extends Pick<Issue, "key" | "title" | "status" | "parent" | "updated_at" | "last_seq"> {
+  readonly labels?: string[];
   readonly open_asks: number;
 }
 
@@ -90,6 +92,7 @@ export interface Artifact {
   readonly id: string;
   readonly issue_key: string | null;
   readonly project: string;
+  readonly ref_key?: string;
   readonly slug: string;
   readonly name: string;
   readonly kind: "doc" | "image" | "file";
@@ -171,7 +174,8 @@ export type AskEditEventPayload = Ask & {
 
 export interface Comment {
   readonly id: string;
-  readonly issue_key: string;
+  readonly issue_key: string | null;
+  readonly artifact_id?: string | null;
   readonly author: Actor;
   readonly body: string;
   readonly anchor: Anchor | null;
@@ -251,10 +255,39 @@ export interface Agent {
 }
 
 export interface ReferencedBy {
-  readonly kind: "ask" | "comment" | "message";
+  readonly kind: "ask" | "comment" | "message" | "artifact";
   readonly id: string;
-  readonly issue_key: string;
+  readonly issue_key: string | null;
+  readonly project: string;
   readonly excerpt: string;
+  readonly ref_key?: string;
+}
+
+export interface ReferenceVia {
+  readonly kind: "ask" | "comment" | "message" | "artifact";
+  readonly id: string;
+}
+
+export interface ReferenceMember {
+  readonly artifact: Artifact;
+  readonly depth: number;
+  readonly via: ReferenceVia;
+}
+
+export interface IssueReferences {
+  readonly members: ReferenceMember[];
+  readonly truncated: boolean;
+}
+
+export interface OutgoingReference {
+  readonly kind: string;
+  readonly to_id: string;
+  readonly artifact?: Artifact;
+}
+
+export interface ArtifactReferences {
+  readonly outgoing: OutgoingReference[];
+  readonly referenced_by: ReferencedBy[];
 }
 
 export interface ArtifactCreatedEventPayload {
