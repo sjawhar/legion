@@ -298,6 +298,35 @@ function reportRootAnomalies(deps: RunResyncDeps, now: number): Promise<ResyncAn
   return Promise.all(acks).then(() => anomalies);
 }
 
+/** Probes every root process this daemon still considers active, independent of whatever
+ * anomalies `reportRootAnomalies` finds (or the total absence of any): process failure recovery
+ * is exception-driven -- some routed event probes a root's locator and resurrects it if dead --
+ * so a root that dies with nothing left to route to it is otherwise invisible forever. Emitting a
+ * `probe` effect for every confirmed, located active tree here makes the periodic resync the
+ * designated backstop: `onProbe` checks the tmux pane itself and resurrects it if it is gone.
+ * Skips a tree with no recorded locator (nothing to probe yet) and one whose root has not yet
+ * confirmed ready (its own per-tree registration deadline owns that root until `readyConfirmedAt`
+ * is set); an already in-flight resurrection is de-duplicated by `resurrect`'s own `resurrecting`
+ * map, so this never needs to track it itself. */
+async function probeActiveRoots(deps: RunResyncDeps, now: number): Promise<number> {
+  const probes: Promise<void>[] = [];
+  for (const [issue, tree] of Object.entries(deps.state.trees) as Array<
+    [IssueKey, LegionState["trees"][IssueKey]]
+  >) {
+    if (tree.status !== "active" || tree.readyConfirmedAt === undefined || !tree.locator) {
+      continue;
+    }
+    probes.push(
+      deps.applyEffects([{ kind: "probe", tree: issue }], {
+        event_id: `resync:${issue}:probe`,
+        issued_at: now,
+      })
+    );
+  }
+  await Promise.all(probes);
+  return probes.length;
+}
+
 /**
  * Heals missed Dispatch status changes before retrying daemon-owned writes, then reconciles
  * unsettled PR check rollups and reports root-issue anomalies a status replay cannot self-heal.
@@ -327,6 +356,10 @@ export async function runResync(
   await retryPendingStatusWrites(deps);
   const ciFetchFailureDetails = await reconcilePrs(deps, now);
   const anomalies = await reportRootAnomalies(deps, now);
+  const probesEmitted = await probeActiveRoots(deps, now);
+  if (probesEmitted > 0) {
+    console.log(`[legion] resync probed ${probesEmitted} active roots`);
+  }
   return {
     type: "resync",
     anomalies,

@@ -1288,4 +1288,86 @@ describe("runResync", () => {
     expect(state.pendingStatusWrites[issue]).toBeUndefined();
     expect(saves).toBe(1);
   });
+
+  it("probes every active tree with a confirmed ready root and a recorded locator", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.trees[issue].locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@1",
+      tmuxPaneId: "%1",
+    };
+    state.trees[issue].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
+    const dispatched: Effect[][] = [];
+
+    const event = await runResync({
+      ...resyncDeps(state),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    // The probe is emitted even though this run is otherwise anomaly-free: it is a liveness
+    // backstop, not a symptom of a bookkeeping anomaly `reportRootAnomalies` would already catch.
+    expect(event.anomalies).toEqual([]);
+    expect(dispatched).toContainEqual([{ kind: "probe", tree: issue }]);
+  });
+
+  it("does not probe an active tree whose root has not yet confirmed ready", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.trees[issue].locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@1",
+      tmuxPaneId: "%1",
+    };
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(dispatched).toEqual([]);
+  });
+
+  it("does not probe a lingering tree even with a confirmed, located root", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.trees[issue].status = "lingering";
+    state.trees[issue].locator = {
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@1",
+      tmuxPaneId: "%1",
+    };
+    state.trees[issue].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(dispatched).toEqual([]);
+  });
+
+  it("does not probe an active tree with no recorded locator", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.trees[issue].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(dispatched).toEqual([]);
+  });
 });
