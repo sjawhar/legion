@@ -15,6 +15,26 @@ import { fakeDispatchClient } from "./ci-fixtures";
 
 const { startDaemon } = daemonIndex;
 
+/** Yields once to the event loop's macrotask queue (never a wall-clock-bound wait --
+ * `setImmediate` fires on the next tick, whatever that costs). */
+function onceEventLoop(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setImmediate(resolve);
+  return promise;
+}
+
+/** Polls `condition` across real macrotask ticks until it is true, rather than guessing a fixed
+ * number of ticks (or, worse, a fixed real-time duration) is enough: the awaited chain here is a
+ * boot-time fire-and-forget `ensureController()` call built entirely from mocked, instantly-
+ * resolving dependencies, so under ordinary conditions this converges within one or two ticks --
+ * but a single guessed tick is not a bound, only a guess, and a CPU-starved host can genuinely
+ * need more than one before the condition is actually observable. */
+async function flushEventLoopUntil(condition: () => boolean, maxTicks = 20_000): Promise<void> {
+  for (let tick = 0; tick < maxTicks && !condition(); tick += 1) {
+    await onceEventLoop();
+  }
+}
+
 class FakeNats {
   readonly subscriptions: Array<{
     subject: string;
@@ -792,7 +812,10 @@ describe("startDaemon", () => {
 
       // No controller role claim existed at boot, so nothing would ever reach
       // `/controller/ready` on its own -- boot itself had to spawn the controller directly.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Polls for the actual condition (the boot-time `ensureController()` fire-and-forget call
+      // reaching the point where the mocked `runner` observes the minted secret) instead of
+      // guessing a single real tick is always enough -- see `flushEventLoopUntil`'s doc comment.
+      await flushEventLoopUntil(() => controllerSecret !== undefined);
       expect(controllerSecret).toBeString();
       expect(publications).toEqual([]);
 

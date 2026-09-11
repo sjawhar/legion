@@ -4287,7 +4287,13 @@ describe("ProcessManager", () => {
     expect(publications.some((publication) => publication.json.includes('"launch-failed"'))).toBe(
       true
     );
-  });
+    // Three resurrect cycles, each opening a real pane through `spawnTree`'s
+    // `provisionWorkspace` (real `mkdir` I/O -- see `onceEventLoop`'s doc comment above) and each
+    // requiring `flushEventLoopUntil` to drain a potentially large number of real macrotask
+    // (`setImmediate`) ticks so that I/O actually completes: under a CPU/IO-starved host this can
+    // legitimately take longer than bun's default 5000ms per-test budget even though every
+    // timer/clock the test itself controls above is fake.
+  }, 20_000);
 
   it("dispose() landing during the pre-resurrect persist prevents the retry from resurrecting a root after shutdown", async () => {
     const stateDir = await temporaryDir();
@@ -4571,7 +4577,12 @@ describe("ProcessManager", () => {
     expect(publications.some((publication) => publication.json.includes('"launch-failed"'))).toBe(
       true
     );
-  });
+    // The freed slot's promotion drives a real spawn for the queued child through `spawnTree`'s
+    // `provisionWorkspace` (real `mkdir` I/O -- see `onceEventLoop`'s doc comment above), and
+    // `flushEventLoopUntil` must drain real macrotask (`setImmediate`) ticks for that I/O to
+    // complete: under a CPU/IO-starved host this can legitimately take longer than bun's default
+    // 5000ms per-test budget even though every timer/clock the test itself controls is fake.
+  }, 20_000);
 
   it("re-arms the same generation's deadline when the alive-but-unconfirmed pane's stop fails, instead of stranding it with no retry", async () => {
     const stateDir = await temporaryDir();
@@ -8623,6 +8634,11 @@ describe("ProcessManager", () => {
     const relaunched = Promise.withResolvers<void>();
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir, { workerCap: 1 }),
+      // Never overridden before: the freshly-launched worker's boot watchdog otherwise fell back
+      // to a real timer (`createCancellableSleep`'s `setTimeout`) for its 100ms connect-retry
+      // poll, since `now()` below is a fixed fake clock whose deadline check the watchdog can
+      // never advance past. Deterministic like every other test in this file that arms a watch.
+      sleep: async () => {},
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
       },
@@ -8681,7 +8697,12 @@ describe("ProcessManager", () => {
     expect(claim.locator?.tmuxPaneId).toBe("%50");
     expect(claim.pendingAssignment).toBe("task2");
     expect(claim.resumeSessionFile ?? claim.locator?.ompSessionFile).toBe(resumeFile);
-  });
+    // Whichever race order wins, the decision still funnels through `launchWorker`'s
+    // `provisionWorkspace` step, which performs real `mkdir` I/O (via this file's shared
+    // `manager()` harness's `jj git clone`/`jj workspace add` handling) rather than a fake one;
+    // under a CPU/IO-starved host this can legitimately take longer than bun's default 5000ms
+    // per-test budget even though every timer/clock the test itself controls above is fake.
+  }, 20_000);
 
   it("a worker-ready confirmation whose lock acquisition wins a race against a runtime retirement decision keeps the claim confirmed, making the retirement a no-op", async () => {
     const stateDir = await temporaryDir();
