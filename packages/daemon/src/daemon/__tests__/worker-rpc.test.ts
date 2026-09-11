@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,20 +12,69 @@ async function socketPath(): Promise<string> {
   return path.join(dir, "worker.sock");
 }
 
-/** A fake worker-shim: echoes negotiate/prompt/get_state responses and lets the test push events. */
+const RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024;
+
+/** Encodes `frame` into protocol v2 `rpc_chunk` lines exactly like oh-my-pi's real RPC frame
+ * encoder: JSON -> utf8 bytes -> 256 KiB base64 slices, in order. */
+function encodeRpcChunks(frame: object, chunkId: string): Record<string, unknown>[] {
+  const bytes = Buffer.from(JSON.stringify(frame), "utf8");
+  const byteLength = bytes.byteLength;
+  const count = Math.ceil(byteLength / RPC_CHUNK_PAYLOAD_BYTES);
+  const chunks: Record<string, unknown>[] = [];
+  for (let index = 0; index < count; index++) {
+    chunks.push({
+      type: "rpc_chunk",
+      chunkId,
+      index,
+      count,
+      byteLength,
+      data: bytes
+        .subarray(index * RPC_CHUNK_PAYLOAD_BYTES, (index + 1) * RPC_CHUNK_PAYLOAD_BYTES)
+        .toString("base64"),
+    });
+  }
+  return chunks;
+}
+
+/** A fake worker-shim: echoes negotiate/prompt/get_state responses and lets the test push
+ * events. Buffers writes and retries on `drain` so a line larger than the unix socket's send
+ * buffer (e.g. a 256 KiB `rpc_chunk` payload) is never silently truncated by a partial
+ * `socket.write()`. */
 function fakeShimServer(
   target: string,
   handleFrame: (frame: Record<string, unknown>, write: (frame: object) => void) => void
 ): { stop(): void; write(frame: object): void } {
   let currentSocket: Bun.Socket<undefined> | undefined;
   let buffer = "";
+  const pendingWrites: Buffer[] = [];
+
+  const flush = (): void => {
+    if (!currentSocket) return;
+    while (pendingWrites.length > 0) {
+      const head = pendingWrites[0];
+      const written = currentSocket.write(head);
+      if (written >= head.byteLength) {
+        pendingWrites.shift();
+        continue;
+      }
+      if (written > 0) pendingWrites[0] = head.subarray(written);
+      break;
+    }
+  };
+
+  const enqueueWrite = (line: string): void => {
+    pendingWrites.push(Buffer.from(line, "utf8"));
+    flush();
+  };
+
   const server = Bun.listen({
     unix: target,
     socket: {
       open(socket) {
         currentSocket = socket;
+        flush();
       },
-      data(socket, data) {
+      data(_socket, data) {
         buffer += data.toString("utf8");
         let index = buffer.indexOf("\n");
         while (index !== -1) {
@@ -33,13 +82,16 @@ function fakeShimServer(
           buffer = buffer.slice(index + 1);
           if (line) {
             const frame = JSON.parse(line) as Record<string, unknown>;
-            handleFrame(frame, (response) => socket.write(`${JSON.stringify(response)}\n`));
+            handleFrame(frame, (response) => enqueueWrite(`${JSON.stringify(response)}\n`));
           }
           index = buffer.indexOf("\n");
         }
       },
       close() {
         currentSocket = undefined;
+      },
+      drain() {
+        flush();
       },
     },
   });
@@ -48,7 +100,7 @@ function fakeShimServer(
       server.stop(true);
     },
     write(frame) {
-      currentSocket?.write(`${JSON.stringify(frame)}\n`);
+      enqueueWrite(`${JSON.stringify(frame)}\n`);
     },
   };
 }
@@ -182,5 +234,96 @@ describe("WorkerRpcClient", () => {
     const client = await connectWorkerRpc(target);
     shim.stop();
     await expect(client.closed).resolves.toBeUndefined();
+  });
+
+  it("reassembles a chunked agent_end frame and marks the worker idle", async () => {
+    const target = await socketPath();
+    const bigAgentEnd = {
+      type: "agent_end",
+      messages: [{ role: "assistant", content: "x".repeat(1_400_000) }],
+    };
+    const chunks = encodeRpcChunks(bigAgentEnd, "chunk-agent-end");
+    const shim = fakeShimServer(target, (frame, write) => {
+      if (frame.type === "negotiate_protocol") {
+        write({
+          id: frame.id,
+          type: "response",
+          command: "negotiate_protocol",
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+        write({ type: "agent_start" });
+        for (const chunk of chunks) write(chunk);
+      }
+    });
+    try {
+      const client = await connectWorkerRpc(target);
+      let idleCount = 0;
+      const idleResolvers = Promise.withResolvers<void>();
+      client.onIdle(() => {
+        idleCount++;
+        idleResolvers.resolve();
+      });
+      await client.negotiate();
+      await idleResolvers.promise;
+      expect(client.runState).toBe("idle");
+      expect(idleCount).toBe(1);
+      client.close();
+    } finally {
+      shim.stop();
+    }
+  });
+
+  it("reassembles a chunked response frame and resolves the pending get_state request", async () => {
+    const target = await socketPath();
+    const bigData = { isStreaming: false, note: "x".repeat(1_400_000) };
+    const shim = fakeShimServer(target, (frame, write) => {
+      if (frame.type === "get_state") {
+        const chunks = encodeRpcChunks(
+          { id: frame.id, type: "response", command: "get_state", success: true, data: bigData },
+          "chunk-get-state"
+        );
+        for (const chunk of chunks) write(chunk);
+      }
+    });
+    try {
+      const client = await connectWorkerRpc(target);
+      const response = await client.getState(2_000);
+      expect(response).toMatchObject({ command: "get_state", success: true, data: bigData });
+      client.close();
+    } finally {
+      shim.stop();
+    }
+  });
+
+  it("drops a chunk sequence interrupted by a plain frame without touching runState", async () => {
+    const target = await socketPath();
+    // A large agent_end-shaped payload chunked into several lines, deliberately never finished.
+    const abortedChunks = encodeRpcChunks(
+      { type: "agent_end", messages: [{ role: "assistant", content: "x".repeat(1_400_000) }] },
+      "chunk-aborted"
+    );
+    const shim = fakeShimServer(target, (frame, write) => {
+      if (frame.type === "prompt") {
+        write(abortedChunks[0]);
+        write({ id: frame.id, type: "response", command: "prompt", success: true });
+      }
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const client = await connectWorkerRpc(target);
+      await expect(client.prompt("verify #41")).resolves.toBeUndefined();
+      // "running" is exactly what `prompt()` itself sets optimistically before sending the
+      // request -- the aborted chunk sequence never dispatched anything, so it never had a
+      // chance to touch `runState` on its own.
+      expect(client.runState).toBe("running");
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      const [message] = errorLog.mock.calls[0] ?? [];
+      expect(message).toContain("[legion] worker RPC dropped a malformed rpc_chunk sequence:");
+      client.close();
+    } finally {
+      errorLog.mockRestore();
+      shim.stop();
+    }
   });
 });

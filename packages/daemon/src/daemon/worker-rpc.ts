@@ -2,6 +2,19 @@ import { randomUUID } from "node:crypto";
 
 const DEFAULT_RPC_TIMEOUT_MS = 5_000;
 
+/** Maximum UTF-8 size of one newline-delimited RPC frame, including the newline — mirrors
+ * `MAX_RPC_FRAME_BYTES` in oh-my-pi's `rpc-frame.ts`. A protocol v2 `rpc_chunk` sequence's
+ * declared `byteLength` must be at least this large: anything smaller would have fit in a
+ * single plain frame. */
+const MAX_RPC_FRAME_BYTES = 1024 * 1024;
+/** Maximum UTF-8 size of one logical frame reassembled from `rpc_chunk` lines — mirrors
+ * `MAX_RPC_REASSEMBLED_BYTES` in oh-my-pi's `rpc-frame.ts`. */
+const MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024;
+/** Base64 payload size of one `rpc_chunk` line — mirrors `RPC_CHUNK_PAYLOAD_BYTES` in oh-my-pi's
+ * `rpc-frame.ts`. */
+const RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024;
+const RPC_CHUNK_BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
 /**
  * A worker's run state, tracked from the moment its socket connects: `"unknown"` until the first
  * `agent_start`/`agent_end` frame is observed (including ones replayed from the shim's
@@ -17,7 +30,13 @@ export type WorkerRunState = "unknown" | "running" | "idle";
  * `legion worker-shim` unix socket rather than a spawned process's stdio. The
  * shim forwards every frame between the socket and the wrapped `omp --mode rpc`
  * process unchanged, so this client speaks the same newline-delimited JSON
- * protocol `packages/coding-agent/src/modes/rpc/rpc-mode.ts` implements.
+ * protocol `packages/coding-agent/src/modes/rpc/rpc-mode.ts` implements. Any
+ * logical frame larger than `MAX_RPC_FRAME_BYTES` arrives as a sequence of
+ * `rpc_chunk` lines instead of one plain JSONL line; this client reassembles that
+ * sequence before dispatching the frame through the same path a plain frame takes
+ * (see `connectWorkerRpc`'s `pushRpcChunk`). A worker's `agent_end` frame — which
+ * carries the whole turn's `messages` — is the frame most likely to arrive
+ * chunked, since it is the only one whose size scales with turn length.
  */
 export interface WorkerRpcClient {
   /** Resolves once the underlying socket connection closes. */
@@ -61,8 +80,28 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+interface PendingRpcChunks {
+  chunkId: string;
+  count: number;
+  byteLength: number;
+  nextIndex: number;
+  chunks: Buffer[];
+  receivedBytes: number;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/** Decodes one `rpc_chunk` frame's base64 `data` field, rejecting anything that isn't
+ * well-formed (non-canonical) base64 — mirrors `decodeBase64` in oh-my-pi's `rpc-frame.ts`. */
+function decodeRpcChunkData(data: unknown): Buffer {
+  if (typeof data !== "string" || data.length === 0 || !RPC_CHUNK_BASE64_PATTERN.test(data)) {
+    throw new Error("invalid rpc chunk data");
+  }
+  const bytes = Buffer.from(data, "base64");
+  if (bytes.toString("base64") !== data) throw new Error("invalid rpc chunk data");
+  return bytes;
 }
 
 /** Connects to a running worker-shim's unix socket and negotiates nothing by itself — call
@@ -80,6 +119,7 @@ export async function connectWorkerRpc(
   let runState: WorkerRunState = "unknown";
   let idleCallback: (() => void) | undefined;
   let loggedMissingIsStreaming = false;
+  let pendingChunks: PendingRpcChunks | undefined;
   const markIdle = (): void => {
     const wasIdle = runState === "idle";
     runState = "idle";
@@ -91,15 +131,125 @@ export async function connectWorkerRpc(
     pending.clear();
   };
 
+  const dropPendingChunks = (reason: string): void => {
+    pendingChunks = undefined;
+    console.error(`[legion] worker RPC dropped a malformed rpc_chunk sequence: ${reason}`);
+  };
+
+  /** Reassembles one protocol v2 `rpc_chunk` line into the pending sequence for this
+   * connection, mirroring the validation semantics of `RpcFrameDecoder` in oh-my-pi's
+   * `rpc-frame.ts`. Returns the decoded logical frame once the final chunk lands, and
+   * `undefined` both while still waiting for more chunks and after dropping a malformed
+   * sequence (logged once via `dropPendingChunks`) — callers cannot and need not tell the two
+   * apart, since both mean "nothing to dispatch yet". */
+  const pushRpcChunk = (value: Record<string, unknown>): Record<string, unknown> | undefined => {
+    const { chunkId, index, count, byteLength, data } = value;
+    if (
+      typeof chunkId !== "string" ||
+      chunkId.length === 0 ||
+      chunkId.length > 128 ||
+      typeof index !== "number" ||
+      typeof count !== "number" ||
+      typeof byteLength !== "number" ||
+      !Number.isSafeInteger(index) ||
+      !Number.isSafeInteger(count) ||
+      !Number.isSafeInteger(byteLength) ||
+      index < 0 ||
+      count < 2 ||
+      count > Math.ceil(MAX_RPC_REASSEMBLED_BYTES / RPC_CHUNK_PAYLOAD_BYTES) ||
+      index >= count ||
+      byteLength < MAX_RPC_FRAME_BYTES ||
+      byteLength > MAX_RPC_REASSEMBLED_BYTES
+    ) {
+      dropPendingChunks("invalid rpc chunk metadata");
+      return undefined;
+    }
+    let bytes: Buffer;
+    try {
+      bytes = decodeRpcChunkData(data);
+    } catch (error) {
+      dropPendingChunks(error instanceof Error ? error.message : "invalid rpc chunk data");
+      return undefined;
+    }
+    if (bytes.byteLength > RPC_CHUNK_PAYLOAD_BYTES) {
+      dropPendingChunks("rpc chunk payload exceeds the transport limit");
+      return undefined;
+    }
+
+    let sequence = pendingChunks;
+    if (!sequence) {
+      if (index !== 0) {
+        dropPendingChunks("rpc chunk sequence must start at index 0");
+        return undefined;
+      }
+      sequence = { chunkId, count, byteLength, nextIndex: 0, chunks: [], receivedBytes: 0 };
+      pendingChunks = sequence;
+    }
+    if (
+      sequence.chunkId !== chunkId ||
+      sequence.count !== count ||
+      sequence.byteLength !== byteLength ||
+      sequence.nextIndex !== index
+    ) {
+      dropPendingChunks("rpc chunk sequence mismatch");
+      return undefined;
+    }
+    sequence.chunks.push(bytes);
+    sequence.receivedBytes += bytes.byteLength;
+    sequence.nextIndex++;
+    if (sequence.receivedBytes > sequence.byteLength) {
+      dropPendingChunks("rpc chunk sequence exceeds declared length");
+      return undefined;
+    }
+    if (sequence.nextIndex < sequence.count) return undefined;
+    if (sequence.receivedBytes !== sequence.byteLength) {
+      dropPendingChunks("rpc chunk sequence length mismatch");
+      return undefined;
+    }
+
+    pendingChunks = undefined;
+    let decoded: string;
+    try {
+      decoded = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(sequence.chunks));
+    } catch {
+      dropPendingChunks("reassembled payload is not valid utf-8");
+      return undefined;
+    }
+    let reassembled: unknown;
+    try {
+      reassembled = JSON.parse(decoded);
+    } catch {
+      dropPendingChunks("reassembled payload is not valid json");
+      return undefined;
+    }
+    if (!isRecord(reassembled)) {
+      dropPendingChunks("reassembled frame must be an object");
+      return undefined;
+    }
+    return reassembled;
+  };
+
   const handleLine = (line: string): void => {
     if (!line) return;
-    let frame: unknown;
+    let parsed: unknown;
     try {
-      frame = JSON.parse(line);
+      parsed = JSON.parse(line);
     } catch {
       return;
     }
-    if (!isRecord(frame)) return;
+    if (!isRecord(parsed)) return;
+
+    let frame: Record<string, unknown>;
+    if (parsed.type === "rpc_chunk") {
+      const reassembled = pushRpcChunk(parsed);
+      if (reassembled === undefined) return;
+      frame = reassembled;
+    } else {
+      if (pendingChunks)
+        dropPendingChunks("a non-chunk frame arrived while a sequence was pending");
+      frame = parsed;
+    }
+
     if (frame.type === "agent_start") {
       runState = "running";
     } else if (frame.type === "agent_end") {
