@@ -37,6 +37,42 @@ const config: ReducerConfig = {
   maxFixAttempts: 3,
 };
 
+/** A normalized `pull_request_review` payload as Envoy delivers it: flat strings, `commit_id`
+ * the sha the review was submitted against. Defaults match `addPr`'s default `headSha`. */
+function reviewPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: "review",
+    action: "submitted",
+    repo,
+    number: String(prNumber),
+    parent_kind: "pr",
+    author: "sami",
+    url: "review-url",
+    state: "approved",
+    body: "Looks good",
+    commit_id: "old-sha",
+    head_sha: "old-sha",
+    ...overrides,
+  };
+}
+
+/** A normalized `pull_request_review_comment` (`path` present) or `issue_comment` on a PR
+ * (`path` absent) payload as Envoy delivers it. Pass `parent_kind: "issue"` for a plain GitHub
+ * issue comment, which the daemon never acts on. */
+function commentPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: "comment",
+    action: "created",
+    repo,
+    number: String(prNumber),
+    parent_kind: "pr",
+    author: "reviewer",
+    url: "comment-url",
+    body: "Please rename this",
+    ...overrides,
+  };
+}
+
 const DAEMON_STATUS_FIXTURES: ReadonlyArray<readonly [IssueStatus, DispatchFixture]> = [
   ["in_progress", issueUpdatedInProgress as unknown as DispatchFixture],
   ["testing", issueUpdatedTesting as unknown as DispatchFixture],
@@ -85,15 +121,6 @@ function envelope(payload: Record<string, unknown>, eventId = "delivery-1"): Env
 
 function github(payload: Record<string, unknown>, eventId?: string): EnvelopeJson {
   return envelope({ repository: { full_name: repo }, ...payload }, eventId);
-}
-function issue(number: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    number,
-    title: `Issue ${number}`,
-    state: "open",
-    updated_at: "2026-01-01T00:00:00.000Z",
-    ...overrides,
-  };
 }
 
 function issueNode(
@@ -173,7 +200,9 @@ function effects(
   topic = `notifications.github.acme.widgets.issue.1`,
   eventId?: string
 ): Effect[] {
-  const input = payload.kind === "pr" ? envelope(payload, eventId) : github(payload, eventId);
+  const normalized =
+    payload.kind === "pr" || payload.kind === "review" || payload.kind === "comment";
+  const input = normalized ? envelope(payload, eventId) : github(payload, eventId);
   return reduceGithubEvent(state, topic, input, config);
 }
 
@@ -644,23 +673,13 @@ describe("reduceDispatchEvent", () => {
 });
 
 describe("reduceGithubEvent", () => {
-  it("routes PR conversation issue_comment events to the mapped implementer", () => {
+  it("routes PR conversation comments to the mapped implementer", () => {
     const state = rootState();
     attachChild(state);
     const implementer = claim(state, child, "implementer");
     addPr(state);
 
-    expect(
-      effects(state, {
-        action: "created",
-        issue: issue(prNumber, { pull_request: { url: "pr-api-url" } }),
-        comment: {
-          user: { login: "reviewer" },
-          body: "Please rename this",
-          html_url: "comment-url",
-        },
-      })
-    ).toEqual([
+    expect(effects(state, commentPayload())).toEqual([
       {
         kind: "publish",
         role: implementer,
@@ -679,16 +698,7 @@ describe("reduceGithubEvent", () => {
     attachChild(state);
     const implementer = claim(state, child, "implementer");
     addPr(state);
-    const payload = {
-      action: "created",
-      pull_request: { number: prNumber },
-      comment: {
-        user: { login: "reviewer" },
-        body: "Inline note",
-        path: "src/reducers.ts",
-        html_url: "comment-url",
-      },
-    };
+    const payload = commentPayload({ body: "Inline note", path: "src/reducers.ts" });
 
     expect(effects(state, payload)).toEqual([
       {
@@ -704,6 +714,26 @@ describe("reduceGithubEvent", () => {
       },
     ]);
     expect(effects(rootState(), payload)).toEqual([]);
+  });
+
+  it("ignores a comment on a plain GitHub issue (parent_kind !== pr)", () => {
+    const state = rootState();
+    attachChild(state);
+    claim(state, child, "implementer");
+    addPr(state);
+
+    expect(effects(state, commentPayload({ parent_kind: "issue" }))).toEqual([]);
+  });
+
+  it("filters a comment whose legion_footer flag is set even though the capped body lacks the marker", () => {
+    const state = rootState();
+    attachChild(state);
+    claim(state, child, "implementer");
+    addPr(state);
+
+    expect(
+      effects(state, commentPayload({ legion_footer: "true", body: "Truncated notice..." }))
+    ).toEqual([]);
   });
 
   it("maps legion issue branches on PR opening and notifies the implementer", () => {
@@ -881,18 +911,7 @@ describe("reduceGithubEvent", () => {
       ciSettledAt: 0,
     });
 
-    expect(
-      effects(state, {
-        action: "submitted",
-        pull_request: { number: prNumber, head: { sha: "old-sha" } },
-        review: {
-          user: { login: "sami" },
-          state: "approved",
-          commit_id: "old-sha",
-          body: "Looks good",
-        },
-      })
-    ).toEqual([
+    expect(effects(state, reviewPayload())).toEqual([
       {
         kind: "publish",
         role: implementer,
@@ -912,6 +931,33 @@ describe("reduceGithubEvent", () => {
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBe("approved");
   });
 
+  it("publishes pr-review without recording an approval when the payload carries no commit_id", () => {
+    const state = rootState();
+    attachChild(state);
+    const implementer = claim(state, child, "implementer");
+    addPr(state, {
+      verdict: "green",
+      ciSettledAt: 0,
+    });
+
+    // An older listener that never sends `commit_id` cannot be pinned to a head: the approval
+    // must not be recorded (and `pr-ready` must not fire), but the phase worker still hears
+    // about the review.
+    expect(effects(state, reviewPayload({ commit_id: undefined, head_sha: undefined }))).toEqual([
+      {
+        kind: "publish",
+        role: implementer,
+        payload: {
+          type: "pr-review",
+          state: "approved",
+          author: "sami",
+          body: "Looks good",
+        },
+      },
+    ]);
+    expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBeUndefined();
+  });
+
   it("falls back to the tree's architect for a review and its ready signal when no phase is active", () => {
     const state = rootState();
     attachChild(state);
@@ -921,18 +967,7 @@ describe("reduceGithubEvent", () => {
       ciSettledAt: 0,
     });
 
-    expect(
-      effects(state, {
-        action: "submitted",
-        pull_request: { number: prNumber, head: { sha: "old-sha" } },
-        review: {
-          user: { login: "sami" },
-          state: "approved",
-          commit_id: "old-sha",
-          body: "Looks good",
-        },
-      })
-    ).toEqual([
+    expect(effects(state, reviewPayload())).toEqual([
       {
         kind: "publish",
         role: architect,
@@ -1184,16 +1219,14 @@ describe("reduceGithubEvent", () => {
     });
 
     expect(
-      effects(state, {
-        action: "submitted",
-        pull_request: { number: prNumber, head: { sha: "current-sha" } },
-        review: {
-          user: { login: "sami" },
-          state: "approved",
+      effects(
+        state,
+        reviewPayload({
           commit_id: "stale-sha",
+          head_sha: "current-sha",
           body: "Approved an earlier head",
-        },
-      })
+        })
+      )
     ).toEqual([
       {
         kind: "publish",
@@ -1217,16 +1250,16 @@ describe("reduceGithubEvent", () => {
       headSha: "current-sha",
     });
 
-    effects(state, {
-      action: "submitted",
-      pull_request: { number: prNumber, head: { sha: "current-sha" } },
-      review: {
-        user: { login: "legion-reviewer" },
+    effects(
+      state,
+      reviewPayload({
         state: "changes_requested",
+        author: "legion-reviewer",
         commit_id: "implementation-sha",
+        head_sha: "current-sha",
         body: "C1 and C2 block",
-      },
-    });
+      })
+    );
 
     expect(state.prs[`${repo}#${prNumber}`]?.reviewDecision).toBe("changes_requested");
   });
@@ -1345,17 +1378,7 @@ describe("routeActive", () => {
     phase.completed = { summary: "Implemented the change", at: "2026-09-09T00:00:00.000Z" };
     const architect = roleToken(state.project, root, "architect");
 
-    expect(
-      effects(state, {
-        action: "created",
-        issue: issue(prNumber, { pull_request: { url: "pr-api-url" } }),
-        comment: {
-          user: { login: "reviewer" },
-          body: "Please rename this",
-          html_url: "comment-url",
-        },
-      })
-    ).toEqual([
+    expect(effects(state, commentPayload())).toEqual([
       {
         kind: "publish",
         role: architect,

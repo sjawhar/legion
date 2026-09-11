@@ -260,3 +260,42 @@ export function prPayload(overrides: Record<string, unknown> = {}): Record<strin
     ...overrides,
   };
 }
+
+/** A normalized `pull_request_review` payload as Envoy delivers it (see `githubPayload` in
+ * `packages/envoy/internal/contracts/normalize.go`): flat strings, `commit_id` the sha the review
+ * was submitted against, `head_sha` the PR's head at delivery time. */
+export function reviewPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: "review",
+    action: "submitted",
+    repo: "acme/widgets",
+    number: "7",
+    title: "PR title",
+    parent_kind: "pr",
+    author: "sami",
+    url: "https://github.com/acme/widgets/pull/7#pullrequestreview-1",
+    state: "approved",
+    body: "Looks good",
+    commit_id: "head-1",
+    head_sha: "head-1",
+    ...overrides,
+  };
+}
+
+/** A normalized `pull_request_review_comment` (`path` present) or `issue_comment` on a PR
+ * (`path` absent) payload as Envoy delivers it. Pass `parent_kind: "issue"` for a plain GitHub
+ * issue comment, which the daemon never acts on. */
+export function commentPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: "comment",
+    action: "created",
+    repo: "acme/widgets",
+    number: "7",
+    title: "PR title",
+    parent_kind: "pr",
+    author: "reviewer",
+    url: "https://github.com/acme/widgets/pull/7#issuecomment-1",
+    body: "Please rename this",
+    ...overrides,
+  };
+}

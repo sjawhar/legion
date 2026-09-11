@@ -474,6 +474,16 @@ function openChildren(state: LegionState, parent: IssueNode): number {
   return parent.children.filter((key) => state.issues[key]?.status !== "done").length;
 }
 
+/** `payload.legion_footer` is Envoy's flag for the substring on the uncapped raw body
+ * (`<!-- legion:`, Legion's own worker footer) — capping the body at 2048 runes can cut the
+ * marker off, so the flag is checked first and the capped `body` is only a fallback for an
+ * older listener that never set it. */
+function filtered(payload: JsonRecord): boolean {
+  return (
+    payload.legion_footer === "true" || (stringValue(payload.body) ?? "").includes("<!-- legion:")
+  );
+}
+
 export function issueForBranch(branch: string): IssueKey | undefined {
   const match = /^legion\/([A-Z][A-Z0-9]*-[0-9]+)$/.exec(branch);
   return match?.[1];
@@ -609,66 +619,31 @@ function removeBranchMappings(state: LegionState, prKey: string): void {
   }
 }
 
-function issueComment(
+/** A `pull_request_review_comment` (`path` present) or `issue_comment` on a PR (`path` absent) —
+ * both arrive from Envoy as `kind: "comment"`. A comment on a plain GitHub issue
+ * (`parent_kind !== "pr"`) is never acted on: the daemon does not read or write GitHub issues. */
+function prComment(
   state: LegionState,
   payload: JsonRecord,
-  envelope: EnvelopeJson,
-  _config: ReducerConfig
+  envelope: EnvelopeJson
 ): Effect[] | undefined {
-  const rawIssue = asRecord(payload.issue);
-  const comment = asRecord(payload.comment);
-  if (!rawIssue || !comment) return undefined;
-  const repo = repository(payload);
-  const number = numberValue(rawIssue.number);
+  if (payload.kind !== "comment") return undefined;
+  const repo = stringValue(payload.repo);
+  const number = numberValue(payload.number);
   if (!repo || number === undefined) return [];
-  if (payload.action !== "created" || (stringValue(comment.body) ?? "").includes("<!-- legion:"))
-    return [];
-  if (rawIssue.pull_request === undefined) return [];
+  if (payload.action !== "created" || payload.parent_kind !== "pr" || filtered(payload)) return [];
   const pr = state.prs[`${repo}#${number}`];
   if (!pr) return [];
+  const author = stringValue(payload.author) ?? "";
+  const body = stringValue(payload.body) ?? "";
+  const url = stringValue(payload.url) ?? "";
+  const path = stringValue(payload.path);
   return routeActive(
     state,
     pr.key,
-    {
-      type: "pr-comment",
-      author: stringValue(asRecord(comment.user)?.login) ?? "",
-      body: stringValue(comment.body) ?? "",
-      url: stringValue(comment.html_url) ?? "",
-    },
-    envelope
-  );
-}
-
-function reviewComment(
-  state: LegionState,
-  payload: JsonRecord,
-  envelope: EnvelopeJson,
-  _config: ReducerConfig
-): Effect[] | undefined {
-  const pullRequest = asRecord(payload.pull_request);
-  const comment = asRecord(payload.comment);
-  if (!pullRequest || !comment || asRecord(payload.issue)) return undefined;
-  const repo = repository(payload);
-  const number = numberValue(pullRequest.number);
-  if (
-    !repo ||
-    number === undefined ||
-    payload.action !== "created" ||
-    (stringValue(comment.body) ?? "").includes("<!-- legion:")
-  )
-    return [];
-  const pr = state.prs[`${repo}#${number}`];
-  if (!pr) return [];
-  return routeActive(
-    state,
-    pr.key,
-    {
-      type: "pr-review-comment",
-      author: stringValue(asRecord(comment.user)?.login) ?? "",
-      body: stringValue(comment.body) ?? "",
-      path: stringValue(comment.path) ?? "",
-      url: stringValue(comment.html_url) ?? "",
-    },
+    path !== undefined
+      ? { type: "pr-review-comment", author, body, path, url }
+      : { type: "pr-comment", author, body, url },
     envelope
   );
 }
@@ -678,16 +653,17 @@ function review(
   payload: JsonRecord,
   envelope: EnvelopeJson
 ): Effect[] | undefined {
-  const pullRequest = asRecord(payload.pull_request);
-  const rawReview = asRecord(payload.review);
-  if (!pullRequest || !rawReview) return undefined;
-  const repo = repository(payload);
-  const number = numberValue(pullRequest.number);
+  if (payload.kind !== "review") return undefined;
+  const repo = stringValue(payload.repo);
+  const number = numberValue(payload.number);
   if (!repo || number === undefined || payload.action !== "submitted") return [];
   const pr = state.prs[`${repo}#${number}`];
   if (!pr) return [];
-  const decision = (stringValue(rawReview.state) ?? "").toLowerCase();
-  const isCurrentHead = stringValue(rawReview.commit_id) === pr.headSha;
+  const decision = (stringValue(payload.state) ?? "").toLowerCase();
+  const commitId = stringValue(payload.commit_id);
+  // Absent `commit_id` (an older listener) means the delivery cannot be pinned to a head at
+  // all: the approval is never recorded, but the phase worker still hears about the review.
+  const isCurrentHead = commitId !== undefined && commitId === pr.headSha;
   const prior = pr.reviewDecision;
   // Approval is head-gated: it feeds `pr-ready`, which must only ever fire for an approval of
   // the exact commit that would merge. Changes requested is not — a reviewer
@@ -704,8 +680,8 @@ function review(
     {
       type: "pr-review",
       state: decision,
-      author: stringValue(asRecord(rawReview.user)?.login) ?? "",
-      body: stringValue(rawReview.body) ?? "",
+      author: stringValue(payload.author) ?? "",
+      body: stringValue(payload.body) ?? "",
     },
     envelope
   );
@@ -790,7 +766,7 @@ export function reduceGithubEvent(
   state: LegionState,
   topic: string,
   envelope: EnvelopeJson,
-  config: ReducerConfig
+  _config: ReducerConfig
 ): Effect[] {
   if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.checks$/.test(topic)) return [];
   const payload = payloadFrom(envelope);
@@ -805,8 +781,7 @@ export function reduceGithubEvent(
   // GitHub carries PRs, checks, and reviews only (D1/D2): the daemon never reads or writes a
   // GitHub issue, so an `issues`/`projects_v2_item`/`sub_issue` webhook produces no effect.
   return collapseClosedTreeWakes(
-    issueComment(state, payload, envelope, config) ??
-      reviewComment(state, payload, envelope, config) ??
+    prComment(state, payload, envelope) ??
       review(state, payload, envelope) ??
       pullRequest(state, payload, envelope, source) ??
       []
