@@ -46,6 +46,7 @@ bridge_pid=""
 tmux_log="${temporary_dir}/tmux.log"
 cat >"${fake_bin}/tmux" <<EOF
 #!/usr/bin/env bash
+if [[ "\$1" == "-L" ]]; then shift 2; fi
 case "\$1" in
   has-session) exit 0 ;;
   show-option) printf 'foreign-owner\n' ;;
@@ -62,16 +63,24 @@ PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$dow
 
 cat >"${fake_bin}/tmux" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${tmux_log}"
+if [[ "\$1" == "-L" ]]; then shift 2; fi
 case "\$1" in
   has-session) exit 0 ;;
   show-option) printf 'legion-omp\n' ;;
-  kill-session) printf 'kill-session\n' >>"${tmux_log}" ;;
 esac
 EOF
 chmod +x "${fake_bin}/tmux"
 
 PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$down_script" >"$output_file" 2>&1
-[[ "$(<"$tmux_log")" == 'kill-session' ]] || {
+# The kill must land on the daemon's private socket -- the default server never hosts a Legion
+# session, so a bare `tmux kill-session` would find nothing (or worse, an operator's own session).
+[[ "$(<"$tmux_log")" == *'-L legion-omp kill-session -t legion-omp'* ]] || {
+  cat "$output_file" >&2
+  cat "$tmux_log" >&2
+  exit 1
+}
+[[ "$(<"$output_file")" == *'STOPPED tmux session legion-omp on private socket legion-omp'* ]] || {
   cat "$output_file" >&2
   exit 1
 }

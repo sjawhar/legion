@@ -85,7 +85,7 @@ function baseDeps(overrides: Partial<WorkerBootWatchdogDeps> = {}): WorkerBootWa
     registrationDeadlineIntervals: () => 1_000,
     workerRpcTimeoutMs: () => 5_000,
     now: () => Date.now(),
-    run: async () => ({ stdout: "", exitCode: 1 }),
+    tmux: { socket: "legion-omp", run: async () => ({ stdout: "", exitCode: 1 }) },
     isOmpPane: async () => false,
     workerClient: async () => {
       throw new Error("no client configured for this test");
@@ -204,9 +204,12 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           // — proving several full re-arm cycles worth of connect-retry timers were each
           // cleaned up along the way, not merely the last one.
           isOmpPane: async () => true,
-          run: async (cmd) => {
-            if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
-            return { stdout: "", exitCode: 0 };
+          tmux: {
+            socket: "legion-omp",
+            run: async (cmd) => {
+              if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+              return { stdout: "", exitCode: 0 };
+            },
           },
         })
       );
@@ -238,9 +241,12 @@ describe("WorkerBootWatchdog registration deadline", () => {
         // `/worker/started` never confirms either. Without the deadline this would re-arm
         // forever; with it, the watch must give up after exactly 3 consecutive alive intervals.
         isOmpPane: async () => true,
-        run: async (cmd) => {
-          if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
-          return { stdout: "", exitCode: 0 };
+        tmux: {
+          socket: "legion-omp",
+          run: async (cmd) => {
+            if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+            return { stdout: "", exitCode: 0 };
+          },
         },
         workerClient: async () => {
           throw new Error("shim not listening");
@@ -270,9 +276,12 @@ describe("WorkerBootWatchdog registration deadline", () => {
           probeCount += 1;
           return true;
         },
-        run: async (cmd) => {
-          if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
-          return { stdout: "", exitCode: 0 };
+        tmux: {
+          socket: "legion-omp",
+          run: async (cmd) => {
+            if (cmd.includes("list-panes")) return { stdout: "12345\n", exitCode: 0 };
+            return { stdout: "", exitCode: 0 };
+          },
         },
         workerClient: async () => {
           throw new Error("shim not listening");

@@ -1,6 +1,6 @@
 import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { WorkerLocator } from "./legion-state";
-import type { TmuxRun } from "./tmux";
+import type { TmuxServer } from "./tmux";
 import * as tmux from "./tmux";
 import { probeWorkerSocket, type WorkerRpcClient } from "./worker-rpc";
 
@@ -35,7 +35,7 @@ export interface WorkerBootWatchdogDeps {
    * `WorkerBootWatchdog`'s own doc comment. */
   registrationDeadlineIntervals(): number;
   now(): number;
-  run: TmuxRun;
+  tmux: TmuxServer;
   isOmpPane(pid: number): Promise<boolean>;
   workerClient(token: string, socketPath: string): Promise<WorkerRpcClient>;
   /** Overridable for tests; defaults to a real timer. */
@@ -175,7 +175,7 @@ export class WorkerBootWatchdog {
    */
   private async probeAlive(token: string, locator: WorkerLocator): Promise<boolean> {
     const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
-    const pid = await tmux.panePid(this.deps.run, target);
+    const pid = await tmux.panePid(this.deps.tmux, target);
     if (pid !== undefined && (await this.deps.isOmpPane(pid))) return true;
     const probe = await probeWorkerSocket(
       (socketPath) => this.deps.workerClient(token, socketPath),

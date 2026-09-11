@@ -110,6 +110,9 @@ const environmentKeys = [
   "HOME",
   "DISPATCH_URL",
   "DISPATCH_TOKEN",
+  "LEGION_BOOT_TOKEN_FILE",
+  "LEGION_CONTROLLER_SECRET_FILE",
+  "DISPATCH_TOKEN_FILE",
 ] as const;
 const originalEnvironment: Record<(typeof environmentKeys)[number], string | undefined> = {
   ENVOY_NATS_URL: process.env.ENVOY_NATS_URL,
@@ -127,6 +130,9 @@ const originalEnvironment: Record<(typeof environmentKeys)[number], string | und
   HOME: process.env.HOME,
   DISPATCH_URL: process.env.DISPATCH_URL,
   DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
+  LEGION_BOOT_TOKEN_FILE: process.env.LEGION_BOOT_TOKEN_FILE,
+  LEGION_CONTROLLER_SECRET_FILE: process.env.LEGION_CONTROLLER_SECRET_FILE,
+  DISPATCH_TOKEN_FILE: process.env.DISPATCH_TOKEN_FILE,
 };
 
 const temporaryPaths: string[] = [];
@@ -824,7 +830,7 @@ describe("Legion OMP extension", () => {
         ui: { notify: () => undefined },
       })
     ).rejects.toThrow(
-      "LEGION_CONTROLLER_SECRET is required to claim the controller. Launch OMP with LEGION_CONTROLLER_SECRET in its environment before running /legion-claim-controller."
+      "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required to claim the controller. Launch OMP with one of them in its environment before running /legion-claim-controller."
     );
   });
   test("boots a phase worker from its environment and reports readiness to the daemon", async () => {
@@ -1101,6 +1107,164 @@ describe("Legion OMP extension", () => {
       path: "/legion/v1/worker-session",
       body: { sessionId: "ses_worker_recovery", recoveryToken: "boot-worker-recovery" },
     });
+  });
+  test("boots a phase worker with the boot token read from LEGION_BOOT_TOKEN_FILE, ignoring LEGION_BOOT_TOKEN", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
+    temporaryPaths.push(secretsDir);
+    const bootTokenFile = path.join(secretsDir, "legion-omp-repo-43-tester");
+    await writeFile(bootTokenFile, "file-boot-token\n");
+    process.env.LEGION_BOOT_TOKEN_FILE = bootTokenFile;
+
+    await bootWorker({ role: "tester", workspace, requests, sessionId: "ses_file_worker" });
+
+    expect(requests.find((request) => request.path === "/legion/v1/worker/started")).toMatchObject({
+      body: { bootToken: "file-boot-token" },
+    });
+  });
+  test("exits the phase worker naming LEGION_BOOT_TOKEN_FILE and its path when the file is unreadable, never falling back to LEGION_BOOT_TOKEN", async () => {
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_ROLE = "tester";
+    process.env.LEGION_BOOT_TOKEN = "decoy";
+    process.env.LEGION_BOOT_TOKEN_FILE = "/nonexistent/legion-secrets/tester";
+    globalThis.fetch = (async (_input, _init) => Response.json({})) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+
+    await expect(sessionStart({}, sessionContext("ses_bad_boot_file"))).rejects.toThrow(
+      "LEGION_BOOT_TOKEN_FILE names /nonexistent/legion-secrets/tester, which could not be read"
+    );
+  });
+  test("uses the recovery token from LEGION_BOOT_TOKEN_FILE when the daemon has lost a worker's secret", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const tree = "REPO-42";
+    const issue = "REPO-43";
+    const role: LegionRole = "tester";
+    const token = roleToken("omp", issue, role);
+    const workspace = await createJjWorkspace();
+    const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
+    temporaryPaths.push(secretsDir);
+    const bootTokenFile = path.join(secretsDir, token);
+    await writeFile(bootTokenFile, "boot-worker-recovery\n");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "decoy";
+    process.env.LEGION_BOOT_TOKEN_FILE = bootTokenFile;
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ISSUE = issue;
+    process.env.LEGION_ROLE = role;
+    process.env.LEGION_WORKSPACE = workspace;
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json({
+          roleToken: token,
+          secret: "stale-secret",
+          gitName: "Legion Tester",
+          gitEmail: "tester@example.test",
+        });
+      }
+      if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/grants") {
+        if ((body as { readonly secret?: unknown } | undefined)?.secret === "stale-secret") {
+          return Response.json({ error: "Invalid session secret" }, { status: 403 });
+        }
+        return Response.json({ grantId: "grant-recovered", expiresAt: "2099-01-01T00:00:00.000Z" });
+      }
+      if (url.pathname === "/legion/v1/worker-session") {
+        return Response.json({ tree, issue, role, secret: "recovered-secret" });
+      }
+      return Response.json({
+        session_id: "ses_worker_file_recovery",
+        machine_id: "machine",
+        dir: workspace,
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("worker lifecycle handlers were not registered");
+    }
+    const context = { ...sessionContext("ses_worker_file_recovery"), cwd: workspace };
+    await sessionStart({}, context);
+
+    await toolCall(
+      { toolName: "bash", toolCallId: "call-1", input: { command: "echo hi" } },
+      context
+    );
+
+    expect(requests.find((request) => request.path === "/legion/v1/worker/started")).toMatchObject({
+      body: { bootToken: "boot-worker-recovery" },
+    });
+    expect(requests.find((request) => request.path === "/legion/v1/worker-session")).toEqual({
+      path: "/legion/v1/worker-session",
+      body: { sessionId: "ses_worker_file_recovery", recoveryToken: "boot-worker-recovery" },
+    });
+  });
+  test("claims the controller with the secret read from LEGION_CONTROLLER_SECRET_FILE", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const token = "legion-omp-controller";
+    const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
+    temporaryPaths.push(secretsDir);
+    const secretFile = path.join(secretsDir, token);
+    await writeFile(secretFile, "file-controller-secret\n");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "decoy";
+    process.env.LEGION_CONTROLLER_SECRET_FILE = secretFile;
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+      if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const claimCommand = fixture.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (sessionStart === undefined || claimCommand === undefined) {
+      throw new Error("controller handlers were not registered");
+    }
+    await sessionStart({}, sessionContext("ses_controller"));
+    await sessionStart({}, sessionContext("ses_interactive"));
+    await claimCommand.handler("", sessionContext("ses_interactive"));
+
+    expect(requests.filter((request) => request.path === "/legion/v1/controller/ready")).toEqual([
+      {
+        path: "/legion/v1/controller/ready",
+        body: { secret: "file-controller-secret", sessionId: "ses_controller" },
+      },
+      {
+        path: "/legion/v1/controller/ready",
+        body: { secret: "file-controller-secret", sessionId: "ses_interactive" },
+      },
+    ]);
   });
   test("registers the Legion tool for a sub-architect worker", async () => {
     const workspace = await createJjWorkspace();

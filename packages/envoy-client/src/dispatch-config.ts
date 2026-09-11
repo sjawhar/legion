@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
 import { messageFor } from "./errors";
+import { readSecretFile } from "./secret-file";
 
 /** Default dispatch server base URL, matching the Go server's listen address. */
 const DEFAULT_SERVER_URL = "http://localhost:8766";
@@ -81,6 +82,7 @@ function readEnvoyFile(filePath: string): EnvoyFileResult {
 type DispatchEnvironment = {
   readonly DISPATCH_URL?: string;
   readonly DISPATCH_TOKEN?: string;
+  readonly DISPATCH_TOKEN_FILE?: string;
   readonly HOME?: string;
 } & Record<string, string | undefined>;
 
@@ -95,8 +97,11 @@ export interface DispatchConfigResolution {
 /**
  * Load Dispatch's URL and bearer token from the shared envoy.json contract.
  *
- * DISPATCH_URL and DISPATCH_TOKEN override file settings. Dispatch tools are
- * available only when both a URL and a bearer token resolve.
+ * `DISPATCH_URL` overrides the file URL. The token resolves from `DISPATCH_TOKEN_FILE` (trimmed
+ * file contents — how the Legion daemon delivers it to a pane), then `DISPATCH_TOKEN`, then
+ * `dispatch.token`; a set `DISPATCH_TOKEN_FILE` that cannot be read or is blank disables Dispatch
+ * with that failure as `error` and never falls back. Dispatch tools are available only when both
+ * a URL and a bearer token resolve.
  */
 export function resolveDispatchConfig(
   env: DispatchEnvironment,
@@ -129,8 +134,22 @@ export function resolveDispatchConfig(
         ? { value: merged.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" }
         : null;
   const url = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
-  const token = env.DISPATCH_TOKEN ?? merged.token ?? null;
-  const tokenSource = env.DISPATCH_TOKEN === undefined ? "dispatch.token" : "DISPATCH_TOKEN";
+  let token: string | null;
+  let tokenSource: string;
+  if (env.DISPATCH_TOKEN_FILE !== undefined) {
+    tokenSource = "DISPATCH_TOKEN_FILE";
+    try {
+      token = readSecretFile(tokenSource, env.DISPATCH_TOKEN_FILE);
+    } catch (error) {
+      return { enabled: false, url: url.url, token: null, error: messageFor(error) };
+    }
+  } else if (env.DISPATCH_TOKEN !== undefined) {
+    tokenSource = "DISPATCH_TOKEN";
+    token = env.DISPATCH_TOKEN;
+  } else {
+    tokenSource = "dispatch.token";
+    token = merged.token ?? null;
+  }
   if (url.error !== null) return { enabled: false, url: null, token, error: url.error };
   if (url.url === null) return { enabled: false, url: null, token, error: null };
   if (!token) {

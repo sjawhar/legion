@@ -80,6 +80,12 @@ project_slug() {
   printf '%s\n' "$project"
 }
 
+# Every Legion pane lives on the daemon's private tmux server, socket `legion-<slug>` (the same
+# string as its session name); the default server never sees one.
+legion_tmux() {
+  tmux -L "legion-$(project_slug)" "$@"
+}
+
 # The root Dispatch issue for this exercise: `up.sh` creates it once and records its key at
 # `${smoke_dir}/root-issue` for every later checkpoints.sh invocation to read (it never guesses
 # by picking "the first parentless issue" -- LEGSMOKE is a shared project, and other concurrent
@@ -141,7 +147,7 @@ window_id() {
 
   while IFS=' ' read -r id window; do
     [[ "$window" == "$name" ]] && matches+=("$id")
-  done < <(tmux list-windows -t "legion-$(project_slug)" -F '#{window_id} #{window_name}')
+  done < <(legion_tmux list-windows -t "legion-$(project_slug)" -F '#{window_id} #{window_name}')
   [[ "${#matches[@]}" == 1 ]] || fail "expected one tmux window named ${name}, found ${#matches[@]}"
   printf '%s\n' "${matches[0]}"
 }
@@ -149,14 +155,14 @@ window_id() {
 expect_window() {
   local window="$1"
   local windows
-  windows="$(tmux list-windows -t "legion-$(project_slug)" -F '#{window_name}')"
+  windows="$(legion_tmux list-windows -t "legion-$(project_slug)" -F '#{window_name}')"
   grep -Fxq -- "$window" <<<"$windows" || fail "tmux window ${window} is absent"
 }
 expect_recorded_window() {
   local recorded_window_id="$1"
   local windows
 
-  windows="$(tmux list-windows -t "legion-$(project_slug)" -F '#{window_id}')"
+  windows="$(legion_tmux list-windows -t "legion-$(project_slug)" -F '#{window_id}')"
   grep -Fxq -- "$recorded_window_id" <<<"$windows" ||
     fail "recorded tmux window ${recorded_window_id} is absent"
 }
@@ -288,7 +294,7 @@ checkpoint_six() {
   require_env SMOKE_RAW_CHECK_FRAGMENT
   state | jq -e '[.prs[] | select(.verdict == "green")] | length > 0' >/dev/null ||
     fail "no PR recorded a green CI verdict"
-  pane="$(tmux capture-pane -p -t "$(tree_window_id "$root")")"
+  pane="$(legion_tmux capture-pane -p -t "$(tree_window_id "$root")")"
   verdict_count="$(grep -Foc "$SMOKE_VERDICT_FRAGMENT" <<<"$pane")"
   [[ "$verdict_count" == "1" ]] || fail "expected one coalesced verdict, found ${verdict_count}"
   [[ "$pane" != *"$SMOKE_RAW_CHECK_FRAGMENT"* ]] || fail "architect transcript contains raw check noise"
@@ -392,7 +398,7 @@ checkpoint_ten() {
   log_offset="${SMOKE_REVIVAL_LOG_OFFSET:-${smoke_dir}/revival.log.offset}"
   [[ -r "$daemon_log" && -r "$log_offset" ]] || fail "run arm-revival immediately before the triggering comment"
   daemon_output="$(tail -c "+$(( $(<"$log_offset") + 1 ))" "$daemon_log")"
-  worker_pane="$(tmux capture-pane -p -t "$(window_id "$SMOKE_WORKER_WINDOW")")"
+  worker_pane="$(legion_tmux capture-pane -p -t "$(window_id "$SMOKE_WORKER_WINDOW")")"
   [[ "$worker_pane" == *"$SMOKE_COMMENT_FRAGMENT"* ]] || fail "worker transcript lacks the published comment"
   after_no_holder="${daemon_output#*no_holder}"
   [[ -n "$after_no_holder" && "$after_no_holder" != "$daemon_output" ]] ||
@@ -400,7 +406,7 @@ checkpoint_ten() {
   after_probe="${after_no_holder#*probe}"
   [[ "$after_probe" != "$after_no_holder" && "$after_probe" == *revive* ]] ||
     fail "daemon log lacks ordered no_holder → probe → revive handling"
-  architect_pane="$(tmux capture-pane -p -t "$(window_id "$SMOKE_ARCHITECT_WINDOW")")"
+  architect_pane="$(legion_tmux capture-pane -p -t "$(window_id "$SMOKE_ARCHITECT_WINDOW")")"
   [[ "$architect_pane" != *"$SMOKE_COMMENT_FRAGMENT"* ]] ||
     fail "architect consumed the worker revival comment"
   printf 'CHECKPOINT 10 OK: no_holder → probe → revive reached worker without an architect turn\n'
@@ -424,9 +430,9 @@ checkpoint_eleven() {
   state | jq -e --arg issue "$issue" --arg role "$SMOKE_RESURRECTION_ROLE" --arg session "$SMOKE_RESURRECTION_WORKER_SESSION" '
     any(.roles[]; .issue == $issue and .role == $role and .sessionId == $session)
   ' >/dev/null || fail "resurrection role does not map to the specified worker session"
-  windows="$(tmux list-windows -t "legion-$(project_slug)" -F '#{window_name}' | jq -Rsc --arg window "$window" 'split("\n") | map(select(. == $window)) | length')"
+  windows="$(legion_tmux list-windows -t "legion-$(project_slug)" -F '#{window_name}' | jq -Rsc --arg window "$window" 'split("\n") | map(select(. == $window)) | length')"
   [[ "$windows" == "1" ]] || fail "expected one ${window} tmux window, found ${windows}"
-  pane="$(tmux capture-pane -p -t "$(tree_window_id "$issue")")"
+  pane="$(legion_tmux capture-pane -p -t "$(tree_window_id "$issue")")"
   [[ "$pane" == *"$SMOKE_RESURRECTION_WORKER_SESSION"* && "$pane" == *"$SMOKE_CATCHUP_FRAGMENT"* ]] ||
     fail "specified revived worker transcript lacks its catchup-worker payload"
   printf 'CHECKPOINT 11 OK: %s resurrected once and worker received catchup payload\n' "$issue"
@@ -441,6 +447,48 @@ checkpoint_twelve() {
     fail "closed tree is still active or queued issue was not promoted"
 }
 
+# Spec LEGION-6 acceptance 2 and 4: no recorded Legion process — the private tmux server itself,
+# the controller pane, every tree root pane, every worker pane — carries a bearer or boot secret on
+# its argv or in its environment; the private server's global environment has none; and the default
+# tmux server hosts no legion-<slug> session.
+checkpoint_thirteen() {
+  local slug socket server_pid pane pid entry name
+  local -a pids=()
+  slug="$(project_slug)"
+  socket="legion-${slug}"
+  server_pid="$(legion_tmux display-message -p '#{pid}')" || fail "private tmux server ${socket} is not running"
+  pids+=("$server_pid")
+  while IFS= read -r pane; do
+    [[ -n "$pane" ]] || continue
+    pid="$(legion_tmux display-message -p -t "$pane" '#{pane_pid}')" || fail "recorded pane ${pane} is absent from ${socket}"
+    pids+=("$pid")
+  done < <(state | jq -r '
+    [ .controllerLocator.tmuxPaneId?,
+      (.trees[]? | .locator.tmuxPaneId?),
+      (.roles[]? | select(has("issue")) | .locator.tmuxPaneId?) ]
+    | map(select(. != null)) | .[]')
+  ((${#pids[@]} > 1)) || fail "daemon state records no pane to inspect"
+  for pid in "${pids[@]}"; do
+    [[ -r "/proc/${pid}/environ" && -r "/proc/${pid}/cmdline" ]] || fail "cannot read /proc/${pid}"
+    for name in DISPATCH_TOKEN LEGION_BOOT_TOKEN LEGION_CONTROLLER_SECRET; do
+      if entry="$(tr '\0' '\n' <"/proc/${pid}/environ" | grep -m1 "^${name}=")"; then
+        fail "pid ${pid} environ carries ${entry%%=*}=… (expected only ${name}_FILE)"
+      fi
+      if entry="$(tr '\0' '\n' <"/proc/${pid}/cmdline" | grep -m1 "^${name}=")"; then
+        fail "pid ${pid} cmdline carries ${entry%%=*}=…"
+      fi
+    done
+  done
+  if entry="$(legion_tmux show-environment -g | grep -m1 -E '^(DISPATCH_TOKEN|LEGION_BOOT_TOKEN|LEGION_CONTROLLER_SECRET)=')"; then
+    fail "private tmux server global environment carries ${entry%%=*}"
+  fi
+  if tmux has-session -t "$socket" 2>/dev/null; then
+    fail "default tmux server still hosts a ${socket} session"
+  fi
+  printf 'CHECKPOINT 13 OK: %d processes on %s carry no bearer or boot secret; default server hosts no %s\n' \
+    "${#pids[@]}" "$socket" "$socket"
+}
+
 if [[ $# -eq 1 && "$1" == "arm-revival" ]]; then
   [[ -r "${smoke_dir}/daemon.log" ]] || {
     printf 'arm-revival: daemon log is unavailable\n' >&2
@@ -451,8 +499,8 @@ if [[ $# -eq 1 && "$1" == "arm-revival" ]]; then
   exit 0
 fi
 
-[[ $# -eq 1 && "$1" =~ ^[1-9][0-2]?$ ]] || {
-  printf 'usage: %s <1-12>\n' "$0" >&2
+[[ $# -eq 1 && "$1" =~ ^([1-9]|1[0-3])$ ]] || {
+  printf 'usage: %s <1-13>\n' "$0" >&2
   exit 2
 }
 
@@ -500,4 +548,5 @@ case "$checkpoint" in
   10) checkpoint_ten ;;
   11) checkpoint_eleven ;;
   12) checkpoint_twelve ;;
+  13) checkpoint_thirteen ;;
 esac

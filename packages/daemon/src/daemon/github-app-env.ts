@@ -13,11 +13,11 @@ function isolatedGhConfigDir(baseEnv: NodeJS.ProcessEnv): string {
   return path.join(stateHome, "legion", "gh");
 }
 
-/** Also strips `DISPATCH_TOKEN`/`DISPATCH_URL` (configured pane-only exports) and
- * `DISPATCH_MCP_URL` (a retired alias with no legitimate destination at all — see
+/** Also strips every pane-secret key (`DISPATCH_TOKEN`/`DISPATCH_URL`, the `*_FILE` pointers, the
+ * boot token and controller secret, and the retired `DISPATCH_MCP_URL` alias — see
  * `stripDispatchEnv`'s doc comment): a `gh`/git-identity child spawned for a scoped GitHub App
- * role has no legitimate use for a Dispatch bearer token, whether or not the daemon's own
- * process — or the pane this call happens to run from — carries one. */
+ * role has no legitimate use for a Dispatch bearer or a pane's boot secret, whether or not the
+ * daemon's own process — or the pane this call happens to run from — carries one. */
 function scrubGitHubCredentials(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const withoutDispatch = stripDispatchEnv(baseEnv);
   const env: NodeJS.ProcessEnv = {};

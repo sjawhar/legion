@@ -91,10 +91,10 @@ it("marks each daemon-created tmux window with its Legion owner", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-thermo-ops-"));
   try {
     const { manager: processes, commands } = manager(stateDir, async (command) => {
-      if (command[0] === "tmux" && command[1] === "has-session") {
+      if (command[0] === "tmux" && command[3] === "has-session") {
         return { stdout: "", exitCode: 1 };
       }
-      if (command[0] === "tmux" && command[1] === "new-window") {
+      if (command[0] === "tmux" && command[3] === "new-window") {
         return { stdout: "@2 %1 12345\n", exitCode: 0 };
       }
       return { stdout: "", exitCode: 0 };
@@ -104,6 +104,8 @@ it("marks each daemon-created tmux window with its Legion owner", async () => {
 
     expect(commands).toContainEqual([
       "tmux",
+      "-L",
+      "legion-omp",
       "set-option",
       "-w",
       "-t",
@@ -124,7 +126,7 @@ it("reconciles only stale windows owned by this daemon", async () => {
       state,
       commands,
     } = manager(stateDir, async (command) => {
-      if (command[0] !== "tmux" || command[1] !== "list-windows") {
+      if (command[0] !== "tmux" || command[3] !== "list-windows") {
         return { stdout: "", exitCode: 0 };
       }
       const format = command[command.indexOf("-F") + 1] ?? "";
@@ -144,8 +146,8 @@ it("reconciles only stale windows owned by this daemon", async () => {
     state.controllerLocator = { tmuxSession: "legion-omp", tmuxWindowId: "@42" };
     await processes.reconcileTmuxWindows();
 
-    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([
-      ["tmux", "kill-window", "-t", "@101"],
+    expect(commands.filter((command) => command[3] === "kill-window")).toEqual([
+      ["tmux", "-L", "legion-omp", "kill-window", "-t", "@101"],
     ]);
   } finally {
     await rm(stateDir, { recursive: true, force: true });

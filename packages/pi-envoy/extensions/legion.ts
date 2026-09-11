@@ -10,6 +10,7 @@ import {
   generation,
   requiredControllerCapability,
   requiredEnvironment,
+  requiredSecret,
 } from "../src/legion/classify";
 import {
   handleLegionControlDirective,
@@ -219,12 +220,13 @@ export default function legionExtension(pi: PiApi): void {
   const roleDaemon = () => {
     return createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"), fetch, {
       recoveryToken: (sessionId) => {
-        // A worker's LEGION_BOOT_TOKEN is its recovery token exactly like the
-        // root's: it is single-use to redeem the initial capability, but the
-        // daemon accepts it again on /worker-session to reissue a secret it
-        // has since forgotten (e.g. after a daemon restart).
+        // A worker's boot token (read again from `LEGION_BOOT_TOKEN_FILE` here — the daemon keeps
+        // that file for as long as the pane's locator lives) is its recovery token exactly like
+        // the root's: it is single-use to redeem the initial capability, but the daemon accepts it
+        // again on /worker-session to reissue a secret it has since forgotten (e.g. after a daemon
+        // restart).
         if (capability !== undefined && sessionId === capability.sessionID) {
-          return requiredEnvironment(process.env, "LEGION_BOOT_TOKEN");
+          return requiredSecret(process.env, "LEGION_BOOT_TOKEN");
         }
         throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
       },
@@ -325,7 +327,7 @@ export default function legionExtension(pi: PiApi): void {
     if (capability !== undefined && capability.sessionID !== sessionID) return;
     if (bootstrap) return bootstrap;
 
-    const bootToken = requiredEnvironment(process.env, "LEGION_BOOT_TOKEN");
+    const bootToken = requiredSecret(process.env, "LEGION_BOOT_TOKEN");
 
     bootstrap = (async () => {
       const { sessionFile, agentId } = await persistedTranscript(context);
@@ -415,7 +417,7 @@ export default function legionExtension(pi: PiApi): void {
     if (capability !== undefined && capability.sessionID !== sessionID) return;
     if (bootstrap) return bootstrap;
 
-    const bootToken = requiredEnvironment(process.env, "LEGION_BOOT_TOKEN");
+    const bootToken = requiredSecret(process.env, "LEGION_BOOT_TOKEN");
     const workspace = requiredEnvironment(process.env, "LEGION_WORKSPACE");
 
     bootstrap = (async () => {

@@ -607,18 +607,22 @@ describe("daemon config", () => {
     ).toThrow("dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)");
   });
 
-  it("strips DISPATCH_TOKEN/DISPATCH_URL/DISPATCH_MCP_URL from a private_key_command child's environment", () => {
-    const saved = {
-      DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
-      DISPATCH_URL: process.env.DISPATCH_URL,
-      DISPATCH_MCP_URL: process.env.DISPATCH_MCP_URL,
+  it("strips every pane-secret key (Dispatch, boot token, controller secret, and their *_FILE pointers) from a private_key_command child's environment", () => {
+    const leaked: Record<string, string> = {
+      DISPATCH_TOKEN: "leaked-private-key-command-token",
+      DISPATCH_TOKEN_FILE: "/leaked/dispatch-token",
+      DISPATCH_URL: "http://leaked-private-key-command",
+      DISPATCH_MCP_URL: "http://leaked-private-key-command/mcp",
+      LEGION_BOOT_TOKEN: "leaked-boot-token",
+      LEGION_BOOT_TOKEN_FILE: "/leaked/legion-acme7-acme-7-architect",
+      LEGION_CONTROLLER_SECRET: "leaked-controller-secret",
+      LEGION_CONTROLLER_SECRET_FILE: "/leaked/legion-acme7-controller",
     };
+    const saved = Object.fromEntries(Object.keys(leaked).map((key) => [key, process.env[key]]));
     // Set directly on process.env (not resolveDaemonConfig's env param): executePrivateKeyCommand
-    // reads process.env for its spawnSync call, so its child must never see any of these three
-    // keys from that environment.
-    process.env.DISPATCH_TOKEN = "leaked-private-key-command-token";
-    process.env.DISPATCH_URL = "http://leaked-private-key-command";
-    process.env.DISPATCH_MCP_URL = "http://leaked-private-key-command/mcp";
+    // reads process.env for its spawnSync call, so its child must never see any of these keys
+    // from that environment.
+    for (const [key, value] of Object.entries(leaked)) process.env[key] = value;
     try {
       const file = loadConfigFromFile(
         [
@@ -642,17 +646,13 @@ describe("daemon config", () => {
       // here — a dump of the child's actual environment, one KEY=VALUE per line.
       const dump = config.githubApps.implement?.privateKey ?? "";
 
-      expect(dump).not.toContain("DISPATCH_TOKEN=");
-      expect(dump).not.toContain("DISPATCH_URL=");
-      expect(dump).not.toContain("DISPATCH_MCP_URL=");
+      for (const key of Object.keys(leaked)) expect(dump).not.toContain(`${key}=`);
       expect(dump).toContain("PATH=");
     } finally {
-      if (saved.DISPATCH_TOKEN === undefined) delete process.env.DISPATCH_TOKEN;
-      else process.env.DISPATCH_TOKEN = saved.DISPATCH_TOKEN;
-      if (saved.DISPATCH_URL === undefined) delete process.env.DISPATCH_URL;
-      else process.env.DISPATCH_URL = saved.DISPATCH_URL;
-      if (saved.DISPATCH_MCP_URL === undefined) delete process.env.DISPATCH_MCP_URL;
-      else process.env.DISPATCH_MCP_URL = saved.DISPATCH_MCP_URL;
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 

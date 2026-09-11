@@ -48,6 +48,11 @@
       "bun": "./src/machine.ts",
       "default": "./dist/machine.js"
     },
+    "./secret-file": {
+      "types": "./src/secret-file.ts",
+      "bun": "./src/secret-file.ts",
+      "default": "./dist/secret-file.js"
+    },
     "./tool-contract": {
       "types": "./src/tool-contract.ts",
       "bun": "./src/tool-contract.ts",
@@ -60,7 +65,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-http.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-http.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"

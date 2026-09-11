@@ -18,8 +18,9 @@ until that PR merges, this skill's contract is not yet runnable on `main`.
 The Legion extension claims `legion-<project>-controller` and registers controller readiness
 with the daemon during session startup. Do not handle a wake unless that startup succeeded.
 
-For an interactive takeover, start OMP with `LEGION_CONTROLLER_SECRET` and
-`LEGION_DAEMON_URL` in its environment, then run:
+For an interactive takeover, start OMP with `LEGION_CONTROLLER_SECRET` (or
+`LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it) and `LEGION_DAEMON_URL` in its
+environment, then run:
 
 ```text
 /legion-claim-controller

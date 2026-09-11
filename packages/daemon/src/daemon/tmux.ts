@@ -5,6 +5,20 @@ export type TmuxRun = (
   options?: CommandRunnerOptions
 ) => Promise<{ stdout: string; stderr?: string; exitCode: number }>;
 
+/** The private tmux server this daemon owns. Every argv this module builds starts
+ * `tmux -L <socket>`, so the server is forked by the daemon's own first command and inherits the
+ * runner's stripped `paneEnv` (never a human's shell that may carry `DISPATCH_TOKEN`), and no
+ * Legion pane ever shares a server with the operator's own sessions. The socket name equals the
+ * session name (`legion-<project>`): attach with `tmux -L legion-<project> attach -t legion-<project>`. */
+export interface TmuxServer {
+  readonly run: TmuxRun;
+  readonly socket: string;
+}
+
+function argv(server: TmuxServer, ...rest: string[]): string[] {
+  return ["tmux", "-L", server.socket, ...rest];
+}
+
 const BOOTSTRAP_WINDOW = "__legion_bootstrap";
 
 /**
@@ -12,22 +26,29 @@ const BOOTSTRAP_WINDOW = "__legion_bootstrap";
  * (the deployment's tmux session name today), so reconciliation can tell a Legion-managed
  * window from one a human opened by hand in the same session.
  */
-async function markOwner(run: TmuxRun, target: string, owner: string, scope: "session" | "window") {
-  const marker = await run([
-    "tmux",
-    "set-option",
-    ...(scope === "window" ? ["-w"] : []),
-    "-t",
-    target,
-    "@legion_owner",
-    owner,
-  ]);
+async function markOwner(
+  server: TmuxServer,
+  target: string,
+  owner: string,
+  scope: "session" | "window"
+) {
+  const marker = await server.run(
+    argv(
+      server,
+      "set-option",
+      ...(scope === "window" ? ["-w"] : []),
+      "-t",
+      target,
+      "@legion_owner",
+      owner
+    )
+  );
   if (marker.exitCode !== 0) {
     if (scope === "window") {
       // Every window is either recorded (marked, then locator-assigned by the caller) or
       // reaped: this one never got its marker, so nothing will ever recognize or clean it up
       // later. Kill it now instead of leaving an orphan for `reconcileTmuxWindows` to find.
-      await run(["tmux", "kill-window", "-t", target]);
+      await server.run(argv(server, "kill-window", "-t", target));
     }
     throw new Error(
       `tmux ${scope} ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`
@@ -72,32 +93,26 @@ function parsePaneReport(stdout: string, context: string, expectWindow: boolean)
  * fails to spawn) instantly can never race a later, separate discovery call.
  */
 export async function openWindow(
-  run: TmuxRun,
+  server: TmuxServer,
   session: string,
   name: string,
   environmentAndCommand: string[],
   owner: string
 ): Promise<{ windowId: string; paneId: string; pid: number }> {
-  const sessionExists = (await run(["tmux", "has-session", "-t", session])).exitCode === 0;
+  const sessionExists =
+    (await server.run(argv(server, "has-session", "-t", session))).exitCode === 0;
   if (!sessionExists) {
-    const create = await run([
-      "tmux",
-      "new-session",
-      "-d",
-      "-s",
-      session,
-      "-n",
-      BOOTSTRAP_WINDOW,
-      "sleep 3600",
-    ]);
+    const create = await server.run(
+      argv(server, "new-session", "-d", "-s", session, "-n", BOOTSTRAP_WINDOW, "sleep 3600")
+    );
     if (create.exitCode !== 0) {
       throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
     }
-    await markOwner(run, session, owner, "session");
+    await markOwner(server, session, owner, "session");
   }
 
-  const command = [
-    "tmux",
+  const command = argv(
+    server,
     "new-window",
     "-P",
     "-F",
@@ -106,11 +121,13 @@ export async function openWindow(
     session,
     "-n",
     name,
-    ...environmentAndCommand,
-  ];
-  const result = await run(command);
+    ...environmentAndCommand
+  );
+  const result = await server.run(command);
   if (!sessionExists) {
-    const cleanup = await run(["tmux", "kill-window", "-t", `${session}:${BOOTSTRAP_WINDOW}`]);
+    const cleanup = await server.run(
+      argv(server, "kill-window", "-t", `${session}:${BOOTSTRAP_WINDOW}`)
+    );
     if (cleanup.exitCode !== 0) {
       throw new Error(
         `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode}): ${cleanup.stdout}`
@@ -122,44 +139,46 @@ export async function openWindow(
   }
   const { windowId, paneId, pid } = parsePaneReport(result.stdout, "tmux new-window", true);
   if (!windowId) throw new Error(`tmux new-window did not report a window id: ${result.stdout}`);
-  await markOwner(run, windowId, owner, "window");
+  await markOwner(server, windowId, owner, "window");
   return { windowId, paneId, pid };
 }
 
 /** Splits a new pane into an existing window, tiling the layout afterward. Same single-invocation
  * capture rationale as `openWindow`. */
 export async function splitWindow(
-  run: TmuxRun,
+  server: TmuxServer,
   windowId: string,
   environmentAndCommand: string[]
 ): Promise<{ paneId: string; pid: number }> {
-  const split = await run([
-    "tmux",
-    "split-window",
-    "-t",
-    windowId,
-    "-P",
-    "-F",
-    "#{pane_id} #{pane_pid}",
-    ...environmentAndCommand,
-  ]);
+  const split = await server.run(
+    argv(
+      server,
+      "split-window",
+      "-t",
+      windowId,
+      "-P",
+      "-F",
+      "#{pane_id} #{pane_pid}",
+      ...environmentAndCommand
+    )
+  );
   if (split.exitCode !== 0) {
     throw new Error(`tmux split-window failed (exit ${split.exitCode}): ${split.stdout}`);
   }
   const { paneId, pid } = parsePaneReport(split.stdout, "tmux split-window", false);
-  await run(["tmux", "select-layout", "-t", windowId, "tiled"]);
+  await server.run(argv(server, "select-layout", "-t", windowId, "tiled"));
   return { paneId, pid };
 }
 
 /** Trusts no recorded window id until it is confirmed live, so a human-killed window falls back to a fresh one. */
-export async function windowAlive(run: TmuxRun, windowId: string): Promise<boolean> {
-  const probe = await run(["tmux", "list-panes", "-t", windowId, "-F", "#{pane_id}"]);
+export async function windowAlive(server: TmuxServer, windowId: string): Promise<boolean> {
+  const probe = await server.run(argv(server, "list-panes", "-t", windowId, "-F", "#{pane_id}"));
   return probe.exitCode === 0;
 }
 
 /** Reads the live pid of a window's (or pane's) first pane, or `undefined` if it cannot be read. */
-export async function panePid(run: TmuxRun, target: string): Promise<number | undefined> {
-  const panes = await run(["tmux", "list-panes", "-t", target, "-F", "#{pane_pid}"]);
+export async function panePid(server: TmuxServer, target: string): Promise<number | undefined> {
+  const panes = await server.run(argv(server, "list-panes", "-t", target, "-F", "#{pane_pid}"));
   const pid = Number(panes.stdout.trim().split(/\s+/)[0]);
   return panes.exitCode === 0 && Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
 }
@@ -169,23 +188,26 @@ export async function panePid(run: TmuxRun, target: string): Promise<number | un
  * or written by some other pane-id-less path — is confirmed alive, so the reconciliation
  * sweep's pane-level check (see `listUnknownPanes`) eventually has a real id to compare against
  * instead of permanently exempting that window. */
-export async function firstPaneId(run: TmuxRun, windowId: string): Promise<string | undefined> {
-  const panes = await run(["tmux", "list-panes", "-t", windowId, "-F", "#{pane_id}"]);
+export async function firstPaneId(
+  server: TmuxServer,
+  windowId: string
+): Promise<string | undefined> {
+  const panes = await server.run(argv(server, "list-panes", "-t", windowId, "-F", "#{pane_id}"));
   const paneId = panes.stdout.trim().split(/\s+/)[0];
   return panes.exitCode === 0 && paneId && /^%\d+$/.test(paneId) ? paneId : undefined;
 }
 
-export async function killWindow(run: TmuxRun, windowId: string): Promise<void> {
-  await run(["tmux", "kill-window", "-t", windowId]);
+export async function killWindow(server: TmuxServer, windowId: string): Promise<void> {
+  await server.run(argv(server, "kill-window", "-t", windowId));
 }
 
 /** Kills a single pane, leaving the rest of its window (and any sibling panes) intact. The caller
  * decides whether/how to surface a non-zero exit — this never throws. */
 export async function killPane(
-  run: TmuxRun,
+  server: TmuxServer,
   paneId: string
 ): Promise<{ exitCode: number; stderr?: string }> {
-  const result = await run(["tmux", "kill-pane", "-t", paneId]);
+  const result = await server.run(argv(server, "kill-pane", "-t", paneId));
   return { exitCode: result.exitCode, stderr: result.stderr };
 }
 
@@ -201,19 +223,21 @@ export interface UnknownOwnedWindow {
  * Returns an empty array (rather than throwing) if the session itself no longer exists.
  */
 export async function listUnknownOwnedWindows(
-  run: TmuxRun,
+  server: TmuxServer,
   session: string,
   owner: string,
   known: ReadonlySet<string>
 ): Promise<UnknownOwnedWindow[]> {
-  const windows = await run([
-    "tmux",
-    "list-windows",
-    "-t",
-    session,
-    "-F",
-    "#{window_id}\t#{@legion_owner}\t#{window_activity}",
-  ]);
+  const windows = await server.run(
+    argv(
+      server,
+      "list-windows",
+      "-t",
+      session,
+      "-F",
+      "#{window_id}\t#{@legion_owner}\t#{window_activity}"
+    )
+  );
   if (windows.exitCode !== 0) return [];
 
   const unknown: UnknownOwnedWindow[] = [];
@@ -237,8 +261,8 @@ export interface UnknownPane {
 }
 
 /**
- * Lists every pane, anywhere on the tmux server, whose owning window is marked with
- * `@legion_owner === owner` (window options resolve through the pane's own window, exactly as
+ * Lists every pane, anywhere on this daemon's private tmux server, whose owning window is marked
+ * with `@legion_owner === owner` (window options resolve through the pane's own window, exactly as
  * `listUnknownOwnedWindows` reads the same option via `list-windows`) whose pane id isn't in
  * `known`, and whose start command names the `legion worker-shim` wrapper every Legion process —
  * root, phase worker, or controller — runs inside its pane. A pane split into a *known* window
@@ -250,17 +274,19 @@ export interface UnknownPane {
  * the command itself fails.
  */
 export async function listUnknownPanes(
-  run: TmuxRun,
+  server: TmuxServer,
   owner: string,
   known: ReadonlySet<string>
 ): Promise<UnknownPane[]> {
-  const panes = await run([
-    "tmux",
-    "list-panes",
-    "-a",
-    "-F",
-    "#{pane_id}\t#{window_id}\t#{@legion_owner}\t#{pane_start_command}\t#{pane_activity}",
-  ]);
+  const panes = await server.run(
+    argv(
+      server,
+      "list-panes",
+      "-a",
+      "-F",
+      "#{pane_id}\t#{window_id}\t#{@legion_owner}\t#{pane_start_command}\t#{pane_activity}"
+    )
+  );
   if (panes.exitCode !== 0) return [];
 
   const unknown: UnknownPane[] = [];

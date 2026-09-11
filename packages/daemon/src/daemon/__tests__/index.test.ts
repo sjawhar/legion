@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { controllerToken, roleTopic } from "@legion/contracts";
@@ -157,18 +158,19 @@ function daemonTestDependencies(
             exitCode: 0,
           };
         }
-        const controllerSecret = command.find((part) =>
-          part.startsWith("LEGION_CONTROLLER_SECRET=")
-        );
-        if (controllerSecret)
-          onControllerSecret(controllerSecret.slice("LEGION_CONTROLLER_SECRET=".length));
-        if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+        const pointer = command.find((part) => part.startsWith("LEGION_CONTROLLER_SECRET_FILE="));
+        if (pointer) {
+          onControllerSecret(
+            readFileSync(pointer.slice("LEGION_CONTROLLER_SECRET_FILE=".length), "utf8")
+          );
+        }
+        if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
           return { stdout: "", stderr: "", exitCode: 1 };
         }
-        if (command[0]?.endsWith("/tmux") && command[1] === "new-session") {
+        if (command[0]?.endsWith("/tmux") && command[3] === "new-session") {
           return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
         }
-        if (command[0]?.endsWith("/tmux") && command[1] === "new-window") {
+        if (command[0]?.endsWith("/tmux") && command[3] === "new-window") {
           return { stdout: "@42 %1 12345", stderr: "", exitCode: 0 };
         }
         return { stdout: "", stderr: "", exitCode: 0 };
@@ -240,6 +242,8 @@ function config(stateDir: string): DaemonConfig {
     workerRpcTimeoutSeconds: 5,
     gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    dispatchUrl: "http://127.0.0.1:18766",
+    dispatchToken: "test-dispatch-token",
     stateDir,
   };
 }
@@ -348,19 +352,19 @@ describe("startDaemon", () => {
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "list-windows") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "list-windows") {
               // reconcileAdmission's boot-time orphan reap: slow to prove
               // startDaemon does not resolve until it — and every promotion
               // it gates — has fully settled.
               await listWindowsGate.promise;
               return { stdout: "", stderr: "", exitCode: 0 };
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
               return { stdout: "", stderr: "", exitCode: 0 };
             }
             if (
               command[0]?.endsWith("/tmux") &&
-              (command[1] === "new-session" || command[1] === "new-window")
+              (command[3] === "new-session" || command[3] === "new-window")
             ) {
               return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
             }
@@ -482,7 +486,7 @@ describe("startDaemon", () => {
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "list-windows") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "list-windows") {
               // reconcileAdmission's boot-time orphan reap: slow enough to observe whether
               // reconnectRoots (synchronous, no tmux calls of its own) has already armed the
               // restored tree's deadline before this settles.
@@ -490,12 +494,12 @@ describe("startDaemon", () => {
               await listWindowsGate.promise;
               return { stdout: "", stderr: "", exitCode: 0 };
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
               return { stdout: "", stderr: "", exitCode: 0 };
             }
             if (
               command[0]?.endsWith("/tmux") &&
-              (command[1] === "new-session" || command[1] === "new-window")
+              (command[3] === "new-session" || command[3] === "new-window")
             ) {
               return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
             }
@@ -659,6 +663,10 @@ describe("startDaemon", () => {
           controllerSecret = secret;
         })
       );
+      const dispatchTokenFile = path.join(stateDir, "secrets", "dispatch-token");
+      expect(await readFile(dispatchTokenFile, "utf8")).toBe("test-dispatch-token");
+      expect((await stat(dispatchTokenFile)).mode & 0o777).toBe(0o600);
+      expect((await stat(path.join(stateDir, "secrets"))).mode & 0o777).toBe(0o700);
       const controller = controllerToken(daemonConfig.project);
       firstNats.emit(
         `notifications.envoy.exceptions.notifications.role.${controller}`,
@@ -967,10 +975,10 @@ describe("startDaemon", () => {
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
               return { stdout: "", stderr: "", exitCode: 0 };
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "new-window") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "new-window") {
               if (command.some((part) => part.startsWith("LEGION_TREE="))) {
                 launchedRoots += 1;
                 if (launchedRoots === 2) rootLaunches.resolve();

@@ -113,4 +113,48 @@ describe("resolveDispatchConfig", () => {
     expect(emptyToken.enabled).toBe(false);
     expect(emptyToken.error).toContain("DISPATCH_TOKEN");
   });
+
+  test("resolves the token from DISPATCH_TOKEN_FILE ahead of DISPATCH_TOKEN and dispatch.token", () => {
+    const home = tempDir();
+    writeUserConfig(home, {
+      dispatch: { enabled: true, serverUrl: "http://file.test", token: "file-token" },
+    });
+    const tokenFile = path.join(tempDir(), "dispatch-token");
+    writeFileSync(tokenFile, "pointer-token\n");
+
+    expect(
+      resolveDispatchConfig(
+        {
+          DISPATCH_URL: "http://override.test",
+          DISPATCH_TOKEN: "environment-token",
+          DISPATCH_TOKEN_FILE: tokenFile,
+        },
+        { home, cwd: tempDir() }
+      )
+    ).toEqual({ enabled: true, url: "http://override.test", token: "pointer-token", error: null });
+  });
+
+  test("disables Dispatch naming DISPATCH_TOKEN_FILE and its path when the file is unreadable or empty, without falling back", () => {
+    const home = tempDir();
+    writeUserConfig(home, {
+      dispatch: { enabled: true, serverUrl: "http://file.test", token: "file-token" },
+    });
+    const missing = path.join(tempDir(), "missing");
+    const unreadable = resolveDispatchConfig(
+      { DISPATCH_TOKEN: "environment-token", DISPATCH_TOKEN_FILE: missing },
+      { home, cwd: tempDir() }
+    );
+    expect(unreadable.enabled).toBe(false);
+    expect(unreadable.token).toBeNull();
+    expect(unreadable.error).toContain(
+      `DISPATCH_TOKEN_FILE names ${missing}, which could not be read`
+    );
+
+    const empty = path.join(tempDir(), "empty");
+    writeFileSync(empty, "  \n");
+    const blank = resolveDispatchConfig({ DISPATCH_TOKEN_FILE: empty }, { home, cwd: tempDir() });
+    expect(blank.enabled).toBe(false);
+    expect(blank.token).toBeNull();
+    expect(blank.error).toBe(`DISPATCH_TOKEN_FILE names ${empty}, which is empty`);
+  });
 });

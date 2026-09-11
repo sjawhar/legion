@@ -108,14 +108,16 @@ stop_tmux_session() {
   slug="$(project_slug)"
   [[ -n "$slug" ]] || return 0
   session="legion-${slug}"
-  tmux has-session -t "$session" 2>/dev/null || return 0
-  owner="$(tmux show-option -qv -t "$session" @legion_owner 2>/dev/null || true)"
+  # Every Legion pane lives on the daemon's private tmux server, whose socket name equals the
+  # session name; the default server never hosts one.
+  tmux -L "$session" has-session -t "$session" 2>/dev/null || return 0
+  owner="$(tmux -L "$session" show-option -qv -t "$session" @legion_owner 2>/dev/null || true)"
   if [[ "$owner" != "$session" ]]; then
     warn "refusing to kill unowned tmux session ${session}"
     return 0
   fi
-  tmux kill-session -t "$session"
-  printf 'STOPPED tmux session %s\n' "$session"
+  tmux -L "$session" kill-session -t "$session"
+  printf 'STOPPED tmux session %s on private socket %s\n' "$session" "$session"
 }
 
 main() {

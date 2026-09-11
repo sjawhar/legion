@@ -93,13 +93,15 @@ The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, 
 
 When `SMOKE_BRANCH_PROTECTION=1` is set, the rig configures `main` to require one approving review, using the user-authenticated `gh` identity described above. Legion itself never reads or writes a human-approval signal: whether a human must approve before merge is the sandbox repository's own rule, and checkpoint 8 verifies that the merge queue respected it.
 
-Tear down the processes, tmux session, and NATS container with:
+Tear down the processes, the private tmux server (`tmux -L legion-<slug>`), and NATS container with:
 
 ```sh
 bash scripts/smoke/down.sh
 ```
 
 Keep `SMOKE_REPO` and `SMOKE_PROJECT` exported for teardown so it can close the named tmux session.
+
+Legion panes never appear in your own `tmux list-sessions`; attach with `tmux -L legion-<slug> attach -t legion-<slug>` where `<slug>` is `SMOKE_PROJECT` lower-cased with every non-alphanumeric character removed (`example-org/24` → `exampleorg24`).
 
 `down.sh` also succeeds in `none` mode: absent forwarder process and hook records are ignored while the listener, daemon, tmux session, and NATS container are stopped. In `envoy` mode it first stops the start-time-validated bridge PID, preventing new upstream envelopes from reaching the local daemon during teardown.
 
@@ -109,10 +111,10 @@ Keep `SMOKE_REPO` and `SMOKE_PROJECT` exported for teardown so it can close the 
 Run the numbered assertions during the end-to-end exercise:
 
 ```sh
-secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <1-12>
+secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <1-13>
 ```
 
-`DISPATCH_TOKEN` is a secret: the `secrets` wrapper injects it only for this one invocation and never persists it under `SMOKE_DIR` (the same wrapper the start command above uses for `up.sh`). `DISPATCH_URL` is not a secret and must already be exported in the shell, exactly as in "Start and stop" above.
+`DISPATCH_TOKEN` is a secret: the `secrets` wrapper injects it only for this one invocation and never persists it under `SMOKE_DIR` (the same wrapper the start command above uses for `up.sh`). `DISPATCH_URL` is not a secret and must already be exported in the shell, exactly as in "Start and stop" above. Checkpoint 13 needs no `DISPATCH_TOKEN`; run it bare.
 
 Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints 1–4, 9, and 12 read the root issue `up.sh` recorded at `${SMOKE_DIR}/root-issue`; checkpoint 5 infers the Legion pull request from `gh pr list` where possible. Set the listed variable when a later exercise has more than one candidate, or when checkpoints run against a `SMOKE_DIR` `up.sh` never populated:
 
@@ -145,3 +147,4 @@ Then post the comment and run checkpoint 10. The command captures the daemon-log
 | 10 | `arm-revival`, `SMOKE_WORKER_WINDOW`, `SMOKE_ARCHITECT_WINDOW`, `SMOKE_COMMENT_FRAGMENT` | Daemon logs `no_holder → probe → revive` after the arm point; the worker receives the comment without architect consumption. |
 | 11 | `SMOKE_RESURRECTION_ISSUE`, `SMOKE_RESURRECTION_ROLE`, `SMOKE_RESURRECTION_WORKER_SESSION`, `SMOKE_WORKER_WINDOW`, `SMOKE_CATCHUP_FRAGMENT` | Second live issue advances exactly one generation and its specific revived worker receives catch-up. |
 | 12 | `SMOKE_ROOT_ISSUE`, `SMOKE_QUEUED_ISSUE` | The lingering root released its slot and the queued issue was promoted. |
+| 13 | — | The private tmux server and every recorded pane (controller, roots, workers) carry no `DISPATCH_TOKEN=`, `LEGION_BOOT_TOKEN=`, or `LEGION_CONTROLLER_SECRET=` on argv or in environ; the server's global environment has none; the default server hosts no `legion-<slug>` session. |
