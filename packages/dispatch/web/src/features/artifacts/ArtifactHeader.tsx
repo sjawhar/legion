@@ -41,7 +41,7 @@ export function formatArtifactBytes(bytes: number | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function versionLabel(version: Version): string {
+export function versionLabel(version: Version): string {
   return `Version ${version.number}${version.summary === null ? "" : ` — ${version.summary}`}`;
 }
 

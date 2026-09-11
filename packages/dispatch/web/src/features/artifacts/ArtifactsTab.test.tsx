@@ -4,9 +4,9 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact } from "../../api/types";
+import type { Artifact, IssueReferences } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
-import { ArtifactsTab, ReferencedBy } from "./ArtifactsTab";
+import { ArtifactsTab } from "./ArtifactsTab";
 
 const artifact: Artifact = {
   created_at: "2026-09-09T00:00:00Z",
@@ -42,47 +42,46 @@ const artifact: Artifact = {
   ],
 };
 
-test("ArtifactsTab compares selected blob versions side by side", async () => {
-  const listArtifacts = spyOn(api, "listArtifacts").mockResolvedValue([artifact]);
-  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
-    ...artifact,
-    referenced_by: [],
-  });
+const noReferences: IssueReferences = { members: [], truncated: false };
+
+function renderTab(artifacts: Artifact[], references: IssueReferences = noReferences) {
+  const listArtifacts = spyOn(api, "listArtifacts").mockResolvedValue(artifacts);
+  const getIssueReferences = spyOn(api, "getIssueReferences").mockResolvedValue(references);
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "artifacts" })]}>
+      <QueryClientProvider client={queryClient}>
+        <ArtifactsTab />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return { getIssueReferences, listArtifacts, view };
+}
+
+test("renders one row per artifact with no compare controls", async () => {
+  const notes: Artifact = {
+    ...artifact,
+    id: "artifact-notes",
+    kind: "doc",
+    name: "notes.md",
+    slug: "notes-md",
+    versions: artifact.versions.slice(0, 1),
+  };
+  const { getIssueReferences, listArtifacts, view } = renderTab([artifact, notes]);
 
   try {
-    render(
-      <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
-        <QueryClientProvider client={queryClient}>
-          <ArtifactsTab />
-        </QueryClientProvider>
-      </MemoryRouter>
-    );
-
     await screen.findByTestId("artifact-diagram-png");
-    fireEvent.change(screen.getByLabelText("Compare diagram.png from"), {
-      target: { value: "1" },
-    });
-    fireEvent.change(screen.getByLabelText("Compare diagram.png to"), {
-      target: { value: "2" },
-    });
-
-    const comparison = await screen.findByLabelText("Blob version comparison");
-    expect(comparison.textContent).toContain("Version 1");
-    expect(comparison.textContent).toContain("10 B");
-    expect(comparison.textContent).toContain("first-sha");
-    expect(comparison.textContent).toContain("Version 2");
-    expect(comparison.textContent).toContain("20 B");
-    expect(comparison.textContent).toContain("second-sha");
-    fireEvent.change(screen.getByLabelText("Compare diagram.png to"), {
-      target: { value: "1" },
-    });
-    expect(await screen.findByText("Identical blobs.")).not.toBeNull();
+    expect(screen.getByTestId("artifact-notes-md")).not.toBeNull();
+    expect(screen.queryByLabelText(/Compare .* from/)).toBeNull();
+    expect(screen.queryByLabelText(/Compare .* to/)).toBeNull();
+    expect(screen.queryByText("Compare versions")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show all versions" })).toBeNull();
   } finally {
+    view.unmount();
     listArtifacts.mockRestore();
-    getArtifact.mockRestore();
+    getIssueReferences.mockRestore();
   }
 });
 
@@ -108,35 +107,75 @@ test("artifacts tab renders no make-primary control", async () => {
     },
     artifact,
   ];
-  const listArtifacts = spyOn(api, "listArtifacts").mockResolvedValue(artifacts);
-  const getArtifact = spyOn(api, "getArtifact").mockImplementation(async (id) => {
-    const artifact = artifacts.find((candidate) => candidate.id === id);
-    if (!artifact) throw new Error(`missing artifact ${id}`);
-    return { ...artifact, referenced_by: [] };
-  });
-  const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
-  });
+  const { getIssueReferences, listArtifacts, view } = renderTab(artifacts);
 
   try {
-    render(
-      <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
-        <QueryClientProvider client={queryClient}>
-          <ArtifactsTab />
-        </QueryClientProvider>
-      </MemoryRouter>
-    );
-
     await screen.findByTestId("artifact-spec");
     expect(screen.getByTestId("artifact-spec").textContent).toContain("Primary");
     expect(screen.queryByRole("button", { name: /make primary/i })).toBeNull();
     expect(screen.queryByText(/Not\s+primary/)).toBeNull();
   } finally {
+    view.unmount();
     listArtifacts.mockRestore();
-    getArtifact.mockRestore();
+    getIssueReferences.mockRestore();
   }
 });
-test("References lists closure members with chip, via, and depth, names truncation, and renders an artifact source without an issue key", async () => {
+
+test("a primary artifact sorts first regardless of upload order", async () => {
+  const older: Artifact = {
+    ...artifact,
+    id: "artifact-older",
+    name: "older.png",
+    slug: "older-png",
+  };
+  const primary: Artifact = {
+    ...artifact,
+    id: "artifact-primary",
+    name: "primary.png",
+    primary: true,
+    slug: "primary-png",
+  };
+  const { getIssueReferences, listArtifacts, view } = renderTab([older, primary]);
+
+  try {
+    await screen.findByTestId("artifact-older-png");
+    const rows = screen.getAllByRole("listitem");
+    expect(rows[0]?.getAttribute("data-testid")).toBe("artifact-primary-png");
+    expect(rows[1]?.getAttribute("data-testid")).toBe("artifact-older-png");
+  } finally {
+    view.unmount();
+    listArtifacts.mockRestore();
+    getIssueReferences.mockRestore();
+  }
+});
+
+test("the filter input narrows rows by name and kind", async () => {
+  const notes: Artifact = {
+    ...artifact,
+    id: "artifact-notes",
+    kind: "doc",
+    name: "notes.md",
+    slug: "notes-md",
+  };
+  const { getIssueReferences, listArtifacts, view } = renderTab([artifact, notes]);
+
+  try {
+    await screen.findByTestId("artifact-diagram-png");
+    fireEvent.change(screen.getByLabelText("Filter artifacts"), { target: { value: "notes" } });
+    expect(screen.queryByTestId("artifact-diagram-png")).toBeNull();
+    expect(screen.getByTestId("artifact-notes-md")).not.toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Filter artifacts"), { target: { value: "image" } });
+    expect(screen.getByTestId("artifact-diagram-png")).not.toBeNull();
+    expect(screen.queryByTestId("artifact-notes-md")).toBeNull();
+  } finally {
+    view.unmount();
+    listArtifacts.mockRestore();
+    getIssueReferences.mockRestore();
+  }
+});
+
+test("References lists closure members with chip, via, and depth, names truncation, and renders an artifact source without an issue key, collapsed by default", async () => {
   const referencedDocument: Artifact = {
     ...artifact,
     id: "artifact-notes",
@@ -146,21 +185,7 @@ test("References lists closure members with chip, via, and depth, names truncati
     primary: false,
     slug: "design-notes",
   };
-  const listArtifacts = spyOn(api, "listArtifacts").mockResolvedValue([artifact]);
-  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
-    ...artifact,
-    referenced_by: [
-      {
-        excerpt: "Design notes links here",
-        id: "artifact-notes",
-        issue_key: null,
-        kind: "artifact",
-        project: "CORE",
-        ref_key: "CORE/design-notes",
-      },
-    ],
-  });
-  const getIssueReferences = spyOn(api, "getIssueReferences").mockResolvedValue({
+  const { getIssueReferences, listArtifacts, view } = renderTab([artifact], {
     members: [
       {
         artifact: referencedDocument,
@@ -170,19 +195,14 @@ test("References lists closure members with chip, via, and depth, names truncati
     ],
     truncated: true,
   });
-  const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
-  });
 
-  const view = render(
-    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "artifacts" })]}>
-      <QueryClientProvider client={queryClient}>
-        <ArtifactsTab />
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
   try {
-    const references = await within(view.container).findByRole("region", { name: "References" });
+    const summary = await screen.findByText("References (1)");
+    const details = summary.closest("details");
+    expect(details).toBeInstanceOf(HTMLDetailsElement);
+    expect((details as HTMLDetailsElement).open).toBe(false);
+
+    const references = within(view.container).getByRole("region", { name: "References" });
     expect(
       within(references).getByRole("link", { name: "Design notes" }).getAttribute("href")
     ).toBe("/projects/CORE/documents/design-notes");
@@ -190,44 +210,9 @@ test("References lists closure members with chip, via, and depth, names truncati
     expect(references.textContent).toContain("via comment");
     expect(references.textContent).toContain("depth 1");
     expect(references.textContent).toContain("more references beyond 8 hops");
-
-    const referencedBy = within(view.container).getByRole("region", { name: "Referenced by" });
-    expect(
-      within(referencedBy)
-        .getByRole("link", { name: "Artifact · CORE/design-notes" })
-        .getAttribute("href")
-    ).toBe("/projects/CORE/documents/design-notes");
   } finally {
     view.unmount();
-    getArtifact.mockRestore();
-    getIssueReferences.mockRestore();
     listArtifacts.mockRestore();
-  }
-});
-
-test("Referenced by renders an artifact source with an issue key through its artifact path", () => {
-  const view = render(
-    <MemoryRouter>
-      <ReferencedBy
-        references={[
-          {
-            excerpt: "Source artifact",
-            id: "artifact-source",
-            issue_key: "CORE-1",
-            kind: "artifact",
-            project: "CORE",
-            ref_key: "CORE-1/source-doc",
-          },
-        ]}
-      />
-    </MemoryRouter>
-  );
-
-  try {
-    expect(screen.getByRole("link", { name: "Artifact · CORE-1" }).getAttribute("href")).toBe(
-      "/issues/CORE-1/artifacts/source-doc"
-    );
-  } finally {
-    view.unmount();
+    getIssueReferences.mockRestore();
   }
 });
