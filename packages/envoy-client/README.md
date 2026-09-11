@@ -50,9 +50,9 @@ listen address. Invalid configuration, malformed URLs, and
 empty tokens leave Dispatch disabled and name the failing source in `error`.
 ## Tool contract
 
-`@legion/contracts` `src/dispatch-tools.ts` is the single source for the eleven
+`@legion/contracts` `src/dispatch-tools.ts` is the single source for the twelve
 native Dispatch tool names, descriptions, schemas, and subscription behavior:
-`dispatch_issue`, `dispatch_ask`, `dispatch_resolve_ask`, `dispatch_comment`,
+`dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_comment`,
 `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
 `dispatch_artifact`, `dispatch_read`, and `dispatch_search`. Hosts build their schema
 from those specifications and do not add aliases or host-specific descriptions.

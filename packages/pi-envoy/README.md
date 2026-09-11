@@ -85,7 +85,7 @@ extension files it does not contain.
 
 ## Native Dispatch tools
 
-The extension registers eleven native Dispatch tools: `dispatch_issue`, `dispatch_ask`,
+The extension registers twelve native Dispatch tools: `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`,
 `dispatch_resolve_ask`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`,
 `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_artifact`, `dispatch_read`, and
 `dispatch_search`, when Dispatch configuration resolves both a base URL and bearer token.
@@ -107,20 +107,22 @@ The user file is `~/.config/opencode/envoy.json`; a
 `DISPATCH_TOKEN` override the file values for one process. Omitting
 `dispatch.serverUrl` while `dispatch.enabled` is true targets
 `http://localhost:8766`, the Go server's listen address. Invalid configuration,
-an invalid URL, or an empty token leaves the eleven tools unavailable and reports
+an invalid URL, or an empty token leaves the twelve tools unavailable and reports
 the source of the error.
 
-Every native tool except `dispatch_search` operates on a Dispatch issue: a native
-`KEY` or an external `owner/repo#n` reference. A Legion session may omit `issue` when
-`LEGION_ISSUE` identifies its root issue and its working directory resolves to a repository.
-`dispatch_doc_read` and `dispatch_read` also accept `dispatch://` references;
-`dispatch_search` needs only its query and returns no subscription topic.
+Issue-scoped calls use a native `KEY` or an external `owner/repo#n` reference. A Legion
+session may omit `issue` when `LEGION_ISSUE` identifies its root issue and its working
+directory resolves to a repository. `dispatch_doc_read` and `dispatch_read` also accept
+`dispatch://` references. `dispatch_search` needs only its query and returns no subscription
+topic. `dispatch_edit_ask` and `dispatch_resolve_ask` instead identify an existing ask with
+`ask`.
 
-Every mutation result carries `details.topic` as
-`notifications.dispatch.issue.<KEY>.>`. The extension's `tool_result` hook
-subscribes to that exact topic, then registers the session so retained issue
-events arrive as Pi steering. `dispatch_doc_read` and `dispatch_read` return
-issue details without a subscription topic.
+Every mutation result carries `details.topic`. Issue writes use
+`notifications.dispatch.issue.<KEY>.>`; mutations of a document ask use its
+`notifications.dispatch.document.<PROJECT>.<SLUG>.>` topic. The extension's `tool_result` hook
+subscribes to that exact topic, then registers the session so retained events arrive as Pi
+steering. `dispatch_doc_read` and `dispatch_read` return issue details without a subscription
+topic.
 
 The shared contract supplies the model-facing schemas and descriptions. The
 `dispatch` skill describes when to use each operation for issues, asks, review

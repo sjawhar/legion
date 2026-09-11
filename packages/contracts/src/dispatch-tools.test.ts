@@ -25,6 +25,13 @@ function dispatchSkillSpecSections() {
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_ask: { issue: "DSP-1", question: "Ship this?" },
+  dispatch_edit_ask: {
+    ask: "ask-1",
+    question: "Ship the revised plan?",
+    options: [{ label: "Ship", description: "Approve the revision." }],
+    multiple: false,
+    urgency: "high",
+  },
   dispatch_resolve_ask: {
     ask: "ask-1",
     kind: "retracted",
@@ -78,6 +85,7 @@ describe("dispatchToolSpecs", () => {
     expect(dispatchToolSpecs.map((spec) => spec.name)).toEqual([
       "dispatch_issue",
       "dispatch_ask",
+      "dispatch_edit_ask",
       "dispatch_resolve_ask",
       "dispatch_comment",
       "dispatch_suggest",
@@ -134,6 +142,15 @@ describe("dispatchToolSpecs", () => {
         multiple: "yes",
       }).success
     ).toBe(false);
+  });
+
+  test("requires an ask edit to include a patch field", () => {
+    const schema = schemaFor("dispatch_edit_ask");
+
+    expect(schema.safeParse({ ask: "ask-1" }).success).toBe(false);
+    expect(schema.safeParse({ ask: "ask-1", question: "Ship the revised plan?" }).success).toBe(
+      true
+    );
   });
 
   test("rejects a document edit with an unknown operation", () => {
