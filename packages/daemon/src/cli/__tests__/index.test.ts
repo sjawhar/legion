@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { cmdCheckConfig, cmdGh, cmdHandoffComplete } from "../index";
+import { cmdCheckConfig, cmdGh, cmdHandoffComplete, resolveControllerSecret } from "../index";
 
 describe("legion gh", () => {
   it("redeems the worker-extension grant only into the gh child environment", async () => {
@@ -271,5 +271,53 @@ describe("legion handoff complete", () => {
     expect(messages).toEqual([
       "[handoff] Warning: phase recorded; no architect was live to receive the summary",
     ]);
+  });
+});
+
+describe("resolveControllerSecret", () => {
+  it("reads LEGION_CONTROLLER_SECRET_FILE (trimmed) ahead of LEGION_CONTROLLER_SECRET", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-cli-secret-"));
+    const file = path.join(dir, "controller");
+    fs.writeFileSync(file, "  file-secret\n");
+    try {
+      expect(
+        resolveControllerSecret({
+          LEGION_CONTROLLER_SECRET_FILE: file,
+          LEGION_CONTROLLER_SECRET: "env-secret",
+        })
+      ).toBe("file-secret");
+      expect(resolveControllerSecret({ LEGION_CONTROLLER_SECRET: "env-secret" })).toBe(
+        "env-secret"
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails naming the variable and path when the file is missing or empty, never falling back", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-cli-secret-"));
+    const empty = path.join(dir, "empty");
+    fs.writeFileSync(empty, " \n");
+    try {
+      expect(() =>
+        resolveControllerSecret({
+          LEGION_CONTROLLER_SECRET_FILE: path.join(dir, "missing"),
+          LEGION_CONTROLLER_SECRET: "env-secret",
+        })
+      ).toThrow(
+        `LEGION_CONTROLLER_SECRET_FILE names ${path.join(dir, "missing")}, which could not be read`
+      );
+      expect(() =>
+        resolveControllerSecret({
+          LEGION_CONTROLLER_SECRET_FILE: empty,
+          LEGION_CONTROLLER_SECRET: "env-secret",
+        })
+      ).toThrow(`LEGION_CONTROLLER_SECRET_FILE names ${empty}, which is empty`);
+      expect(() => resolveControllerSecret({})).toThrow(
+        "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required for controller commands"
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

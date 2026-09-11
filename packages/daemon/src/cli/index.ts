@@ -265,9 +265,31 @@ async function cmdLegions(): Promise<void> {
   console.log(JSON.stringify(await readLegionsRegistry(paths.legionsFile), null, 2));
 }
 
-function controllerSecret(): string {
-  const secret = process.env.LEGION_CONTROLLER_SECRET;
-  if (!secret) throw new CliError("LEGION_CONTROLLER_SECRET is required for controller commands");
+/** `LEGION_CONTROLLER_SECRET_FILE` (the 0600 file the daemon hands its controller pane; trimmed
+ * contents) ahead of `LEGION_CONTROLLER_SECRET` (an interactive operator's own export). A set
+ * pointer is authoritative: a missing, unreadable, or empty file is an error naming both the
+ * variable and the path, never a fallback to the plain variable. */
+export function resolveControllerSecret(env: NodeJS.ProcessEnv): string {
+  const file = env.LEGION_CONTROLLER_SECRET_FILE;
+  if (file !== undefined) {
+    let contents: string;
+    try {
+      contents = fs.readFileSync(file, "utf8");
+    } catch (error) {
+      throw new CliError(
+        `LEGION_CONTROLLER_SECRET_FILE names ${file}, which could not be read: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    const secret = contents.trim();
+    if (!secret) throw new CliError(`LEGION_CONTROLLER_SECRET_FILE names ${file}, which is empty`);
+    return secret;
+  }
+  const secret = env.LEGION_CONTROLLER_SECRET;
+  if (!secret) {
+    throw new CliError(
+      "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required for controller commands"
+    );
+  }
   return secret;
 }
 
@@ -275,7 +297,7 @@ async function postController(pathname: string, body: Record<string, unknown>): 
   const response = await fetch(`${daemonUrl(process.env)}${pathname}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...body, secret: controllerSecret() }),
+    body: JSON.stringify({ ...body, secret: resolveControllerSecret(process.env) }),
   });
   const payload: unknown = await response.json();
   if (!response.ok)
