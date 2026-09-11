@@ -5,8 +5,8 @@ description: "Use when asking Sami a question, updating the spec, commenting on 
 
 # Dispatch
 
-Dispatch is your issue's living spec, asks, comments, and artifacts. The transcript is your
-scratch pad. Anything meant for a human goes through a `dispatch_*` tool.
+Dispatch is your issue's or project document's living spec, asks, comments, and artifacts. The
+transcript is your scratch pad. Anything meant for a human goes through a `dispatch_*` tool.
 
 The server enforces high signal: an ask question is at most 800 characters with at most eight
 options; comment and message bodies are at most 2,000 characters; an artifact is at most 25 MiB.
@@ -143,6 +143,7 @@ dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
 It returns live or versioned markdown with open marks. `issue` with an omitted `artifact`
 reads the issue specification; a project needs `artifact`; and a
 `dispatch://PROJECT/artifact/<slug>` ref supplies both. Then write narrative with:
+
 ```ts
 dispatch_doc_edit({ issue?, project?, artifact, ops, summary? })
 ```
@@ -162,15 +163,22 @@ type EditOp = {
 ```
 
 Target `replace` and `delete` by the document's plain text: inline-code and link text match
-without Markdown syntax, and a table-cell anchor is its cell text. `replace` requires `find` and
-`with`; `delete` requires `find`; `insert` requires `markdown` and exactly one of `after` or
-`before`. An insert anchor is a quote, `"start"`, `"end"`, or `"heading:Title"`. Every insert
-creates a sibling block before or after the quote or heading's enclosing document block; `"start"`
-and `"end"` select the document edges. At a table-cell quote, pipe-table body-row fragments extend
-that table before or after the matched row; omit table header and delimiter rows, and do not exceed
-the table width. Use `replace` for inline continuation. Use zero-based `occurrence` for a repeated
-target. When a decision lands, pass `summary` to name the resulting version. Never paste progress
-into a message.
+without Markdown syntax, and a table-cell anchor is its cell text. Quote code-block contents
+without their Markdown fences. A quote must stay within one textblock; split changes that
+span separate blocks into separate operations.
+
+`replace` requires `find` and `with`; `delete` requires `find`; `insert` requires `markdown`
+and exactly one of `after` or `before`. An insert anchor is a quote, `"start"`, `"end"`, or
+`"heading:Title"`. Ordinary inserts create a sibling block before or after the quote or
+heading's enclosing document block; `"start"` and `"end"` select the document edges.
+
+At a table-cell quote, pipe-table body-row fragments extend that table before or after the
+matched row; omit table header and delimiter rows. Short rows are padded to the table width;
+rows wider than the table are rejected.
+Deleting a cell's quoted text removes that text, not the surrounding row or table.
+Use `replace` for inline continuation. Use zero-based `occurrence` for a repeated target;
+re-read a missing or ambiguous target before retrying. Pass `summary` to name the version
+when recording a decision. Never paste progress into a message.
 
 ## Comments and suggestions
 
@@ -321,8 +329,8 @@ dispatch_doc_edit({
   ops: [
     {
       op: "replace",
-      find: "## Delivery\n\nRelease pending.",
-      with: "## Delivery\n\nRelease merged and ready for deployment.",
+      find: "Release pending.",
+      with: "Release merged and ready for deployment.",
     },
   ],
   summary: "Recorded merged release",
