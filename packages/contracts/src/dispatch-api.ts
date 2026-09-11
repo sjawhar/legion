@@ -88,7 +88,8 @@ export interface IssueChild {
 
 export interface Artifact {
   readonly id: string;
-  readonly issue_key: string;
+  readonly issue_key: string | null;
+  readonly project: string;
   readonly slug: string;
   readonly name: string;
   readonly kind: "doc" | "image" | "file";
@@ -112,7 +113,8 @@ export interface Version {
 
 export interface Ask {
   readonly id: string;
-  readonly issue_key: string;
+  readonly issue_key: string | null;
+  readonly artifact_id?: string | null;
   readonly author: Actor;
   readonly question: string;
   readonly options: AskOption[];
@@ -126,6 +128,7 @@ export interface Ask {
   readonly opened_event_id: number;
   readonly created_at: string;
   readonly issue?: Pick<Issue, "key" | "title">;
+  readonly edited_at: string | null;
 }
 
 export interface AskOption {
@@ -146,6 +149,18 @@ export interface AskResolution {
   readonly actor: Actor;
   readonly at: string;
 }
+
+export interface AskEditPrevious {
+  readonly question: string;
+  readonly options: AskOption[];
+  readonly multiple: boolean;
+  readonly urgency: AskUrgency;
+}
+
+export type AskEditEventPayload = Ask & {
+  readonly previous: AskEditPrevious;
+  readonly edited_by: Actor;
+};
 
 export interface Comment {
   readonly id: string;
@@ -254,7 +269,9 @@ export interface ChildStatusEventPayload {
 
 interface DispatchEventBase {
   readonly id: number;
-  readonly issue_key: string;
+  readonly issue_key: string | null;
+  readonly artifact_id?: string | null;
+  readonly project?: string;
   readonly seq: number;
   readonly actor: Actor;
   readonly notify: boolean;
@@ -274,6 +291,10 @@ export type DispatchEvent =
       readonly payload: ArtifactVersionEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: Ask })
+  | (DispatchEventBase & {
+      readonly type: "ask.edited";
+      readonly payload: AskEditEventPayload;
+    })
   | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: Ask })
   | (DispatchEventBase & {
       readonly type: "ask.resolved";
@@ -367,6 +388,14 @@ export interface CreateAskInput {
   readonly multiple?: boolean;
   readonly urgency?: AskUrgency;
   readonly anchor?: AnchorInput;
+  readonly actor?: Actor;
+}
+
+export interface EditAskInput {
+  readonly question?: string;
+  readonly options?: AskOption[];
+  readonly multiple?: boolean;
+  readonly urgency?: AskUrgency;
   readonly actor?: Actor;
 }
 
@@ -490,7 +519,9 @@ export interface DispatchServiceErrorShape {
  * discard a valid event header.
  */
 export const DispatchEventSchema = z.object({
-  issue_key: z.string(),
+  issue_key: z.string().nullable(),
+  artifact_id: z.string().nullish(),
+  project: z.string().optional(),
   type: z.string(),
   actor: z.object({ kind: z.string(), id: z.string().optional() }).passthrough(),
   payload: z.object({}).passthrough(),
@@ -514,7 +545,7 @@ export const ArtifactVersionEventPayloadSchema = z.object({
   diff: z.string().optional(),
 });
 
-export const AskEventPayloadSchema = z.object({
+const askEventPayloadFields = {
   opened_event_id: z.number().int().positive(),
   question: z.string().optional(),
   options: z.array(z.object({ label: z.string().optional() })).nullish(),
@@ -532,6 +563,28 @@ export const AskEventPayloadSchema = z.object({
       at: z.string().optional(),
     })
     .nullish(),
+};
+
+export const AskEventPayloadSchema = z.intersection(
+  z.object(askEventPayloadFields),
+  z.object({
+    previous: z.never().optional(),
+    edited_by: z.never().optional(),
+  })
+);
+
+export const AskEditedEventPayloadSchema = z.object({
+  ...askEventPayloadFields,
+  multiple: z.boolean(),
+  urgency: z.string(),
+  edited_at: z.string().nullish(),
+  previous: z.object({
+    question: z.string(),
+    options: z.array(z.object({ label: z.string().optional() })),
+    multiple: z.boolean(),
+    urgency: z.string(),
+  }),
+  edited_by: z.object({ kind: z.string(), id: z.string() }).passthrough(),
 });
 
 export const CommentEventPayloadSchema = z.object({

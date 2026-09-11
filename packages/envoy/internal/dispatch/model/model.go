@@ -184,6 +184,23 @@ type Ask struct {
 	Resolution    *AskResolution `json:"resolution,omitempty"`
 	OpenedEventID *int64         `json:"opened_event_id,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
+	EditedAt      *string        `json:"edited_at"`
+}
+
+// AskEditPrevious is the mutable content of an ask before an edit.
+type AskEditPrevious struct {
+	Question string      `json:"question"`
+	Options  []AskOption `json:"options"`
+	Multiple bool        `json:"multiple"`
+	Urgency  string      `json:"urgency"`
+}
+
+// AskEditEventPayload is the full edited ask plus its prior mutable content
+// and the actor who made the edit.
+type AskEditEventPayload struct {
+	Ask
+	Previous AskEditPrevious `json:"previous"`
+	EditedBy Actor           `json:"edited_by"`
 }
 
 // AskOption is an answer choice.

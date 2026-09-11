@@ -3,6 +3,7 @@ import {
   type Actor,
   type Anchor,
   type AnchorInput,
+  AskEditedEventPayloadSchema,
   AskEventPayloadSchema,
   type Comment,
   type CreateProjectInput,
@@ -38,6 +39,67 @@ test("requires a positive opened event id on an ask event payload", () => {
   expect(AskEventPayloadSchema.safeParse({ opened_event_id: 12, question: "Q" }).success).toBe(
     true
   );
+});
+
+test("accepts an artifact-owned ask edit event", () => {
+  const event: DispatchEvent = {
+    id: 72,
+    issue_key: null,
+    artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+    project: "CORE",
+    seq: 4,
+    type: "ask.edited",
+    actor: { kind: "session", id: "session-1" },
+    notify: false,
+    created_at: "2026-09-11T04:05:29Z",
+    payload: {
+      id: "ask-1",
+      issue_key: null,
+      artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      author: { kind: "session", id: "session-1" },
+      question: "Publish?",
+      options: [],
+      multiple: false,
+      urgency: "med",
+      anchor: null,
+      state: "open",
+      answer: null,
+      opened_event_id: 3,
+      created_at: "2026-09-11T04:00:00Z",
+      edited_at: "2026-09-11T04:05:29Z",
+      previous: {
+        question: "Draft?",
+        options: [{ label: "Yes" }],
+        multiple: false,
+        urgency: "med",
+      },
+      edited_by: { kind: "session", id: "session-1" },
+    },
+  };
+
+  expect(DispatchEventSchema.safeParse(event)).toMatchObject({
+    data: {
+      artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      issue_key: null,
+      type: "ask.edited",
+    },
+    success: true,
+  });
+});
+
+test("rejects edit history on non-edit ask events", () => {
+  expect(
+    AskEventPayloadSchema.safeParse({
+      opened_event_id: 7,
+      question: "Which API?",
+      previous: {
+        question: "Which transport?",
+        options: [{ label: "HTTP" }],
+        multiple: false,
+        urgency: "med",
+      },
+    }).success
+  ).toBe(false);
 });
 
 test("permits the actor supplied with an agent project creation request", () => {
@@ -124,4 +186,39 @@ test("models comment thread lifecycle events and author edits", () => {
   expect(DispatchEventSchema.safeParse(reopened)).toMatchObject({ success: true });
   expect(DispatchEventSchema.safeParse(edited)).toMatchObject({ success: true });
   expect(input).toEqual({ body: "Edited discussion" });
+});
+
+test("preserves ask edit history in the event payload", () => {
+  const payload = {
+    opened_event_id: 7,
+    question: "Which transport should we implement?",
+    options: [{ label: "REST" }, { label: "gRPC" }],
+    multiple: true,
+    urgency: "high",
+    answer: null,
+    edited_at: "2026-09-11T03:26:00Z",
+    previous: {
+      question: "Which implementation?",
+      options: [{ label: "HTTP" }, { label: "MCP" }],
+      multiple: false,
+      urgency: "low",
+    },
+    edited_by: { kind: "session", id: "session-1" },
+  };
+
+  expect(AskEditedEventPayloadSchema.parse(payload)).toEqual(payload);
+});
+
+test("requires previous fields on ask edit events", () => {
+  expect(
+    AskEditedEventPayloadSchema.safeParse({
+      opened_event_id: 7,
+      question: "Which API?",
+      options: [],
+      multiple: false,
+      urgency: "med",
+      edited_at: "2026-09-11T03:26:00Z",
+      edited_by: { kind: "session", id: "session-1" },
+    }).success
+  ).toBe(false);
 });

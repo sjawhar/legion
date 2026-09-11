@@ -117,6 +117,7 @@ describe("renderInbound dispatch events", () => {
       at: "1970-01-01T00:00:00Z",
       id: "dispatch-1",
       dispatch: {
+        owner: "DSP-1",
         issue_key: "DSP-1",
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
@@ -149,6 +150,7 @@ describe("renderInbound dispatch events", () => {
       at: "1970-01-01T00:00:00Z",
       id: "dispatch-1",
       dispatch: {
+        owner: "DSP-1",
         issue_key: "DSP-1",
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
@@ -181,6 +183,7 @@ describe("renderInbound dispatch events", () => {
     };
 
     expect(decoded.envoy.dispatch).toEqual({
+      owner: "DSP-1",
       issue_key: "DSP-1",
       type: "ask.resolved",
       actor: { kind: "session", id: "session-1" },
@@ -196,6 +199,99 @@ describe("renderInbound dispatch events", () => {
           reason: "A newer question supersedes this one.",
         },
       },
+    });
+  });
+
+  test("renders ask.edited with its current question and edit history", () => {
+    const decoded = decode(
+      renderInbound(
+        dispatchEvent("ask.edited", {
+          ...openAsk,
+          question: "Which transport should we implement?",
+          options: [{ label: "REST" }, { label: "gRPC" }],
+          multiple: true,
+          urgency: "high",
+          edited_at: "2026-09-11T03:26:00Z",
+          previous: {
+            question: "Which API?",
+            options: [{ label: "JSON" }, { label: "MCP" }],
+            multiple: false,
+            urgency: "med",
+          },
+          edited_by: actor,
+        }),
+        reader
+      ).content
+    ) as { envoy: { dispatch: Record<string, unknown> } };
+
+    expect(decoded.envoy.dispatch).toEqual({
+      owner: "DSP-1",
+      issue_key: "DSP-1",
+      type: "ask.edited",
+      actor: { kind: "session", id: "session-1" },
+      payload: {
+        opened_event_id: 7,
+        question: "Which transport should we implement?",
+        options: [{ label: "REST" }, { label: "gRPC" }],
+        answer: null,
+        multiple: true,
+        urgency: "high",
+        edited_at: "2026-09-11T03:26:00Z",
+        previous: {
+          question: "Which API?",
+          options: [{ label: "JSON" }, { label: "MCP" }],
+          multiple: false,
+          urgency: "med",
+        },
+        edited_by: actor,
+      },
+    });
+  });
+  test("renders an artifact-owned ask edit by project document", () => {
+    const capturedArtifactAskEdit = JSON.stringify(
+      envelope({
+        event_id: "dispatch-72",
+        source: "dispatch",
+        source_event_id: "72",
+        topic: "notifications.dispatch.document.CORE.design-notes.ask.edited",
+        payload_summary: "CORE/design-notes ask edited",
+        payload: JSON.stringify({
+          id: 72,
+          issue_key: null,
+          artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+          project: "CORE",
+          seq: 4,
+          type: "ask.edited",
+          actor,
+          notify: false,
+          created_at: "2026-09-11T04:05:29Z",
+          payload: {
+            ...openAsk,
+            issue_key: null,
+            artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+            question: "Publish?",
+            edited_at: "2026-09-11T04:05:29Z",
+            previous: {
+              question: "Draft?",
+              options: [{ label: "Yes" }],
+              multiple: false,
+              urgency: "med",
+            },
+            edited_by: actor,
+          },
+        }),
+      })
+    );
+
+    const decoded = decode(renderInbound(capturedArtifactAskEdit, reader).content) as {
+      envoy: { dispatch: Record<string, unknown> };
+    };
+
+    expect(decoded.envoy.dispatch).toMatchObject({
+      owner: "CORE/design-notes",
+      artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      type: "ask.edited",
+      payload: { question: "Publish?", previous: { question: "Draft?" } },
     });
   });
 
@@ -302,6 +398,7 @@ describe("renderInbound dispatch events", () => {
         envoy: { dispatch: Record<string, unknown> };
       };
       expect(decoded.envoy.dispatch).toEqual({
+        owner: "DSP-1",
         issue_key: "DSP-1",
         type,
         actor: { kind: "session", id: "session-1" },

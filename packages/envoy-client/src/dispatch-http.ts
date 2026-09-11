@@ -1,5 +1,6 @@
 import type {
   Actor,
+  Artifact,
   ArtifactDetails,
   ArtifactText,
   ArtifactUploadResponse,
@@ -154,7 +155,12 @@ export class DispatchClient {
     );
   }
 
-  async artifact(issue: string, input: CreateArtifactInput): Promise<ArtifactUploadResponse> {
+  async artifact(
+    issue: string,
+    input: CreateArtifactInput
+  ): Promise<
+    ArtifactUploadResponse & { readonly artifact: Artifact & { readonly issue_key: string } }
+  > {
     const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"];
     if ("content" in input) return this.#json("POST", artifactPath, input);
 

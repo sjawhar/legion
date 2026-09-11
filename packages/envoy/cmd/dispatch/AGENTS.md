@@ -89,6 +89,7 @@ the table says human only.
 | `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. |
 | `/api/v1/issues/{key}/asks?state=` | GET | user or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | user or bearer | Read an ask. |
+| `/api/v1/asks/{id}` | PATCH | user or bearer | Edit one or more of `question`, `options`, `multiple`, or `urgency` while the ask is open. A bearer caller must be the asking session; a human may edit any open ask. The response has nullable `edited_at`; `ask.edited` records the full current ask, prior mutable fields, and `edited_by`. Ask anchors cannot be changed by this route. |
 | `/api/v1/asks/{id}/answer` | POST | human only | Answer an open ask. |
 | `/api/v1/asks/{id}/resolve` | POST | user or bearer | Retract or self-resolve an open ask with a recorded reason. |
 | `/api/v1/issues/{key}/comments` | GET, POST | user or bearer | List or create comments and suggestions. |

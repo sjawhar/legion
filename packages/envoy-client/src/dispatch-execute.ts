@@ -2,6 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
   Artifact,
+  Ask,
   AskRead,
   AskUrgency,
   Comment,
@@ -89,6 +90,27 @@ const externalIssueRefPattern = /^([^/\s]+)\/([^/\s#]+)#([1-9][0-9]*)$/;
 const bareIssueNumberPattern = /^[1-9][0-9]*$/;
 
 const issueFreeTools = new Set(["dispatch_issue", "dispatch_resolve_ask", "dispatch_search"]);
+
+async function askResultDetails(
+  client: DispatchClient,
+  ask: Pick<Ask, "id" | "issue_key" | "artifact_id">
+) {
+  if (ask.issue_key !== null) {
+    return {
+      issue: ask.issue_key,
+      topic: dispatchIssueSubject(ask.issue_key, ">"),
+      ask: ask.id,
+    };
+  }
+  if (ask.artifact_id === undefined || ask.artifact_id === null) {
+    throw new Error("document ask is missing its artifact ID");
+  }
+  const artifact = await client.getArtifact(ask.artifact_id);
+  return {
+    topic: `notifications.dispatch.document.${artifact.project}.${artifact.slug}.>`,
+    ask: ask.id,
+  };
+}
 
 function canonicalExternalIssueRef(value: string): string {
   const match = value.trim().match(externalIssueRefPattern);
@@ -495,11 +517,7 @@ export async function executeDispatchTool(
       if (ask.resolution === undefined) throw new Error("resolved ask is missing its resolution");
       return {
         text: `${kind === "retracted" ? "Retracted" : "Resolved"} ask ${ask.id}: ${ask.resolution.reason}`,
-        details: {
-          issue: ask.issue_key,
-          topic: dispatchIssueSubject(ask.issue_key, ">"),
-          ask: ask.id,
-        },
+        details: await askResultDetails(client, ask),
       };
     }
     case "dispatch_ask": {
@@ -523,11 +541,7 @@ export async function executeDispatchTool(
       });
       return {
         text: `Opened ask ${ask.id}: ${ask.question}`,
-        details: {
-          issue: ask.issue_key,
-          topic: dispatchIssueSubject(ask.issue_key, ">"),
-          ask: ask.id,
-        },
+        details: await askResultDetails(client, ask),
       };
     }
     case "dispatch_comment": {
@@ -667,7 +681,7 @@ export async function executeDispatchTool(
         const askRead = await client.getAsk(issueArguments.ref.id);
         return {
           text: askSummary(askRead),
-          details: { issue: askRead.ask.issue_key },
+          details: { issue: issueArguments.ref.issue },
         };
       }
       if (issueArguments.ref?.kind === "comment") {

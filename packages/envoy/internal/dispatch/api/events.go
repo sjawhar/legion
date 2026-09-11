@@ -291,7 +291,7 @@ func (s *server) attachAskOpenedEventIDs(ctx context.Context, events []model.Eve
 	payloads := []map[string]any{}
 	for index := range events {
 		switch events[index].Type {
-		case "ask.opened", "ask.answered", "ask.resolved":
+		case "ask.opened", "ask.answered", "ask.resolved", "ask.edited":
 		default:
 			continue
 		}
