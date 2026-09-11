@@ -26,6 +26,8 @@ import {
   StopFailed,
   TreeClosingError,
 } from "../processes";
+import type { Effect } from "../reducers";
+import { runResync } from "../resync";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { fakeDispatchClient } from "./ci-fixtures";
 
@@ -9400,5 +9402,91 @@ describe("ProcessManager", () => {
     await processes.ensureController();
     expect(state.controllerLocator?.tmuxPaneId).toBe("%43");
     expect(saveStateCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  it("resurrects a dead active root during a resync probe tick, but leaves a live one alone", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const aliveIssue = "LEGION-99" as IssueKey;
+    const state = newLegionState("omp", 2);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    state.trees[root].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.issues[aliveIssue] = {
+      key: aliveIssue,
+      title: "Alive root",
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[aliveIssue] = {
+      root: aliveIssue,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@43", tmuxPaneId: "%1" },
+    };
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+      run: async (command) => {
+        // The root's original pane ("%0", from `tree()`) is gone; the untouched second tree's
+        // pane ("%1") is still live and running OMP (the default `readProcessCmdline`).
+        if (command[0] === "tmux" && command[1] === "list-panes" && command[3] === "%0") {
+          return { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[1] === "list-panes" && command[3] === "%1") {
+          return { stdout: "12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[1] === "new-window") {
+          return { stdout: "@50 %2 12345\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    const resurrectSpy = vi.spyOn(processes, "resurrect");
+
+    const dispatched: Effect[][] = [];
+    await runResync(
+      {
+        state,
+        config: {
+          resyncIntervalMs: 600_000,
+          dispatchProject: "LEGSMOKE",
+          appLogins: [],
+          maxFixAttempts: 3,
+        },
+        dispatchClient: fakeDispatchClient(),
+        saveState: async () => {},
+        fetchCiStatusBatch: async () => ({}),
+        now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        applyEffects: async (effects) => {
+          dispatched.push(effects);
+          for (const effect of effects) {
+            if (effect.kind !== "probe") continue;
+            if ((await processes.probe(effect.tree)) === "dead")
+              await processes.resurrect(effect.tree);
+          }
+        },
+      },
+      { force: true }
+    );
+
+    expect(dispatched).toContainEqual([{ kind: "probe", tree: root }]);
+    expect(dispatched).toContainEqual([{ kind: "probe", tree: aliveIssue }]);
+    expect(resurrectSpy).toHaveBeenCalledTimes(1);
+    expect(resurrectSpy).toHaveBeenCalledWith(root);
+    expect(managedState.trees[root]).toMatchObject({ status: "active" });
+    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
   });
 });
