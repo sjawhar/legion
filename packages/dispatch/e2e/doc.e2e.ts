@@ -17,8 +17,8 @@ const session = {
   actor: { kind: "session" as const, id: "e2e-doc-editor", origin: { tmux: "dispatch:1.3" } },
   as: "agent" as const,
 };
-const initialMarkdown =
-  "## Database\n\nUse SQLite\n\n| col | value |\n|---|---|\n| a | 1 |\n\n- [ ] task\n\n```ts\nconst x = 1;\n```\n";
+const longToken = `sjawhar/legion#838-${"unbreakable".repeat(12)}`;
+const initialMarkdown = `## Database\n\nUse SQLite\n\n| col | value |\n|---|---|\n| a | 1 |\n| b | ${longToken} |\n\n- [ ] task\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n`;
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -71,6 +71,21 @@ test("the spec opens as a formatted, editable document with no source pane", asy
     expect(headerWeight).toBeGreaterThanOrEqual(600);
     expect(borderWidth).toBeGreaterThan(0);
     expect(paddingLeft).toBeGreaterThan(0);
+    // A cell holding an unbreakable token wraps instead of pushing the table into a horizontal
+    // scroll, and on a wide desktop the editor is the column's width (the library's `prose` class
+    // would cap it at 65ch, about 600px).
+    expect(
+      await table.evaluate((element) => element.scrollWidth - element.clientWidth)
+    ).toBeLessThanOrEqual(1);
+    if (testInfo.project.name !== "iphone") {
+      await page.setViewportSize({ width: 1800, height: 1000 });
+      const [editorWidth, articleWidth] = await Promise.all([
+        editor.evaluate((element) => element.getBoundingClientRect().width),
+        documentArticle.evaluate((element) => element.getBoundingClientRect().width),
+      ]);
+      expect(articleWidth).toBeGreaterThan(700);
+      expect(editorWidth).toBeGreaterThanOrEqual(articleWidth - 1);
+    }
     await expect(editor.locator('input[type="checkbox"]')).toBeVisible();
     await expect(editor.locator("pre code")).toBeVisible();
     await expect(page.getByRole("button", { name: /^(Edit|Preview)$/ })).toHaveCount(0);
