@@ -164,6 +164,7 @@ the Postgres `postgres` database for a non-default local port.
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
+| `/api/v1/asks/{id}` | PATCH | cookie, trusted header, or bearer | Edit one or more of `question`, `options`, `multiple`, or `urgency` on an open ask. A bearer caller must be the asking session; a human may edit any open ask. The response records `edited_at` and emits `ask.edited` with the current ask, prior mutable fields, and `edited_by`. Anchors are selected when the ask is created and cannot be changed by this route. |
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |
 | `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |

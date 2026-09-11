@@ -20,6 +20,46 @@ const (
 	maxAskOptions    = 8
 )
 
+func validateAskQuestion(question string) error {
+	if strings.TrimSpace(question) == "" {
+		return errorf(http.StatusBadRequest, "INVALID_ASK", "ask question is required")
+	}
+	if length := len16(question); length > maxAskQuestion16 {
+		return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "question length %d exceeds limit %d", length, maxAskQuestion16)
+	}
+	return nil
+}
+
+func validateAskOptions(options []model.AskOption) error {
+	if len(options) > maxAskOptions {
+		return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "options length %d exceeds limit %d", len(options), maxAskOptions)
+	}
+	seen := make(map[string]struct{}, len(options))
+	for index := range options {
+		label := strings.TrimSpace(options[index].Label)
+		if label == "" {
+			return errorf(http.StatusBadRequest, "INVALID_ASK", "ask option labels are required")
+		}
+		if _, duplicate := seen[label]; duplicate {
+			return errorf(http.StatusBadRequest, "INVALID_ASK", "ask option labels must be unique")
+		}
+		seen[label] = struct{}{}
+		options[index].Label = label
+	}
+	return nil
+}
+
+func normalizeAskUrgency(value string) (string, error) {
+	urgency := strings.TrimSpace(value)
+	if urgency == "" {
+		urgency = "med"
+	}
+	if !validUrgency(urgency) {
+		return "", errorf(http.StatusBadRequest, "INVALID_ASK", "ask urgency must be low, med, high, or blocking")
+	}
+	return urgency, nil
+}
+
 func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	s.createAskFor(w, r, issueOwner(r.PathValue("key")))
 }
@@ -41,45 +81,24 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	if !ok {
 		return
 	}
-	if strings.TrimSpace(input.Question) == "" {
-		writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask question is required")
+	if err := validateAskQuestion(input.Question); err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
-	if length := len16(input.Question); length > maxAskQuestion16 {
-		capExceeded(w, "question", length, maxAskQuestion16)
-		return
+	if input.Options == nil {
+		input.Options = []model.AskOption{}
 	}
-	if len(input.Options) > maxAskOptions {
-		capExceeded(w, "options", len(input.Options), maxAskOptions)
+	if err := validateAskOptions(input.Options); err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
 	multiple := false
 	if input.Multiple != nil {
 		multiple = *input.Multiple
 	}
-	if input.Options == nil {
-		input.Options = []model.AskOption{}
-	}
-	seenOptions := make(map[string]struct{}, len(input.Options))
-	for index := range input.Options {
-		label := strings.TrimSpace(input.Options[index].Label)
-		if label == "" {
-			writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask option labels are required")
-			return
-		}
-		if _, duplicate := seenOptions[label]; duplicate {
-			writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask option labels must be unique")
-			return
-		}
-		seenOptions[label] = struct{}{}
-		input.Options[index].Label = label
-	}
-	urgency := strings.TrimSpace(input.Urgency)
-	if urgency == "" {
-		urgency = "med"
-	}
-	if !validUrgency(urgency) {
-		writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask urgency must be low, med, high, or blocking")
+	urgency, err := normalizeAskUrgency(input.Urgency)
+	if err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
 
@@ -187,6 +206,137 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	s.publish(events...)
 	writeJSON(w, http.StatusCreated, ask)
+}
+
+func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Question *string            `json:"question"`
+		Options  *[]model.AskOption `json:"options"`
+		Multiple *bool              `json:"multiple"`
+		Urgency  *string            `json:"urgency"`
+		Actor    *model.Actor       `json:"actor"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.Question == nil && input.Options == nil && input.Multiple == nil && input.Urgency == nil {
+		writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask edit requires at least one field")
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
+		return
+	}
+	if input.Question != nil {
+		if err := validateAskQuestion(*input.Question); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if input.Options != nil {
+		if err := validateAskOptions(*input.Options); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	var requestedUrgency string
+	if input.Urgency != nil {
+		var err error
+		requestedUrgency, err = normalizeAskUrgency(*input.Urgency)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	unlockedAsk, err := s.loadAsk(r.Context(), tx, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.requireOpenOwner(r.Context(), tx, ownerOf(unlockedAsk.IssueKey, unlockedAsk.ArtifactID)); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	ask, err := s.loadAskForUpdate(r.Context(), tx, unlockedAsk.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if ask.State != "open" {
+		writeError(w, "ASK_NOT_OPEN", http.StatusConflict, "only open asks may be edited")
+		return
+	}
+	if actor.Kind == "session" && (ask.Author.Kind != actor.Kind || ask.Author.ID != actor.ID) {
+		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the asking session may edit an ask")
+		return
+	}
+
+	previous := model.AskEditPrevious{
+		Question: ask.Question,
+		Options:  ask.Options,
+		Multiple: ask.Multiple,
+		Urgency:  ask.Urgency,
+	}
+	if input.Question != nil {
+		ask.Question = *input.Question
+	}
+	if input.Options != nil {
+		ask.Options = *input.Options
+	}
+	if input.Multiple != nil {
+		ask.Multiple = *input.Multiple
+	}
+	if input.Urgency != nil {
+		ask.Urgency = requestedUrgency
+	}
+	options, err := encodeJSON(ask.Options)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	var editedAt time.Time
+	if err := tx.QueryRow(r.Context(), `
+		update asks
+		set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = now()
+		where id = $1
+		returning edited_at
+	`, ask.ID, ask.Question, options, ask.Multiple, ask.Urgency).Scan(&editedAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	ask.EditedAt = askTimestamp(editedAt)
+	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+		"ask.edited",
+		actor,
+		model.AskEditEventPayload{Ask: ask, Previous: previous, EditedBy: actor},
+	))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.publish(event)
+	writeJSON(w, http.StatusOK, ask)
+}
+
+func askTimestamp(value time.Time) *string {
+	text := value.UTC().Format(time.RFC3339Nano)
+	return &text
 }
 
 type askTransition struct {
@@ -381,7 +531,7 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
 	ask, err := scanAsk(q.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
+		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at
 		from asks where id = $1
 	`, id))
 	if err != nil {
@@ -394,7 +544,7 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 }
 
 // listIssueAsksColumns are the columns every ask-listing query selects, in scan order.
-const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at`
+const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at`
 
 // pgx caches prepared plans by query text. State and ownership each have a fixed
 // query so the partial open-ask index remains eligible under generic plans.
@@ -473,7 +623,7 @@ func (s *server) loadOwnerAsks(ctx context.Context, q queryer, owner owner, stat
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
 	ask, err := scanAsk(tx.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at
+		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at
 		from asks where id = $1 for update
 	`, id))
 	if err != nil {
@@ -505,7 +655,7 @@ func (s *server) attachOpenedEventIDs(
 	rows, err := q.Query(ctx, `
 		select payload->>'id', min(id)
 		from events
-		where type in ('ask.opened', 'ask.answered', 'ask.resolved')
+		where type in ('ask.opened', 'ask.answered', 'ask.resolved', 'ask.edited')
 		  and payload->>'id' = any($1)
 		group by payload->>'id'
 	`, askIDs)
@@ -539,9 +689,10 @@ func (s *server) attachOpenedEventIDs(
 func scanAsk(row pgx.Row) (model.Ask, error) {
 	var ask model.Ask
 	var author, options, anchor, answer, resolution []byte
+	var editedAt *time.Time
 	if err := row.Scan(
 		&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
-		&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt,
+		&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt,
 	); err != nil {
 		return model.Ask{}, err
 	}
@@ -576,7 +727,15 @@ func scanAsk(row pgx.Row) (model.Ask, error) {
 		}
 		ask.Resolution = &value
 	}
+	ask.EditedAt = askTimestampPtr(editedAt)
 	return ask, nil
+}
+
+func askTimestampPtr(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	return askTimestamp(*value)
 }
 
 func selectedOptions(options []model.AskOption, selected []string) bool {

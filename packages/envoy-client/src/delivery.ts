@@ -1,6 +1,7 @@
 import {
   ArtifactCreatedEventPayloadSchema as ArtifactCreatedPayloadSchema,
   ArtifactVersionEventPayloadSchema as ArtifactVersionPayloadSchema,
+  AskEditedEventPayloadSchema as AskEditedPayloadSchema,
   AskEventPayloadSchema as AskPayloadSchema,
   agentSubject,
   ChildStatusEventPayloadSchema as ChildStatusPayloadSchema,
@@ -85,7 +86,8 @@ export function replyWith(envelope: DeliveryEnvelope): string | undefined {
 }
 
 // Dispatch event payloads follow the wire contract: issue.* carries the Issue,
-// ask.* the Ask, message.created the Message, comment.*/suggestion.* the Comment
+// ask.opened/answered/resolved the Ask, ask.edited the edited Ask plus its prior
+// fields and editor, message.created the Message, comment.*/suggestion.* the Comment
 // plus artifact_name, artifact.created {artifact}, artifact.version
 // {artifact_id, name, version, diff?}, and child.status {child_key, from, to}.
 // Bus frames are untrusted, so each schema below declares exactly the fields
@@ -101,6 +103,7 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "artifact.created": ArtifactCreatedPayloadSchema,
   "artifact.version": ArtifactVersionPayloadSchema,
   "ask.opened": AskPayloadSchema,
+  "ask.edited": AskEditedPayloadSchema,
   "ask.answered": AskPayloadSchema,
   "ask.resolved": AskPayloadSchema,
   "comment.created": CommentPayloadSchema,
@@ -110,6 +113,19 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "message.created": MessagePayloadSchema,
   "child.status": ChildStatusPayloadSchema,
 };
+
+const DISPATCH_DOCUMENT_TOPIC_PREFIX = "notifications.dispatch.document.";
+
+function dispatchOwner(event: DispatchEvent, topic: string | undefined): string {
+  if (event.issue_key !== null) return event.issue_key;
+  if (topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) === true) {
+    const [project, slug] = topic.slice(DISPATCH_DOCUMENT_TOPIC_PREFIX.length).split(".", 3);
+    if (project !== undefined && project !== "" && slug !== undefined && slug !== "") {
+      return `${project}/${slug}`;
+    }
+  }
+  return event.artifact_id ?? "unknown";
+}
 
 function dispatchPayload(event: DispatchEvent): unknown {
   const schema = DISPATCH_PAYLOAD_SCHEMAS[event.type];
@@ -211,7 +227,12 @@ export function renderInbound(
         }
         askQuestion = dispatchAskQuestion(frame.event);
         dispatchEvent = {
-          issue_key: frame.event.issue_key,
+          owner: dispatchOwner(frame.event, subject ?? envelope.topic),
+          ...(frame.event.issue_key === null
+            ? frame.event.artifact_id === undefined || frame.event.artifact_id === null
+              ? {}
+              : { artifact_id: frame.event.artifact_id }
+            : { issue_key: frame.event.issue_key }),
           type: frame.event.type,
           actor: frame.event.actor,
           payload: dispatchPayload(frame.event),

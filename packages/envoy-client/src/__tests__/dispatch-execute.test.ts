@@ -1118,3 +1118,62 @@ test("resolves an ask as the calling session", async () => {
     },
   });
 });
+
+test("subscribes to the project document topic after resolving a document ask", async () => {
+  const requests: string[] = [];
+  const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+    const pathname = new URL(String(url)).pathname;
+    requests.push(pathname);
+    if (pathname === "/api/v1/asks/ask-document/resolve") {
+      return response({
+        id: "ask-document",
+        issue_key: null,
+        artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        resolution: {
+          actor: { kind: "session", id: "session-42" },
+          at: "2026-09-11T04:00:00Z",
+          kind: "retracted",
+          reason: "No longer needed.",
+        },
+        state: "resolved",
+      });
+    }
+    if (pathname === "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3") {
+      return response({
+        id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        issue_key: null,
+        project: "CORE",
+        slug: "design-notes",
+      });
+    }
+    throw new Error(`unexpected request: ${pathname}`);
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_resolve_ask",
+    args: {
+      ask: "ask-document",
+      kind: "retracted",
+      reason: "No longer needed.",
+    },
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+
+  expect(result).toEqual({
+    text: "Retracted ask ask-document: No longer needed.",
+    details: {
+      topic: "notifications.dispatch.document.CORE.design-notes.>",
+      ask: "ask-document",
+    },
+  });
+  expect(requests).toEqual([
+    "/api/v1/asks/ask-document/resolve",
+    "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3",
+  ]);
+});
