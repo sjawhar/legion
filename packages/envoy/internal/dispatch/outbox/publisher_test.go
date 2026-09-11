@@ -395,6 +395,69 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 	}
 }
 
+func TestLoadRootCommentAuthorTerminatesOnACycle(t *testing.T) {
+	database := openTestStore(t)
+	seedIssue(t, database, "T-1", nil)
+	commentID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
+	// comments.reply_to carries no acyclicity constraint; a comment can end up pointing
+	// at itself (or a longer cycle). The walk must terminate promptly rather than spin
+	// the recursive query and stall the outbox scan.
+	if _, err := database.Pool.Exec(context.Background(), `update comments set reply_to = $1 where id = $1`, commentID); err != nil {
+		t.Fatalf("create self-referential comment: %v", err)
+	}
+
+	done := make(chan struct{})
+	var ok bool
+	go func() {
+		defer close(done)
+		_, ok = loadRootCommentAuthor(context.Background(), Deps{Store: database}, commentID)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loadRootCommentAuthor did not terminate on a cyclic reply_to chain")
+	}
+	if ok {
+		t.Fatal("loadRootCommentAuthor reported a root for a cyclic reply_to chain, want none")
+	}
+}
+
+func TestRunStillPublishesWhenTheRootWalkHitsAReplyToCycle(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	commentID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
+	if _, err := database.Pool.Exec(context.Background(), `update comments set reply_to = $1 where id = $1`, commentID); err != nil {
+		t.Fatalf("create self-referential comment: %v", err)
+	}
+	replyID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID:       replyID,
+			IssueKey: new("T-1"),
+			Body:     "Ship it.",
+			ReplyTo:  &commentID,
+		}},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	// A malformed cycle must not stop the event from reaching its own issue topic or
+	// resolving the direct parent's author (a plain, non-recursive lookup); only the
+	// unresolvable thread-root walk is skipped.
+	waitFor(t, 5*time.Second, "cyclic reply_to publication", func() bool {
+		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if items[1].Topic != "notifications.agent.session-writer" {
+		t.Fatalf("parent author route topic = %q, want %q", items[1].Topic, "notifications.agent.session-writer")
+	}
+}
+
 func TestRunRoutesHumanAskResolutionToAuthorOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name            string

@@ -22,6 +22,10 @@ const (
 	compactInterval     = 24 * time.Hour
 	compactKeep         = 500
 	documentTopicPrefix = "notifications.dispatch.document."
+	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
+	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the
+	// recursive query and stall the outbox scan.
+	maxCommentThreadDepth = 32
 )
 
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
@@ -241,17 +245,21 @@ func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.
 }
 
 // loadRootCommentAuthor walks a comment's reply_to chain up to its thread root - the comment
-// humans reply under - and returns that root's author.
+// humans reply under - and returns that root's author. comments.reply_to has no acyclicity
+// constraint, so the walk unions on the visited row and stops at maxCommentThreadDepth: a
+// cycle then finds no reply_to-is-null row and this reports no root, rather than spinning.
 func loadRootCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool) {
 	var authorJSON []byte
 	if err := deps.Store.Pool.QueryRow(ctx, `
 		with recursive chain as (
-			select id, reply_to, author from comments where id = $1
-			union all
-			select c.id, c.reply_to, c.author from comments c join chain h on c.id = h.reply_to
+			select id, reply_to, author, 0 as depth from comments where id = $1
+			union
+			select c.id, c.reply_to, c.author, h.depth + 1
+			from comments c join chain h on c.id = h.reply_to
+			where h.depth < $2
 		)
 		select author from chain where reply_to is null limit 1
-	`, commentID).Scan(&authorJSON); err != nil {
+	`, commentID, maxCommentThreadDepth).Scan(&authorJSON); err != nil {
 		slog.Error("dispatch outbox: load root comment author", "comment_id", commentID, "error", err)
 		return model.Actor{}, false
 	}
