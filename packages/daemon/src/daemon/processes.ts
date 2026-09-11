@@ -35,6 +35,13 @@ import { probeWorkerSocket, type WorkerRpcClient } from "./worker-rpc";
 
 const HOUR_MS = 60 * 60 * 1000;
 
+/** `kill-pane` stderr shapes that mean "this pane is already gone" rather than "the kill
+ * failed": the pane reaped itself; the private server exited (socket file left behind); or the
+ * private socket was never created — on the daemon's own `-L legion-<project>` socket, no server
+ * means no Legion pane. Every other non-zero exit is a real `StopFailed`. */
+const PANE_GONE_STDERR =
+  /can't find pane|no server running|error connecting to .*\(No such file or directory\)/;
+
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../pi-envoy");
 const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, "../cli/index.ts");
 
@@ -2735,9 +2742,12 @@ export class ProcessManager {
    * locator carries a pane id (`launchShimmedProcess` always records one); a locator without one
    * is a corrupt or legacy record, not a case to silently degrade for. Throws `StopFailed` for
    * any `kill-pane` failure other than the pane having already been reaped on its own (`"can't
-   * find pane"`) or the private server itself not running (`"no server running"` — no server on
-   * this daemon's own socket means no Legion pane exists) — the caller must never treat the
-   * process as stopped, or its claim/locator as safe to delete, when it cannot confirm that.
+   * find pane"`) or the private server itself not being there (`"no server running"` — the
+   * socket exists but its server exited; `"error connecting to … (No such file or directory)"` —
+   * the socket was never created, the shape a first boot after the upgrade runbook or a reboot
+   * that cleared `TMUX_TMPDIR` produces): no server on this daemon's own socket means no Legion
+   * pane exists. See `PANE_GONE_STDERR`. The caller must never treat the process as stopped, or
+   * its claim/locator as safe to delete, when it cannot confirm that.
    */
   private async stopProcess(
     token: string,
@@ -2768,7 +2778,7 @@ export class ProcessManager {
       throw new Error(`Worker locator for ${token} is missing a pane id`);
     }
     const killed = await tmux.killPane(this.tmux, locator.tmuxPaneId);
-    if (killed.exitCode !== 0 && !/can't find pane|no server running/.test(killed.stderr ?? "")) {
+    if (killed.exitCode !== 0 && !PANE_GONE_STDERR.test(killed.stderr ?? "")) {
       throw new StopFailed(
         token,
         `kill-pane ${locator.tmuxPaneId} exited ${killed.exitCode}${killed.stderr ? `: ${killed.stderr}` : ""}`

@@ -8502,6 +8502,48 @@ describe("ProcessManager", () => {
     expect(claim.pendingAssignment).toBe("verify #41");
   });
 
+  it("clears a dead worker's locator on boot when the private tmux socket does not exist yet (first boot after upgrade or reboot)", async () => {
+    // Nothing has created the private server yet: the kill-pane fallback fails to *connect*
+    // rather than finding a server with no such pane. That must count as pane-gone exactly like
+    // `no server running`, or every dead worker keeps its locator (and its running-worker slot)
+    // until some later launch happens to fork the server.
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: "verify #41",
+      locator: {
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+      },
+    };
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
+          return {
+            stdout: "",
+            stderr: "error connecting to /tmp/tmux-1000/legion-omp (No such file or directory)",
+            exitCode: 1,
+          };
+        }
+        return { stdout: "", exitCode: 1 };
+      },
+    });
+
+    await processes.reconnectWorkers();
+
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.locator).toBeUndefined();
+    expect(claim.pendingAssignment).toBe("verify #41");
+  });
+
   it("passes DISPATCH_URL and a DISPATCH_TOKEN_FILE pointer to a spawned phase worker, never the token or the retired DISPATCH_MCP_URL alias", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");

@@ -105,11 +105,16 @@ Every tmux command the daemon runs targets its own private server: `tmux -L legi
 daemon's first tmux command and therefore inherits the runner's stripped `paneEnv`, never an
 operator shell that may carry `DISPATCH_TOKEN`; Legion panes never appear in the operator's own
 `tmux list-sessions`. Attach with `tmux -L legion-<project> attach -t legion-<project>`. A
-`kill-pane` that reports `no server running` counts as the pane being gone — no server on the
-daemon's own socket means no Legion pane exists. **Upgrading a live box from a default-socket
-daemon:** stop the daemon, `tmux kill-session -t legion-<project>` on the default server once, start
-the new daemon; `reconnectWorkers` finds every recorded socket dead and roots resurrect (`--resume`)
-onto the private server. No migration code.
+`kill-pane` whose stderr says the private server is not there — `no server running` (socket file
+left behind by an exited server) or `error connecting to … (No such file or directory)` (the socket
+was never created: a first boot after the upgrade step below, or after a reboot cleared
+`TMUX_TMPDIR`) — counts as the pane being gone (`PANE_GONE_STDERR` in `processes.ts`): no server on
+the daemon's own socket means no Legion pane exists, and a dead worker's locator must clear on that
+first boot rather than hold its running-worker slot until some later launch forks the server.
+**Upgrading a live box from a default-socket daemon:** stop the daemon,
+`tmux kill-session -t legion-<project>` on the default server once, start the new daemon;
+`reconnectWorkers` finds every recorded socket dead and roots resurrect (`--resume`) onto the
+private server. No migration code.
 
 Before loading state, opening core NATS, or serving the API, the daemon probes the exact resolved OMP executable with an isolated extension and refuses startup unless it confirms `pi.agents`. Both this probe and the plugin-load probe below run through the same configured `omp_launch_prefix` as a spawned pane — one launch path, never a probe-only shortcut that could pass with credentials a real pane would lack. It also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 
