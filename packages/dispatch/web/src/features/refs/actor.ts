@@ -12,7 +12,14 @@ export function actorLabel(actor: Actor): string {
   return actor.id;
 }
 
-export function describeAskResolution(resolution: AskResolution): string {
+/** The verb-and-actor prefix of a resolution summary, without its free-text reason - callers
+ *  that render the reason as Markdown (via `MarkdownBody`) compose this with their own markup
+ *  instead of using `describeAskResolution`'s single plain-text string. */
+export function describeAskResolutionActor(resolution: AskResolution): string {
   const verb = resolution.kind === "retracted" ? "Retracted" : "Resolved";
-  return `${verb} by ${actorLabel(resolution.actor)} - ${resolution.reason}`;
+  return `${verb} by ${actorLabel(resolution.actor)}`;
+}
+
+export function describeAskResolution(resolution: AskResolution): string {
+  return `${describeAskResolutionActor(resolution)} - ${resolution.reason}`;
 }

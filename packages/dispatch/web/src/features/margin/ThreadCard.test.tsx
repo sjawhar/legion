@@ -1,6 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  type RenderResult,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import type { ComponentProps } from "react";
 
 import { api } from "../../api/client";
@@ -56,6 +63,11 @@ function thread(overrides: Partial<Thread> = {}): Thread {
   };
 }
 
+function listThread(): Thread {
+  const listRoot = comment("root-1", "- first\n- second", "2026-09-10T00:00:00Z");
+  return thread({ replies: [], root: { comment: listRoot, kind: "comment" } });
+}
+
 function renderCard(
   currentThread = thread(),
   overrides: Partial<ComponentProps<typeof ThreadCard>> = {}
@@ -92,12 +104,13 @@ test("an expanded comment thread renders flat replies and posts an inline reply 
     id: "reply-2",
   });
 
+  let view: RenderResult | undefined;
   try {
-    const view = renderCard();
+    view = renderCard();
     const card = screen.getByTestId(`margin-comment-${root.id}`);
     expect(card.getAttribute("aria-expanded")).toBe("true");
     expect(card.querySelector(`[data-margin-item="${reply.id}"]`)).toBeNull();
-    expect(screen.getByText("First reply").closest("li")?.style.marginLeft).toBe("0px");
+    expect((await screen.findByText("First reply")).closest("li")?.style.marginLeft).toBe("0px");
 
     const composer = screen.getByRole("form", { name: "Reply composer" });
     fireEvent.change(screen.getByLabelText("Reply"), { target: { value: "Second reply" } });
@@ -110,12 +123,22 @@ test("an expanded comment thread renders flat replies and posts an inline reply 
       })
     );
     expect(composer.querySelector("blockquote")).toBeNull();
-    view.unmount();
   } finally {
+    view?.unmount();
     createComment.mockRestore();
   }
 });
 
+test("a collapsed preview flattens a list-only body onto one line with no nested <ul>", async () => {
+  const view = renderCard(listThread(), { expanded: false });
+
+  try {
+    const preview = await within(view.container).findByText("first second");
+    expect(preview.querySelector("ul")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
 test("a resolved comment thread names its resolver and exposes Reopen", () => {
   const onAction = spyOn({ call: () => {} }, "call");
   const resolvedRoot = comment("root-1", "Root comment", "2026-09-10T00:00:00Z", {
@@ -182,7 +205,7 @@ test("the author can edit a comment and an edited comment carries its marker", a
         />
       </QueryClientProvider>
     );
-    expect(screen.getByText("Updated root")).not.toBeNull();
+    expect(await screen.findByText("Updated root")).not.toBeNull();
     expect(screen.getByTestId(`margin-comment-${root.id}`).textContent).toContain("edited");
   } finally {
     view.unmount();
@@ -194,6 +217,16 @@ test("a different author never sees an Edit control", () => {
   const view = renderCard(undefined, { viewerLogin: "bob" });
   try {
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a comment body with inline code renders it as <code>", async () => {
+  const codeRoot = comment("root-1", "Run `npm install` first.", "2026-09-10T00:00:00Z");
+  const view = renderCard(thread({ root: { comment: codeRoot, kind: "comment" } }));
+  try {
+    expect(await screen.findByText("npm install", { selector: "code" })).toBeTruthy();
   } finally {
     view.unmount();
   }
