@@ -5,7 +5,7 @@
   "prUrl": "https://github.com/sjawhar/legion/pull/923",
   "branch": "legion/LEGION-6",
   "reviewedHead": "72989037b5c2c27cfe26980d1cccf41c7ea6929e",
-  "verdict": "CHANGES_REQUESTED",
+  "verdict": "CHANGES_REQUESTED (round 2 at 1741381a8e3a; see round2)",
   "review": "https://github.com/sjawhar/legion/pull/923#pullrequestreview-5182392737",
   "summary": "Security contract holds in every traced path (no secret on any tmux -e argv; every daemon tmux argv is `tmux -L legion-<project>`; 0700/0600 files; X_FILE-first consumers with no fallback in envoy-client, pi-envoy, CLI; stripDispatchEnv covers DISPATCH_TOKEN_FILE). Not approvable yet: the branch conflicts with main and CI has never run on the PR, and two correctness gaps in the new stop/prune logic must land in this PR.",
   "blocking": [
@@ -80,7 +80,58 @@
     "Reviewer role cannot push: the review GitHub App token has push:false on sjawhar/legion (X-Accepted-Github-Permissions: pull_requests=read; contents=read; `jj git push` -> 'Permission to sjawhar/legion.git denied to legion-reviewer[bot]'). credentials.ts handleGitCredential maps role reviewer -> app 'review'. The reviewer charter's clean path (delete .legion/, push, approve that head) is therefore not executable by this role as deployed. Decision needed before the next review round: grant the review App contents:write on the repo, or route the reviewer's git credential through the implement App for the .legion/ deletion push.",
     "Consequence for this round: the review handoff commit 225b7c6be0a7 ('review: record handoff', only .legion/review.json) is committed on the workspace's local legion/LEGION-6 bookmark but NOT on origin; the implementer's next push from this workspace carries it."
   ],
+  "round2": {
+    "reviewedHead": "1741381a8e3a8222a341518165f140b21883e646",
+    "originHead": "0b828137aa2534a275b92c12085a98658443724e (tester round-2 handoff on top; .legion only)",
+    "base": "main 8961e44398c2 (rebased)",
+    "verdict": "CHANGES_REQUESTED",
+    "review": "https://github.com/sjawhar/legion/pull/923#pullrequestreview-5183050068",
+    "round1Resolution": {
+      "B1": "resolved — rebased on main 8961e443; #907 test reindexed in 58d8b6290a00; merged tree green (my local run at head: daemon 817/0, envoy-client 183/0, pi-envoy 137/0; tsc/biome clean everywhere; smoke harnesses 10/2/8)",
+      "B2": "resolved — title `feat(daemon): deliver pane secrets as 0600 file pointers over a private tmux socket (LEGION-6)`; pr-title check green",
+      "C1": "resolved in 6729baf37b40 — PANE_GONE_STDERR; regression test fails at parent 58d8b6290a00 with StopFailed (re-run by reviewer), passes at head; tester proved live on a socketless boot (unconfirmed-claim path)",
+      "C2": "resolved in 794f38202609 — Map refcount held by launch owner; regression test fails at parent 6729baf37b40 (ENOENT on the pruned architect file, re-run by reviewer), passes at head",
+      "S1": "resolved in 794f38202609 — boot prune seeds paneSecretFiles with kept names; test present and passing",
+      "S2": "resolved in e5844ba4da27 — PANE_SECRET_ENV_KEYS strips the boot-token/controller-secret family; tester planted LEGION_BOOT_TOKEN in the daemon env and observed none of the family on the private server or a pane",
+      "S3": "resolved in b6be9a3e06e1 — harness socket assertion over the whole TMUX_LOG after the last checkpoint",
+      "threads": "all 7 round-1 threads dispositioned by reply (fixing commit named); review App cannot resolveReviewThread (Resource not accessible by integration) — implementer to resolve and set the PR body Threads line"
+    },
+    "rulings": {
+      "C2_writePlacement": "ACCEPTED as implemented (write before the per-issue serialize lane, under the owner's refcount hold). /process/started checks tree generation (409) before the boot token and the token record is generation-bound (api/routes/process.ts:14,22), so a stale pane reading the newer token cannot assume its identity; the refcount alone closes the prune race; in-lane placement changes nothing for the reverse-order case; the deterministic regression test depends on observing gen 2's write before gen 1 settles. Deep-review found no interleaving the refcount misses that in-lane placement would fix.",
+      "reverseOrderGenerations": "OUT OF SCOPE, does not block. Consequence of the accepted role-token file naming; same-tree/same-role daemon-launched panes only; self-heals via registration deadline (403 at /process/started -> retire -> launchFailures++ -> resurrect). Unreachable in the documented park-then-re-admit ordering. Same class: a failed newer generation rolls tree.generation back (spawnRoot:1318) while the still-current older pane may have read the failed generation's token. Architect's call on a stale-at-lane-entry guard follow-up."
+    },
+    "changesRequested": [
+      {
+        "id": "R1",
+        "location": "packages/daemon/src/daemon/processes.ts:1345 (spawnRoot catch)",
+        "problem": "releaseSecret() runs after publishController (:1330, sync NATS publish) and the advancePromotionSweep/beginPromotionSweep awaits (:1342-1343, each persist()s). A throw there exits the catch before the release; startRoot's .catch (:1862-1865) swallows non-SpawnPersistenceFailure errors, so the architect token's hold leaks for the daemon's lifetime and liveSecretFiles() keeps legion-<project>-<root>-architect exempt until the next boot. Hygiene-only impact, but breaks the refcount invariant this round introduced; launchWorker already releases first in its catch (:2589).",
+        "fix": "Move releaseSecret() to immediately after the locator/generation rollback (:1322), before publishController."
+      },
+      {
+        "id": "R2",
+        "location": "packages/daemon/src/daemon/__tests__/processes.test.ts:1189-1191 (C2 regression test)",
+        "problem": "flushEventLoopUntil returns silently after 5000 ticks; if gen 2's write has not landed, releaseFirstLaunch.resolve() lets gen 1 settle first and the final assertions pass even with the pre-fix Set — silent false green.",
+        "fix": "expect(readFileSync(architectFile, \"utf8\")).toBe(\"boot-gen-2\") immediately after the wait."
+      }
+    ],
+    "nits": [
+      "C1 test's seeded claim has no readyConfirmedAt so it takes retireUnconfirmedBoot, not markWorkerDead as implement.json says (both reach stopProcess) — fix the description or seed readyConfirmedAt",
+      "spawnRoot:1344 comment 'before any locator was stored' contradicts the priorLocator rollback path",
+      "environment.ts:96-97 doc comment implies plain LEGION_CONTROLLER_SECRET is retired (it is a live operator input)",
+      "stripDispatchEnv name vs PANE_SECRET_ENV_KEYS constant",
+      "secrets.pruneSecretFiles `removed` return unused in production; secrets.test pins kept's sort order"
+    ],
+    "preExistingMainBug": "index.ts: reconnectWorkers (:430) runs before api is assigned (:409 revokeSessionCapability closure) -> markWorkerDead -> revokeRoleClaim -> TypeError for a confirmed dead worker at boot; C1's fix is masked for that sub-case. Tester observed live; not a LEGION-6 regression; needs its own issue.",
+    "verifiedFacts": {
+      "ci": "Tests + Legion Envoy and Contracts success at 1741381a and 0b828137; pr-title pass; contracts/envoy-go/dispatch skipped (path filter); mergeStateStatus BLOCKED on legion-human-approval only",
+      "threads": "7 round-1 threads, all replied with disposition, 0 resolved (permission)",
+      "e2e": "tester round-2 rig evidence in .legion/test.json round2 (checkpoints 1-3, 13, S1 boot prune, S2 planted-env, C1 live socketless boot); reviewer re-ran bare gates and both regression tests pre-fix/post-fix",
+      "thermo": "deep-review + code-quality run once at 1741381a: no blocking; R1 (deep) and R2 (quality) are the two should-fixes"
+    },
+    "nextSteps": "implementer: R1 + R2 (one commit; nits optional), resolve the 7 threads, PR body Threads line -> tester: daemon bun test + the two regression tests -> reviewer re-review; then cleanup push per ask e091bc28 and approval of that exact head.",
+    "completed": "2026-09-11T20:30:00Z"
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-11T18:55:13.050Z"
+  "completed": "2026-09-11T20:15:44.817Z"
 }
