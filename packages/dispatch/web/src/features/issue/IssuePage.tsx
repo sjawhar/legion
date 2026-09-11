@@ -51,7 +51,8 @@ import {
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
-import { actorLabel } from "../refs/actor";
+import { shortSessionId } from "../conversation/conversation-model";
+import { useAgents } from "../conversation/useAgents";
 import {
   buildIssuePath,
   type DispatchRoute,
@@ -80,14 +81,17 @@ const issueStatuses = [
   "done",
 ];
 
-function activeSessions(events: Event[]): Extract<Event["actor"], { kind: "session" }>[] {
+function activeSessions(
+  events: Event[],
+  liveSessionTitles: ReadonlyMap<string, string>
+): Extract<Event["actor"], { kind: "session" }>[] {
   const sessions = new Map<string, Extract<Event["actor"], { kind: "session" }>>();
   for (const event of events) {
     if (event.actor.kind === "session") {
       sessions.set(event.actor.id, event.actor);
     }
   }
-  return [...sessions.values()];
+  return [...sessions.values()].filter((session) => liveSessionTitles.has(session.id));
 }
 
 function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
@@ -219,7 +223,9 @@ function IssueHeader({
     queryKey: ["events", issue.key, "active-sessions"],
     queryFn: () => api.getIssueEvents(issue.key, { limit: 200, order: "desc" }),
   });
-  const sessions = activeSessions(events.data ?? []);
+  const hasSessionEvents = events.data?.some((event) => event.actor.kind === "session") ?? false;
+  const { isError: liveSessionsError, titles: liveSessionTitles } = useAgents(hasSessionEvents);
+  const sessions = liveSessionsError ? [] : activeSessions(events.data ?? [], liveSessionTitles);
   const updateIssue = useMutation({
     mutationFn: (input: Partial<Pick<Issue, "route" | "status" | "title">>) =>
       api.patchIssue(issue.key, input),
@@ -468,12 +474,15 @@ function IssueHeader({
           <ul className="mt-2 flex flex-wrap gap-2">
             {sessions.map((session) => {
               const tmuxTarget = session.origin?.tmux;
+              const title = liveSessionTitles.get(session.id)?.trim();
+              const label =
+                title === "" || title === undefined ? shortSessionId(session.id) : title;
               return (
                 <li
                   className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm ${badgeLow.bg} ${badgeLow.text}`}
                   key={session.id}
                 >
-                  <span title={session.id}>{actorLabel(session)}</span>
+                  <span title={session.id}>{label}</span>
                   {tmuxTarget === undefined ? null : (
                     <button
                       className={`font-medium ${linkText} ${linkHoverText}`}

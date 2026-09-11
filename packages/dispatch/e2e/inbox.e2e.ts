@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { setLiveSessions } from "./agents";
 import {
   createArtifactAsk,
   createAsk,
@@ -23,9 +24,11 @@ const session = {
   },
   as: "agent" as const,
 };
-
 test.beforeEach(async () => {
   await resetDatabase();
+  if (!process.env.PLAYWRIGHT_BASE_URL) {
+    await setLiveSessions([]);
+  }
 });
 
 test("inbox shows current asks and answers issue asks in the margin", async ({
@@ -57,6 +60,9 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Newest ask" },
     session
   );
+  if (!process.env.PLAYWRIGHT_BASE_URL) {
+    await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
+  }
   await expect
     .poll(async () =>
       (await getIssueEvents(firstIssue.key)).some((event) => event.actor.id === "e2e-session")
