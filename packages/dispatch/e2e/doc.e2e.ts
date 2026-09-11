@@ -54,7 +54,23 @@ test("the spec opens as a formatted, editable document with no source pane", asy
     ]);
     expect(headingSize).toBeGreaterThan(paragraphSize);
 
-    await expect(editor.locator("table")).toBeVisible();
+    const table = editor.locator("table");
+    await expect(table).toBeVisible();
+    const headerCell = table.locator("th").first();
+    const [headerWeight, borderWidth, paddingLeft] = await Promise.all([
+      headerCell.evaluate((element) => Number.parseInt(getComputedStyle(element).fontWeight, 10)),
+      table
+        .locator("td")
+        .first()
+        .evaluate((element) => Number.parseFloat(getComputedStyle(element).borderTopWidth)),
+      table
+        .locator("td")
+        .first()
+        .evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingLeft)),
+    ]);
+    expect(headerWeight).toBeGreaterThanOrEqual(600);
+    expect(borderWidth).toBeGreaterThan(0);
+    expect(paddingLeft).toBeGreaterThan(0);
     await expect(editor.locator('input[type="checkbox"]')).toBeVisible();
     await expect(editor.locator("pre code")).toBeVisible();
     await expect(page.getByRole("button", { name: /^(Edit|Preview)$/ })).toHaveCount(0);

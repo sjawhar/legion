@@ -89,10 +89,43 @@ a {
   }
 }
 
+/* Tailwind preflight collapses table borders and zeroes cell padding, and the editor library
+   ships no table rules of its own, so a Markdown table renders as run-together text without
+   these. */
 .dispatch-doc .milkdown table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.dispatch-doc .milkdown th,
+.dispatch-doc .milkdown td {
+  border: 1px solid #cad5e2; /* slate-300 */
+  padding: 0.375rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.dispatch-doc .milkdown th {
+  font-weight: 600;
+  background-color: #f8fafc; /* slate-50 */
+}
+
+.dispatch-doc .milkdown th > p,
+.dispatch-doc .milkdown td > p {
+  margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc .milkdown th,
+  .dispatch-doc .milkdown td {
+    border-color: #45556c; /* slate-600 */
+  }
+
+  .dispatch-doc .milkdown th {
+    background-color: #1d293d; /* slate-800 */
+  }
 }
 
 .dispatch-doc .milkdown .editor {
