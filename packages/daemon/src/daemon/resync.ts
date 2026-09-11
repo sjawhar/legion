@@ -301,11 +301,18 @@ function reportRootAnomalies(deps: RunResyncDeps, now: number): Promise<ResyncAn
 /**
  * Heals missed Dispatch status changes before retrying daemon-owned writes, then reconciles
  * unsettled PR check rollups and reports root-issue anomalies a status replay cannot self-heal.
+ * `options.force` bypasses the `resyncIntervalMs` throttle below (still recording `now` as the
+ * new `lastRunAt`) — used by `onControllerReady` so a freshly respawned controller always sees a
+ * fresh anomaly report instead of the empty one a throttled run would return, even when the
+ * previous controller's crash landed well inside the interval.
  */
-export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload> {
+export async function runResync(
+  deps: RunResyncDeps,
+  options?: { force?: boolean }
+): Promise<LegionEventPayload> {
   const now = deps.now();
   const last = lastRunAt.get(deps.state);
-  if (last !== undefined && now - last < deps.config.resyncIntervalMs) {
+  if (!options?.force && last !== undefined && now - last < deps.config.resyncIntervalMs) {
     return {
       type: "resync",
       anomalies: [],

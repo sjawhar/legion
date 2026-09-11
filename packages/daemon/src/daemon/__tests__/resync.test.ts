@@ -132,6 +132,57 @@ describe("runResync", () => {
     expect(dispatched).toEqual([]);
   });
 
+  it("options.force bypasses the interval throttle and re-reports an untriaged root, while an unforced run within the same interval stays throttled", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = {
+      key: issue,
+      title: "Untriaged root",
+      status: "triage",
+      children: [],
+    };
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
+    const deps: RunResyncDeps = {
+      ...resyncDeps(state),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+    };
+    const anomaly = {
+      kind: "untriaged-open" as const,
+      issue,
+      detail: "tracked triage issue has no Legion tree or admission entry",
+    };
+
+    const first = await runResync(deps);
+    expect(first.anomalies).toEqual([anomaly]);
+    expect(dispatched).toEqual([
+      {
+        effects: [
+          {
+            kind: "controller",
+            payload: { type: "triage", issue, preexistingChildren: [] },
+          },
+        ],
+        envelope: { event_id: `resync:${issue}:triage`, issued_at: expect.any(Number) },
+      },
+    ]);
+
+    dispatched.length = 0;
+    const throttled = await runResync(deps);
+    expect(throttled).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
+    });
+    expect(dispatched).toEqual([]);
+
+    const forced = await runResync(deps, { force: true });
+    expect(forced.anomalies).toEqual([anomaly]);
+    expect(dispatched).toHaveLength(1);
+  });
+
   it("reconciles an unsettled red PR with failing check names", async () => {
     const state = newLegionState("omp", 1);
     trackIssue(state);

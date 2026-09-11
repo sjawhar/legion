@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { controllerToken, roleTopic } from "@legion/contracts";
+import { EnvoyPublishError } from "../api/http";
 import { overseerCatchup } from "../catchup";
 import { type EventPumpDeps, startEventPump, truncateTermReason } from "../events";
 import { type LegionState, newLegionState } from "../legion-state";
@@ -376,6 +377,95 @@ describe("Dispatch durable intake", () => {
       expect(fatalCalls).toEqual([]);
     } finally {
       errorLog.mockRestore();
+      pump.stop();
+    }
+  });
+});
+
+describe("controller pending notices for reducer-derived effects", () => {
+  it("records a closed-tree-activity controller effect as a pending notice on a 404, and drains it once the controller claims the role", async () => {
+    const { state, issue } = stateForIssue();
+    const tree = state.trees[issue];
+    if (!tree) throw new Error("tree missing from stateForIssue fixture");
+    tree.status = "closed";
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    let holderLive = false;
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        if (!holderLive) throw new EnvoyPublishError(topic, 404);
+        published.push({ topic, payloadJson });
+      })
+    );
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(settledChecks(), "checks-closed-tree"),
+        {},
+        calls
+      );
+      // The checks durable path nests one more call layer (checksInput/classifySettlement/
+      // effectiveOutcome) than a Dispatch issue event, so its recovery settles a tick later
+      // than `flush()`'s fixed budget covers on its own.
+      await flush();
+      await flush();
+
+      // The 404 no-holder is recovered (never fatal), so the durable message still acks even
+      // though the controller never received the wake live.
+      expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
+      const expectedPayload = JSON.stringify({
+        type: "closed-tree-activity",
+        issue,
+        root: issue,
+        event: { type: "ci-green", sha: "head-1" },
+      });
+      expect(state.controllerPendingNotices).toEqual([
+        { payloadJson: expectedPayload, eventId: "checks-closed-tree" },
+      ]);
+
+      holderLive = true;
+      await pump.drainControllerNotices();
+
+      expect(published).toEqual([
+        { topic: roleTopic(controllerToken(state.project)), payloadJson: expectedPayload },
+      ]);
+      expect(state.controllerPendingNotices).toEqual([]);
+    } finally {
+      pump.stop();
+    }
+  });
+
+  it("never records a triage controller effect as a pending notice on a 404, since resync's own anomaly report re-derives it", async () => {
+    const state = newLegionState("omp", 4);
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const pump = startEventPump({
+      ...deps(state, nats, async (topic) => {
+        throw new EnvoyPublishError(topic, 404);
+      }),
+      config: { ...config(), dispatchProject: "LEGSMOKE" },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.dispatch.issue.LEGSMOKE-1.issue.created",
+        dispatchEnvelope(dispatchIssueCreatedRoot),
+        {},
+        calls
+      );
+      await flush();
+
+      expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
+      expect(state.issues["LEGSMOKE-1"]).toMatchObject({ key: "LEGSMOKE-1", status: "triage" });
+      // Recording it too would double-deliver it once a forced resync on the next
+      // `/controller/ready` also re-emits it via `reportRootAnomalies`.
+      expect(state.controllerPendingNotices).toEqual([]);
+      expect(published).toEqual([]);
+    } finally {
       pump.stop();
     }
   });

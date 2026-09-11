@@ -497,20 +497,23 @@ async function startDaemonLocked(
   }
   const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 
-  const emitResync = async (): Promise<void> => {
+  const emitResync = async (options?: { force?: boolean }): Promise<void> => {
     // Serialized against the shared durable mutation lane: resync reads/writes the same PrState
     // CI fields a durable Dispatch/GitHub checks-settlement message does, so the two must not
     // interleave (see events.ts's queue doc comment).
     const payload = await eventPump.runExclusive(() =>
-      runResync({
-        state,
-        config,
-        dispatchClient: deps.dispatchClient,
-        saveState: save,
-        fetchCiStatusBatch,
-        applyEffects: eventPump.applyEffects,
-        now: deps.now,
-      })
+      runResync(
+        {
+          state,
+          config,
+          dispatchClient: deps.dispatchClient,
+          saveState: save,
+          fetchCiStatusBatch,
+          applyEffects: eventPump.applyEffects,
+          now: deps.now,
+        },
+        options
+      )
     );
     console.log(
       `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} ciFetchFailures=${payload.ciFetchFailures}${
@@ -540,10 +543,13 @@ async function startDaemonLocked(
     // resync triage re-emission for unadmitted tracked roots that already runs periodically.
     // First delivers any Slack mention (or other irreplaceable payload) that arrived while no
     // controller held the role — the one narrow exception to "no held-event queue to replay"
-    // (see `ControllerPendingNotice`'s doc comment) — then runs the fresh resync.
+    // (see `ControllerPendingNotice`'s doc comment) — then runs a forced resync: the respawn
+    // that got us here may itself be the fallout of the *previous* controller crashing on an
+    // anomaly this project's `resyncIntervalMs` throttle would otherwise still be suppressing,
+    // so a fresh controller must never trust the interval to have elapsed.
     onControllerReady: async () => {
       await eventPump.drainControllerNotices();
-      await emitResync();
+      await emitResync({ force: true });
     },
     onControllerEvent: (payload) =>
       eventPump.publishControllerEvent(payload, {
