@@ -1,0 +1,60 @@
+{
+  "issue": "LEGION-9",
+  "spec": "dispatch://LEGION-9/spec (v2)",
+  "planDoc": "docs/plans/2026-09-11-pane-pid-target-row.md",
+  "commit": "3a9b0423f8cd (change lznlnsrw) fix(daemon): panePid reads the target pane's own pid, not its window's first pane",
+  "headSha": "3a9b0423f8cd",
+  "prNumber": 945,
+  "prUrl": "https://github.com/sjawhar/legion/pull/945",
+  "branch": "legion/LEGION-9",
+  "filesChanged": [
+    "packages/daemon/src/daemon/tmux.ts (panePid rewritten: list-panes -t <target> -F \"#{pane_id} #{pane_pid}\" via argv(server, …); /^%\\d+$/ target selects its own row, else first row; undefined on exitCode != 0, no matching row, or pid not a positive safe integer; doc comment updated)",
+    "packages/daemon/src/daemon/__tests__/tmux.test.ts (new, 4 cases: pane-target row + exact argv, window-id first row, exit != 0, missing pane row)",
+    "packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts (+ describe 'WorkerBootWatchdog pid probe' (1 case); 3 fixtures at 210/247/282 → { stdout: \"%7 12345\\n\", exitCode: 0 })",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts (livePanes helper after liveRun; 46 fixture sites cut over)"
+  ],
+  "fixtureSitesEdited": {
+    "processesTest": {
+      "helper": "livePanes(command, pid = 12345) inserted after liveRun",
+      "groupA_predicateAndReply": 20,
+      "groupB_replyOnly": 26,
+      "total": 46,
+      "groupC_unchanged": 26,
+      "leftoverSweep": "grep \"12345\\\\n\" → only new-window/split-window replies and livePanes itself; grep #\\{pane_pid\\}\" → only \"#{pane_id} #{pane_pid}\" and \"#{window_id} #{pane_id} #{pane_pid}\"",
+      "formatterCollapsed": "biome format collapsed the three shortened ternaries the plan predicted (3683, 4953, 5219 in the #6A30 numbering)"
+    },
+    "watchdogTest": 3,
+    "tmuxTest": "new file, 4 cases"
+  },
+  "redState": {
+    "tmuxTest": "2 fail / 2 pass (pane-target and window-id cases read undefined; exit != 0 and missing-pane passed by accident) — as the plan predicted",
+    "watchdogCase": "failed with events [\"workerClient\", \"workerClient\", \"retire\"] (no isOmpPane entry) — as the plan predicted",
+    "afterPanePidBeforeFixtures": "10 pass / 1 fail: only 'never treats a boot as failed while it stays under the registration deadline' (probeCount 0) — as the plan predicted"
+  },
+  "gates": {
+    "cwd": "packages/daemon",
+    "biomeCheck": "bunx biome check src/ → Checked 135 files in 295ms. No fixes applied.",
+    "tsc": "bunx tsc --noEmit → clean, exit 0",
+    "bunTest": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test → 809 pass, 5 skip, 0 fail (814 tests, 53 files, 23.59s); single run, processes.test.ts:5001 did not flake",
+    "processesTestAlone": "bun test src/daemon/__tests__/processes.test.ts → 190 pass, 3 skip, 0 fail",
+    "tmuxAndWatchdog": "bun test src/daemon/__tests__/tmux.test.ts src/daemon/__tests__/worker-boot-watchdog.test.ts → 11 pass, 0 fail"
+  },
+  "deviationsFromPlan": [
+    "None in code: processes.test.ts snapshot tag matched the plan's (#6A30) so every listed line number was exact; all 46 sites edited as tabulated.",
+    "Push mechanics: the local legion/LEGION-9 bookmark sat on the undescribed working-copy commit (jj split moves the bookmark to the remaining half), so `jj bookmark set legion/LEGION-9 -r @- --allow-backwards` was needed before the push; the remote moved forward e3a0cb6c → 3a9b0423 (fast-forward)."
+  ],
+  "rigIssues": {
+    "grantInjection": "Hit the multiple-`export LEGION_GRANT` bug the architect warned about: N grew 1 → 7 over the session (N=3 at the first push attempt, N=4 at the successful push, N=5 at pr create, N=7 at handoff write). Only the first grant of each call redeems; the DEBUG-trap workaround does not see the injected lines here, so I shadowed `export` in the persistent shell (/tmp/legion9-grant-trap.sh) to keep only the first LEGION_GRANT assignment per call. Note for whoever fixes it: inside a bash function, `builtin export \"$@\"` with an expanded `NAME=value` word does not bind the variable on this bash 5.2.37; a plain assignment does.",
+    "envU": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE needed for the full suite on this rig (pre-existing src/cli/__tests__/index.test.ts:156; out of scope, re-filed)."
+  },
+  "unchangedByDesign": [
+    "processes.ts (probe 1693-1701, controllerAlive 2878-2895)",
+    "worker-boot-watchdog.ts (probeAlive 177-179)",
+    "tmux.ts firstPaneId, windowAlive, worker layout",
+    "no display-message, no list-panes -a, no caller changes"
+  ],
+  "testerNotes": "Plan Task 5 is yours: /tmp/legion9-live/probe.ts (full text in the plan doc) run from your own pane shell (needs TMUX_TMPDIR=/home/ubuntu/.tmux/sockets) against main's tmux.ts (`jj file show -r main packages/daemon/src/daemon/tmux.ts`) expecting FAIL rows for every non-first pane, then against $LEGION_WORKSPACE/packages/daemon/src/daemon/tmux.ts expecting ALL MATCH + `negative control %999999 → undefined`. Paste both outputs into .legion/test.json and the PR's E2E line. The PR body's CI/Thermo/E2E lines are marked pending for you and the reviewer to fill in.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T00:06:54.520Z"
+}
