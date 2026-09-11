@@ -9,6 +9,7 @@ import type {
   CommentRead,
   CreateAskInput,
   DuplicateCandidate,
+  EditAskInput,
   EditOp,
   Event,
   IssueDetails,
@@ -89,7 +90,12 @@ const nativeIssueKeyPattern = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
 const externalIssueRefPattern = /^([^/\s]+)\/([^/\s#]+)#([1-9][0-9]*)$/;
 const bareIssueNumberPattern = /^[1-9][0-9]*$/;
 
-const issueFreeTools = new Set(["dispatch_issue", "dispatch_resolve_ask", "dispatch_search"]);
+const issueFreeTools = new Set([
+  "dispatch_issue",
+  "dispatch_edit_ask",
+  "dispatch_resolve_ask",
+  "dispatch_search",
+]);
 
 async function askResultDetails(
   client: DispatchClient,
@@ -197,6 +203,16 @@ function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   if (ask) return { issue, kind: "ask", id: ask };
   if (comment) return { issue, kind: "comment", id: comment };
   return { issue, kind: "issue", id: issue };
+}
+
+function askId(args: ToolArguments): string {
+  const ask = stringArg(args, "ask");
+  if (!ask.startsWith("dispatch://")) return ask;
+  const reference = parseDispatchRef(ask);
+  if (reference?.kind !== "ask") {
+    throw new Error("ask must be a bare ask id or a dispatch://.../ask/<id> reference");
+  }
+  return reference.id;
 }
 
 function toolSchema(tool: string): z.ZodType {
@@ -541,6 +557,25 @@ export async function executeDispatchTool(
       });
       return {
         text: `Opened ask ${ask.id}: ${ask.question}`,
+        details: await askResultDetails(client, ask),
+      };
+    }
+    case "dispatch_edit_ask": {
+      const question = optionalString(args, "question");
+      const options = args.options;
+      const multiple = optionalBoolean(args, "multiple");
+      const urgency = askUrgency(args);
+      const ask = await client.editAsk(askId(args), {
+        ...(question === undefined ? {} : { question }),
+        ...(Array.isArray(options)
+          ? { options: options as NonNullable<EditAskInput["options"]> }
+          : {}),
+        ...(multiple === undefined ? {} : { multiple }),
+        ...(urgency === undefined ? {} : { urgency }),
+        actor,
+      });
+      return {
+        text: `Ask edited: ${ask.question}`,
         details: await askResultDetails(client, ask),
       };
     }

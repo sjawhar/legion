@@ -101,6 +101,49 @@ export const dispatchToolSpecs = [
     }),
   },
   {
+    name: "dispatch_edit_ask",
+    description:
+      "Edit an open question in place. Use it to correct or refine the same decision; retract the " +
+      "old ask and open a new one when the decision itself changes. Previous text remains in the " +
+      "event log. Only the asking session can edit it; answered or resolved asks cannot be edited.",
+    arguments: (z) => ({
+      ask: z.string().describe("Ask id to edit."),
+      question: z
+        .string({ max: 800 })
+        .describe("Replacement decision question, at most 800 characters.")
+        .optional(),
+      options: z
+        .array(
+          z.object({
+            label: z.string().describe("Selectable option label."),
+            description: z.string().describe("Optional option context.").optional(),
+          }),
+          { max: 8 }
+        )
+        .describe("Replacement choices, at most 8.")
+        .optional(),
+      multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
+      urgency: z.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional(),
+    }),
+    validation: {
+      check: (value) => {
+        const input = value as {
+          readonly question?: unknown;
+          readonly options?: unknown;
+          readonly multiple?: unknown;
+          readonly urgency?: unknown;
+        };
+        return (
+          typeof input.question === "string" ||
+          Array.isArray(input.options) ||
+          typeof input.multiple === "boolean" ||
+          typeof input.urgency === "string"
+        );
+      },
+      message: "Ask edit requires at least one field besides ask.",
+    },
+  },
+  {
     name: "dispatch_resolve_ask",
     description:
       "Retract an open question that is moot or resolve one after finding the answer. This closes the question without answering it.",

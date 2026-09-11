@@ -18,6 +18,7 @@ import type {
   DispatchServiceErrorShape,
   EditArtifactInput,
   EditArtifactResponse,
+  EditAskInput,
   Event,
   Issue,
   IssueDetails,
@@ -119,6 +120,10 @@ export class DispatchClient {
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
+  }
+
+  async editAsk(id: string, input: EditAskInput): Promise<Ask> {
+    return this.#json("PATCH", ["api", "v1", "asks", id], input);
   }
 
   async comment(issue: string, input: CreateCommentInput): Promise<Comment> {

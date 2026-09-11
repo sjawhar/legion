@@ -337,9 +337,9 @@ function responseWithRegistration(
 
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
-test("declares all eleven native Dispatch tools", () => {
-  expect(dispatchToolNames).toHaveLength(11);
-  expect(dispatchToolNames).toContain("dispatch_search");
+test("declares all twelve native Dispatch tools", () => {
+  expect(dispatchToolNames).toHaveLength(12);
+  expect(dispatchToolNames).toContain("dispatch_edit_ask");
 });
 
 describe("envoy OMP extension", () => {

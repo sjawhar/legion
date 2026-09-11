@@ -94,6 +94,20 @@ accepts `{ artifact, mark_id }` from a browser that has already written its mark
 use the quote form. An anchor whose quote disappears becomes orphaned but remains readable against
 its original document version.
 
+Correct or refine an open ask in place instead of opening a second question:
+```ts
+dispatch_edit_ask({
+  ask,
+  question?,
+  options?: { label, description? }[],
+  multiple?,
+  urgency?,
+})
+```
+At least one field besides `ask` is required. Use this only while the same decision remains
+open: it keeps the prior text in the event log. An answered or resolved ask cannot be edited.
+If the decision is moot or superseded, retract the old ask and open a new one.
+
 An ask stays open until a human answers, unless its question no longer needs that answer. Retract a
 moot or superseded question, or self-resolve one after finding the answer:
 ```ts

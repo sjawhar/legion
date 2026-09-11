@@ -7,6 +7,7 @@ import initPlugin from "../server";
 const expectedDispatchTools = [
   ["dispatch_issue", ["project", "title"]],
   ["dispatch_ask", ["issue", "question"]],
+  ["dispatch_edit_ask", ["ask"]],
   ["dispatch_resolve_ask", ["ask", "kind", "reason"]],
   ["dispatch_comment", ["issue", "body"]],
   ["dispatch_suggest", ["issue", "artifact", "quote", "replace_with"]],

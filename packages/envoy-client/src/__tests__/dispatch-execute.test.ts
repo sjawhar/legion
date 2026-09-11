@@ -1177,3 +1177,190 @@ test("subscribes to the project document topic after resolving a document ask", 
     "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3",
   ]);
 });
+
+test("edits an open ask with the calling session identity", async () => {
+  const requests: Array<{
+    readonly method: string;
+    readonly pathname: string;
+    readonly body: unknown;
+  }> = [];
+  const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const pathname = new URL(String(url)).pathname;
+    requests.push({
+      method: init?.method ?? "GET",
+      pathname,
+      body: JSON.parse(String(init?.body)),
+    });
+    if (pathname !== "/api/v1/asks/ask-42") {
+      throw new Error(`unexpected request: ${pathname}`);
+    }
+    return response({
+      id: "ask-42",
+      issue_key: "DSP-42",
+      question: "Ship the revised plan?",
+      state: "open",
+    });
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_edit_ask",
+    args: {
+      ask: "dispatch://DSP-42/ask/ask-42",
+      question: "Ship the revised plan?",
+      options: [{ label: "Ship", description: "Approve the revision." }],
+      multiple: true,
+      urgency: "high",
+    },
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+
+  expect(result).toEqual({
+    text: "Ask edited: Ship the revised plan?",
+    details: {
+      issue: "DSP-42",
+      topic: dispatchIssueSubject("DSP-42", ">"),
+      ask: "ask-42",
+    },
+  });
+  expect(requests).toEqual([
+    {
+      method: "PATCH",
+      pathname: "/api/v1/asks/ask-42",
+      body: {
+        question: "Ship the revised plan?",
+        options: [{ label: "Ship", description: "Approve the revision." }],
+        multiple: true,
+        urgency: "high",
+        actor: {
+          kind: "session",
+          id: "session-42",
+          origin: expect.objectContaining({ host: "omp", cwd: "/workspace" }),
+        },
+      },
+    },
+  ]);
+});
+
+test("reports why an answered ask cannot be edited", async () => {
+  const fetchImpl = async (_url: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+    new Response(JSON.stringify({ error: "only open asks may be edited", code: "ASK_NOT_OPEN" }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  await expect(
+    executeDispatchTool({
+      tool: "dispatch_edit_ask",
+      args: { ask: "ask-42", question: "Ship the revised plan?" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+  ).rejects.toThrow("only open asks may be edited");
+});
+
+test("rejects an empty ask edit before issuing a request", async () => {
+  let requests = 0;
+  const fetchImpl = (() => {
+    requests += 1;
+    throw new Error("network must not be called");
+  }) as unknown as typeof fetch;
+
+  await expect(
+    executeDispatchTool({
+      tool: "dispatch_edit_ask",
+      args: { ask: "ask-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    })
+  ).rejects.toThrow("at least one field");
+  expect(requests).toBe(0);
+});
+
+test("rejects a non-ask Dispatch reference before issuing a request", async () => {
+  let requests = 0;
+  const fetchImpl = (() => {
+    requests += 1;
+    throw new Error("network must not be called");
+  }) as unknown as typeof fetch;
+
+  await expect(
+    executeDispatchTool({
+      tool: "dispatch_edit_ask",
+      args: {
+        ask: "dispatch://DSP-42/comment/comment-42",
+        question: "Ship the revised plan?",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    })
+  ).rejects.toThrow("ask must be a bare ask id or a dispatch://.../ask/<id> reference");
+  expect(requests).toBe(0);
+});
+
+test("subscribes to the document topic after editing a document ask", async () => {
+  const requests: string[] = [];
+  const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+    const pathname = new URL(String(url)).pathname;
+    requests.push(pathname);
+    if (pathname === "/api/v1/asks/ask-document") {
+      return response({
+        id: "ask-document",
+        issue_key: null,
+        artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        question: "Approve the document?",
+        state: "open",
+      });
+    }
+    if (pathname === "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3") {
+      return response({
+        id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        issue_key: null,
+        project: "CORE",
+        slug: "design-notes",
+      });
+    }
+    throw new Error(`unexpected request: ${pathname}`);
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_edit_ask",
+    args: { ask: "ask-document", question: "Approve the document?" },
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+
+  expect(result).toEqual({
+    text: "Ask edited: Approve the document?",
+    details: {
+      topic: "notifications.dispatch.document.CORE.design-notes.>",
+      ask: "ask-document",
+    },
+  });
+  expect(requests).toEqual([
+    "/api/v1/asks/ask-document",
+    "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3",
+  ]);
+});

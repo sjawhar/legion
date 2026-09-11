@@ -14,6 +14,7 @@ This package exposes:
 - `envoy_sessions`
 - `dispatch_issue`
 - `dispatch_ask`
+- `dispatch_edit_ask`
 - `dispatch_resolve_ask`
 - `dispatch_comment`
 - `dispatch_suggest`
@@ -24,7 +25,7 @@ This package exposes:
 - `dispatch_read`
 - `dispatch_search`
 
-The eleven native `dispatch_*` tools create and read Dispatch issues, asks, comments,
+The twelve native `dispatch_*` tools create and read Dispatch issues, asks, comments,
 documents, and artifacts, or search all of them. They are present when `dispatch.enabled`
 resolves a server URL and bearer token from envoy.json (`~/.config/opencode/envoy.json`, merged
 with `<repo>/.opencode/envoy.json`) or the `DISPATCH_URL` and `DISPATCH_TOKEN` environment
