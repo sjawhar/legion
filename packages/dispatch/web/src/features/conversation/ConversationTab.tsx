@@ -200,7 +200,7 @@ export function ConversationTab({
     itemSeqs,
     ownSendCount,
   });
-  const setSection = usePreserveReaderPosition(() => !follow.pinnedToBottom());
+  const setSection = usePreserveReaderPosition(() => !follow.pinnedToTop());
   const { agents, titles } = useAgents(visible);
   const observedTurnKey = useMemo(
     () =>
@@ -447,7 +447,7 @@ export function ConversationTab({
   return (
     <section
       aria-label="Conversation"
-      className="flex min-h-[60dvh] flex-col gap-3"
+      className="flex min-h-[60dvh] flex-col gap-3 pb-16 xl:pb-0"
       ref={setSection}
     >
       {hasFailedOps ? (
@@ -471,19 +471,30 @@ export function ConversationTab({
           </button>
         </div>
       ) : null}
-      <div className="flex items-center justify-between">
-        {log.hasNextPage ? (
-          <button
-            className={`min-h-11 rounded-lg px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-            disabled={log.isFetchingNextPage}
-            onClick={() => void log.fetchNextPage()}
-            type="button"
-          >
-            {log.isFetchingNextPage ? "Loading…" : "Load older"}
-          </button>
-        ) : (
-          <span />
-        )}
+      {isClosed ? null : (
+        <ConversationComposer
+          issueKey={issueKey}
+          onSent={() => setOwnSendCount((count) => count + 1)}
+          recipientSlot={
+            <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
+              To
+              <select
+                aria-label="Recipient"
+                className={`min-h-11 max-w-48 rounded-lg border px-3 text-sm ${inputClasses(true)}`}
+                defaultValue=""
+              >
+                <option value="">No recipient</option>
+                {agents.map((agent) => (
+                  <option key={agent.session_id} value={agent.session_id}>
+                    {agent.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          }
+        />
+      )}
+      <div className="flex items-center justify-end">
         <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnCanvas}`}>
           <input
             checked={showActivity}
@@ -582,30 +593,19 @@ export function ConversationTab({
         })}
       </ol>
       {shown.length === 0 ? <p className={textMutedOnCanvas}>No messages yet.</p> : null}
-      {isClosed ? null : (
-        <ConversationComposer
-          issueKey={issueKey}
-          onSent={() => setOwnSendCount((count) => count + 1)}
-          recipientSlot={
-            <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-              To
-              <select
-                aria-label="Recipient"
-                className={`min-h-11 max-w-48 rounded-lg border px-3 text-sm ${inputClasses(true)}`}
-                defaultValue=""
-              >
-                <option value="">No recipient</option>
-                {agents.map((agent) => (
-                  <option key={agent.session_id} value={agent.session_id}>
-                    {agent.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          }
-        />
-      )}
-      {visible && !follow.atBottom && shown.length > 0 ? (
+      {log.hasNextPage ? (
+        <div className="flex items-center justify-center">
+          <button
+            className={`min-h-11 rounded-lg px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+            disabled={log.isFetchingNextPage}
+            onClick={() => void log.fetchNextPage()}
+            type="button"
+          >
+            {log.isFetchingNextPage ? "Loading…" : "Load older"}
+          </button>
+        </div>
+      ) : null}
+      {visible && !follow.atTop && shown.length > 0 ? (
         <button
           className={`fixed right-6 bottom-36 z-20 min-h-11 rounded-full px-4 text-sm font-semibold shadow-lg xl:bottom-24 ${primaryButtonBg} ${primaryButtonHoverBg}`}
           data-testid="jump-to-latest"

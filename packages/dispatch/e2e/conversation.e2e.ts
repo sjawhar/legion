@@ -99,8 +99,8 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
 
     await expect(turn(page, "First bold line")).toHaveAttribute("data-continued", "false");
     await expect(turn(page, "const x = 1;")).toHaveAttribute("data-continued", "false");
-    await expect(turn(page, "From bob")).toHaveAttribute("data-continued", "false");
-    await expect(turn(page, "Another from bob")).toHaveAttribute("data-continued", "true");
+    await expect(turn(page, "From bob")).toHaveAttribute("data-continued", "true");
+    await expect(turn(page, "Another from bob")).toHaveAttribute("data-continued", "false");
     await expect(turn(page, "First bold line").locator("strong")).toHaveText("bold");
     await expect(turn(page, "const x = 1;").locator("pre code")).toContainText("const x = 1;");
     if (!process.env.PLAYWRIGHT_BASE_URL) {
@@ -328,7 +328,7 @@ test("Conversation divides unread turns by day, sends with Enter, and jumps to n
     await expect(dividers).toHaveCount(3);
     expect(
       await dividers.evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))
-    ).toEqual(["Yesterday", "Today", "New since you last read"]);
+    ).toEqual(["Today", "Yesterday", "New since you last read"]);
     const turnTexts = await page
       .getByRole("list", { name: "Conversation turns" })
       .locator("li")
@@ -336,8 +336,8 @@ test("Conversation divides unread turns by day, sends with Enter, and jumps to n
     const unreadIndex = turnTexts.indexOf("New since you last read");
     const secondIndex = turnTexts.findIndex((text) => text.includes("Second yesterday"));
     const thirdIndex = turnTexts.findIndex((text) => text.includes("Third today"));
-    expect(unreadIndex).toBeGreaterThan(secondIndex);
-    expect(unreadIndex).toBeLessThan(thirdIndex);
+    expect(unreadIndex).toBeGreaterThan(thirdIndex);
+    expect(unreadIndex).toBeLessThan(secondIndex);
 
     const recipient = page.getByRole("combobox", { name: "Recipient" });
     await expect(recipient).toHaveValue("");
@@ -378,7 +378,7 @@ test("Conversation divides unread turns by day, sends with Enter, and jumps to n
       await page.evaluate(() => window.innerHeight)
     );
 
-    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
     const firstTurn = turn(page, "First yesterday");
     const before = (await firstTurn.boundingBox())?.y;
     await createMessage(issue.key, { body: "Tail arrives" }, bob);

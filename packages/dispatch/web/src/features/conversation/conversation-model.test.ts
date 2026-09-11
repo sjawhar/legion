@@ -82,7 +82,7 @@ test("an ask edit updates its existing card and remains a question-edit activity
   };
   const items = build([askEvent(2, "2026-09-10T09:00:00Z", "ask.opened", baseAsk), edited]);
 
-  expect(items.map((item) => item.kind)).toEqual(["day-divider", "ask", "activity"]);
+  expect(items.map((item) => item.kind)).toEqual(["day-divider", "activity", "ask"]);
   const ask = items.find((item) => item.kind === "ask");
   const activity = items.find((item) => item.kind === "activity");
   if (
@@ -174,7 +174,7 @@ test("an ask whose opened event is not loaded still renders from its later event
   });
 });
 
-test("turns run oldest first and same-author messages within five minutes continue the group", () => {
+test("turns run newest first and same-author messages within five minutes continue the group", () => {
   const items = build([
     message(3, "2026-09-10T10:09:00Z"),
     message(1, "2026-09-10T10:00:00Z"),
@@ -184,7 +184,7 @@ test("turns run oldest first and same-author messages within five minutes contin
   ]);
   expect(
     items.map((item) => (item.kind === "message" ? [item.seq, item.continued] : item.kind))
-  ).toEqual(["day-divider", [1, false], [2, true], [3, false], [4, false], [5, false]]);
+  ).toEqual(["day-divider", [5, false], [4, false], [3, false], [2, false], [1, true]]);
 });
 
 test("an ask or a divider breaks message grouping; an activity line does not", () => {
@@ -202,7 +202,7 @@ test("an ask or a divider breaks message grouping; an activity line does not", (
   ]);
   expect(
     items.map((item) => (item.kind === "message" ? [item.seq, item.continued] : item.kind))
-  ).toEqual(["day-divider", [1, false], "activity", [3, true], "ask", [5, false]]);
+  ).toEqual(["day-divider", [5, false], "ask", [3, false], "activity", [1, true]]);
 });
 
 test("day dividers land on local calendar boundaries and name Today and Yesterday", () => {
@@ -210,8 +210,8 @@ test("day dividers land on local calendar boundaries and name Today and Yesterda
   const items = build([message(1, yesterday.toISOString()), message(2, "2026-09-10T12:00:00Z")]);
   const dividers = items.filter((item) => item.kind === "day-divider");
   expect(dividers.map((item) => item.kind === "day-divider" && item.label)).toEqual([
-    "Yesterday",
     "Today",
+    "Yesterday",
   ]);
   expect(dayLabel("2025-01-03", "2026-09-10")).toBe(
     new Intl.DateTimeFormat(undefined, {
@@ -223,7 +223,7 @@ test("day dividers land on local calendar boundaries and name Today and Yesterda
   );
 });
 
-test("the unread divider precedes the first unread item only when something is read and something is not", () => {
+test("the unread divider follows the newest unread turns and precedes the read turns below them", () => {
   const events = [
     message(1, "2026-09-10T10:00:00Z"),
     message(2, "2026-09-10T10:01:00Z"),
@@ -232,8 +232,8 @@ test("the unread divider precedes the first unread item only when something is r
   expect(build(events, 2).map((item) => item.kind)).toEqual([
     "day-divider",
     "message",
-    "message",
     "unread-divider",
+    "message",
     "message",
   ]);
   expect(build(events, 0).some((item) => item.kind === "unread-divider")).toBe(false);
@@ -242,7 +242,7 @@ test("the unread divider precedes the first unread item only when something is r
     build(events, 2)
       .filter((item) => item.kind === "message")
       .map((item) => item.kind === "message" && item.continued)
-  ).toEqual([false, true, false]);
+  ).toEqual([false, false, true]);
 });
 
 test("anchored comments, replies and system events are activity lines described as verb phrases", () => {
@@ -297,25 +297,25 @@ test("anchored comments, replies and system events are activity lines described 
   const items = build(events);
   expect(items.map((item) => item.kind)).toEqual([
     "day-divider",
+    "activity",
+    "activity",
+    "activity",
+    "activity",
+    "activity",
+    "activity",
     "comment",
-    "activity",
-    "activity",
-    "activity",
-    "activity",
-    "activity",
-    "activity",
   ]);
   expect(
     items
       .filter((item) => item.kind === "activity")
       .map((item) => item.kind === "activity" && item.description)
   ).toEqual([
-    "commented on spec: “brown fox”",
-    "replied to “Ship it?”",
-    "replied to a comment",
-    "saved spec v3",
-    "moved CORE-2 from todo to in_progress",
     "updated the issue",
+    "moved CORE-2 from todo to in_progress",
+    "saved spec v3",
+    "replied to a comment",
+    "replied to “Ship it?”",
+    "commented on spec: “brown fox”",
   ]);
   expect(
     activityDescription({ ...message(8, at), type: "issue.closed", payload: {} } as Event)
@@ -337,13 +337,13 @@ test("hiding activity drops the lines and any day that would be left empty", () 
   ]);
   expect(visibleConversationItems(items, true).map((item) => item.kind)).toEqual([
     "day-divider",
-    "activity",
-    "day-divider",
     "message",
+    "day-divider",
+    "activity",
   ]);
   expect(visibleConversationItems(items, false).map((item) => item.kind)).toEqual([
     "day-divider",
     "message",
   ]);
-  expect(visibleConversationItems(items, false)[1]).toBe(items[3]);
+  expect(visibleConversationItems(items, false)[1]).toBe(items[1]);
 });

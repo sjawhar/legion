@@ -43,9 +43,10 @@ function measureAnchor(root: HTMLElement): ReadingAnchor | null {
 
 /**
  * The Conversation never moves the reader's attention: keeps the turn they are looking at pinned
- * to its viewport position across renders that shift content above it (an older page loading, a
- * pin reflow, the failed-operations banner appearing, or the unread divider moving as a turn is
- * marked read). Readers at the top are left alone so new items appear in place, unchanged.
+ * to its viewport position across renders that shift content above it (a new turn arriving while
+ * the reader is browsing history, a pin reflow, the failed-operations banner appearing, or the
+ * unread divider moving as a turn is marked read). Readers already at the top are pinned to the
+ * latest turn, so a new turn simply appears in place there without any adjustment.
  *
  * The reader's position is tracked by a scroll listener rather than sampled inside the
  * render-triggered effect below: a reader can scroll (or scroll back) without causing any React

@@ -202,7 +202,12 @@ export function buildConversationItems({
   let unreadPlaced = !(anyRead && anyUnread);
   let previous: { author: Actor; atMs: number } | undefined;
 
-  for (const turn of turns) {
+  // Turns are assembled oldest-first above so ask coalescing and grouping see events in
+  // chronological order, then walked newest-first here to produce the display list: day
+  // dividers head their day, the unread divider sits between the newest unread turns (above)
+  // and read turns (below), and a run of same-author turns hides the avatar on every turn but
+  // the newest.
+  for (const turn of [...turns].reverse()) {
     const day = dateKey(turn.at);
     if (day !== currentDay) {
       currentDay = day;
@@ -214,7 +219,7 @@ export function buildConversationItems({
       });
       previous = undefined;
     }
-    if (!unreadPlaced && turn.seq > lastReadSeq) {
+    if (!unreadPlaced && turn.seq <= lastReadSeq) {
       items.push({ kind: "unread-divider", id: "unread-divider" });
       unreadPlaced = true;
       previous = undefined;
@@ -225,7 +230,7 @@ export function buildConversationItems({
         previous !== undefined &&
         previous.author.kind === turn.author.kind &&
         previous.author.id === turn.author.id &&
-        atMs - previous.atMs < GROUP_WINDOW_MS;
+        previous.atMs - atMs < GROUP_WINDOW_MS;
       previous = { author: turn.author, atMs };
     } else if (turn.kind === "ask") {
       previous = undefined;
