@@ -1011,6 +1011,34 @@ describe("reduceGithubEvent", () => {
     expect(state.prByBranch[`${repo}@${childBranch}`]).toBeUndefined();
   });
 
+  it("tells the tree's architect a PR merged, naming the merge commit, and forgets the PR", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "closed",
+        repo,
+        number: String(prNumber),
+        merged: "true",
+        merge_commit_sha: "f088622403c5",
+        updated_at: "2026-09-07T04:00:00Z",
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "pr-merged", pr: prNumber, mergeCommitSha: "f088622403c5" },
+      },
+    ]);
+    expect(state.prs[`${repo}#${prNumber}`]).toBeUndefined();
+    expect(state.prByBranch[`${repo}@${childBranch}`]).toBeUndefined();
+    expect(state.prTombstones[`${repo}#${prNumber}`]).toBe(Date.parse("2026-09-07T04:00:00Z"));
+  });
+
   it("keeps a tombstone after an unmerged close so an older opened redelivery cannot recreate the PR", () => {
     const state = rootState();
     attachChild(state);

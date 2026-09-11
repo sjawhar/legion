@@ -753,10 +753,26 @@ function pullRequest(
     }
     return [];
   }
-  if (payload.action === "closed" && payload.merged === "false") {
+  if (payload.action === "closed") {
+    // Either way the PR is finished: its record and branch mapping go, and a tombstone keeps
+    // a stale "opened" redelivery from recreating it. The wake differs -- a merge is the
+    // architect's cue to sign off and close the issue, an unmerged close its cue to decide
+    // whether the work is reopened, reassigned, or cancelled.
     delete state.prs[prKey];
     removeBranchMappings(state, prKey);
     if (headUpdatedAt !== undefined) state.prTombstones[prKey] = headUpdatedAt;
+    if (payload.merged === "true") {
+      return routeActive(
+        state,
+        pr.key,
+        {
+          type: "pr-merged",
+          pr: number,
+          mergeCommitSha: stringValue(payload.merge_commit_sha) ?? "",
+        },
+        envelope
+      );
+    }
     return routeActive(state, pr.key, { type: "pr-closed-unmerged", pr: number }, envelope);
   }
   return [];
