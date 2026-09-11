@@ -52,21 +52,22 @@ bun run e2e
 
 ## Acceptance run against the deployed image
 
-The `acceptance` Compose profile runs Playwright against a locally built Dispatch image with an
-isolated Postgres database. It uses header identity for `alice` and `bob`, an acceptance-only
-agent token, disabled NATS, and port 8767; it never starts the production `dispatch` service.
+The `acceptance` Compose profile runs Playwright against a locally built Dispatch image with its
+own Postgres volume and database. It uses header identity for `alice` and `bob`, an
+acceptance-only agent token, disabled NATS, and port 8767; it starts only the named acceptance
+service and its database dependency.
 
 ```bash
 cd packages/envoy/deploy/compose
-DISPATCH_PG_PASSWORD=dispatch DISPATCH_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose build dispatch
-DISPATCH_PG_PASSWORD=dispatch DISPATCH_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose --profile acceptance up -d dispatch-acceptance
+DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -f dispatch.compose.yml build dispatch
+DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance up -d dispatch-acceptance
 cd ../../../dispatch
 PLAYWRIGHT_BASE_URL=http://127.0.0.1:8767 \
 PLAYWRIGHT_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55516/dispatch_acceptance?sslmode=disable' \
 E2E_AGENT_TOKEN=acceptance-token \
 bun run e2e:deployed
 cd ../envoy/deploy/compose
-DISPATCH_PG_PASSWORD=dispatch DISPATCH_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose --profile acceptance down
+DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance down -v
 docker rmi ghcr.io/sjawhar/legion/envoy:pr4-local
 ```
 

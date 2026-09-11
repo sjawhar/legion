@@ -18,6 +18,12 @@ function loadHeadlessProof(): Promise<HeadlessProofEditor> {
   return headlessProof;
 }
 
+function escapeUnsupportedHtml(markdown: string): string {
+  return markdown.replace(/<\/?[A-Za-z][A-Za-z0-9-]*(?=\s|\/?>)[^<>]*>/g, (html) =>
+    html.replaceAll("<", "\\<").replaceAll(">", "\\>")
+  );
+}
+
 function MarkdownBody({
   markdown,
   onRendered,
@@ -38,7 +44,7 @@ function MarkdownBody({
       if (root.current === null) {
         throw new Error("EventBody's Markdown root is unavailable.");
       }
-      const document = proof.parseMarkdown(markdown);
+      const document = proof.parseMarkdown(escapeUnsupportedHtml(markdown));
       root.current.replaceChildren(
         DOMSerializer.fromSchema(proof.schema).serializeFragment(document.content)
       );

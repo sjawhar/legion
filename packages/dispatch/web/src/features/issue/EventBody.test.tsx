@@ -34,3 +34,21 @@ test("EventBody renders Markdown event content", async () => {
     view.unmount();
   }
 });
+
+test("EventBody renders unsupported raw HTML as literal text", async () => {
+  const view = render(
+    <EventBody
+      event={{
+        ...markdownMessage,
+        payload: { ...markdownMessage.payload, body: '<img src="x">' },
+      }}
+    />
+  );
+
+  try {
+    expect(await screen.findByText('<img src="x">')).not.toBeNull();
+    expect(view.container.querySelector("img")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
