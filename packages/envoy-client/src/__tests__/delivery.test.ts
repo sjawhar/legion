@@ -263,7 +263,7 @@ describe("renderInbound dispatch events", () => {
           seq: 4,
           type: "ask.edited",
           actor,
-          notify: false,
+          notify: true,
           created_at: "2026-09-11T04:05:29Z",
           payload: {
             ...openAsk,
@@ -288,11 +288,35 @@ describe("renderInbound dispatch events", () => {
     };
 
     expect(decoded.envoy.dispatch).toMatchObject({
-      owner: "CORE/design-notes",
+      owner: "CORE / design-notes",
+      document: "CORE/design-notes",
       artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
       type: "ask.edited",
       payload: { question: "Publish?", previous: { question: "Draft?" } },
     });
+  });
+
+  test("skips a non-notify document frame", () => {
+    const raw = JSON.stringify(
+      envelope({
+        source: "dispatch",
+        topic: "notifications.dispatch.document.CORE.runbook-md.artifact.version",
+        payload: JSON.stringify({
+          id: 72,
+          issue_key: null,
+          artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+          project: "CORE",
+          seq: 4,
+          type: "artifact.version",
+          actor,
+          notify: false,
+          created_at: "2026-09-11T04:05:29Z",
+          payload: {},
+        }),
+      })
+    );
+
+    expect(renderInbound(raw, reader)).toMatchObject({ skip: true, content: "" });
   });
 
   test("renders a comment.created reply to an ask as 're: <question>', not the raw ask id", () => {

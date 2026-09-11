@@ -6,7 +6,8 @@ import {
   agentSubject,
   ChildStatusEventPayloadSchema as ChildStatusPayloadSchema,
   CommentEventPayloadSchema as CommentPayloadSchema,
-  DISPATCH_ISSUE_TOPIC_PREFIX,
+  DISPATCH_DOCUMENT_TOPIC_PREFIX,
+  DISPATCH_TOPIC_PREFIX,
   type InboundDispatchEvent as DispatchEvent,
   DispatchEventSchema,
   EnvelopeSchema,
@@ -114,14 +115,12 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "child.status": ChildStatusPayloadSchema,
 };
 
-const DISPATCH_DOCUMENT_TOPIC_PREFIX = "notifications.dispatch.document.";
-
 function dispatchOwner(event: DispatchEvent, topic: string | undefined): string {
   if (event.issue_key !== null) return event.issue_key;
   if (topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) === true) {
     const [project, slug] = topic.slice(DISPATCH_DOCUMENT_TOPIC_PREFIX.length).split(".", 3);
     if (project !== undefined && project !== "" && slug !== undefined && slug !== "") {
-      return `${project}/${slug}`;
+      return `${project} / ${slug}`;
     }
   }
   return event.artifact_id ?? "unknown";
@@ -218,7 +217,7 @@ export function renderInbound(
       if ("event" in frame) {
         if (
           frame.notify === false &&
-          (subject ?? envelope.topic)?.startsWith(DISPATCH_ISSUE_TOPIC_PREFIX) === true
+          (subject ?? envelope.topic)?.startsWith(DISPATCH_TOPIC_PREFIX) === true
         ) {
           return { skip: true, content: "", envelope };
         }
@@ -229,9 +228,19 @@ export function renderInbound(
         dispatchEvent = {
           owner: dispatchOwner(frame.event, subject ?? envelope.topic),
           ...(frame.event.issue_key === null
-            ? frame.event.artifact_id === undefined || frame.event.artifact_id === null
-              ? {}
-              : { artifact_id: frame.event.artifact_id }
+            ? {
+                ...((subject ?? envelope.topic)?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) === true
+                  ? {
+                      document: dispatchOwner(frame.event, subject ?? envelope.topic).replace(
+                        " / ",
+                        "/"
+                      ),
+                    }
+                  : {}),
+                ...(frame.event.artifact_id === undefined || frame.event.artifact_id === null
+                  ? {}
+                  : { artifact_id: frame.event.artifact_id }),
+              }
             : { issue_key: frame.event.issue_key }),
           type: frame.event.type,
           actor: frame.event.actor,

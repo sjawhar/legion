@@ -55,15 +55,15 @@ const dispatchToolNames = [
 
 const requiredDispatchFields: Readonly<Record<(typeof dispatchToolNames)[number], readonly string[]>> = {
   dispatch_issue: ["project", "title"],
-  dispatch_ask: ["issue", "question"],
+  dispatch_ask: ["question"],
   dispatch_edit_ask: ["ask"],
   dispatch_resolve_ask: ["ask", "kind", "reason"],
-  dispatch_comment: ["issue", "body"],
-  dispatch_suggest: ["issue", "artifact", "quote", "replace_with"],
+  dispatch_comment: ["body"],
+  dispatch_suggest: ["artifact", "quote", "replace_with"],
   dispatch_message: ["issue", "body"],
-  dispatch_doc_edit: ["issue", "artifact", "ops"],
+  dispatch_doc_edit: ["artifact", "ops"],
   dispatch_doc_read: [],
-  dispatch_artifact: ["issue", "name"],
+  dispatch_artifact: ["name"],
   dispatch_read: [],
   dispatch_search: ["query"],
 }

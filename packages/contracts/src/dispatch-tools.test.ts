@@ -175,6 +175,79 @@ describe("dispatchToolSpecs", () => {
     );
   });
 
+  test("accepts exactly one issue or project owner", () => {
+    const cases = [
+      ["dispatch_ask", { project: "CORE", artifact: "runbook-md", question: "Publish?" }],
+      ["dispatch_comment", { project: "CORE", artifact: "runbook-md", body: "Looks good." }],
+      [
+        "dispatch_suggest",
+        {
+          project: "CORE",
+          artifact: "runbook-md",
+          quote: "draft",
+          replace_with: "final",
+        },
+      ],
+      [
+        "dispatch_doc_edit",
+        {
+          project: "CORE",
+          artifact: "runbook-md",
+          ops: [{ op: "replace", find: "draft", with: "final" }],
+        },
+      ],
+      ["dispatch_doc_read", { project: "CORE", artifact: "runbook-md" }],
+      ["dispatch_artifact", { project: "CORE", name: "runbook.md", content: "# Runbook" }],
+      ["dispatch_read", { project: "CORE", artifact: "runbook-md" }],
+    ] as const;
+
+    for (const [name, args] of cases) {
+      const schema = schemaFor(name);
+      expect(schema.safeParse(args).success, `${name} project owner`).toBe(true);
+      expect(schema.safeParse({ ...args, issue: "CORE-1" }).success, `${name} both owners`).toBe(
+        false
+      );
+    }
+  });
+
+  test("requires artifact with project on document tools but not dispatch_artifact", () => {
+    const cases = [
+      ["dispatch_ask", { project: "CORE", question: "Publish?" }],
+      ["dispatch_comment", { project: "CORE", body: "Looks good." }],
+      ["dispatch_suggest", { project: "CORE", quote: "draft", replace_with: "final" }],
+      [
+        "dispatch_doc_edit",
+        { project: "CORE", ops: [{ op: "replace", find: "draft", with: "final" }] },
+      ],
+      ["dispatch_doc_read", { project: "CORE" }],
+      ["dispatch_read", { project: "CORE" }],
+    ] as const;
+
+    for (const [name, args] of cases) {
+      expect(schemaFor(name).safeParse(args).success, name).toBe(false);
+    }
+    expect(
+      schemaFor("dispatch_artifact").safeParse({
+        project: "CORE",
+        name: "runbook.md",
+        content: "# Runbook",
+      }).success
+    ).toBe(true);
+  });
+
+  test("accepts ref alone on dispatch_doc_read and dispatch_read", () => {
+    expect(
+      schemaFor("dispatch_doc_read").safeParse({
+        ref: "dispatch://CORE/artifact/runbook-md",
+      }).success
+    ).toBe(true);
+    expect(
+      schemaFor("dispatch_read").safeParse({
+        ref: "dispatch://CORE/artifact/runbook-md",
+      }).success
+    ).toBe(true);
+  });
+
   test("does not advertise a primary artifact option", () => {
     const artifact = dispatchToolSpecs.find((spec) => spec.name === "dispatch_artifact");
     if (!artifact) throw new Error("missing dispatch_artifact");

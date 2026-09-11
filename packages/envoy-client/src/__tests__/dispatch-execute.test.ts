@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dispatchIssueSubject } from "@legion/contracts";
+import { dispatchDocumentSubject, dispatchIssueSubject } from "@legion/contracts";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool } from "../dispatch-execute";
 import { dispatchSubscriptionTopic } from "../dispatch-subscribe";
@@ -502,6 +502,215 @@ describe("executeDispatchTool", () => {
       summary: "Record final wording",
     });
   });
+
+  test.each([
+    [
+      "dispatch_artifact",
+      { project: "CORE", name: "runbook.md", content: "# Runbook\n" },
+      "/api/v1/projects/CORE/artifacts",
+      true,
+    ],
+    [
+      "dispatch_ask",
+      { project: "CORE", artifact: "runbook-md", question: "Publish?" },
+      "/api/v1/artifacts/artifact-42/asks",
+      true,
+    ],
+    [
+      "dispatch_comment",
+      { project: "CORE", artifact: "runbook-md", body: "Looks good." },
+      "/api/v1/artifacts/artifact-42/comments",
+      true,
+    ],
+    [
+      "dispatch_suggest",
+      {
+        project: "CORE",
+        artifact: "runbook-md",
+        quote: "draft",
+        replace_with: "final",
+      },
+      "/api/v1/artifacts/artifact-42/comments",
+      true,
+    ],
+    [
+      "dispatch_doc_edit",
+      {
+        project: "CORE",
+        artifact: "runbook-md",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      },
+      "/api/v1/artifacts/artifact-42/edits",
+      true,
+    ],
+    [
+      "dispatch_doc_read",
+      { project: "CORE", artifact: "runbook-md" },
+      "/api/v1/artifacts/artifact-42/text",
+      false,
+    ],
+    [
+      "dispatch_read",
+      { project: "CORE", artifact: "runbook-md" },
+      "/api/v1/projects/CORE/artifacts/runbook-md",
+      false,
+    ],
+  ])("executes %s with a project document owner", async (tool, args, expectedPath, writes) => {
+    const paths: string[] = [];
+    const artifact = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/runbook-md",
+      slug: "runbook-md",
+      name: "Runbook.md",
+      kind: "doc",
+      primary: false,
+      created_by: { kind: "session", id: "session-42" },
+      created_at: "2026-09-11T00:00:00Z",
+      versions: [],
+    };
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = new URL(String(url));
+      paths.push(request.pathname);
+      if (request.pathname === "/api/v1/projects/CORE/artifacts/runbook-md") {
+        return response(artifact);
+      }
+      if (request.pathname === "/api/v1/projects/CORE/artifacts") {
+        return response({ artifact, version: { number: 1 } });
+      }
+      if (request.pathname.endsWith("/text"))
+        return response({ markdown: "# Runbook", version: 1 });
+      if (request.pathname.endsWith("/edits"))
+        return response({ applied: 1, version: { number: 2 } });
+      if (request.pathname.endsWith("/events")) return response([]);
+      if (request.pathname.endsWith("/references"))
+        return response({ outgoing: [], referenced_by: [] });
+      if (request.pathname.endsWith("/asks")) {
+        return init?.method === "POST"
+          ? response({
+              id: "ask-42",
+              issue_key: null,
+              artifact_id: artifact.id,
+              question: "Publish?",
+            })
+          : response([]);
+      }
+      if (request.pathname.endsWith("/comments")) {
+        return init?.method === "POST"
+          ? response({ id: "comment-42", issue_key: null, artifact_id: artifact.id })
+          : response([]);
+      }
+      throw new Error(`unexpected request: ${request.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool,
+      args,
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(paths).toContain(expectedPath);
+    if (writes) {
+      expect(result.details.topic).toBe(dispatchDocumentSubject("CORE", "runbook-md", ">"));
+      expect(result.details).toMatchObject({
+        project: "CORE",
+        document: "CORE/runbook-md",
+      });
+    } else {
+      expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    }
+  });
+
+  test("reads a project document from a dispatch project reference", async () => {
+    const paths: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const request = new URL(String(url));
+      paths.push(request.pathname);
+      if (request.pathname === "/api/v1/projects/CORE/artifacts/runbook-md") {
+        return response({
+          id: "artifact-42",
+          issue_key: null,
+          project: "CORE",
+          ref_key: "CORE/runbook-md",
+          slug: "runbook-md",
+          name: "Runbook.md",
+          kind: "doc",
+          primary: false,
+          created_by: { kind: "session", id: "session-42" },
+          created_at: "2026-09-11T00:00:00Z",
+          versions: [],
+        });
+      }
+      if (request.pathname.endsWith("/text"))
+        return response({ markdown: "# Runbook", version: 1 });
+      if (request.pathname.endsWith("/asks") || request.pathname.endsWith("/comments"))
+        return response([]);
+      throw new Error(`unexpected request: ${request.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { ref: "dispatch://CORE/artifact/runbook-md" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("# Runbook");
+    expect(result.details).toEqual({ project: "CORE", document: "CORE/runbook-md" });
+    expect(paths).toEqual([
+      "/api/v1/projects/CORE/artifacts/runbook-md",
+      "/api/v1/artifacts/artifact-42/text",
+      "/api/v1/artifacts/artifact-42/asks",
+      "/api/v1/artifacts/artifact-42/comments",
+    ]);
+  });
+
+  test("rejects conflicting project owners, missing document names, and invalid project keys", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+    const shared = {
+      cwd: "/workspace",
+      host: "omp" as const,
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    };
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "CORE-1", project: "CORE", artifact: "runbook-md" },
+        ...shared,
+      })
+    ).rejects.toThrow("exactly one of issue and project");
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { project: "CORE" },
+        ...shared,
+      })
+    ).rejects.toThrow("with project, artifact names the document");
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { project: "not-a-project", artifact: "runbook-md" },
+        ...shared,
+      })
+    ).rejects.toThrow("project must be a project key");
+  });
   test("uploads a relative artifact path from the Dispatch process cwd", async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));
     writeFileSync(path.join(cwd, "artifact.txt"), "artifact from Dispatch cwd");
@@ -957,6 +1166,18 @@ describe("executeDispatchTool", () => {
         });
       }
       if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      if (target.pathname === "/api/v1/issues/DSP-42/references") {
+        return response({
+          members: [
+            {
+              artifact: { project: "CORE", slug: "runbook-md", name: "Runbook.md" },
+              depth: 1,
+              via: { kind: "comment", id: "comment-1" },
+            },
+          ],
+          truncated: false,
+        });
+      }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
@@ -973,6 +1194,46 @@ describe("executeDispatchTool", () => {
 
     expect(result.details).toEqual({ issue: "DSP-42" });
     expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(result.text).toContain("References:\n- CORE/runbook-md · depth 1 via comment comment-1");
+  });
+
+  test("keeps an issue summary readable when its references are unavailable", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          last_seq: 0,
+        });
+      }
+      if (pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      if (pathname === "/api/v1/issues/DSP-42/references") {
+        return new Response(JSON.stringify({ error: "missing", code: "NOT_FOUND" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected request: ${pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain("Title: Dispatch issue");
+    expect(result.text).toContain("References:\n- unavailable");
+    expect(result.details).toEqual({ issue: "DSP-42" });
   });
 
   test("reads recent events from a Dispatch log reference", async () => {
@@ -1168,6 +1429,9 @@ test("subscribes to the project document topic after resolving a document ask", 
   expect(result).toEqual({
     text: "Retracted ask ask-document: No longer needed.",
     details: {
+      project: "CORE",
+      artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      document: "CORE/design-notes",
       topic: "notifications.dispatch.document.CORE.design-notes.>",
       ask: "ask-document",
     },
@@ -1355,6 +1619,9 @@ test("subscribes to the document topic after editing a document ask", async () =
   expect(result).toEqual({
     text: "Ask edited: Approve the document?",
     details: {
+      project: "CORE",
+      artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      document: "CORE/design-notes",
       topic: "notifications.dispatch.document.CORE.design-notes.>",
       ask: "ask-document",
     },

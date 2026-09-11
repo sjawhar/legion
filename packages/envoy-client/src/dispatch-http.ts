@@ -2,6 +2,7 @@ import type {
   Actor,
   Artifact,
   ArtifactDetails,
+  ArtifactReferences,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -23,6 +24,7 @@ import type {
   Issue,
   IssueDetails,
   IssueRead,
+  IssueReferences,
   IssueSummary,
   Message,
   ResolveAskInput,
@@ -87,6 +89,34 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "issues"], undefined, options);
   }
 
+  async listProjectArtifacts(project: string, unlinked = false): Promise<Artifact[]> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "projects", project, "artifacts"],
+      undefined,
+      unlinked ? { unlinked: "true" } : undefined
+    );
+  }
+
+  async projectArtifact(
+    project: string,
+    input: CreateArtifactInput
+  ): Promise<ArtifactUploadResponse> {
+    const artifactPath = ["api", "v1", "projects", project, "artifacts"];
+    if ("content" in input) return this.#json("POST", artifactPath, input);
+
+    const form = new FormData();
+    form.set("name", input.name);
+    if (input.summary !== undefined) form.set("summary", input.summary);
+    if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
+    form.set("file", input.file, input.name);
+    return this.#form("POST", artifactPath, form);
+  }
+
+  async getProjectArtifact(project: string, slug: string): Promise<ArtifactDetails> {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
+  }
+
   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
     return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
   }
@@ -134,6 +164,19 @@ export class DispatchClient {
     );
   }
 
+  async getArtifactAsks(id: string, state?: "all" | "open" | "answered"): Promise<Ask[]> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "artifacts", id, "asks"],
+      undefined,
+      state === undefined ? undefined : { state }
+    );
+  }
+
+  async artifactAsk(id: string, input: CreateAskInput): Promise<Ask> {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
+  }
+
   async suggest(
     issue: string,
     input: Omit<CreateCommentInput, "body" | "suggestion"> & {
@@ -150,6 +193,28 @@ export class DispatchClient {
         suggestion: { replace_with },
       }
     );
+  }
+
+  async getArtifactComments(id: string): Promise<Comment[]> {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
+  }
+
+  async artifactComment(id: string, input: CreateCommentInput): Promise<Comment> {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
+  }
+
+  async artifactSuggest(
+    id: string,
+    input: Omit<CreateCommentInput, "body" | "suggestion"> & {
+      readonly body?: string;
+      readonly replace_with: string;
+    }
+  ): Promise<Comment> {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
+      ...comment,
+      suggestion: { replace_with },
+    });
   }
 
   async message(issue: string, input: CreateMessageInput): Promise<Message> {
@@ -198,6 +263,14 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
   }
 
+  async getArtifactEvents(id: string, after = 0, limit = 200): Promise<Event[]> {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
+  }
+
+  async getArtifactReferences(id: string): Promise<ArtifactReferences> {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
+  }
+
   async getAsk(id: string): Promise<AskRead> {
     return this.#json("GET", ["api", "v1", "asks", id]);
   }
@@ -213,6 +286,16 @@ export class DispatchClient {
       undefined,
       artifact ? { artifact } : undefined
     );
+  }
+
+  async getIssueReferences(issue: string): Promise<IssueReferences> {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "references",
+    ]);
   }
 
   async ensureIssue(issueReference: string, actor: Actor): Promise<string> {

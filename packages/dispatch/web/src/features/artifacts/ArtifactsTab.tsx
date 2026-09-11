@@ -306,24 +306,27 @@ function ArtifactCard({ artifact, issueKey }: { artifact: Artifact; issueKey: st
       {referencedBy.length === 0 ? null : (
         <section aria-label="Referenced by" className="space-y-2">
           <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Referenced by</h3>
-          {referencedBy.map((reference) => (
-            <article
-              className={`rounded-lg border p-3 ${borderDefault}`}
-              key={`${reference.kind}:${reference.id}`}
-            >
-              <p className={`text-xs font-medium ${textMutedOnSurface}`}>
-                {reference.kind[0]?.toUpperCase()}
-                {reference.kind.slice(1)} ·{" "}
-                <Link
-                  className={`underline ${linkText}`}
-                  to={buildIssuePath({ key: reference.issue_key, kind: "issue" })}
-                >
-                  {reference.issue_key}
-                </Link>
-              </p>
-              <Unfurl body={reference.excerpt} />
-            </article>
-          ))}
+          {referencedBy.map((reference) => {
+            if (reference.issue_key === null) return null;
+            return (
+              <article
+                className={`rounded-lg border p-3 ${borderDefault}`}
+                key={`${reference.kind}:${reference.id}`}
+              >
+                <p className={`text-xs font-medium ${textMutedOnSurface}`}>
+                  {reference.kind[0]?.toUpperCase()}
+                  {reference.kind.slice(1)} ·{" "}
+                  <Link
+                    className={`underline ${linkText}`}
+                    to={buildIssuePath({ key: reference.issue_key, kind: "issue" })}
+                  >
+                    {reference.issue_key}
+                  </Link>
+                </p>
+                <Unfurl body={reference.excerpt} />
+              </article>
+            );
+          })}
         </section>
       )}
     </article>
