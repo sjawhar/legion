@@ -28,7 +28,7 @@
   },
   "dependencies": {
     "@hocuspocus/provider": "^2.15.2",
-    "@sjawhar/proof-editor": "0.2.4",
+    "@sjawhar/proof-editor": "0.2.5",
     "@legion/contracts": "workspace:*",
     "@milkdown/core": "^7.18.0",
     "@milkdown/kit": "^7.18.0",

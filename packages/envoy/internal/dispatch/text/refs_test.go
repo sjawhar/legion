@@ -89,12 +89,13 @@ func TestInvalidArtifactReferencesDoNotProduceGraphEdges(t *testing.T) {
 }
 
 func TestExtractParsesProjectDocumentReferences(t *testing.T) {
-	body := `dispatch://CORE/artifact/design-notes dispatch://CORE/artifact/design-notes@v2 dispatch://CORE/artifact/design-notes/ask/a1 dispatch://CORE/artifact/design-notes/comment/c1 dispatch://CORE dispatch://CORE/spec https://dispatch.example/projects/CORE/documents/design-notes?version=3 https://dispatch.example/projects/CORE/documents/design-notes?ask=a2`
+	body := `dispatch://CORE/artifact/design-notes dispatch://CORE/artifact/design-notes@v2 dispatch://CORE/artifact/design-notes/ask/a1 dispatch://CORE/artifact/design-notes/comment/c1 dispatch://CORE/artifact/design-notes@v2/ask/a3 dispatch://CORE dispatch://CORE/spec https://dispatch.example/projects/CORE/documents/design-notes?version=3 https://dispatch.example/projects/CORE/documents/design-notes?ask=a2`
 	want := []Ref{
 		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
 		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
 		{Kind: "ask", Project: "CORE", ID: "a1"},
 		{Kind: "comment", Project: "CORE", ID: "c1"},
+		{Kind: "ask", Project: "CORE", ID: "a3"},
 		{Kind: "artifact", Project: "CORE", ID: "design-notes"},
 		{Kind: "ask", Project: "CORE", ID: "a2"},
 	}

@@ -11,6 +11,7 @@ import type {
   AskRead,
   AuthenticatedUser,
   Comment,
+  CommentRead,
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
@@ -255,6 +256,10 @@ export class DispatchApiClient {
 
   createComment(key: string, input: CreateCommentInput): Promise<Comment> {
     return this.post<Comment>(`/api/v1/issues/${pathSegment(key)}/comments`, input);
+  }
+
+  getComment(id: string): Promise<CommentRead> {
+    return this.json<CommentRead>(`/api/v1/comments/${pathSegment(id)}`);
   }
 
   resolveComment(id: string): Promise<Comment> {
