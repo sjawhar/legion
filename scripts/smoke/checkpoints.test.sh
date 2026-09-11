@@ -82,13 +82,6 @@ PATH="${fake_bin}:${PATH}" \
 }
 grep -Fq 'Authorization: Bearer test-dispatch-token' "$curl_log"
 grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1' "$curl_log"
-# Every tmux call checkpoints.sh makes must target the daemon's private socket, `legion-<slug>`
-# (`project_slug` of `example-org/24` is `exampleorg24`); the default server never hosts a pane.
-[[ -s "$TMUX_LOG" ]] && ! grep -qv '^legion-exampleorg24 ' "$TMUX_LOG" || {
-  cat "$TMUX_LOG" >&2
-  exit 1
-}
-printf 'PASS: every tmux invocation targets the private legion-<slug> socket\n'
 
 # Checkpoint 13 inspects `/proc/<pid>/environ` of every pid the fake tmux reports, so those pids
 # must be real, long-lived processes the harness owns: one with a clean environment and one with
@@ -328,3 +321,22 @@ fi
   exit 1
 }
 printf 'PASS: checkpoint 1 fails with a clear message naming the path when the daemon state file is missing\n'
+
+# Every tmux call any checkpoint above made must have targeted the daemon's private socket,
+# `legion-<slug>` (`project_slug` of `example-org/24` is `exampleorg24`) — the default server never
+# hosts a Legion pane. The one call allowed off the private socket is checkpoint 13's own
+# default-server `has-session` probe, which exists precisely to prove no such session is there.
+[[ -s "$TMUX_LOG" ]] || {
+  printf 'no tmux invocation was logged; the fake tmux is not being exercised\n' >&2
+  exit 1
+}
+off_socket="$(grep -v '^legion-exampleorg24 ' "$TMUX_LOG" | grep -v '^ has-session -t legion-exampleorg24$' || true)"
+[[ -z "$off_socket" ]] || {
+  printf 'tmux invocations off the private legion-exampleorg24 socket:\n%s\n' "$off_socket" >&2
+  exit 1
+}
+grep -q '^ has-session -t legion-exampleorg24$' "$TMUX_LOG" || {
+  printf 'checkpoint 13 never probed the default server for a legion-exampleorg24 session\n' >&2
+  exit 1
+}
+printf 'PASS: every tmux invocation across checkpoints 1-13 targets the private legion-<slug> socket (default-server probe excepted)\n'
