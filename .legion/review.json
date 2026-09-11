@@ -1,0 +1,86 @@
+{
+  "spec": "dispatch://LEGION-6/spec (version 9)",
+  "plan": "docs/plans/2026-09-11-dispatch-token-file-delivery.md",
+  "pr": 923,
+  "prUrl": "https://github.com/sjawhar/legion/pull/923",
+  "branch": "legion/LEGION-6",
+  "reviewedHead": "72989037b5c2c27cfe26980d1cccf41c7ea6929e",
+  "verdict": "CHANGES_REQUESTED",
+  "review": "https://github.com/sjawhar/legion/pull/923#pullrequestreview-5182392737",
+  "summary": "Security contract holds in every traced path (no secret on any tmux -e argv; every daemon tmux argv is `tmux -L legion-<project>`; 0700/0600 files; X_FILE-first consumers with no fallback in envoy-client, pi-envoy, CLI; stripDispatchEnv covers DISPATCH_TOKEN_FILE). Not approvable yet: the branch conflicts with main and CI has never run on the PR, and two correctness gaps in the new stop/prune logic must land in this PR.",
+  "blocking": [
+    {
+      "id": "B1",
+      "title": "Branch conflicts with main; CI never ran",
+      "evidence": "gh: mergeStateStatus DIRTY, 0 workflow runs for legion/LEGION-6, 0 check runs at 72989037. Trial merge main@3e3888ac78a2 + 72989037 (git merge-tree, scratch at /tmp/legion6-review-merge): one textual conflict packages/pi-envoy/extensions/legion.test.ts:2 (main added `mkdir` to the node:fs/promises import; take main's superset); main's #907 test `resurrects a dead active root during a resync probe tick, but leaves a live one alone` matches tmux argv at pre-`-L` indices (command[1]==='list-panes' && command[3]==='%0') and fails on the merged tree: daemon bun test 801 pass / 1 fail. Merged tree otherwise green: daemon tsc+biome clean; envoy-client tsc clean, 169/169; pi-envoy tsc+biome clean, 134/134.",
+      "action": "Rebase/merge main into legion/LEGION-6, resolve the import, codemod that test to command[3]/command[5], re-run gates; tester re-verifies at the new head."
+    },
+    {
+      "id": "B2",
+      "title": "PR title fails the pr-title job",
+      "evidence": ".github/workflows/pr-and-main.yaml:11-24 requires ^[a-z]+(\\([^)]+\\))?!?: .+; current title starts with a capital and has no type.",
+      "action": "Retitle, e.g. `feat(daemon): deliver pane secrets as 0600 file pointers over a private tmux socket (LEGION-6)`."
+    }
+  ],
+  "correctness": [
+    {
+      "id": "C1",
+      "location": "packages/daemon/src/daemon/processes.ts:2771 (stopProcess pane-gone regex); AGENTS.md:109",
+      "problem": "Regex covers `no server running` (socket file exists, server exited) but not the missing-socket shape. Verified on this box, tmux 3.7c: `tmux -L <absent> kill-pane -t %1` -> `error connecting to <path> (No such file or directory)` exit 1. The documented upgrade runbook (kill default-server session, start new daemon) and any reboot clearing TMUX_TMPDIR hit this shape at boot: reconnectWorkers -> markWorkerDead -> retireWorkerLocator -> stopProcess throws StopFailed before `delete current.locator` (:755-757); dead workers keep their locators and runningWorkerCount slots until an architect respawns that role after ensureController created the server.",
+      "fix": "Treat a connect failure to the daemon's own socket as pane-gone (extend the regex with `error connecting to .*No such file or directory`, or handle it in tmux.killPane); update the stopProcess doc comment and AGENTS.md:109; add a processes.test.ts case with that stderr asserting the locator is cleared."
+    },
+    {
+      "id": "C2",
+      "location": "packages/daemon/src/daemon/processes.ts:2897 withPaneSecret / :286 launchingSecrets / :2376 write before serialize",
+      "problem": "launchingSecrets is a Set and the file is written before the per-issue serialize lane. Two overlapping spawnRoot generations for one root (documented :2075-2098, exercised by processes.test.ts:1064) share the token: gen 2's add is a no-op, gen 1's finally deletes it while gen 2's body is still queued; gen 1 takes the stale-generation branch without storing a locator and spawnRoot's persist prunes legion-<project>-<root>-architect while gen 2's pane launch is in flight. Reproduced by the deep-review pass by extending the :1064 test to await gen 2's write before releasing gen 1 (tree active, locator %2, secrets/ empty). Impact: gen 2's pane boots to a missing file, requiredSecret throws, registration deadline retires it, launchFailures++.",
+      "fix": "Refcount (Map<string, number>) in withPaneSecret/liveSecretFiles; move writeSecretFile inside serialize(issueLaunchQueue, ...) in launchShimmedProcess; extend the :1064 test to assert the architect's secret file survives."
+    }
+  ],
+  "shouldFix": [
+    {
+      "id": "S1",
+      "location": "processes.ts:2931 pruneSecretFiles; AGENTS.md:99",
+      "problem": "Boot prune never seeds paneSecretFiles, so files inherited across a daemon restart are never removed steady-state when their locator clears (until the next boot); AGENTS.md 'lives exactly as long as the pane's locator' is false for them.",
+      "fix": "Seed paneSecretFiles with the names the boot prune keeps (one line; keeps the accepted no-listing steady-state design)."
+    },
+    {
+      "id": "S2",
+      "location": "environment.ts:106 DISPATCH_ENV_KEYS",
+      "problem": "The private server is always forked by the daemon, so its environment minus only DISPATCH_* is the pane baseline. LEGION_BOOT_TOKEN/_FILE and LEGION_CONTROLLER_SECRET/_FILE in the daemon's own environment (daemon started from inside a Legion pane; tester scrubbed exactly these before up.sh, test.json rigLaunch) reach every pane that does not override them with -e. Not observed live; mechanism verified by reading environment.ts and tmux semantics.",
+      "fix": "Add the secret family to the strip list + environment.test.ts case. Whether to also strip the launch-marker family (LEGION_TREE etc.; nested controller boot fails classifySession) is an architect scope call."
+    },
+    {
+      "id": "S3",
+      "location": "scripts/smoke/checkpoints.test.sh:87",
+      "problem": "Private-socket assertion over TMUX_LOG runs only after checkpoint 1; checkpoints 2-12 append unchecked.",
+      "fix": "Move after the last checkpoint run (excluding checkpoint 13's intentional default-server has-session) or assert after each run."
+    }
+  ],
+  "fastFollowCandidates": [
+    "github-app-env.ts:16 comment and config.test.ts:605 name still enumerate three stripped keys",
+    "dispatch-execute.ts:406 error text hides config.error (DISPATCH_TOKEN_FILE failure)",
+    "liveSecretFiles keeps dispatch-token even when config.dispatchToken is undefined",
+    "writeSecretFile truncate-then-write: concurrent reader can see an empty file; tmp+rename also removes the chmod fix-up",
+    "classify.ts requiredControllerCapability duplicates requiredSecret",
+    "processes.test.ts 328-site positional command[3] codemod vs a tmuxArgv/tmuxSub helper (real-shutdown-e2e.test.ts already has one)"
+  ],
+  "verifiedFacts": {
+    "ci": "no runs (GitHub skips pull_request runs for unmergeable PRs); PR body 'CI: pending' is accurate",
+    "threads": "0 open, 0 resolved; 0 prior reviews",
+    "e2e": "PR body smoke evidence corroborated by /tmp/legion6-smoke/rig: daemon/secrets drwx------ with -rw------- dispatch-token, legion-sjawhar24-controller, legion-sjawhar24-legsmoke-23-architect; tmux -L legion-sjawhar24 list-sessions -> no server running after down.sh",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 72989037: no blocking findings from either beyond the items above (deep-review surfaced C1 and reproduced C2; code-quality surfaced S1 and S3)",
+    "intentionalDecisionsDefended": "role-token file names, tracked-names prune + readdir at boot, kill-pane `no server running` = gone, envoy-client error channel, tmux -L legion-<project> naming — all accepted as-is; C1 is the same decision applied to the second stderr shape, not a relitigation"
+  },
+  "nextSteps": "implementer: B1, B2, C1, C2, S1-S3 (fast-follow list optional) -> tester: re-run bare gates + smoke checkpoints 1-3 and 13 at the new head, plus a first-boot-with-no-private-socket case for C1 -> reviewer (this session) re-reviews and, if clean, deletes .legion/ and approves that head.",
+  "observations": [
+    "The daemon's legion gh grant injection into this session's shell mints several LEGION_GRANT exports per command; only the first of each batch redeems (later ones 403). Worked around locally by probing; worth a look in the extension/daemon since every worker phase hits it.",
+    "The daemon writes an untracked empty .omp/config.yml into the workspace before each worker launch; left in the working copy, not committed (bookmark set to the handoff commit)."
+  ],
+  "blockersForArchitect": [
+    "Reviewer role cannot push: the review GitHub App token has push:false on sjawhar/legion (X-Accepted-Github-Permissions: pull_requests=read; contents=read; `jj git push` -> 'Permission to sjawhar/legion.git denied to legion-reviewer[bot]'). credentials.ts handleGitCredential maps role reviewer -> app 'review'. The reviewer charter's clean path (delete .legion/, push, approve that head) is therefore not executable by this role as deployed. Decision needed before the next review round: grant the review App contents:write on the repo, or route the reviewer's git credential through the implement App for the .legion/ deletion push.",
+    "Consequence for this round: the review handoff commit 225b7c6be0a7 ('review: record handoff', only .legion/review.json) is committed on the workspace's local legion/LEGION-6 bookmark but NOT on origin; the implementer's next push from this workspace carries it."
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-11T18:55:13.050Z"
+}
