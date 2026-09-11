@@ -149,6 +149,23 @@ test("Escape calls onClose", () => {
   }
 });
 
+test("Escape closes the palette even when pressed before focus has moved into it", () => {
+  let closed = 0;
+  const view = renderPalette(() => {
+    closed += 1;
+  });
+
+  try {
+    // The dialog moves focus inside itself one animation frame after opening; a key pressed
+    // in that frame lands on whatever was focused before (the document editor, the body).
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(closed).toBe(1);
+  } finally {
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
 test("closes the palette when navigation changes", async () => {
   let closed = 0;
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

@@ -38,6 +38,22 @@ const scrollLock = {
   },
 };
 
+// Every open dialog's container. Escape is handled at the document level so it works before
+// the deferred initial focus has moved into the dialog (the key then lands on whatever was
+// focused before, such as the document editor); only the innermost open dialog closes -
+// innermost by DOM containment, since a picker nested in a sheet runs its effect first.
+const openDialogs = new Set<HTMLElement | null>();
+
+function innermostOpenDialog(): HTMLElement | null | undefined {
+  let innermost: HTMLElement | null | undefined;
+  for (const container of openDialogs) {
+    if (innermost === undefined || (container !== null && innermost?.contains(container))) {
+      innermost = container;
+    }
+  }
+  return innermost;
+}
+
 export interface UseDialogOptions {
   /** Element to focus first instead of the container's first focusable descendant. */
   initialFocusRef?: RefObject<HTMLElement | null>;
@@ -51,10 +67,9 @@ export interface DialogHandle<T extends HTMLElement> {
 
 /**
  * Focus trap, Escape-to-close, focus restoration, and a body scroll lock for an overlay
- * (the phone navigation drawer, the phone margin sheet, and the reference picker all use
- * this). The keydown listener is attached to the dialog's own container rather than
- * `document`, so it fires on the DOM bubble phase: a picker nested inside a sheet handles
- * its own Escape before the sheet's listener ever sees the event.
+ * (the search palette, the phone navigation drawer, the phone margin sheet, and the reference
+ * picker all use this). Escape is observed on `document` in the capture phase and closes the
+ * innermost open dialog, whatever element holds focus; Tab trapping listens on the container.
  */
 export function useDialog<T extends HTMLElement>({
   initialFocusRef,
@@ -89,12 +104,19 @@ export function useDialog<T extends HTMLElement>({
       initial?.focus();
     });
 
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        onCloseRef.current();
+    // Bubble phase on `document`: a descendant that owns its Escape (the margin Composer
+    // dismissing its picker or confirming a discard) stops propagation before this runs,
+    // while a key that lands outside the dialog still reaches it.
+    openDialogs.add(container);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || innermostOpenDialog() !== container) {
         return;
       }
+      onCloseRef.current();
+    };
+    document.addEventListener("keydown", handleEscape);
+
+    const handleTab = (event: KeyboardEvent) => {
       if (event.key !== "Tab" || container === null) {
         return;
       }
@@ -113,11 +135,13 @@ export function useDialog<T extends HTMLElement>({
         first.focus();
       }
     };
-    container?.addEventListener("keydown", handleKeyDown);
+    container?.addEventListener("keydown", handleTab);
 
     return () => {
       window.cancelAnimationFrame(initialFocusFrame);
-      container?.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keydown", handleEscape);
+      openDialogs.delete(container);
+      container?.removeEventListener("keydown", handleTab);
       scrollLock.release();
       if (previouslyFocused !== null && document.contains(previouslyFocused)) {
         previouslyFocused.focus();
