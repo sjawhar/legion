@@ -9662,13 +9662,13 @@ describe("ProcessManager", () => {
       run: async (command) => {
         // The root's original pane ("%0", from `tree()`) is gone; the untouched second tree's
         // pane ("%1") is still live and running OMP (the default `readProcessCmdline`).
-        if (command[0] === "tmux" && command[1] === "list-panes" && command[3] === "%0") {
+        if (command[0] === "tmux" && command[3] === "list-panes" && command[5] === "%0") {
           return { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "list-panes" && command[3] === "%1") {
+        if (command[0] === "tmux" && command[3] === "list-panes" && command[5] === "%1") {
           return { stdout: "12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@50 %2 12345\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
