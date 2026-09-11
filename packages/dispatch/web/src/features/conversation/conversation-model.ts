@@ -122,6 +122,8 @@ export function activityDescription(event: Event): string {
       return "sent a message";
     case "child.status":
       return `moved ${event.payload.child_key} from ${event.payload.from} to ${event.payload.to}`;
+    case "subscription.removed":
+      return `unsubscribed ${shortSessionId(event.payload.session_id)} from notifications`;
   }
 }
 

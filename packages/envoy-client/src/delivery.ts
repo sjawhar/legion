@@ -13,6 +13,7 @@ import {
   EnvelopeSchema,
   IssueEventPayloadSchema as IssuePayloadSchema,
   MessageEventPayloadSchema as MessagePayloadSchema,
+  SubscriptionRemovedEventPayloadSchema as SubscriptionRemovedPayloadSchema,
 } from "@legion/contracts";
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
@@ -237,6 +238,23 @@ export function renderInbound(
         }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
           return { skip: true, content: "", envelope };
+        }
+        // A meta-notice about Envoy plumbing, not a domain event: a short plain
+        // sentence is higher signal here than the generic TOON envelope below.
+        // This event also reaches the issue's own topic — every other subscriber,
+        // not just the removed session — so it renders only for the session it
+        // names; every other receiving session sees nothing (high signal).
+        if (frame.event.type === "subscription.removed") {
+          const removed = SubscriptionRemovedPayloadSchema.safeParse(frame.event.payload);
+          if (!removed.success || removed.data.session_id !== sessionID) {
+            return { skip: true, content: "", envelope };
+          }
+          const who = removed.data.by?.id ?? "someone";
+          return {
+            skip: false,
+            content: `Unsubscribed from ${dispatchOwner(frame.event, subject ?? envelope.topic)} by ${who}`,
+            envelope,
+          };
         }
         askQuestion = dispatchAskQuestion(frame.event);
         messageReplyPreview = dispatchMessageReplyPreview(frame.event);

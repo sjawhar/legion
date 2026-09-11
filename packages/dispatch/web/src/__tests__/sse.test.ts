@@ -191,6 +191,7 @@ test("every event type refreshes user state so unread badges stay live across ta
     "suggestion.accepted",
     "message.created",
     "child.status",
+    "subscription.removed",
   ] as const) {
     const invalidated: unknown[][] = [];
     const queryClient = {
@@ -279,5 +280,53 @@ test("a document event invalidates the artifact, document route, project's docum
     ["project", "CORE", "artifacts"],
     ["projects"],
     ["inbox"],
+  ]);
+});
+
+test("a subscription removal refreshes the issue's subscribers list", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
+
+  applyEventInvalidations(queryClient, event("subscription.removed", { session_id: "session-1" }));
+
+  expect(invalidated).toEqual([
+    ["issue", "CORE-1"],
+    ["events", "CORE-1"],
+    ["issues"],
+    ["user-state"],
+    ["inbox"],
+    ["subscribers", "CORE-1"],
+  ]);
+});
+
+test("a document subscription removal refreshes the document's subscribers list", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
+
+  applyEventInvalidations(
+    queryClient,
+    event(
+      "subscription.removed",
+      { session_id: "session-1" },
+      { artifact_id: "artifact-1", issue_key: null, project: "CORE" }
+    )
+  );
+
+  expect(invalidated).toEqual([
+    ["artifact", "artifact-1"],
+    ["artifact-ref"],
+    ["project", "CORE", "artifacts"],
+    ["projects"],
+    ["subscribers", "artifact-1"],
   ]);
 });

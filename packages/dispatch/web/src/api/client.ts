@@ -31,6 +31,7 @@ import type {
   Project,
   RepoProject,
   SearchResponse,
+  Subscriber,
   UpdateIssueInput,
   UserIssueState,
   UserState,
@@ -391,8 +392,30 @@ export class DispatchApiClient {
     );
   }
 
+  getArtifactSubscribers(id: string): Promise<Subscriber[]> {
+    return this.json<Subscriber[]>(`/api/v1/artifacts/${pathSegment(id)}/subscribers`);
+  }
+
+  async unsubscribeArtifactSession(id: string, sessionId: string): Promise<void> {
+    await this.response(
+      `/api/v1/artifacts/${pathSegment(id)}/subscribers/${pathSegment(sessionId)}`,
+      { method: "DELETE" }
+    );
+  }
+
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
+  }
+
+  getIssueSubscribers(key: string): Promise<Subscriber[]> {
+    return this.json<Subscriber[]>(`/api/v1/issues/${pathSegment(key)}/subscribers`);
+  }
+
+  async unsubscribeIssueSession(key: string, sessionId: string): Promise<void> {
+    await this.response(
+      `/api/v1/issues/${pathSegment(key)}/subscribers/${pathSegment(sessionId)}`,
+      { method: "DELETE" }
+    );
   }
 
   getMyState(): Promise<UserState> {

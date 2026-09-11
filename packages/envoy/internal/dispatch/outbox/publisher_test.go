@@ -53,6 +53,12 @@ func (p *recordingPublisher) all() []contracts.Envelope {
 	return append([]contracts.Envelope(nil), p.items...)
 }
 
+func (p *recordingPublisher) setFailTopic(topic string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failTopic = topic
+}
+
 func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()
@@ -426,6 +432,119 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 
 	if got := publisher.all(); len(got) != 0 {
 		t.Fatalf("published %d author route(s) for an agent replying to itself, want 0: %#v", len(got), got)
+	}
+}
+
+func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T) {
+	database := openTestStore(t)
+	seedIssue(t, database, "T-1", nil)
+	publisher := &recordingPublisher{}
+	deps := Deps{Store: database, Publisher: publisher}
+	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.subscription.removed"}
+	event := model.Event{
+		Type:  "subscription.removed",
+		Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: map[string]any{
+			"session_id": "planner",
+			"by":         map[string]any{"kind": "user", "id": "alice"},
+			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
+		},
+	}
+	publishAuthorRoutes(context.Background(), deps, item, event)
+
+	got := publisher.all()
+	if len(got) != 1 || got[0].Topic != "notifications.agent.planner" {
+		t.Fatalf("author routes = %#v, want a single notice to notifications.agent.planner", got)
+	}
+}
+
+func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing.T) {
+	database := openTestStore(t)
+	seedIssue(t, database, "T-1", nil)
+	publisher := &recordingPublisher{}
+	deps := Deps{Store: database, Publisher: publisher}
+	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.subscription.removed"}
+	event := model.Event{
+		Type:    "subscription.removed",
+		Actor:   model.Actor{Kind: "user", ID: "alice"},
+		Payload: map[string]any{"by": map[string]any{"kind": "user", "id": "alice"}, "topics": []any{}},
+	}
+	publishAuthorRoutes(context.Background(), deps, item, event)
+
+	if got := publisher.all(); len(got) != 0 {
+		t.Fatalf("published %d author route(s) with no session_id, want 0: %#v", len(got), got)
+	}
+}
+
+func TestRunPublishesSubscriptionRemovedAndRoutesItDirectlyToTheUnsubscribedSession(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "subscription.removed",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: map[string]any{
+			"session_id": "planner",
+			"by":         map[string]any{"kind": "user", "id": "alice"},
+			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
+		},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "subscription.removed publication", func() bool {
+		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if items[0].Topic != "notifications.dispatch.issue.T-1.subscription.removed" {
+		t.Fatalf("issue topic = %q", items[0].Topic)
+	}
+	if items[1].Topic != "notifications.agent.planner" {
+		t.Fatalf("author route topic = %q, want notifications.agent.planner", items[1].Topic)
+	}
+}
+
+func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "subscription.removed",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: map[string]any{
+			"session_id": "planner",
+			"by":         map[string]any{"kind": "user", "id": "alice"},
+			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
+		},
+	})
+	// The notice IS the feature for subscription.removed (unlike ask/comment
+	// author routes, where a failed notice is merely logged): a failed
+	// author-route publish must leave the event unpublished so the outbox
+	// retries, rather than losing the removed session's only notice for good.
+	publisher := &recordingPublisher{failTopic: "notifications.agent.planner"}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "issue-topic publication despite the failing author route", func() bool {
+		return len(publisher.all()) == 1
+	})
+	if publishedAt(t, database, event.ID) != nil {
+		t.Fatal("event was marked published while its author-route notice failed")
+	}
+
+	publisher.setFailTopic("")
+	waitFor(t, 7*time.Second, "retried publication once the author route succeeds", func() bool {
+		return publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if len(items) != 3 {
+		t.Fatalf("published items after retry = %#v, want the issue topic twice (the retry republishes it) plus the author route once", items)
+	}
+	if items[2].Topic != "notifications.agent.planner" {
+		t.Fatalf("retried author route topic = %q, want notifications.agent.planner", items[2].Topic)
 	}
 }
 

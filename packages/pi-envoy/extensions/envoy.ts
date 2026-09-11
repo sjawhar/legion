@@ -12,7 +12,11 @@ import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
-import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
+import {
+  dispatchSubscriptionTopic,
+  dispatchTopicLabel,
+  subscriptionRemovedTopics,
+} from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import {
@@ -161,6 +165,12 @@ export default function envoyExtension(pi: PiApi): void {
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
+    // A human unsubscribed one of our topics: drop it locally too, the same
+    // way envoy_unsubscribe does, so the resubscribe-on-drop recovery path
+    // below does not undo the human's action a few seconds later. The event
+    // also reaches the issue's own topic (every subscriber, not just the
+    // removed session), so this only fires for a removal naming us.
+    for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) closeIntentionally(topic);
     const dedupeKey = rendered.envelope?.dedupe_key;
     const duplicate = dedupeKey !== undefined && dedupeKeys.has(dedupeKey);
     // Steering: mid-turn the message is injected at the next tool boundary
@@ -706,7 +716,25 @@ export default function envoyExtension(pi: PiApi): void {
     const topic = dispatchSubscriptionTopic(event.details);
     if (topic === null) return;
     try {
-      if (await subscribe(topic)) await registerSession();
+      const isNew = await subscribe(topic);
+      if (isNew) await registerSession();
+      // Silent subscription is the one thing Sami ruled out: a write must tell
+      // the agent it now gets every event on this issue. Already-subscribed is
+      // not news, so it stays silent rather than repeating itself every write.
+      // The host does not let a tool_result handler amend the result the model
+      // already saw, so this goes through the same steer channel `deliver`
+      // uses for inbound envelopes instead of a UI-only notification, which
+      // the model never sees.
+      if (isNew) {
+        pi.sendMessage(
+          {
+            customType: "envoy-message",
+            content: `Subscribed to ${dispatchTopicLabel(topic)} (every event on this issue reaches you; envoy_unsubscribe ${topic} to stop).`,
+            display: true,
+          },
+          { deliverAs: "steer", triggerTurn: false }
+        );
+      }
     } catch (error) {
       activeSessionContext?.ui.notify(
         `envoy: dispatch reply auto-subscribe failed (${messageFor(error)}); run envoy_subscribe ${topic}`,

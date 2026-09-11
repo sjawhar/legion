@@ -167,7 +167,9 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	}
 	if event.Notify {
 		publishRoute(deps.Publisher, item, route)
-		publishAuthorRoutes(ctx, deps, item, event)
+		if err := publishAuthorRoutes(ctx, deps, item, event); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -178,21 +180,15 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 // project document (which has no route at all). Without this, the agent that asked the
 // question, started the thread, or is the thread's own root author never learns about the
 // human's reply, resolution, reopening, or edit.
-func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) {
-	var askID, replyTo, commentID, messageReplyTo string
-	switch event.Type {
-	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
-		askID = payloadString(event.Payload, "ask_id")
-		replyTo = payloadString(event.Payload, "reply_to")
-		commentID = payloadString(event.Payload, "id")
-	case "ask.resolved":
-		askID = payloadString(event.Payload, "id")
-	case "message.created":
-		messageReplyTo = payloadString(event.Payload, "reply_to")
-	default:
-		return
-	}
-
+//
+// A failed publish is logged and swallowed for every event type except
+// subscription.removed, where the author route IS the feature (the removed
+// session has no other way to learn it was unsubscribed): that failure is
+// returned so publish leaves published_at null and the next scan retries the
+// row (the issue-topic publish above is idempotent on its retained subject,
+// so a duplicate there on retry is harmless). This asymmetry is pre-existing
+// for ask/comment/message author routes, not introduced here.
+func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) error {
 	seen := map[string]bool{}
 	var targets []model.Actor
 	consider := func(author model.Actor, ok bool) {
@@ -204,6 +200,26 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope
 		}
 		seen[author.ID] = true
 		targets = append(targets, author)
+	}
+
+	var askID, replyTo, commentID, messageReplyTo string
+	switch event.Type {
+	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
+		askID = payloadString(event.Payload, "ask_id")
+		replyTo = payloadString(event.Payload, "reply_to")
+		commentID = payloadString(event.Payload, "id")
+	case "ask.resolved":
+		askID = payloadString(event.Payload, "id")
+	case "message.created":
+		messageReplyTo = payloadString(event.Payload, "reply_to")
+	case "subscription.removed":
+		// The target is the unsubscribed session itself, carried directly in the
+		// payload — there is no thread or ask to walk to find it.
+		if sessionID := payloadString(event.Payload, "session_id"); sessionID != "" {
+			consider(model.Actor{Kind: "session", ID: sessionID}, true)
+		}
+	default:
+		return nil
 	}
 
 	if askID != "" {
@@ -226,9 +242,13 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope
 		routed := item
 		routed.Topic = contracts.AgentTopicPrefix + author.ID
 		if err := deps.Publisher.Publish(routed); err != nil {
+			if event.Type == "subscription.removed" {
+				return fmt.Errorf("publish subscription.removed author route: %w", err)
+			}
 			slog.Error("dispatch outbox: publish author route", "session_id", author.ID, "error", err)
 		}
 	}
+	return nil
 }
 
 func loadAskAuthor(ctx context.Context, deps Deps, askID string) (model.Actor, bool) {
@@ -377,6 +397,8 @@ func payloadSummary(event model.Event, slug string) string {
 		text = payloadString(event.Payload, "body")
 	case strings.HasPrefix(event.Type, "comment."), strings.HasPrefix(event.Type, "suggestion."):
 		text = payloadString(event.Payload, "body")
+	case event.Type == "subscription.removed":
+		text = payloadString(event.Payload, "session_id")
 	}
 	owner := ""
 	if event.ArtifactID != nil {

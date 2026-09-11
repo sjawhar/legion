@@ -73,6 +73,7 @@ function stubIssueApi() {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue([]);
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({
     "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false },
   });
@@ -90,6 +91,7 @@ function stubIssueApi() {
       getIssue.mockRestore();
       getIssueEvents.mockRestore();
       getInbox.mockRestore();
+      getIssueSubscribers.mockRestore();
       getMyState.mockRestore();
       patchIssue.mockRestore();
     },

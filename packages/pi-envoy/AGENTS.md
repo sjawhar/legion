@@ -23,8 +23,17 @@ configuration resolves a URL and bearer token. Set
 `~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`; `DISPATCH_URL`
 and `DISPATCH_TOKEN` override those settings. A successful mutation returns
 `details.topic`, and the `tool_result` hook subscribes to that exact retained
-Dispatch topic. Reads (`dispatch_read`, `dispatch_doc_read`) return only
-`details.issue`: surveying the board never subscribes the session.
+Dispatch topic — a new subscription also tells the model (`pi.sendMessage`
+with `deliverAs: "steer"`, the same channel `deliver` uses for inbound
+envelopes, since the host does not let a `tool_result` handler amend what the
+model already saw); an already-subscribed write stays quiet. Reads
+(`dispatch_read`, `dispatch_doc_read`) return only `details.issue`: surveying
+the board never subscribes the session. A `subscription.removed` notice (a
+human unsubscribed a session from the dashboard) reaches both the issue's own
+topic and the removed session's agent topic directly; only the session the
+payload names renders it and drops the matching local NATS subscription
+(so the dead-connection recovery path does not resurrect it) — every other
+subscriber ignores it.
 
 ## Where to look
 
