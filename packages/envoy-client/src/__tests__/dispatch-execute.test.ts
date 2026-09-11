@@ -446,6 +446,112 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/valid dispatch/);
   });
 
+  test("lists the accepted dispatch:// reference grammar in the malformed-ref error", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { ref: "dispatch://DSP-42/not-a-reference" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(
+      "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
+        "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
+        "dispatch://KEY-1/artifact/<slug>, or dispatch://PROJECT/artifact/<slug>"
+    );
+  });
+
+  test("resolves an issue artifact by its filename, not only its id or slug", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "garrett-reply-draft.md" }],
+          open_asks: [],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Garrett reply", version: 1 });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42", artifact: "garrett-reply-draft.md" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("# Garrett reply");
+  });
+
+  test("resolves a project artifact by its filename when the slug route 404s", async () => {
+    const paths: string[] = [];
+    const artifact = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/garrett-reply-draft-md",
+      slug: "garrett-reply-draft-md",
+      name: "garrett-reply-draft.md",
+      kind: "doc",
+      primary: false,
+      created_by: { kind: "session", id: "session-42" },
+      created_at: "2026-09-11T00:00:00Z",
+      versions: [],
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const request = new URL(String(url));
+      paths.push(request.pathname);
+      if (request.pathname === "/api/v1/projects/CORE/artifacts/garrett-reply-draft.md") {
+        return new Response(JSON.stringify({ code: "ARTIFACT_NOT_FOUND", error: "not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (request.pathname === "/api/v1/projects/CORE/artifacts") return response([artifact]);
+      if (request.pathname.endsWith("/text")) {
+        return response({ markdown: "# Garrett reply", version: 1 });
+      }
+      if (request.pathname.endsWith("/asks") || request.pathname.endsWith("/comments")) {
+        return response([]);
+      }
+      throw new Error(`unexpected request: ${request.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { project: "CORE", artifact: "garrett-reply-draft.md" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("# Garrett reply");
+    expect(paths).toContain("/api/v1/projects/CORE/artifacts");
+  });
+
   test("renders a no-new-version document edit and forwards its summary", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -783,6 +889,35 @@ describe("executeDispatchTool", () => {
       actor: { kind: "session", id: "session-42" },
     });
     expect(body).not.toHaveProperty("primary");
+  });
+
+  test("reports the artifact slug and dispatch:// reference in the upload result text", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+      response({
+        artifact: {
+          id: "artifact-42",
+          issue_key: "DSP-42",
+          name: "garrett-reply-draft.md",
+          slug: "garrett-reply-draft-md",
+        },
+        version: { number: 1 },
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_artifact",
+      args: { issue: "DSP-42", name: "garrett-reply-draft.md", content: "# Reply\n" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      "Uploaded garrett-reply-draft.md as version 1 " +
+        "(artifact slug garrett-reply-draft-md; dispatch://DSP-42/artifact/garrett-reply-draft-md)"
+    );
   });
 
   test.each([

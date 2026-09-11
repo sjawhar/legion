@@ -6,10 +6,12 @@ import {
   AskEditedEventPayloadSchema,
   AskEventPayloadSchema,
   type Comment,
+  CommentEventPayloadSchema,
   type CreateProjectInput,
   type DispatchEvent,
   DispatchEventSchema,
   type EditCommentInput,
+  MessageEventPayloadSchema,
 } from "./dispatch-api";
 
 test("accepts the typed artifact version event payload", () => {
@@ -186,6 +188,40 @@ test("models comment thread lifecycle events and author edits", () => {
   expect(DispatchEventSchema.safeParse(reopened)).toMatchObject({ success: true });
   expect(DispatchEventSchema.safeParse(edited)).toMatchObject({ success: true });
   expect(input).toEqual({ body: "Edited discussion" });
+});
+
+test("keeps the comment id, author, and message id when parsing event payloads", () => {
+  const actor: Actor = { id: "alice", kind: "user" };
+  const comment: Comment = {
+    anchor: null,
+    author: actor,
+    body: "Please update this.",
+    created_at: "2026-09-10T00:00:00Z",
+    edited_at: null,
+    id: "comment-1",
+    issue_key: "DSP-1",
+    reply_to: null,
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: null,
+    ask_id: null,
+  };
+
+  expect(CommentEventPayloadSchema.parse({ ...comment, artifact_name: "spec.md" })).toMatchObject({
+    id: "comment-1",
+    author: actor,
+    created_at: "2026-09-10T00:00:00Z",
+  });
+  expect(
+    MessageEventPayloadSchema.parse({
+      id: "message-1",
+      issue_key: "DSP-1",
+      author: actor,
+      body: "The build is green.",
+      created_at: "2026-09-10T00:00:00Z",
+    })
+  ).toMatchObject({ id: "message-1", author: actor });
 });
 
 test("preserves ask edit history in the event payload", () => {

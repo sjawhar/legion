@@ -109,6 +109,8 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "ask.resolved": AskPayloadSchema,
   "comment.created": CommentPayloadSchema,
   "comment.resolved": CommentPayloadSchema,
+  "comment.reopened": CommentPayloadSchema,
+  "comment.edited": CommentPayloadSchema,
   "suggestion.accepted": CommentPayloadSchema,
   "suggestion.rejected": CommentPayloadSchema,
   "message.created": MessagePayloadSchema,
