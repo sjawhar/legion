@@ -693,7 +693,13 @@ function review(
   const decision = (stringValue(rawReview.state) ?? "").toLowerCase();
   const isCurrentHead = stringValue(rawReview.commit_id) === pr.headSha;
   const prior = pr.reviewDecision;
-  if (isCurrentHead && (decision === "approved" || decision === "changes_requested")) {
+  // Approval is head-gated: it feeds `pr-ready` and the merge gate, which must only ever act on
+  // an approval of the exact commit that would merge. Changes requested is not — a reviewer
+  // legitimately pins its review to the implementation commit it read rather than to a later
+  // handoff commit, and any such verdict still means the PR is not reviewer-clean. Safe to
+  // record from any commit because `resetPrHead` drops the decision on every new head, so a
+  // verdict never outlives the round it was given for.
+  if (decision === "changes_requested" || (isCurrentHead && decision === "approved")) {
     pr.reviewDecision = decision;
   }
   const result = routeActive(

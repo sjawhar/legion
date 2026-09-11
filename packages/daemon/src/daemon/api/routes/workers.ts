@@ -24,7 +24,8 @@ import {
  * finished. `planner`/`merger` completions never PATCH a status here: planning still reads as
  * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. A reviewer
  * completion checks the review verdict the `review` reducer already recorded on the issue's PR
- * (`state.prs[...].reviewDecision`, set for a review at the PR's current head): changes requested
+ * (`state.prs[...].reviewDecision`, which records changes requested from any commit and an
+ * approval only at the PR's current head): changes requested
  * returns the issue to `in_progress` for a corrective implementer instead of advancing to
  * `retro`. */
 function phaseCompleteStatus(
