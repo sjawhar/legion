@@ -1188,6 +1188,9 @@ describe("ProcessManager", () => {
     await flushEventLoopUntil(
       () => existsSync(architectFile) && readFileSync(architectFile, "utf8") === "boot-gen-2"
     );
+    // `flushEventLoopUntil` returns silently on exhaustion; a wait that gave up would let
+    // generation 1 settle first and turn the assertions below into a false green.
+    expect(readFileSync(architectFile, "utf8")).toBe("boot-gen-2");
 
     // Only now does the older, generation-1 launch's tmux call finally resolve; generation 2's
     // queued launch runs immediately after it, splitting a second pane into the same window.
@@ -2002,6 +2005,48 @@ describe("ProcessManager", () => {
           failures: 3,
         }),
       },
+    ]);
+  });
+
+  it("releases the failed launch's secret-file hold even when the launch-failed publish throws, so the next persist still reaps the file", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.admission.active.push(root);
+    // Two prior failures: this attempt crosses MAX_LAUNCH_FAILURES and publishes the controller
+    // anomaly — the one step in spawnRoot's catch that can throw after the rollback.
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 2 };
+    let sessionExists = false;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      natsPublish: (subject) => {
+        if (subject === `notifications.role.${controllerToken("omp")}`) {
+          throw new Error("nats down");
+        }
+      },
+      run: async (command) => {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window" && command[command.indexOf("-n") + 1] === "legion-42") {
+          return { stdout: "window creation failed", exitCode: 1 };
+        }
+        if (command[3] === "new-window") return { stdout: "@1 %1 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    const architectFile = path.join(stateDir, "secrets", roleToken("omp", root, "architect"));
+
+    await expect(processes.spawnRoot(root)).rejects.toThrow("nats down");
+    expect(state.trees[root]).toMatchObject({ status: "launch-failed", launchFailures: 3 });
+    // The boot token was written before the failed tmux call and the catch never reached its
+    // own persist, so the file is still there...
+    expect(await readFile(architectFile, "utf8")).toBe("boot-token");
+
+    // ...and the very next persist (here: the controller spawn's) must be free to reap it. A
+    // hold leaked past the throw would keep it exempt for the daemon's lifetime.
+    await processes.ensureController();
+
+    expect((await readdir(path.join(stateDir, "secrets"))).sort()).toEqual([
+      "legion-omp-controller",
     ]);
   });
 
@@ -8587,9 +8632,14 @@ describe("ProcessManager", () => {
     // until some later launch happens to fork the server.
     const state = newLegionState("omp", 1);
     const token = roleToken("omp", root, "tester");
+    // A confirmed, previously-live worker (session registered, ready confirmed): reconnect takes
+    // the `markWorkerDead` path, not the unconfirmed-boot retirement.
     state.roles[token] = {
       issue: root,
       role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
         tmuxSession: "legion-omp",

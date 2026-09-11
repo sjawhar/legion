@@ -1320,6 +1320,12 @@ export class ProcessManager {
       else delete tree.locator;
       if (priorReadyConfirmedAt !== undefined) tree.readyConfirmedAt = priorReadyConfirmedAt;
       else delete tree.readyConfirmedAt;
+      // Released as soon as the rollback is in state and before anything below can throw
+      // (`publishController`, the promotion-sweep awaits): a hold that outlives this catch would
+      // exempt the architect file for the daemon's lifetime. This generation stored no locator,
+      // so the persist below reaps the file — unless the rollback restored a prior generation's
+      // locator, which keeps it live.
+      releaseSecret();
       tree.launchFailures += 1;
       const activeIndex = this.deps.state.admission.active.indexOf(issue);
       if (activeIndex !== -1) this.deps.state.admission.active.splice(activeIndex, 1);
@@ -1341,8 +1347,6 @@ export class ProcessManager {
       this.settlePromotionSpawn(issue);
       if (this.promotionSweep) await this.advancePromotionSweep();
       else await this.beginPromotionSweep(issue);
-      // Launch failed before any locator was stored: this persist's prune reaps the file.
-      releaseSecret();
       await this.persist();
       throw error;
     }
