@@ -268,6 +268,9 @@ export class ProcessManager {
    * `workerBootTimeoutSeconds`, probing liveness before ever retiring an unconfirmed boot. See
    * `worker-boot-watchdog.ts` for the full design. */
   private readonly bootWatchdog: WorkerBootWatchdog;
+  /** The private tmux server this daemon owns — see `TmuxServer`. Socket and session share the
+   * `legion-<project>` name. */
+  private readonly tmux: tmux.TmuxServer;
 
   /**
    * The stop hierarchy every graceful-shutdown path funnels through, from lowest level up:
@@ -281,6 +284,7 @@ export class ProcessManager {
    * circuit breaker retiring a persistently-broken but still-queued worker).
    */
   constructor(private readonly deps: ProcessManagerDeps) {
+    this.tmux = { run: deps.run, socket: `legion-${deps.state.project}` };
     this.workerAdmission = new WorkerAdmission({
       state: deps.state,
       config: deps.config,
@@ -304,7 +308,7 @@ export class ProcessManager {
       workerBootTimeoutSeconds: () => this.deps.config.workerBootTimeoutSeconds,
       registrationDeadlineIntervals: () => this.deps.config.workerBootRegistrationDeadlineIntervals,
       now: () => this.deps.now(),
-      run: this.deps.run,
+      tmux: this.tmux,
       isOmpPane: (pid) => this.isOmpPane(pid),
       workerClient: (token, socketPath) => this.workerClient(token, socketPath),
       workerRpcTimeoutMs: () => this.workerRpcTimeoutMs,
@@ -1214,7 +1218,7 @@ export class ProcessManager {
    * shrinks to nothing as every surviving locator gets its pane id recorded.
    */
   async reconcileTmuxWindows(graceMs = TMUX_RECONCILIATION_GRACE_MS): Promise<void> {
-    const session = `legion-${this.deps.state.project}`;
+    const session = this.tmux.socket;
     const owner = session;
     const locators = [
       ...Object.values(this.deps.state.trees).map((tree) => tree.locator),
@@ -1229,14 +1233,14 @@ export class ProcessManager {
         .filter((windowId): windowId is string => windowId !== undefined)
     );
     const unknownWindows = await tmux.listUnknownOwnedWindows(
-      this.deps.run,
+      this.tmux,
       session,
       owner,
       knownWindows
     );
     for (const { windowId, activityAt } of unknownWindows) {
       if (this.deps.now() - activityAt < graceMs) continue;
-      await tmux.killWindow(this.deps.run, windowId);
+      await tmux.killWindow(this.tmux, windowId);
     }
 
     const knownPanes = new Set(
@@ -1251,11 +1255,11 @@ export class ProcessManager {
         )
         .map((locator) => locator?.tmuxWindowId)
     );
-    const unknownPanes = await tmux.listUnknownPanes(this.deps.run, owner, knownPanes);
+    const unknownPanes = await tmux.listUnknownPanes(this.tmux, owner, knownPanes);
     for (const { paneId, windowId, activityAt } of unknownPanes) {
       if (exemptWindows.has(windowId)) continue;
       if (this.deps.now() - activityAt < graceMs) continue;
-      await tmux.killPane(this.deps.run, paneId);
+      await tmux.killPane(this.tmux, paneId);
     }
   }
 
@@ -1326,7 +1330,7 @@ export class ProcessManager {
       await this.deps.saveState();
     } catch (error) {
       if (tree.locator) {
-        await this.deps.run(["tmux", "kill-window", "-t", tree.locator.tmuxWindowId]);
+        await tmux.killWindow(this.tmux, tree.locator.tmuxWindowId);
       }
       throw new SpawnPersistenceFailure(error);
     }
@@ -1642,11 +1646,11 @@ export class ProcessManager {
     if (!locator) return "dead";
 
     const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
-    const pid = await tmux.panePid(this.deps.run, target);
+    const pid = await tmux.panePid(this.tmux, target);
     if (pid === undefined) return "dead";
     if (!(await this.isOmpPane(pid))) return "dead";
     if (locator.tmuxPaneId === undefined) {
-      const paneId = await tmux.firstPaneId(this.deps.run, locator.tmuxWindowId);
+      const paneId = await tmux.firstPaneId(this.tmux, locator.tmuxWindowId);
       if (paneId !== undefined) {
         locator.tmuxPaneId = paneId;
         await this.persist();
@@ -2179,7 +2183,7 @@ export class ProcessManager {
   private async probedWindowId(issue: IssueKey): Promise<string | undefined> {
     const candidate = this.recordedWindowId(issue);
     if (!candidate) return undefined;
-    return (await tmux.windowAlive(this.deps.run, candidate)) ? candidate : undefined;
+    return (await tmux.windowAlive(this.tmux, candidate)) ? candidate : undefined;
   }
 
   /**
@@ -2342,21 +2346,21 @@ export class ProcessManager {
     const socketPath = await this.prepareSocket(workerSocketBasename(issue, role));
     const shellCommand = this.shimmedShellCommand(workspaceDir, socketPath, innerCommand);
 
-    const session = `legion-${this.deps.state.project}`;
+    const session = this.tmux.socket;
     const { tmuxWindowId, tmuxPaneId } = await this.serialize(
       this.issueLaunchQueue,
       issue,
       async () => {
         const existingWindowId = await this.probedWindowId(issue);
         if (existingWindowId) {
-          const { paneId } = await tmux.splitWindow(this.deps.run, existingWindowId, [
+          const { paneId } = await tmux.splitWindow(this.tmux, existingWindowId, [
             ...envPairs,
             shellCommand,
           ]);
           return { tmuxWindowId: existingWindowId, tmuxPaneId: paneId };
         }
         const window = await tmux.openWindow(
-          this.deps.run,
+          this.tmux,
           session,
           treeName(issue),
           [...envPairs, shellCommand],
@@ -2555,7 +2559,7 @@ export class ProcessManager {
     const socketPath = await this.prepareSocket("controller");
     const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
     const shellCommand = this.shimmedShellCommand(controllerDir, socketPath, innerCommand);
-    const session = `legion-${this.deps.state.project}`;
+    const session = this.tmux.socket;
     const env = tmuxEnv({
       LEGION_CONTROLLER: "1",
       LEGION_ROLE: "controller",
@@ -2569,7 +2573,7 @@ export class ProcessManager {
       DISPATCH_TOKEN: this.deps.config.dispatchToken,
     });
     const window = await tmux.openWindow(
-      this.deps.run,
+      this.tmux,
       session,
       "controller",
       [...env, shellCommand],
@@ -2700,8 +2704,9 @@ export class ProcessManager {
    * locator carries a pane id (`launchShimmedProcess` always records one); a locator without one
    * is a corrupt or legacy record, not a case to silently degrade for. Throws `StopFailed` for
    * any `kill-pane` failure other than the pane having already been reaped on its own (`"can't
-   * find pane"`) — the caller must never treat the process as stopped, or its claim/locator as
-   * safe to delete, when it cannot confirm that.
+   * find pane"`) or the private server itself not running (`"no server running"` — no server on
+   * this daemon's own socket means no Legion pane exists) — the caller must never treat the
+   * process as stopped, or its claim/locator as safe to delete, when it cannot confirm that.
    */
   private async stopProcess(
     token: string,
@@ -2731,8 +2736,8 @@ export class ProcessManager {
     if (!locator.tmuxPaneId) {
       throw new Error(`Worker locator for ${token} is missing a pane id`);
     }
-    const killed = await tmux.killPane(this.deps.run, locator.tmuxPaneId);
-    if (killed.exitCode !== 0 && !/can't find pane/.test(killed.stderr ?? "")) {
+    const killed = await tmux.killPane(this.tmux, locator.tmuxPaneId);
+    if (killed.exitCode !== 0 && !/can't find pane|no server running/.test(killed.stderr ?? "")) {
       throw new StopFailed(
         token,
         `kill-pane ${locator.tmuxPaneId} exited ${killed.exitCode}${killed.stderr ? `: ${killed.stderr}` : ""}`
@@ -2796,7 +2801,7 @@ export class ProcessManager {
     const locator = this.deps.state.controllerLocator;
     if (!locator) return false;
     const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
-    const pid = await tmux.panePid(this.deps.run, target);
+    const pid = await tmux.panePid(this.tmux, target);
     if (pid === undefined) {
       delete this.deps.state.controllerLocator;
       return false;
@@ -2807,7 +2812,7 @@ export class ProcessManager {
       return false;
     }
     if (locator.tmuxPaneId === undefined) {
-      const paneId = await tmux.firstPaneId(this.deps.run, locator.tmuxWindowId);
+      const paneId = await tmux.firstPaneId(this.tmux, locator.tmuxWindowId);
       if (paneId !== undefined) {
         locator.tmuxPaneId = paneId;
         await this.persist();

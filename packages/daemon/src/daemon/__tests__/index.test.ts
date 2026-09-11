@@ -162,13 +162,13 @@ function daemonTestDependencies(
         );
         if (controllerSecret)
           onControllerSecret(controllerSecret.slice("LEGION_CONTROLLER_SECRET=".length));
-        if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+        if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
           return { stdout: "", stderr: "", exitCode: 1 };
         }
-        if (command[0]?.endsWith("/tmux") && command[1] === "new-session") {
+        if (command[0]?.endsWith("/tmux") && command[3] === "new-session") {
           return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
         }
-        if (command[0]?.endsWith("/tmux") && command[1] === "new-window") {
+        if (command[0]?.endsWith("/tmux") && command[3] === "new-window") {
           return { stdout: "@42 %1 12345", stderr: "", exitCode: 0 };
         }
         return { stdout: "", stderr: "", exitCode: 0 };
@@ -348,19 +348,19 @@ describe("startDaemon", () => {
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "list-windows") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "list-windows") {
               // reconcileAdmission's boot-time orphan reap: slow to prove
               // startDaemon does not resolve until it — and every promotion
               // it gates — has fully settled.
               await listWindowsGate.promise;
               return { stdout: "", stderr: "", exitCode: 0 };
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
               return { stdout: "", stderr: "", exitCode: 0 };
             }
             if (
               command[0]?.endsWith("/tmux") &&
-              (command[1] === "new-session" || command[1] === "new-window")
+              (command[3] === "new-session" || command[3] === "new-window")
             ) {
               return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
             }
@@ -482,7 +482,7 @@ describe("startDaemon", () => {
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "list-windows") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "list-windows") {
               // reconcileAdmission's boot-time orphan reap: slow enough to observe whether
               // reconnectRoots (synchronous, no tmux calls of its own) has already armed the
               // restored tree's deadline before this settles.
@@ -490,12 +490,12 @@ describe("startDaemon", () => {
               await listWindowsGate.promise;
               return { stdout: "", stderr: "", exitCode: 0 };
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
               return { stdout: "", stderr: "", exitCode: 0 };
             }
             if (
               command[0]?.endsWith("/tmux") &&
-              (command[1] === "new-session" || command[1] === "new-window")
+              (command[3] === "new-session" || command[3] === "new-window")
             ) {
               return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
             }
@@ -967,10 +967,10 @@ describe("startDaemon", () => {
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
               return { stdout: "", stderr: "", exitCode: 0 };
             }
-            if (command[0]?.endsWith("/tmux") && command[1] === "new-window") {
+            if (command[0]?.endsWith("/tmux") && command[3] === "new-window") {
               if (command.some((part) => part.startsWith("LEGION_TREE="))) {
                 launchedRoots += 1;
                 if (launchedRoots === 2) rootLaunches.resolve();

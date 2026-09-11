@@ -20,6 +20,10 @@ import { ProcessManager, type ProcessManagerDeps } from "../processes";
 import { fakeDispatchClient } from "./ci-fixtures";
 
 const SESSION = "legion-smoke-T8Shutdown";
+/** The `ProcessManager` under test has `project: "realshutdown"`, so every kill-pane it issues
+ * targets exactly this private socket; the fixture's own tmux calls must land on the same server. */
+const TMUX_SOCKET = "legion-realshutdown";
+const tmuxArgv = (...rest: string[]) => ["tmux", "-L", TMUX_SOCKET, ...rest];
 const STUCK_OMP = path.join(
   import.meta.dir,
   "..",
@@ -67,19 +71,11 @@ async function run(
 }
 
 async function ensureSession(): Promise<void> {
-  const listed = await run(["tmux", "has-session", "-t", SESSION]);
+  const listed = await run(tmuxArgv("has-session", "-t", SESSION));
   if (listed.exitCode !== 0) {
-    const created = await run([
-      "tmux",
-      "new-session",
-      "-d",
-      "-s",
-      SESSION,
-      "-x",
-      "200",
-      "-y",
-      "50",
-    ]);
+    const created = await run(
+      tmuxArgv("new-session", "-d", "-s", SESSION, "-x", "200", "-y", "50")
+    );
     if (created.exitCode !== 0) {
       throw new Error(`Unable to create tmux session ${SESSION}: ${created.stderr}`);
     }
@@ -95,17 +91,18 @@ async function openShimWindow(
 ): Promise<{ windowId: string; paneId: string }> {
   const envPairs = Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
   const shellCommand = `${process.execPath} ${CLI_ENTRYPOINT} worker-shim --socket ${socketPath} -- bun ${innerCommand}`;
-  const opened = await run([
-    "tmux",
-    "new-window",
-    "-t",
-    SESSION,
-    "-P",
-    "-F",
-    "#{window_id} #{pane_id}",
-    ...envPairs,
-    shellCommand,
-  ]);
+  const opened = await run(
+    tmuxArgv(
+      "new-window",
+      "-t",
+      SESSION,
+      "-P",
+      "-F",
+      "#{window_id} #{pane_id}",
+      ...envPairs,
+      shellCommand
+    )
+  );
   if (opened.exitCode !== 0) {
     throw new Error(`Unable to open shim window: ${opened.stderr}`);
   }
@@ -125,7 +122,7 @@ async function waitForSocket(target: string): Promise<void> {
 }
 
 async function paneAlive(paneId: string): Promise<boolean> {
-  const listed = await run(["tmux", "list-panes", "-a", "-F", "#{pane_id}"]);
+  const listed = await run(tmuxArgv("list-panes", "-a", "-F", "#{pane_id}"));
   return listed.stdout.split("\n").includes(paneId);
 }
 
@@ -225,7 +222,7 @@ function processManagerDeps(
 }
 
 afterAll(async () => {
-  await run(["tmux", "kill-session", "-t", SESSION]);
+  await run(tmuxArgv("kill-server"));
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 

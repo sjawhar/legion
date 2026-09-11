@@ -212,10 +212,10 @@ function exception(
 }
 
 function liveRun(command: string[]): Promise<{ stdout: string; exitCode: number }> {
-  if (command[0] === "tmux" && command[1] === "list-windows") {
+  if (command[0] === "tmux" && command[3] === "list-windows") {
     return Promise.resolve({ stdout: "sjawhar-legion-42\n", exitCode: 0 });
   }
-  if (command[0] === "tmux" && command[1] === "list-panes") {
+  if (command[0] === "tmux" && command[3] === "list-panes") {
     return Promise.resolve({ stdout: "12345\n", exitCode: 0 });
   }
   if (command[0] === "kill") return Promise.resolve({ stdout: "", exitCode: 0 });
@@ -253,7 +253,7 @@ function manager(
       // already reports the pane id and pid synchronously, so no further discovery call happens.
       if (
         command[0] === "tmux" &&
-        command[1] === "list-panes" &&
+        command[3] === "list-panes" &&
         (command.includes("#{pane_id}") || command.includes("#{pane_pid}"))
       ) {
         if (!launchedAnyWindow) return { stdout: "", exitCode: 1 };
@@ -262,11 +262,11 @@ function manager(
           exitCode: 0,
         };
       }
-      if (command[0] === "tmux" && command[1] === "split-window") {
+      if (command[0] === "tmux" && command[3] === "split-window") {
         launchedAnyWindow = true;
         return { stdout: "%2 12345\n", exitCode: 0 };
       }
-      if (command[0] === "tmux" && command[1] === "new-window") {
+      if (command[0] === "tmux" && command[3] === "new-window") {
         launchedAnyWindow = true;
         return { stdout: "@42 %1 12345\n", exitCode: 0 };
       }
@@ -324,7 +324,7 @@ function manager(
       }
       if (
         command[0] === "tmux" &&
-        (command[1] === "new-window" || command[1] === "new-session") &&
+        (command[3] === "new-window" || command[3] === "new-session") &&
         result.stdout.trim() === ""
       ) {
         return { ...result, stdout: "@42\n" };
@@ -409,7 +409,7 @@ describe("ProcessManager", () => {
     const { manager: processes, state } = manager(newLegionState("omp", 1), {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           if (++windows === 2) completeSpawns?.();
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
@@ -433,8 +433,8 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(newLegionState("omp", 1), {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@42 %1 4242\n", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@42 %1 4242\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
       saveState: async () => {
@@ -496,8 +496,8 @@ describe("ProcessManager", () => {
         if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
           await mkdir(workspace, { recursive: true });
         }
-        if (command[1] === "has-session") return { stdout: "", exitCode: 1 };
-        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 1 };
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -556,11 +556,24 @@ describe("ProcessManager", () => {
         ],
         ["git", `--git-dir=${repo}/.git`, "config", "credential.interactive", "false"],
       ],
-      ["tmux", "has-session", "-t", "legion-omp"],
-      ["tmux", "new-session", "-d", "-s", "legion-omp", "-n", "__legion_bootstrap", "sleep 3600"],
-      ["tmux", "set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"],
+      ["tmux", "-L", "legion-omp", "has-session", "-t", "legion-omp"],
       [
         "tmux",
+        "-L",
+        "legion-omp",
+        "new-session",
+        "-d",
+        "-s",
+        "legion-omp",
+        "-n",
+        "__legion_bootstrap",
+        "sleep 3600",
+      ],
+      ["tmux", "-L", "legion-omp", "set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"],
+      [
+        "tmux",
+        "-L",
+        "legion-omp",
         "new-window",
         "-P",
         "-F",
@@ -609,8 +622,8 @@ describe("ProcessManager", () => {
         "DISPATCH_TOKEN=test-dispatch-token",
         `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       ],
-      ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
-      ["tmux", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
+      ["tmux", "-L", "legion-omp", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
+      ["tmux", "-L", "legion-omp", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
     ]);
     expect(workspaceCalls).toContainEqual({
       command: ["jj", "bookmark", "set", "legion/LEGION-42", "--allow-backwards"],
@@ -634,11 +647,11 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") {
+        if (command[3] === "has-session") {
           return { stdout: "", exitCode: sessionExists ? 0 : 1 };
         }
-        if (command[1] === "new-session") sessionExists = true;
-        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -646,7 +659,7 @@ describe("ProcessManager", () => {
     await processes.ensureController();
     await processes.spawnRoot(root);
 
-    const windows = commands.filter((command) => command[1] === "new-window");
+    const windows = commands.filter((command) => command[3] === "new-window");
     expect(windows).toHaveLength(2);
     const controllerWindow = windows[0];
     const rootWindow = windows[1];
@@ -682,6 +695,31 @@ describe("ProcessManager", () => {
       PATH: "/full/bin:/usr/bin",
     });
   });
+  it("runs every tmux command against the private legion-<project> socket", async () => {
+    const stateDir = await temporaryDir();
+    let sessionExists = false;
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.reconcileTmuxWindows();
+
+    const tmuxCommands = commands.filter((command) => command[0] === "tmux");
+    expect(tmuxCommands.length).toBeGreaterThan(0);
+    for (const command of tmuxCommands) {
+      expect(command.slice(0, 3)).toEqual(["tmux", "-L", "legion-omp"]);
+    }
+    expect(tmuxCommands.map((command) => command[3])).toContain("list-windows");
+  });
   it("writes the tree's Dispatch status to in_progress on a successful spawn, then to done on close", async () => {
     const stateDir = await temporaryDir();
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
@@ -698,9 +736,9 @@ describe("ProcessManager", () => {
         },
       }),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") sessionExists = true;
-        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -738,9 +776,9 @@ describe("ProcessManager", () => {
         },
       }),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") sessionExists = true;
-        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -794,7 +832,7 @@ describe("ProcessManager", () => {
       }),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           launchStarted.resolve();
           await launchGate.promise;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
@@ -815,7 +853,7 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]).toMatchObject({ status: "lingering" });
     expect(managedState.trees[root]?.locator).toBeUndefined();
     expect(statusWrites).toEqual([]);
-    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
+    expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
   });
 
   it("proceeds to a running root when a delayed in_progress echo lands mid-launch", async () => {
@@ -841,7 +879,7 @@ describe("ProcessManager", () => {
       }),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           launchStarted.resolve();
           await launchGate.promise;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
@@ -862,7 +900,7 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]).toMatchObject({ status: "active" });
     expect(managedState.trees[root]?.locator).toBeDefined();
     expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
-    expect(commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
+    expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
   });
 
   it("preserves a /process/ready confirmation that lands while the launch is still opening its pane", async () => {
@@ -880,7 +918,7 @@ describe("ProcessManager", () => {
         throw new Error("ECONNREFUSED");
       },
       run: async (command) => {
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           launchStarted.resolve();
           await launchGate.promise;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
@@ -931,24 +969,24 @@ describe("ProcessManager", () => {
       }),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           firstLaunchStarted.resolve();
           await releaseFirstLaunch.promise;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%2 54321\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return { stdout: "%1\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "12345\n", exitCode: 0 };
@@ -982,7 +1020,7 @@ describe("ProcessManager", () => {
       status: "active",
       locator: { tmuxWindowId: "@42", tmuxPaneId: "%2" },
     });
-    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
+    expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
   });
 
   it("resurrects a dead root whose Dispatch status is in_progress instead of treating it as a human park", async () => {
@@ -1027,12 +1065,12 @@ describe("ProcessManager", () => {
         throw new Error("ECONNREFUSED");
       },
       run: async (command) => {
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           launchStarted.resolve();
           await launchGate.promise;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 1, stderr: "tmux: server not responding" };
         }
         return { stdout: "", exitCode: 0 };
@@ -1069,9 +1107,9 @@ describe("ProcessManager", () => {
         },
       }),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") sessionExists = true;
-        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1145,9 +1183,9 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@314 %7 12345\n", exitCode: 0 };
-        if (command[1] === "list-panes" && command.includes("%7")) {
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@314 %7 12345\n", exitCode: 0 };
+        if (command[3] === "list-panes" && command.includes("%7")) {
           return { stdout: "12345\n", exitCode: 0 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
@@ -1166,7 +1204,16 @@ describe("ProcessManager", () => {
       tmuxPaneId: "%7",
     });
     expect(await processes.probe(root)).toBe("alive");
-    expect(commands).toContainEqual(["tmux", "list-panes", "-t", "%7", "-F", "#{pane_pid}"]);
+    expect(commands).toContainEqual([
+      "tmux",
+      "-L",
+      "legion-omp",
+      "list-panes",
+      "-t",
+      "%7",
+      "-F",
+      "#{pane_pid}",
+    ]);
   });
 
   it("rejects a live pane whose process command is not OMP", async () => {
@@ -1195,7 +1242,7 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-windows") {
+        if (command[3] === "list-windows") {
           return {
             stdout: [
               `@42\tlegion-omp\t${activitySeconds}`,
@@ -1212,8 +1259,8 @@ describe("ProcessManager", () => {
 
     await processes.reconcileTmuxWindows();
 
-    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@99"]);
-    expect(commands).not.toContainEqual(["tmux", "kill-window", "-t", "@100"]);
+    expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-window", "-t", "@99"]);
+    expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-window", "-t", "@100"]);
   });
 
   it("clears a self-reporting root's locator without attempting to stop it (it is the caller, still alive and blocked on this response)", async () => {
@@ -1240,7 +1287,7 @@ describe("ProcessManager", () => {
       panePath,
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1254,7 +1301,7 @@ describe("ProcessManager", () => {
     const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const controllerSocketPath = path.join(stateDir, "workers", "controller.sock");
-    const windows = commands.filter((command) => command[1] === "new-window");
+    const windows = commands.filter((command) => command[3] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
       `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       `cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
@@ -1270,7 +1317,7 @@ describe("ProcessManager", () => {
       ompInvocation,
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1278,7 +1325,7 @@ describe("ProcessManager", () => {
     await processes.spawnRoot(root);
     await processes.ensureController();
 
-    const windows = commands.filter((command) => command[1] === "new-window");
+    const windows = commands.filter((command) => command[3] === "new-window");
     for (const command of windows) {
       expect(command.at(-1)).toContain(
         `-- secrets ANTHROPIC_API_KEY -- ${ompInvocation} --mode rpc`
@@ -1307,7 +1354,7 @@ describe("ProcessManager", () => {
     await processes.spawnWorker(root, child, "implementer", "implement it");
 
     const windows = commands.filter(
-      (command) => command[1] === "new-window" || command[1] === "split-window"
+      (command) => command[3] === "new-window" || command[3] === "split-window"
     );
     expect(windows.length).toBeGreaterThan(0);
     for (const command of windows) {
@@ -1328,7 +1375,7 @@ describe("ProcessManager", () => {
         saves += 1;
       },
       run: async (command) =>
-        command[1] === "new-window"
+        command[3] === "new-window"
           ? { stdout: "window creation failed", exitCode: 1 }
           : { stdout: "", exitCode: 0 },
     });
@@ -1352,15 +1399,15 @@ describe("ProcessManager", () => {
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: 1 };
-        if (command[1] === "new-session") return { stdout: "session creation failed", exitCode: 1 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 1 };
+        if (command[3] === "new-session") return { stdout: "session creation failed", exitCode: 1 };
         return { stdout: "", exitCode: 0 };
       },
     });
 
     await expect(processes.spawnRoot(root)).rejects.toThrow("tmux new-session failed");
 
-    expect(commands.some((command) => command[1] === "new-window")).toBeFalse();
+    expect(commands.some((command) => command[3] === "new-window")).toBeFalse();
     expect(state.trees[root]).toEqual({
       root,
       generation: 0,
@@ -1405,10 +1452,10 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "new-window" && command.includes(`LEGION_TREE=${root}`)) {
+        if (command[3] === "new-window" && command.includes(`LEGION_TREE=${root}`)) {
           return { stdout: "root launch failed", exitCode: 1 };
         }
-        if (command[1] === "new-window" && command.includes(`LEGION_TREE=${child}`)) {
+        if (command[3] === "new-window" && command.includes(`LEGION_TREE=${child}`)) {
           completePromotion?.();
           return { stdout: "@2 %2 4242\n", exitCode: 0 };
         }
@@ -1435,7 +1482,7 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] !== "new-window") return { stdout: "", exitCode: 0 };
+        if (command[3] !== "new-window") return { stdout: "", exitCode: 0 };
         attempts += 1;
         return { stdout: "window creation failed", exitCode: 1 };
       },
@@ -1498,8 +1545,8 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@77 %1 4242\n", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@77 %1 4242\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1538,18 +1585,18 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "list-windows") {
+        if (command[3] === "list-windows") {
           return {
             stdout: `@99\tlegion-omp\t${Date.parse("2026-08-24T00:00:00.000Z") / 1000}\n`,
             exitCode: 0,
           };
         }
-        if (command[1] === "kill-window") {
-          killedWindows.push(command[3] ?? "");
+        if (command[3] === "kill-window") {
+          killedWindows.push(command[5] ?? "");
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") {
           newWindowCalls += 1;
           return { stdout: "@77 %1 4242\n", exitCode: 0 };
         }
@@ -1579,13 +1626,13 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@88 %1 4242\n", exitCode: 0 };
-        if (command[1] === "set-option" && command[2] === "-w") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@88 %1 4242\n", exitCode: 0 };
+        if (command[3] === "set-option" && command[4] === "-w") {
           return { stdout: "marker rejected", exitCode: 1 };
         }
-        if (command[1] === "kill-window") {
-          killedWindows.push(command[3] ?? "");
+        if (command[3] === "kill-window") {
+          killedWindows.push(command[5] ?? "");
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -1667,7 +1714,7 @@ describe("ProcessManager", () => {
         if (failures === 3) settled.resolve();
       },
       run: async (command) =>
-        command[1] === "new-window"
+        command[3] === "new-window"
           ? { stdout: "window creation failed", exitCode: 1 }
           : { stdout: "", exitCode: 0 },
     });
@@ -1711,6 +1758,8 @@ describe("ProcessManager", () => {
     expect(commands).toEqual([
       [
         "tmux",
+        "-L",
+        "legion-omp",
         "list-windows",
         "-t",
         "legion-omp",
@@ -1719,6 +1768,8 @@ describe("ProcessManager", () => {
       ],
       [
         "tmux",
+        "-L",
+        "legion-omp",
         "list-panes",
         "-a",
         "-F",
@@ -1734,7 +1785,7 @@ describe("ProcessManager", () => {
     const { manager: processes, publications } = manager(state, {
       config: config(stateDir),
       run: async (command) =>
-        command[1] === "new-window"
+        command[3] === "new-window"
           ? { stdout: "window creation failed", exitCode: 1 }
           : { stdout: "", exitCode: 0 },
     });
@@ -1770,10 +1821,10 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@42 %1 4242\n", exitCode: 0 };
-        if (command[1] === "kill-window") {
-          killedWindows.push(command[3] ?? "");
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@42 %1 4242\n", exitCode: 0 };
+        if (command[3] === "kill-window") {
+          killedWindows.push(command[5] ?? "");
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -1860,16 +1911,16 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "list-windows") return { stdout: "", exitCode: 1 };
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") {
+        if (command[3] === "list-windows") return { stdout: "", exitCode: 1 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") {
           windows += 1;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
-        if (command[1] === "list-panes" && command.includes("#{pane_id}")) {
+        if (command[3] === "list-panes" && command.includes("#{pane_id}")) {
           return windows > 0 ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[1] === "list-panes" && command.includes("#{pane_pid}")) {
+        if (command[3] === "list-panes" && command.includes("#{pane_pid}")) {
           return windows > 0 ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
@@ -1901,7 +1952,7 @@ describe("ProcessManager", () => {
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
-    const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
+    const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.at(-1)).toBe(
       `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`
     );
@@ -1932,7 +1983,7 @@ describe("ProcessManager", () => {
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const entrypoint = path.resolve(import.meta.dir, "../../cli/index.ts");
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
-    const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
+    const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.at(-1)).toBe(
       `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`
     );
@@ -1953,7 +2004,7 @@ describe("ProcessManager", () => {
     await expect(processes.resurrect(root)).rejects.toThrow(/recorded OMP session file is missing/);
 
     expect(
-      commands.some((command) => command[0] === "tmux" && command[1] === "new-window")
+      commands.some((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toBeFalse();
     expect(state.trees[root].launchFailures).toBe(1);
     expect(state.trees[root].status).toBe("queued");
@@ -1997,7 +2048,7 @@ describe("ProcessManager", () => {
     expect(publications).toEqual([]);
     // The default fixture's fake pane never reports a live pid, so `probe` sees the root as
     // already dead and `stopProcess` skips straight to reaping its recorded pane.
-    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%0"]);
+    expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%0"]);
   });
 
   it("awaits a promoted queued tree's full spawn attempt before beginLinger resolves", async () => {
@@ -2010,8 +2061,8 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@99 %1 4242\n", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@99 %1 4242\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -2043,8 +2094,8 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@99 %1 4242\n", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@99 %1 4242\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
       saveState: async () => {
@@ -2108,7 +2159,7 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
@@ -2132,8 +2183,8 @@ describe("ProcessManager", () => {
       "/state/workers/architect.sock",
       "/state/workers/implementer.sock",
     ]);
-    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([]);
-    expect(commands.filter((command) => command[1] === "kill-pane")).toEqual([]);
+    expect(commands.filter((command) => command[3] === "kill-window")).toEqual([]);
+    expect(commands.filter((command) => command[3] === "kill-pane")).toEqual([]);
     expect(state.roles[roleToken("omp", child, "implementer")]).toBeUndefined();
     expect(state.trees[root].locator).toBeUndefined();
     expect(state.trees[root].status).toBe("closed");
@@ -2177,7 +2228,7 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
@@ -2193,8 +2244,8 @@ describe("ProcessManager", () => {
     await processes.closeTree(root, { stopRoot: false });
 
     expect(connectedSockets).toEqual(["/state/workers/implementer.sock"]);
-    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([]);
-    expect(commands.filter((command) => command[1] === "kill-pane")).toEqual([]);
+    expect(commands.filter((command) => command[3] === "kill-window")).toEqual([]);
+    expect(commands.filter((command) => command[3] === "kill-pane")).toEqual([]);
     expect(state.trees[root].locator).toBeUndefined();
     expect(state.trees[root].status).toBe("closed");
   });
@@ -2253,7 +2304,7 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
@@ -2272,10 +2323,10 @@ describe("ProcessManager", () => {
 
     await processes.closeTree(root);
 
-    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%1"]);
-    expect(commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%2"]);
-    expect(commands).not.toContainEqual(["tmux", "kill-pane", "-t", "%0"]);
-    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([]);
+    expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
+    expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%2"]);
+    expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%0"]);
+    expect(commands.filter((command) => command[3] === "kill-window")).toEqual([]);
   });
 
   it("throws StopFailed and leaves the tree lingering (not closed) when a root locator is a corrupt record missing a pane id", async () => {
@@ -2300,7 +2351,7 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
@@ -2316,8 +2367,8 @@ describe("ProcessManager", () => {
 
     await expect(processes.closeTree(root)).rejects.toThrow(StopFailed);
 
-    expect(commands.filter((command) => command[1] === "kill-pane")).toEqual([]);
-    expect(commands.filter((command) => command[1] === "kill-window")).toEqual([]);
+    expect(commands.filter((command) => command[3] === "kill-pane")).toEqual([]);
+    expect(commands.filter((command) => command[3] === "kill-window")).toEqual([]);
     expect(errorLog).toHaveBeenCalledWith(
       expect.stringContaining(`root process failed to stop while closing ${root}`),
       expect.objectContaining({ message: expect.stringContaining("missing a pane id") })
@@ -2348,12 +2399,12 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "can't find pane: %0", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
@@ -2385,7 +2436,7 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
@@ -2446,7 +2497,7 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
@@ -2466,7 +2517,7 @@ describe("ProcessManager", () => {
     await closing;
 
     expect(state.trees[root].status).toBe("closed");
-    expect(commands.filter((command) => command[1] === "kill-pane")).toEqual([]);
+    expect(commands.filter((command) => command[3] === "kill-pane")).toEqual([]);
   });
 
   it("marks a tree lingering as its first durable act before any stop, so a crash mid-close leaves it retryable by the sweep instead of stuck active", async () => {
@@ -2494,7 +2545,7 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
@@ -2519,7 +2570,7 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "", exitCode: 1 };
@@ -2547,13 +2598,13 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
-          return { stdout: "", stderr: "no server running", exitCode: 1 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
+          return { stdout: "", stderr: "lost server", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2580,6 +2631,38 @@ describe("ProcessManager", () => {
 
     expect(state.trees[root].status).toBe("lingering");
     expect(state.trees[root].locator).toBeDefined();
+    errorLog.mockRestore();
+  });
+
+  it("treats a kill-pane that finds no server on the private socket as an already-gone pane", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes } = manager(state, {
+      sleep: async () => {},
+      run: async (command) => {
+        if (
+          command[0] === "tmux" &&
+          command[3] === "list-panes" &&
+          command.includes("#{pane_pid}")
+        ) {
+          return { stdout: "", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
+          return {
+            stdout: "",
+            stderr: "no server running on /tmp/tmux-1000/legion-omp",
+            exitCode: 1,
+          };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.closeTree(root);
+
+    expect(state.trees[root]?.status).toBe("closed");
+    expect(state.trees[root]?.locator).toBeUndefined();
     errorLog.mockRestore();
   });
 
@@ -2627,8 +2710,8 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
-          return { stdout: "", stderr: "no server running", exitCode: 1 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
+          return { stdout: "", stderr: "lost server", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2640,7 +2723,7 @@ describe("ProcessManager", () => {
 
     expect(error).toBeInstanceOf(StopFailed);
     // Never opened a replacement pane over a possibly-still-live one.
-    expect(commands.filter((c) => c[1] === "new-window" || c[1] === "split-window")).toEqual([]);
+    expect(commands.filter((c) => c[3] === "new-window" || c[3] === "split-window")).toEqual([]);
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     // The failed-to-stop claim's own locator is untouched -- it is the only durable handle left
@@ -3235,10 +3318,10 @@ describe("ProcessManager", () => {
       // then rejects.
       readProcessCmdline: async () => "bash\0",
       run: async (command) => {
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "list-panes") {
+        if (command[0] === "tmux" && command[3] === "list-panes") {
           return { stdout: "", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
@@ -3352,23 +3435,23 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-windows") {
+        if (command[3] === "list-windows") {
           return {
             stdout: controllerSpawned ? "controller\n" : "",
             exitCode: 0,
           };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return controllerSpawned
             ? { stdout: "12345\n", exitCode: 0 }
             : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           controllerSpawned = true;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -3381,7 +3464,7 @@ describe("ProcessManager", () => {
       })
     );
 
-    expect(commands.filter((command) => command[1] === "new-window")).toHaveLength(1);
+    expect(commands.filter((command) => command[3] === "new-window")).toHaveLength(1);
     expect(state.controllerLocator).toEqual({
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
@@ -3402,14 +3485,14 @@ describe("ProcessManager", () => {
       mintControllerCapability: async () => `controller-secret-${++mints}`,
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-windows") {
+        if (command[3] === "list-windows") {
           return { stdout: controllerLive ? "controller\n" : "", exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return controllerLive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           controllerLive = true;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
@@ -3421,7 +3504,7 @@ describe("ProcessManager", () => {
     controllerLive = false;
     await processes.ensureController();
 
-    const windows = commands.filter((command) => command[1] === "new-window");
+    const windows = commands.filter((command) => command[3] === "new-window");
     expect(mints).toBe(2);
     expect(windows[0]).toContain("LEGION_CONTROLLER_SECRET=controller-secret-1");
     expect(windows[1]).toContain("LEGION_CONTROLLER_SECRET=controller-secret-2");
@@ -3448,8 +3531,8 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@43 %2 54321\n", exitCode: 0 };
+        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@43 %2 54321\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -3467,8 +3550,8 @@ describe("ProcessManager", () => {
     sleepGate.resolve();
     await flushEventLoop();
 
-    expect(commands.some((command) => command[1] === "new-window")).toBe(false);
-    expect(commands.some((command) => command[1] === "kill-pane")).toBe(false);
+    expect(commands.some((command) => command[3] === "new-window")).toBe(false);
+    expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
     expect(managedState.controllerLocator).toEqual(state.controllerLocator);
   });
 
@@ -3505,9 +3588,9 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@44 %3 65432\n", exitCode: 0 };
-        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@44 %3 65432\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -3529,10 +3612,10 @@ describe("ProcessManager", () => {
     // The stuck pane was retired (no graceful shim response, so straight to kill-pane) and a
     // fresh one spawned in its place.
     const killPaneRan = commands.some(
-      (command) => command[0] === "tmux" && command[1] === "kill-pane"
+      (command) => command[0] === "tmux" && command[3] === "kill-pane"
     );
     expect(killPaneRan).toBe(true);
-    expect(commands.some((command) => command[1] === "new-window")).toBe(true);
+    expect(commands.some((command) => command[3] === "new-window")).toBe(true);
     expect(managedState.controllerLocator).toEqual({
       tmuxSession: "legion-omp",
       tmuxWindowId: "@44",
@@ -3563,9 +3646,9 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
-        if (command[1] === "new-window") return { stdout: "@45 %4 76543\n", exitCode: 0 };
-        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@45 %4 76543\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -3578,8 +3661,8 @@ describe("ProcessManager", () => {
     sleepGate.resolve();
     await flushEventLoop();
 
-    expect(commands.some((command) => command[1] === "kill-pane")).toBe(false);
-    expect(commands.some((command) => command[1] === "new-window")).toBe(false);
+    expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
+    expect(commands.some((command) => command[3] === "new-window")).toBe(false);
     expect(managedState.controllerLocator).toEqual(locator);
   });
 
@@ -3609,12 +3692,12 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
-        if (command[1] === "new-window") {
+        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@5${windowCount} %${windowCount} 8765${windowCount}\n`, exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -3630,7 +3713,7 @@ describe("ProcessManager", () => {
     firstSleepGate.resolve();
     await flushEventLoopUntil(() => windowCount >= 2, 20_000);
 
-    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+    expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
       true
     );
     expect(windowCount).toBe(2);
@@ -3671,14 +3754,14 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return panesAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@6${windowCount} %${windowCount} 9876${windowCount}\n`, exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -3702,7 +3785,7 @@ describe("ProcessManager", () => {
 
     expect(windowCount).toBe(1);
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "kill-pane")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
     ).toHaveLength(0);
     expect(managedState.controllerLocator).toEqual(freshLocator);
   });
@@ -3730,7 +3813,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           listPanesCalls += 1;
           // The 1st call is `ensureController`'s own initial liveness check (before the deadline
           // is even armed); the 2nd is `retireAndRespawnStuckController`'s post-deadline
@@ -3743,8 +3826,8 @@ describe("ProcessManager", () => {
           }
           return { stdout: "12345\n", exitCode: 0 };
         }
-        if (command[1] === "new-window") return { stdout: "@70 %9 111111\n", exitCode: 0 };
-        if (command[0] === "tmux" && command[1] === "kill-pane") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@70 %9 111111\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -3754,8 +3837,8 @@ describe("ProcessManager", () => {
     await flushEventLoop();
 
     expect(listPanesCalls).toBeGreaterThanOrEqual(2);
-    expect(commands.some((command) => command[1] === "kill-pane")).toBe(false);
-    expect(commands.some((command) => command[1] === "new-window")).toBe(false);
+    expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
+    expect(commands.some((command) => command[3] === "new-window")).toBe(false);
     expect(managedState.controllerLocator).toEqual(locator);
   });
 
@@ -3779,17 +3862,17 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -3810,7 +3893,7 @@ describe("ProcessManager", () => {
 
     // The deadline was cancelled by the confirmation above: its stale fire takes no action.
     expect(windowCount).toBe(1);
-    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+    expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
       false
     );
     expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
@@ -3847,19 +3930,19 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -3905,19 +3988,19 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           // A real kill-pane actually kills the pane -- the resurrect that follows must see it
           // dead now, exactly as it would against a real tmux server.
           paneAlive = false;
@@ -3934,7 +4017,7 @@ describe("ProcessManager", () => {
     firstGate.resolve();
     await flushEventLoopUntil(() => windowCount >= 2, 20_000);
 
-    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+    expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
       true
     );
     expect(windowCount).toBe(2);
@@ -3977,19 +4060,19 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4039,17 +4122,17 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4094,23 +4177,23 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           listPanesCalls += 1;
           // Blocks the deadline's own post-expiry probe exactly once, so a `/process/ready`
           // landing in the middle of it can be observed by the re-check that follows.
           if (listPanesCalls === 1) await probeGate.promise;
           return { stdout: "12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4131,7 +4214,7 @@ describe("ProcessManager", () => {
     probeGate.resolve();
     await flushEventLoop();
 
-    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+    expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
       false
     );
     expect(windowCount).toBe(1);
@@ -4161,21 +4244,21 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           listPanesCalls += 1;
           if (listPanesCalls === 1) await probeGate.promise;
           return { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4241,19 +4324,19 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4325,19 +4408,19 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4390,19 +4473,19 @@ describe("ProcessManager", () => {
         if (saveStateCalls === 2) await saveGate.promise;
       },
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4459,19 +4542,19 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4540,15 +4623,15 @@ describe("ProcessManager", () => {
         throw new Error("ECONNREFUSED");
       },
       run: async (command) => {
-        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@5${windowCount} %${windowCount} 2000${windowCount}\n`, exitCode: 0 };
         }
         // root's own recorded pane always reads dead -- the only real spawn this test drives is
         // the queued child's promotion.
-        if (command[1] === "list-panes") return { stdout: "", exitCode: 1 };
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4618,21 +4701,21 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return killPaneSucceeded
             ? { stdout: "", exitCode: 1 }
             : { stdout: "12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           if (killPaneShouldFail) {
             return { stdout: "", stderr: "tmux: unable to kill pane", exitCode: 1 };
           }
@@ -4705,14 +4788,14 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@5${windowCount} %${windowCount} 2000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4798,17 +4881,17 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[1] === "new-session") {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
           sessionExists = true;
           return { stdout: "", exitCode: 0 };
         }
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -4853,11 +4936,11 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "tmux: unable to kill pane", exitCode: 1 };
         }
-        if (command[1] === "new-window") return { stdout: "@71 %10 222222\n", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@71 %10 222222\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -4868,10 +4951,10 @@ describe("ProcessManager", () => {
 
     // The kill-pane attempt ran and failed, but the locator survives exactly as it was -- never
     // cleared, and no second controller spawned onto what may still be a live pane.
-    expect(commands.some((command) => command[0] === "tmux" && command[1] === "kill-pane")).toBe(
+    expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
       true
     );
-    expect(commands.some((command) => command[1] === "new-window")).toBe(false);
+    expect(commands.some((command) => command[3] === "new-window")).toBe(false);
     expect(managedState.controllerLocator).toEqual(locator);
   });
 
@@ -4887,19 +4970,19 @@ describe("ProcessManager", () => {
     const { manager: processes, publications } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "list-windows") {
+        if (command[3] === "list-windows") {
           return {
             stdout: controllerSpawned ? "controller\n" : "",
             exitCode: 0,
           };
         }
-        if (command[1] === "list-panes") {
+        if (command[3] === "list-panes") {
           return controllerSpawned
             ? { stdout: "12345\n", exitCode: 0 }
             : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
-        if (command[1] === "new-window") {
+        if (command[3] === "new-window") {
           controllerSpawned = true;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
@@ -4975,19 +5058,19 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[1] === "list-windows") return { stdout: "", exitCode: 1 };
-        if (command[1] === "new-window") {
+        if (command[3] === "list-windows") return { stdout: "", exitCode: 1 };
+        if (command[3] === "new-window") {
           launched = true;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
-        if (command[1] === "split-window") {
+        if (command[3] === "split-window") {
           launched = true;
           return { stdout: "%2 12345\n", exitCode: 0 };
         }
-        if (command[1] === "list-panes" && command.includes("#{pane_id}")) {
+        if (command[3] === "list-panes" && command.includes("#{pane_id}")) {
           return launched ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[1] === "list-panes" && command.includes("#{pane_pid}")) {
+        if (command[3] === "list-panes" && command.includes("#{pane_pid}")) {
           return launched ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
@@ -5120,7 +5203,7 @@ describe("ProcessManager", () => {
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
-          command[1] === "new-window" || (command[1] === "new-session" && command.includes("-n"))
+          command[3] === "new-window" || (command[3] === "new-session" && command.includes("-n"))
             ? [...command.slice(0, -1), "sleep 999"]
             : command;
         const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
@@ -5141,6 +5224,8 @@ describe("ProcessManager", () => {
         await processes.spawnRoot(root);
         await commandRunner([
           "tmux",
+          "-L",
+          session,
           "new-window",
           "-t",
           session,
@@ -5151,7 +5236,7 @@ describe("ProcessManager", () => {
 
         expect(await processes.probe(root)).toBe("alive");
       } finally {
-        await commandRunner(["tmux", "kill-session", "-t", session]);
+        await commandRunner(["tmux", "-L", session, "kill-session", "-t", session]);
       }
     }
   );
@@ -5170,7 +5255,7 @@ describe("ProcessManager", () => {
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
-          command[1] === "new-window" || (command[1] === "new-session" && command.includes("-n"))
+          command[3] === "new-window" || (command[3] === "new-session" && command.includes("-n"))
             ? [...command.slice(0, -1), "sleep 999"]
             : command;
         const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
@@ -5190,6 +5275,8 @@ describe("ProcessManager", () => {
         await processes.spawnRoot(root);
         const windows = await commandRunner([
           "tmux",
+          "-L",
+          session,
           "list-windows",
           "-t",
           session,
@@ -5199,7 +5286,7 @@ describe("ProcessManager", () => {
 
         expect(windows.stdout.split(/\r?\n/)).not.toContain("bash");
       } finally {
-        await commandRunner(["tmux", "kill-session", "-t", session]);
+        await commandRunner(["tmux", "-L", session, "kill-session", "-t", session]);
       }
     }
   );
@@ -5218,7 +5305,7 @@ describe("ProcessManager", () => {
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
-          command[1] === "new-window" || (command[1] === "new-session" && command.includes("-n"))
+          command[3] === "new-window" || (command[3] === "new-session" && command.includes("-n"))
             ? [...command.slice(0, -1), "sleep 999"]
             : command;
         const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
@@ -5240,15 +5327,15 @@ describe("ProcessManager", () => {
         expect(await processes.probe(root)).toBe("alive");
         const firstWindowId = state.trees[root]?.locator?.tmuxWindowId;
         if (!firstWindowId) throw new Error("live root is missing its tmux window id");
-        await commandRunner(["tmux", "kill-pane", "-t", firstWindowId]);
+        await commandRunner(["tmux", "-L", session, "kill-pane", "-t", firstWindowId]);
         expect(await processes.probe(root)).toBe("dead");
         await Promise.all([processes.resurrect(root), processes.resurrect(root)]);
         expect(await processes.probe(root)).toBe("alive");
-        expect((await commandRunner(["tmux", "list-windows", "-t", session])).stdout).toContain(
-          "legion-42"
-        );
+        expect(
+          (await commandRunner(["tmux", "-L", session, "list-windows", "-t", session])).stdout
+        ).toContain("legion-42");
       } finally {
-        await commandRunner(["tmux", "kill-session", "-t", session]);
+        await commandRunner(["tmux", "-L", session, "kill-session", "-t", session]);
       }
     }
   );
@@ -5275,7 +5362,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@99 %201 12345\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -5286,7 +5373,7 @@ describe("ProcessManager", () => {
 
     expect(result).toEqual({ status: "spawned", roleToken: roleToken("omp", root, "tester") });
     const windowCommand = commands.find(
-      (command) => command[0] === "tmux" && command[1] === "new-window" && command.includes("-n")
+      (command) => command[0] === "tmux" && command[3] === "new-window" && command.includes("-n")
     );
     if (!windowCommand) throw new Error("worker spawn did not open a tmux window");
     expect(windowCommand[windowCommand.indexOf("-n") + 1]).toBe("legion-42");
@@ -5348,7 +5435,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@99 %201 12345\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -5358,7 +5445,7 @@ describe("ProcessManager", () => {
     await processes.spawnWorker(root, root, "implementer", "implement #41");
 
     const workerLaunch = commands.find(
-      (command) => command[0] === "tmux" && command[1] === "new-window"
+      (command) => command[0] === "tmux" && command[3] === "new-window"
     );
     if (!workerLaunch) throw new Error("worker spawn did not open a tmux window");
     const workerArgv = workerLaunch.at(-1) ?? "";
@@ -5371,7 +5458,7 @@ describe("ProcessManager", () => {
     await rootProcesses.spawnRoot(root);
 
     const rootLaunch = rootCommands.find(
-      (command) => command[0] === "tmux" && command[1] === "new-window"
+      (command) => command[0] === "tmux" && command[3] === "new-window"
     );
     if (!rootLaunch) throw new Error("root spawn did not open a tmux window");
     const rootArgv = rootLaunch.at(-1) ?? "";
@@ -5400,15 +5487,15 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@99 %101 12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%201 67890\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return { stdout: "%101\n", exitCode: 0 };
@@ -5422,14 +5509,22 @@ describe("ProcessManager", () => {
 
     expect(result.status).toBe("spawned");
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
     const split = commands.find(
-      (command) => command[0] === "tmux" && command[1] === "split-window"
+      (command) => command[0] === "tmux" && command[3] === "split-window"
     );
     if (!split) throw new Error("second worker did not split the existing window");
     expect(split).toContain("@99");
-    expect(commands).toContainEqual(["tmux", "select-layout", "-t", "@99", "tiled"]);
+    expect(commands).toContainEqual([
+      "tmux",
+      "-L",
+      "legion-omp",
+      "select-layout",
+      "-t",
+      "@99",
+      "tiled",
+    ]);
   });
 
   it("serializes two concurrent first spawns on the same issue into a single new window", async () => {
@@ -5455,18 +5550,18 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           // Widens the race window a concurrency bug would need to slip through.
           await Bun.sleep(5);
           windowsOpened += 1;
           return { stdout: `@99 %${100 + windowsOpened} 12345\n`, exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%201 67890\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return windowsOpened > 0
@@ -5485,10 +5580,10 @@ describe("ProcessManager", () => {
     expect(plannerResult.status).toBe("spawned");
     expect(testerResult.status).toBe("spawned");
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "split-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "split-window")
     ).toHaveLength(1);
     const plannerClaim = managedState.roles[roleToken("omp", root, "planner")];
     const testerClaim = managedState.roles[roleToken("omp", root, "tester")];
@@ -5539,13 +5634,13 @@ describe("ProcessManager", () => {
       connectWorkerRpc: async () => stuckRootClient,
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           await paneOpenGate.promise;
           return { stdout: "@99 %201 12345\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
@@ -5560,12 +5655,12 @@ describe("ProcessManager", () => {
     // `new-window` call before starting the race.
     for (
       let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[1] === "new-window");
+      attempt < 100 && !commands.some((c) => c[3] === "new-window");
       attempt++
     ) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
-    expect(commands.some((c) => c[1] === "new-window")).toBe(true);
+    expect(commands.some((c) => c[3] === "new-window")).toBe(true);
 
     const closePromise = processes.closeTree(root);
     paneOpenGate.resolve();
@@ -5573,7 +5668,7 @@ describe("ProcessManager", () => {
     const result = await spawnPromise.catch((caught: unknown) => caught);
 
     expect(result).toBeInstanceOf(TreeClosingError);
-    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%201"]);
+    expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%201"]);
     expect(managedState.roles[roleToken("omp", child, "tester")]).toBeUndefined();
 
     await closePromise;
@@ -5617,7 +5712,7 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           await paneOpenGate.promise;
           return { stdout: "@99 %201 12345\n", exitCode: 0 };
         }
@@ -5628,12 +5723,12 @@ describe("ProcessManager", () => {
     const spawnPromise = processes.spawnWorker(root, child, "tester", "verify #41");
     for (
       let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[1] === "new-window");
+      attempt < 100 && !commands.some((c) => c[3] === "new-window");
       attempt++
     ) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
-    expect(commands.some((c) => c[1] === "new-window")).toBe(true);
+    expect(commands.some((c) => c[3] === "new-window")).toBe(true);
 
     let closeSettled = false;
     const closePromise = processes.closeTree(root).then(() => {
@@ -5651,7 +5746,7 @@ describe("ProcessManager", () => {
 
     expect(spawnResult).toBeInstanceOf(TreeClosingError);
     expect(closeSettled).toBe(true);
-    expect(commands).toContainEqual(["tmux", "kill-pane", "-t", "%201"]);
+    expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%201"]);
     expect(managedState.roles[roleToken("omp", child, "tester")]).toBeUndefined();
     expect(managedState.trees[root].status).toBe("closed");
   });
@@ -5691,12 +5786,12 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           await paneOpenGate.promise;
           return { stdout: "@99 %201 12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
-          return { stdout: "", stderr: "no server running", exitCode: 1 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
+          return { stdout: "", stderr: "lost server", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -5705,7 +5800,7 @@ describe("ProcessManager", () => {
     const spawnPromise = processes.spawnWorker(root, child, "tester", "verify #41");
     for (
       let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[1] === "new-window");
+      attempt < 100 && !commands.some((c) => c[3] === "new-window");
       attempt++
     ) {
       await new Promise((resolve) => setTimeout(resolve, 1));
@@ -5807,7 +5902,7 @@ describe("ProcessManager", () => {
     // Never retired or relaunched: the decision's post-probe recheck threw before either step,
     // leaving the stale claim entirely untouched for closeTree itself to reap.
     expect(
-      commands.some((c) => c[0] === "tmux" && (c[1] === "new-window" || c[1] === "split-window"))
+      commands.some((c) => c[0] === "tmux" && (c[3] === "new-window" || c[3] === "split-window"))
     ).toBe(false);
     expect(managedState.roles[token]).toBeUndefined();
     expect(managedState.trees[root].status).toBe("closed");
@@ -5862,15 +5957,15 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@99 %201 12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 67890\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return command.includes("@42")
@@ -5884,7 +5979,7 @@ describe("ProcessManager", () => {
     await processes.spawnWorker(root, root, "tester", "verify #41");
 
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
     for (const token of [plannerToken, implementerToken]) {
       const claim = managedState.roles[token];
@@ -5895,10 +5990,10 @@ describe("ProcessManager", () => {
     await processes.spawnWorker(root, root, "reviewer", "review #41");
 
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
     const split = commands.find(
-      (command) => command[0] === "tmux" && command[1] === "split-window"
+      (command) => command[0] === "tmux" && command[3] === "split-window"
     );
     if (!split) throw new Error("fourth worker did not split into the rewritten window");
     expect(split).toContain("@99");
@@ -5984,7 +6079,7 @@ describe("ProcessManager", () => {
     expect(
       commands.filter(
         (command) =>
-          command[0] === "tmux" && (command[1] === "new-window" || command[1] === "split-window")
+          command[0] === "tmux" && (command[3] === "new-window" || command[3] === "split-window")
       )
     ).toHaveLength(1);
     const claim = managedState.roles[token];
@@ -6077,12 +6172,12 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return { stdout: "%301\n", exitCode: 0 };
@@ -6095,7 +6190,7 @@ describe("ProcessManager", () => {
 
     expect(result).toEqual({ status: "spawned", roleToken: token });
     const split = commands.find(
-      (command) => command[0] === "tmux" && command[1] === "split-window"
+      (command) => command[0] === "tmux" && command[3] === "split-window"
     );
     if (!split) throw new Error("dead-worker respawn did not split its persisted window");
     expect(split).toContain("@42");
@@ -6181,15 +6276,15 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "list-panes" && command.includes("%7")) {
+        if (command[0] === "tmux" && command[3] === "list-panes" && command.includes("%7")) {
           return { stdout: "", exitCode: 1 };
         }
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return { stdout: "%301\n", exitCode: 0 };
@@ -6237,7 +6332,7 @@ describe("ProcessManager", () => {
     // it must resume, since sessionId survived the whole queued interval.
     expect(promotedExpectedSessionId).toBe("ses_tester");
     const split = commands.find(
-      (command) => command[0] === "tmux" && command[1] === "split-window"
+      (command) => command[0] === "tmux" && command[3] === "split-window"
     );
     if (!split) throw new Error("promoted worker did not split into its persisted window");
     expect(split).toContain("@42");
@@ -6288,22 +6383,22 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("%7") &&
           command.includes("#{pane_pid}")
         ) {
           // The old pane's OMP child is still running despite the dead socket.
           return { stdout: "22222\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "kill-pane") {
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return { stdout: "%301\n", exitCode: 0 };
@@ -6317,13 +6412,13 @@ describe("ProcessManager", () => {
     expect(result).toEqual({ status: "spawned", roleToken: token });
     expect(
       commands.some(
-        (command) => command[0] === "tmux" && command[1] === "kill-pane" && command.includes("%7")
+        (command) => command[0] === "tmux" && command[3] === "kill-pane" && command.includes("%7")
       )
     ).toBeTrue();
     const killPaneIndex = commands.findIndex(
-      (command) => command[1] === "kill-pane" && command.includes("%7")
+      (command) => command[3] === "kill-pane" && command.includes("%7")
     );
-    const splitWindowIndex = commands.findIndex((command) => command[1] === "split-window");
+    const splitWindowIndex = commands.findIndex((command) => command[3] === "split-window");
     expect(killPaneIndex).toBeGreaterThanOrEqual(0);
     expect(splitWindowIndex).toBeGreaterThan(killPaneIndex);
     const claim = managedState.roles[token];
@@ -6380,7 +6475,7 @@ describe("ProcessManager", () => {
     );
 
     expect(
-      commands.some((command) => command[0] === "tmux" && command[1] === "split-window")
+      commands.some((command) => command[0] === "tmux" && command[3] === "split-window")
     ).toBeFalse();
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
@@ -6411,7 +6506,7 @@ describe("ProcessManager", () => {
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -6488,12 +6583,12 @@ describe("ProcessManager", () => {
         return staleClient;
       },
       run: async (command) => {
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return { stdout: "%7\n", exitCode: 0 };
@@ -6555,12 +6650,12 @@ describe("ProcessManager", () => {
         return `boot-${generation}`;
       },
       run: async (command) => {
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return { stdout: "%7\n", exitCode: 0 };
@@ -6776,7 +6871,7 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([]);
     expect(testerClient.prompts).toEqual(["verify #41"]);
     expect(
-      commands.some((command) => command[1] === "split-window" || command[1] === "new-window")
+      commands.some((command) => command[3] === "split-window" || command[3] === "new-window")
     ).toBeFalse();
     const promotedClaim = managedState.roles[testerToken];
     if (!promotedClaim || !("issue" in promotedClaim)) throw new Error("tester claim missing");
@@ -6946,7 +7041,7 @@ describe("ProcessManager", () => {
     expect(
       commands.some(
         (command) =>
-          command[0] === "tmux" && (command[1] === "kill-pane" || command[1] === "kill-window")
+          command[0] === "tmux" && (command[3] === "kill-pane" || command[3] === "kill-window")
       )
     ).toBeFalse();
   });
@@ -7137,7 +7232,7 @@ describe("ProcessManager", () => {
     expect(
       commands.some(
         (command) =>
-          command[0] === "tmux" && (command[1] === "kill-pane" || command[1] === "kill-window")
+          command[0] === "tmux" && (command[3] === "kill-pane" || command[3] === "kill-window")
       )
     ).toBeFalse();
   });
@@ -7329,7 +7424,7 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (
           command[0] === "tmux" &&
-          command[1] === "split-window" &&
+          command[3] === "split-window" &&
           command.includes("LEGION_ROLE=planner")
         ) {
           // Held open for the whole test: proves the admission decision for a different role
@@ -7337,7 +7432,7 @@ describe("ProcessManager", () => {
           await plannerGate.promise;
           return { stdout: "%201 12345\n", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@43 %202 23456\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -7424,7 +7519,7 @@ describe("ProcessManager", () => {
         commands.push(command);
         // The tester splits into the root's own already-alive window (from `tree()`), rather
         // than opening a fresh one.
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           // Held open until closeTree below has actually started -- proves launchWorker
           // re-checks after this I/O, not before it.
           await launchGate.promise;
@@ -7440,12 +7535,12 @@ describe("ProcessManager", () => {
     // tree is empty, so starting the race any earlier would just serialize the two calls.
     for (
       let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[1] === "split-window");
+      attempt < 100 && !commands.some((c) => c[3] === "split-window");
       attempt++
     ) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
-    expect(commands.some((c) => c[1] === "split-window")).toBe(true);
+    expect(commands.some((c) => c[3] === "split-window")).toBe(true);
 
     const closePromise = processes.closeTree(root);
     launchGate.resolve();
@@ -7464,7 +7559,7 @@ describe("ProcessManager", () => {
     expect(
       commands.some(
         (command) =>
-          command[0] === "tmux" && (command[1] === "kill-pane" || command[1] === "kill-window")
+          command[0] === "tmux" && (command[3] === "kill-pane" || command[3] === "kill-window")
       )
     ).toBeTrue();
   });
@@ -7495,7 +7590,7 @@ describe("ProcessManager", () => {
         // The tester splits into the root's own already-alive window (from `tree()`) — held
         // open until closeTree below has had every real chance to finish, proving the PROMOTED
         // launch (not just a direct spawnWorker call) is what `inFlightLaunches` awaits.
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           await launchGate.promise;
           return { stdout: "%1 12345\n", exitCode: 0 };
         }
@@ -7509,12 +7604,12 @@ describe("ProcessManager", () => {
 
     for (
       let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[1] === "split-window");
+      attempt < 100 && !commands.some((c) => c[3] === "split-window");
       attempt++
     ) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
-    expect(commands.some((c) => c[1] === "split-window")).toBe(true);
+    expect(commands.some((c) => c[3] === "split-window")).toBe(true);
 
     let closeSettled = false;
     const closePromise = processes.closeTree(root).then(() => {
@@ -7539,7 +7634,7 @@ describe("ProcessManager", () => {
     // Exactly the one pane this launch opened -- no second pane from a retry treating the
     // TreeClosingError like an ordinary launch failure and rotating/relaunching this token.
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "split-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "split-window")
     ).toHaveLength(1);
   });
 
@@ -7603,7 +7698,7 @@ describe("ProcessManager", () => {
 
     expect([plannerResult.status, testerResult.status].sort()).toEqual(["queued", "spawned"]);
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
     const plannerClaim = managedState.roles[roleToken("omp", root, "planner")];
     const testerClaim = managedState.roles[roleToken("omp", root, "tester")];
@@ -7679,10 +7774,10 @@ describe("ProcessManager", () => {
 
     expect(managedState.workerAdmission.queue).toEqual([]);
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "new-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
     expect(
-      commands.filter((command) => command[0] === "tmux" && command[1] === "split-window")
+      commands.filter((command) => command[0] === "tmux" && command[3] === "split-window")
     ).toHaveLength(2);
     const testerClaim = managedState.roles[roleToken("omp", root, "tester")];
     if (!testerClaim || !("issue" in testerClaim)) throw new Error("tester claim missing");
@@ -8210,7 +8305,7 @@ describe("ProcessManager", () => {
     const result = await processes.spawnWorker(root, root, "tester", "verify #41");
     expect(result.status).toBe("spawned");
     expect(
-      commands.some((command) => command[0] === "tmux" && command[1] === "new-window")
+      commands.some((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toBeTrue();
   });
 
@@ -8308,7 +8403,7 @@ describe("ProcessManager", () => {
       }),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@99 %201 12345\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -8318,7 +8413,7 @@ describe("ProcessManager", () => {
     await processes.spawnWorker(root, root, "tester", "verify #41");
 
     const windowCommand = commands.find(
-      (command) => command[0] === "tmux" && command[1] === "new-window" && command.includes("-n")
+      (command) => command[0] === "tmux" && command[3] === "new-window" && command.includes("-n")
     );
     if (!windowCommand) throw new Error("worker spawn did not open a tmux window");
     const environment = tmuxWindowEnvironment(windowCommand);
@@ -8339,7 +8434,7 @@ describe("ProcessManager", () => {
     await processes.ensureController();
 
     const windowCommand = commands.find(
-      (command) => command[0] === "tmux" && command[1] === "new-window"
+      (command) => command[0] === "tmux" && command[3] === "new-window"
     );
     if (!windowCommand) throw new Error("controller spawn did not open a tmux window");
     const environment = tmuxWindowEnvironment(windowCommand);
@@ -8372,7 +8467,7 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("%7") &&
           command.includes("#{pane_pid}")
         ) {
@@ -8386,7 +8481,7 @@ describe("ProcessManager", () => {
 
     expect(
       commands.some(
-        (command) => command[0] === "tmux" && command[1] === "kill-pane" && command.includes("%7")
+        (command) => command[0] === "tmux" && command[3] === "kill-pane" && command.includes("%7")
       )
     ).toBeTrue();
     const claim = managedState.roles[token];
@@ -8439,7 +8534,7 @@ describe("ProcessManager", () => {
     // Exactly the one probe connect -- the identity mismatch bails before `stopClient` ever
     // gets a chance to connect (which would otherwise reach the socket path a respawn reuses).
     expect(connectAttempts).toEqual(["/state/workers/tester.sock"]);
-    expect(commands.filter((c) => c[1] === "kill-pane")).toEqual([]);
+    expect(commands.filter((c) => c[3] === "kill-pane")).toEqual([]);
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.locator).toEqual(freshLocator);
@@ -8486,13 +8581,13 @@ describe("ProcessManager", () => {
         },
         run: async (command) => {
           commands.push(command);
-          if (command[0] === "tmux" && command[1] === "list-panes") {
+          if (command[0] === "tmux" && command[3] === "list-panes") {
             // Reports the original dead pane as gone (drives the first, restart-time
             // retirement decision); the freshly-launched pane's own later liveness is never
             // queried by this test.
             return { stdout: "", exitCode: 1 };
           }
-          if (command[0] === "tmux" && command[1] === "new-window") {
+          if (command[0] === "tmux" && command[3] === "new-window") {
             return { stdout: "@50 %50 54321\n", exitCode: 0 };
           }
           return { stdout: "", exitCode: 0 };
@@ -8507,7 +8602,7 @@ describe("ProcessManager", () => {
     // `retireWorkerLocator` itself makes (which reports dead here) — specifically no
     // `new-window`/`split-window` opening a fresh pane.
     expect(
-      commands.some((command) => command[1] === "new-window" || command[1] === "split-window")
+      commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
     ).toBeFalse();
     expect(managedState.workerAdmission.queue).toEqual([token]);
     const queuedClaim = managedState.roles[token];
@@ -8523,7 +8618,7 @@ describe("ProcessManager", () => {
     commands.length = 0;
     await processes.reconcileWorkerAdmission();
 
-    expect(commands.some((command) => command[1] === "new-window")).toBeTrue();
+    expect(commands.some((command) => command[3] === "new-window")).toBeTrue();
     expect(managedState.workerAdmission.queue).toEqual([]);
     const launchedClaim = managedState.roles[token];
     if (!launchedClaim || !("issue" in launchedClaim)) throw new Error("claim disappeared");
@@ -8570,7 +8665,7 @@ describe("ProcessManager", () => {
           throw new Error("ECONNREFUSED");
         },
         run: async (command) => {
-          if (command[0] === "tmux" && command[1] === "list-panes") {
+          if (command[0] === "tmux" && command[3] === "list-panes") {
             return { stdout: "", exitCode: 1 };
           }
           return { stdout: "", exitCode: 0 };
@@ -8597,7 +8692,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { workerCap: 1 }),
       run: async (command) => {
         relaunchCommands.push(command);
-        if (command[0] === "tmux" && command[1] === "new-window") {
+        if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@50 %50 54321\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -8606,7 +8701,7 @@ describe("ProcessManager", () => {
     reloadedProcesses.enableWorkerPromotion();
     await reloadedProcesses.reconcileWorkerAdmission();
 
-    expect(relaunchCommands.some((command) => command[1] === "new-window")).toBeTrue();
+    expect(relaunchCommands.some((command) => command[3] === "new-window")).toBeTrue();
     expect(reloadedManagedState.workerAdmission.queue).toEqual([]);
   });
 
@@ -8654,13 +8749,13 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "list-panes") {
+        if (command[0] === "tmux" && command[3] === "list-panes") {
           // The recorded pane is gone in every liveness probe throughout this test.
           return { stdout: "", exitCode: 1 };
         }
         if (
           command[0] === "tmux" &&
-          (command[1] === "new-window" || command[1] === "split-window")
+          (command[3] === "new-window" || command[3] === "split-window")
         ) {
           return { stdout: "@50 %50 54321\n", exitCode: 0 };
         }
@@ -8685,7 +8780,7 @@ describe("ProcessManager", () => {
     await relaunched.promise;
 
     const paneOpens = commands.filter(
-      (command) => command[1] === "new-window" || command[1] === "split-window"
+      (command) => command[3] === "new-window" || command[3] === "split-window"
     );
     expect(paneOpens.length).toBe(1);
     expect(publications.filter((publication) => publication.json.includes("worker-died"))).toEqual(
@@ -8734,7 +8829,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "list-panes")
+        if (command[0] === "tmux" && command[3] === "list-panes")
           return { stdout: "", exitCode: 1 };
         return { stdout: "", exitCode: 0 };
       },
@@ -8784,7 +8879,7 @@ describe("ProcessManager", () => {
     expect(claim.locator?.tmuxPaneId).toBe("%9");
     expect(claim.generation).toBe(3);
     expect(claim.launchFailures).toBeUndefined();
-    expect(commands.some((command) => command[1] === "kill-pane")).toBeFalse();
+    expect(commands.some((command) => command[3] === "kill-pane")).toBeFalse();
   });
 
   it("a runtime retirement decision that wins its lock acquisition before a racing worker registration's slow GitHub-lease fetch resolves rejects the stale registration and leaves the claim retired for retry", async () => {
@@ -8816,7 +8911,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "list-panes")
+        if (command[0] === "tmux" && command[3] === "list-panes")
           return { stdout: "", exitCode: 1 };
         return { stdout: "", exitCode: 0 };
       },
@@ -8942,12 +9037,12 @@ describe("ProcessManager", () => {
     const { processes, state, managedState } = await workerCapFixture(1, {
       connectWorkerRpc: async () => client,
       run: async (command) => {
-        if (command[0] === "tmux" && command[1] === "split-window") {
+        if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
           return { stdout: "%301\n", exitCode: 0 };
@@ -9240,13 +9335,13 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "list-windows") {
+        if (command[0] === "tmux" && command[3] === "list-windows") {
           // The tree's own window is known (excluded from `known` in this fixture only via the
           // orphan-pane path below, not this one) — return no unowned windows, isolating this
           // test to pane-level reconciliation only.
           return { stdout: "", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "list-panes" && command[2] === "-a") {
+        if (command[0] === "tmux" && command[3] === "list-panes" && command[4] === "-a") {
           return {
             stdout: [
               // Recorded: this tree's own root pane. Must never be reaped, even tagged with a
@@ -9269,8 +9364,8 @@ describe("ProcessManager", () => {
     await processes.reconcileTmuxWindows(0);
 
     const killedPanes = commands
-      .filter((command) => command[0] === "tmux" && command[1] === "kill-pane")
-      .map((command) => command[3]);
+      .filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
+      .map((command) => command[5]);
     expect(killedPanes).toEqual(["%99"]);
   });
 
@@ -9308,13 +9403,13 @@ describe("ProcessManager", () => {
       config: config(stateDir),
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[1] === "list-windows") {
+        if (command[0] === "tmux" && command[3] === "list-windows") {
           // Every window here (@42, @43, @44) is known via a recorded `tmuxWindowId` — none are
           // candidates for window-level reaping regardless of whether their owner's pane id is
           // recorded; isolates this test to the pane-level pass.
           return { stdout: "", exitCode: 0 };
         }
-        if (command[0] === "tmux" && command[1] === "list-panes" && command[2] === "-a") {
+        if (command[0] === "tmux" && command[3] === "list-panes" && command[4] === "-a") {
           return {
             stdout: [
               // Root tree's own pane, in its known window @42 — but this locator never recorded
@@ -9341,8 +9436,8 @@ describe("ProcessManager", () => {
     await processes.reconcileTmuxWindows(0);
 
     const killedPanes = commands
-      .filter((command) => command[0] === "tmux" && command[1] === "kill-pane")
-      .map((command) => command[3]);
+      .filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
+      .map((command) => command[5]);
     expect(killedPanes).toEqual(["%99"]);
   });
 
@@ -9375,17 +9470,17 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_id}")
         ) {
-          const windowId = command[2] === "-t" ? command[3] : undefined;
+          const windowId = command[4] === "-t" ? command[5] : undefined;
           if (windowId === "@42") return { stdout: "%42\n", exitCode: 0 };
           if (windowId === "@43") return { stdout: "%43\n", exitCode: 0 };
           return { stdout: "", exitCode: 1 };
         }
         if (
           command[0] === "tmux" &&
-          command[1] === "list-panes" &&
+          command[3] === "list-panes" &&
           command.includes("#{pane_pid}")
         ) {
           return { stdout: "4242\n", exitCode: 0 };
