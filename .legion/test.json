@@ -11,15 +11,14 @@
     "prHead": "020677bf2746 (adds only .legion/implement.json on top of 6a55bd6d)",
     "baseAtTest": "8f6fad367099 (chore: release pi-envoy v1.4.3); main has since advanced to 95b93e0bb0d9 (#958, envoy-only)"
   },
-  "verdict": "FAIL",
-  "failingAcceptance": [
-    5
-  ],
+  "verdict": "PASS",
+  "failingAcceptance": [],
   "passingAcceptance": [
     1,
     2,
     3,
     4,
+    5,
     6,
     7
   ],
@@ -138,7 +137,103 @@
     "Up.sh's root issue must be created while the rig daemon and bridge are already live (the daemon only learns of a root through the live issue.created event; resync heals only issues already in state) — a root pre-created before up.sh (LEGSMOKE-29) is never seen; create it with force:true after RIG READY and record it at ${SMOKE_DIR}/root-issue.",
     "The rig's tmux server socket lives under TMUX_TMPDIR=/home/ubuntu/.tmux/sockets (set by up.sh's environment via the mise/dotfiles shim); a bare `tmux -L legion-sjawhar24` from a shell without that variable looks in /tmp/tmux-1000 and reports 'error connecting ... No such file or directory'."
   ],
+  "round1": {
+    "verdict": "FAIL",
+    "failingAcceptance": [
+      5
+    ],
+    "testedHead": {
+      "code": "6a55bd6d13b6",
+      "prHead": "020677bf2746 (adds only .legion/implement.json on top of 6a55bd6d)",
+      "baseAtTest": "8f6fad367099 (chore: release pi-envoy v1.4.3); main has since advanced to 95b93e0bb0d9 (#958, envoy-only)"
+    },
+    "note": "round-1 (FAIL on acceptance 5 at code head 6a55bd6d) detail is preserved verbatim in the top-level acceptance, failure, ci, testedHead, environment, preexistingFindings and workerPaneNotes fields; those describe round 1 only. round2 below is the current verdict."
+  },
+  "currentTestedHead": {
+    "code": "c498c8fb196a5acb7f2b1fcdf09f5663bf05882b",
+    "prHead": "7eacb0f7659d33558860a38ac3eda25095c3e0b0 (implement: record corrective-round handoff, on top of c498c8fb)",
+    "base": "7add4d03087e5a6aa062cbc832d7020790073c3b (main, chore: release pi-envoy v1.5.0 [skip ci])"
+  },
+  "round2": {
+    "round": 2,
+    "trigger": "corrective round 1 (implement.json correctiveRound[0]): c498c8fb fixes the round-1 A5 failure — index.ts and both test helpers derive the TmuxRuntime socket/project from state.project; the default-window live test gained guard assertions; branch rebased onto main 7add4d03 (chore: release pi-envoy v1.5.0).",
+    "testedHead": {
+      "code": "c498c8fb196a5acb7f2b1fcdf09f5663bf05882b",
+      "prHead": "7eacb0f7659d33558860a38ac3eda25095c3e0b0 (implement: record corrective-round handoff, on top of c498c8fb)",
+      "base": "7add4d03087e5a6aa062cbc832d7020790073c3b (main, chore: release pi-envoy v1.5.0 [skip ci])"
+    },
+    "verdict": "PASS",
+    "acceptanceVerdicts": {
+      "1": "PASS",
+      "2": "PASS",
+      "3": "PASS",
+      "4": "PASS",
+      "5": "PASS",
+      "6": "PASS",
+      "7": "PASS"
+    },
+    "ci": {
+      "codeHead": "c498c8fb196a",
+      "runs": [
+        "Tests https://github.com/sjawhar/legion/actions/runs/34686285940 — success, attempt 1 (jobs pr-title, test, lint, typecheck)",
+        "Tests https://github.com/sjawhar/legion/actions/runs/34687346348 — success, attempt 1 (second Tests run at the same sha, 10:01Z)",
+        "Legion Envoy and Contracts https://github.com/sjawhar/legion/actions/runs/34686285941 — success on attempt 2 (`legion gh -- run rerun --failed`); attempt 1's only failure was envoy-go https://github.com/sjawhar/legion/actions/runs/34686285941/job/103533728663 (testcontainers reaper image pull, runner Docker Hub auth — the PR touches no Go); attempt 2 envoy-go https://github.com/sjawhar/legion/actions/runs/34686285941/job/103535475016 success"
+      ],
+      "prHead7eacb0f7": [
+        "Tests https://github.com/sjawhar/legion/actions/runs/34687364207 — success",
+        "Legion Envoy and Contracts https://github.com/sjawhar/legion/actions/runs/34687364216 — success"
+      ],
+      "command": "legion gh -- api 'repos/sjawhar/legion/actions/runs?head_sha=c498c8fb196a5acb7f2b1fcdf09f5663bf05882b' (gh run list --commit returned nothing for either the short or full sha; the REST query is the same data)"
+    },
+    "A5": {
+      "fullSuite": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 880 pass, 0 fail, Ran 880 tests across 54 files. [29.75s] (log /tmp/legion21-test/r2-daemon-full.log; 0 '(fail)' lines)",
+      "liveTmuxX3": "cd packages/daemon && LEGION_TMUX_LIVE=1 bun test src/daemon/__tests__/processes.test.ts --test-name-pattern 'probes a real tmux pane as alive|without a default bash window' x3 -> `2 pass / 0 fail` each run; live tmux server set (every socket under TMUX_TMPDIR=/home/ubuntu/.tmux/sockets/tmux-1000 answering list-sessions) before = after every run = {default, legion-sjawharlegion}; no legion-omp, legion-smoke*, legion-defaultwindow*, legion-duplicate* server live",
+      "vacuousPassGuard": "Real check, not reasoning: a scratch copy of processes.test.ts (relative imports made absolute, placed under packages/daemon/node_modules/.legion21-scratch/, removed afterwards) with manager()'s socket forced to `legion-wrongsocket-vacuous` -> both live tests FAIL: 'creates the first live root without a default bash window' fails at the new guard `expect(windows.exitCode).toBe(0)` (Expected 0, Received 1) at processes.test.ts:5521 — it can no longer pass vacuously; 'probes a real tmux pane as alive...' fails Expected dead / Received alive exactly as round 1 did. The wrong-socket server the scratch run created was killed (`tmux -L legion-wrongsocket-vacuous kill-server`). Guard assertions at c498c8fb (processes.test.ts:5518-5524): `expect(windows.exitCode).toBe(0); const windowNames = windows.stdout.split(/\\r?\\n/); expect(windowNames).toContain(\"legion-42\"); expect(windowNames).not.toContain(\"bash\");`.",
+      "tscBiome": "packages/daemon/node_modules/.bin/tsc --noEmit -p packages/daemon | packages/contracts | packages/pi-envoy -> rc=0 each; biome check packages/daemon/src packages/contracts/src packages/pi-envoy/src -> Checked 169 files in 365ms. No fixes applied.",
+      "pluginRebuild": "cd packages/pi-envoy && bun build extensions/envoy.ts extensions/legion.ts --outdir /tmp/legion21-test/pi-legion-envoy-r2/dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils (Bundled 177 modules; envoy.js 1.20 MB, legion.js 1.23 MB) + cp -r skills dist/skills + jq manifest -> {version: 1.5.0-legion21.c498c8fb, legion: {daemonApiVersion: 1}, omp.extensions: [dist/envoy.js, dist/legion.js]}; installed into ~/.omp/profiles/legion21-smoke/plugins/node_modules/@sjawhar/pi-legion-envoy (bundles differ from the round-1 build by 46 bytes — the rebased sources — so the rebuild mattered). The built manifest carries legion.daemonApiVersion 1 while main's released 1.5.0 manifest (7add4d03 packages/pi-envoy/package.json) has legion: null.",
+      "smokeRig": {
+        "setup": "SMOKE_DIR=/tmp/legion21-test/rig2 (fresh), SMOKE_PROJECT=sjawhar/24, SMOKE_REPO=sjawhar/legion-smoke, SMOKE_WEBHOOK_MODE=envoy, OMP_PROFILE/PI_PROFILE=legion21-smoke, LEGION_OMP_PATH=rpcfix OMP, LEGION_TMUX_PATH=/tmp/legion21-test/tmux-wrapper-r2.sh (argv tracer around the real tmux, -e values redacted); started with `secrets ENVOY_GITHUB_WEBHOOK_SECRET -- bash /tmp/legion21-test/r2-up.sh` from an env scrubbed of every pane LEGION_*/DISPATCH_* variable (and CI/CLAUDECODE/AGENT). Surface handed over by the LEGION-22 implementer at 10:13Z (their rig on the same ports/project had to finish first) and handed to the LEGION-22 tester at 10:47Z.",
+        "upLog": "STARTED NATS container legion-smoke-nats; STARTED listener; GREEN Envoy listener; GREEN webhook round-trip; GREEN webhook ingress; STARTED daemon; GREEN Legion daemon: {\"project\":\"sjawhar24\",\"version\":24,...}; STARTED envoy-bridge; GREEN Envoy bridge: upstream subscription is ready; then `curl: (22) ... 409` / `error: could not create Dispatch root issue in LEGSMOKE` (pre-existing ensure_root_issue POSSIBLE_DUPLICATE bug) — root LEGSMOKE-35 created by hand with force:true while daemon+bridge were live and recorded at ${SMOKE_DIR}/root-issue",
+        "checkpoints": [
+          "CHECKPOINT 1 OK: Dispatch tracks LEGSMOKE-35 past triage; controller locator is live",
+          "CHECKPOINT 2 OK: Dispatch reports LEGSMOKE-35 in_progress; architect locator is live",
+          "CHECKPOINT 13 OK: 3 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24",
+          "CHECKPOINT 3 OK: posted spec artifact, open design gate, and child issue observed",
+          "CHECKPOINT 4 OK: a released child is tracked by admission or tree state",
+          "CHECKPOINT 13 OK: 4 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24"
+        ],
+        "checkpoint13Negative": "`tmux -L legion-sjawhar24 set-environment -g LEGION_BOOT_TOKEN planted-by-tester` -> `CHECKPOINT 13 FAILED: private tmux server global environment carries LEGION_BOOT_TOKEN` (exit 1); `set-environment -gu LEGION_BOOT_TOKEN` -> `CHECKPOINT 13 OK: 3 processes ...` again",
+        "checkpoint4Path": "daemon restarted on legion.gateoff.yaml (gates.design: off; only the daemon restarted, panes untouched) -> state.gates.LEGSMOKE-35 = {designAskId: 8c56f926-..., designApproved: 'gate-off'}; architect released LEGSMOKE-36 -> todo -> in_progress with its own root at @3/%3",
+        "daemonUrlOnPanes": "/proc/<pane_pid>/environ LEGION_DAEMON_URL= only: controller %1 (pid 2876260) http://127.0.0.1:19370; root LEGSMOKE-35 %2 (pid 3620521) http://127.0.0.1:19370; child root LEGSMOKE-36 %3 (pid 3948056) http://127.0.0.1:19370; planner LEGSMOKE-36 %4 (pid 4012367, LEGION_ROLE=planner) http://127.0.0.1:19370 — rig yaml daemon_url http://127.0.0.1:19370; this tester pane's own is http://127.0.0.1:13370",
+        "windowSharingObserved": "tmux argv trace: 10:44:53 `new-window ... -t legion-sjawhar24 -n legsmoke-36` (child root -> @3/%3); 10:46:44 `split-window -t @3 -P -F '#{pane_id} #{pane_pid}' -e LEGION_TREE=...` then `select-layout -t @3 tiled` (planner -> %4); list-panes -a: `@3 legsmoke-36 %3 3948056` and `@3 legsmoke-36 %4 4012367`",
+        "teardown": "scripts/smoke/down.sh at 10:47:37Z: STOPPED tmux session legion-sjawhar24; STOPPED NATS container legion-smoke-nats; RIG DOWN; ports 19020/19370/14222 free; LEGSMOKE-35 and LEGSMOKE-36 set to icebox"
+      }
+    },
+    "B": {
+      "3": "legion-state.test.ts 35 pass, 0 fail ('migrates v23 state to v24 by tagging every persisted locator with runtime: \"tmux\"', 'rejects a v24 locator that carries no runtime discriminant'); migrate.ts re-run on a fresh read-only copy of the dogfood state.json: source version=23 locators=43 tagged=0 -> loaded version=24 locators=43 tmux=43 other=0 (trees-with-locator=16, claims-with-locator=26, controllerLocator.runtime=tmux); v23.bak byte-identical to source: true (85509 bytes); saved+reloaded version=24 locators=43; on-disk all-tagged=true; negative control refused: `Invalid Legion state: Invalid discriminator value. Expected 'tmux' | 'kubernetes'` (dogfood state grew from 34 to 43 locators since round 1)",
+      "4": "config.test.ts 44 pass, 0 fail (9 'runtime, daemon_url, and bind' cases); real CLI from a shell without LEGION_DAEMON_URL/DISPATCH_URL/DISPATCH_TOKEN_FILE: bind.yaml -> `error: bind must be 127.0.0.1 unless runtime is kubernetes`; k8s-nourl.yaml -> `error: daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)`; k8s.yaml -> `error: runtime: kubernetes is not implemented yet`; state dir /tmp/legion21-test/negative/state not created. (With the pane's DISPATCH_URL still in the env the k8s case is pre-empted by `dispatch_url is set but DISPATCH_TOKEN is not` — config-order, not a regression.)",
+      "6": "runtime.contract.test.ts per-harness counts (run with CI/CLAUDECODE/AGENT unset — Bun's agent reporter hides passing test names otherwise): 'Runtime contract: FakeRuntime >' = 6, 'Runtime contract: TmuxRuntime >' = 6, the same six names under both (connect returns a client whose negotiate resolves; graceful stop sends exactly one shutdown frame and still ends dead when closed never settles; reconcileOrphans keeps a process whose handles are known and reaps one whose are not; sameProcess identifies a locator with itself and never with another spawn; spawn returns a locator of this runtime that probe reports alive; stop with skipGraceful never dials and leaves the process dead); plus 'TmuxRuntime >' 16, 'ProcessManager stays runtime-agnostic >' 11, 'runtime helpers >' 5 = 44",
+      "7": "daemon-api-version.test.ts 1 pass; index.test.ts 25 pass incl. the four gate cases (no daemon API contract version / different version / manifest unreadable -> refuse before loading state or opening NATS; accepts a loaded plugin reading its manifest exactly once) and the kubernetes refusal before the instance lock; real negative control: `legion start sjawhar/2121 --config /tmp/legion21-test/a7-negative/legion.yaml` under OMP_PROFILE=PI_PROFILE=legion (dogfood profile, read-only) -> exit 1 `error: [legion] pi-legion-envoy at /home/ubuntu/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json (package 1.3.0) speaks daemon API contract none; this daemon requires 1. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.` — no state.json, scratch state dir held only the pre-gate secrets/ and bin/ writes (removed). Positive control: the rig daemon booted on legion21-smoke (manifest 1.5.0-legion21.c498c8fb, legion.daemonApiVersion 1). 1.5.0 note: no released 1.5.0 manifest is installed anywhere on this box (read-only survey: ~/.omp/profiles/legion 1.3.0 legion:null; ~/.omp/profiles/legion6-smoke 0.41.2-legion6 legion:null; ~/.omp/plugins/node_modules 1.4.0 legion:null; legion21-smoke = my branch build). main's released 1.5.0 package.json (7add4d03) has no `legion` field, so the gate would refuse it with the same `speaks daemon API contract none; this daemon requires 1` message — the refusal branch the 1.3.0 control exercised is the `contractVersion === undefined -> \"none\"` branch, identical for 1.5.0. Deploy note stands: the dogfood profile needs a plugin release built from the merged commit before the dogfood daemon restarts on this code.",
+      "1_2": "bun test packages/daemon/src/daemon/__tests__/runtime.contract.test.ts -> 44 pass, 0 fail (11 'ProcessManager stays runtime-agnostic' gates pass); hand grep -cE of tmux\\.|prepareSocket|writePaneSecret|launchShimmedProcess|workerClient\\(|recordedWindowId|rewriteIssueWindowId|probedWindowId|reconcileTmuxWindows|connectWorkerRpc|readProcessCmdline over processes.ts -> 0; grep -nE 'locator\\.runtime|runtime ===' -> no match (rc 1); lifecycle methods still declared: admit:355 releaseSlot:431 spawnWorker:440 workerReady:647 markProcessDead:946 reportRootExit:969 closeTree:1009 beginLinger:1686 expireLinger:1704 handleException:1708 resumeWorker:1751"
+    },
+    "C": {
+      "mainDelta": "jj log 8f6fad367099..7add4d03087e: 95b93e0bb0d9 fix(envoy): make role recovery and watcher health durable (#958); 97219cbda94a feat(dispatch): per-person agent tokens (#959); 15d92603987d feat(dispatch): kanban board (#960); 64039ef13deb chore: release envoy-plugin v1.5.0; 7add4d03087e chore: release pi-envoy v1.5.0",
+      "diffStat": "jj diff --stat --from 8f6fad367099 --to 7add4d03087e -- packages/daemon packages/contracts packages/pi-envoy: packages/contracts/AGENTS.md +1; packages/contracts/src/dispatch-api.ts +30/-2 (Actor.owner, AgentToken, CreatedAgentToken, Issue.rank, IssueRankInput); packages/pi-envoy/AGENTS.md +7/-2; packages/pi-envoy/package.json version 1.4.3 -> 1.5.0. Nothing under packages/daemon.",
+      "touchesRuntimeFiles": false,
+      "statement": "None of processes.ts, runtime-tmux.ts, legion-state.ts, config.ts, index.ts, or the plugin contract (packages/contracts/src/legion-daemon-api.ts, LEGION_DAEMON_API_VERSION = 1) is touched by the rebase; the only contracts change is dispatch-api.ts. The round-1 real-process observations (graceful stop over a real shim with 0 kill-pane, timeout path with exactly one kill-pane, daemon closeTree with one kill-pane per locator) were therefore not re-run; window sharing was re-observed on this head incidentally (split-window -t @3 above)."
+    },
+    "preexistingFindings": [
+      "Box-wide: `gh auth git-credential get` (the credential.https://github.com.helper in ~/.gitconfig, via ~/.dotfiles/shims/gh -> knives gh -> gh; also with KNIVES_GH_BYPASS=1 and with GH_CONFIG_DIR unset) hangs 60-90 s and prints nothing (10:20-10:30Z). git consults that helper before GIT_ASKPASS, so the daemon's `jj git clone https://github.com/sjawhar/legion-smoke` in provisionIssueWorkspace is killed by defaultRunner's 30 s timeout (state/fetch.ts:55) — clone dir created 10:15:30.9, state saved with launchFailures+1 at 10:16:00.9; second attempt 10:19:29.9 -> 10:19:59.8. A plain `git clone` with the `legion credential` helper takes 1.2 s (repo is 212K), so it is the credential lookup, not the network. Worked around for the rig only by starting its daemon with GIT_CONFIG_GLOBAL=/tmp/legion21-test/rig2/gitconfig (a copy of ~/.gitconfig with the two credential.helper lines removed) — the already-running private tmux server kept its own env, so panes were unaffected. Not a branch defect (packages/workspace and state/fetch.ts untouched by the PR).",
+      "packages/workspace ensureRepoClone (pre-existing): a clone killed mid-fetch leaves <repo>/.jj containing only .gitignore; the guard `existsSync(jjDir)` then treats the dir as a complete clone on the next attempt and the retry fails at `jj git fetch -R` instead of re-cloning. I removed the half-clone by hand before the retry.",
+      "Root launch-failure requeue (pre-existing): after a spawn failure the tree is requeued with launchFailures+1 but nothing periodic re-promotes a queued tree while admission has free slots (only admit/todo, releaseSlot, or boot reconcileAdmission do) — I re-admitted LEGSMOKE-35 by PATCHing it backlog -> todo, and the gate-off daemon restart promoted it at boot.",
+      "Boot-time OMP probe under load (pre-existing, noted in round 1): the daemon refused startup once at 10:41-10:44 (`[legion] Configured OMP invocation does not expose pi.agents`) while the load average spiked to 468; the retry supervisor (/tmp/legion21-test/r2-daemon-retry.sh) succeeded on the next attempt at load 342.",
+      "Bun test reporter: with CLAUDECODE/AGENT (or CI) in the environment, `bun test` hides passing test names; per-test evidence must be gathered with those unset."
+    ],
+    "sharedSurfaceCoordination": "The LEGION-22 implementer's rig held the shared surface (ports 19020/19370/14222, hardcoded NATS container name, shared `legion-LEGSMOKE-dispatch` durable consumer, and both daemons admitting any LEGSMOKE root) from 10:01Z; I asked over Envoy and started at 10:13:47Z on their RIG DOWN; the LEGION-22 tester asked for it at 10:26Z and received it at 10:47:37Z with the two gotchas above.",
+    "artifacts": "/tmp/legion21-test/{r2-daemon-full,r2-live-x3,r2-vacuous-guard,r2-contract,r2-unit-b,r2-migrate,r2-tsc-*}.log, pi-legion-envoy-r2/ (rebuilt plugin), rig2/ (legion.yaml, legion.gateoff.yaml, gitconfig, daemon.log*, tmux-argv.log, checkpoints.log, up.log), r2-up.sh, r2-start-daemon.sh, r2-daemon-retry.sh, r2-checkpoint.sh, a7-negative/daemon-r2.log, tmux-servers-before-r2.txt",
+    "completed": "2026-09-12T10:49:00Z"
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-12T09:25:12.205Z"
+  "completed": "2026-09-12T10:49:56.200Z"
 }
