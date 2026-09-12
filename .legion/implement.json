@@ -211,12 +211,35 @@
         "confirmedVia": "daemon ci-green notice for d468c21f + legion gh -- run list --branch legion/LEGION-21 filtered to headSha d468c21f: both completed success"
       }
     },
-    "notForThisRound": "`.legion/` deletion stays for the next, separate round (architect ruling); reviewer's local review.json commit (95d9b139, now rebased) rides along in this push as instructed"
+    "notForThisRound": "`.legion/` deletion stays for the next, separate round (architect ruling); reviewer's local review.json commit (95d9b139, now rebased) rides along in this push as instructed",
+    "secondRebase": {
+      "why": "GitHub does not run pull_request workflows on a PR whose merge is CONFLICTING. After the 18:17Z push (d468c21f, CI green) main advanced 8 commits - notably LEGION-23 #966 (3a22761f: boot probes moved to boot-probes.ts, index.ts import shrank, config.ts/processes.ts/up.sh/AGENTS.md touched) - so PR #962 became mergeable: CONFLICTING and the a027cd64 / bac07a73 pushes produced no github-actions check suite at all (check-suites API: only claude + legion-reviewer, queued). Diagnosed via `gh pr view --json mergeable,mergeStateStatus` -> CONFLICTING/DIRTY.",
+      "base": "d458b7fe1506 (chore: release cli v1.3.1 [skip ci]; main tip at 19:0x UTC, descendant of #966 3a22761f and #967 5c5c3013)",
+      "conflicts": [
+        {
+          "file": "packages/daemon/src/daemon/index.ts",
+          "at": "cutover commit",
+          "resolution": "import block: main dropped withOmpLaunchPrefix (probes moved to boot-probes.ts), we add locatorsForIssue -> {daemonCredentialHelper, locatorsForIssue, ProcessManager, type ProcessManagerDeps}"
+        },
+        {
+          "file": "packages/daemon/src/daemon/index.ts",
+          "at": "contract-gate commit (daemon refuses a plugin built against another daemon API contract version)",
+          "resolution": "main's #966 had moved verifyOmpAgentsCapability/verifyLegionPluginLoaded/retryBootProbe into boot-probes.ts; our legionPluginManifestPath + verifyLegionPluginContract now live there too (exported), the version-hint read in verifyLegionPluginLoaded uses legionPluginManifestPath() as before, and index.ts imports the gate from ./boot-probes beside the two probes. LEGION_DAEMON_API_VERSION import moved from index.ts to boot-probes.ts. Behaviour unchanged: same call order (agents probe -> contract gate -> load probe), same messages; index.test.ts 27 pass"
+        },
+        {
+          "file": "packages/daemon/src/daemon/AGENTS.md",
+          "at": "contract-gate commit",
+          "resolution": "both paragraphs kept: main's load-probe paragraph (boot-probes.ts, `legion probe-image`, no minPluginVersion) followed by our contract-gate paragraph, its location corrected to boot-probes.ts"
+        }
+      ],
+      "seamStillIntact": "index.ts:477/488 hostname: config.bind; :644/645 listening on ${config.bind}",
+      "verification": "biome 177 files clean; tsc daemon/contracts/pi-envoy 0; grep gates 0/0; daemon suite 943 pass / 0 fail (57 files); contracts + pi-envoy 95 pass; live tmux servers unchanged before/after (default, legion-sjawhar16, legion-sjawharlegion); real boot on fresh XDG_STATE_HOME at the registry-fix head: both listening lines, legions.json created, clean stop"
+    }
   },
   "registryFix": {
     "round": "3b (architect ruling on the rebase-round finding: rides in this PR as its own commit, since the PR hold makes a separate PR an indefinite deferral)",
-    "codeHead": "535ddb6ee80866aa80fef396cae19a3aba1fcf3a",
-    "onTopOf": "20b7bc67 (rebase-round code head) + the two rebase-round handoff commits",
+    "codeHead": "042de1f6fc5b5f365d92aa7c0ea3c22676ed1b54",
+    "onTopOf": "the rebase-round chain, re-rebased (see rebaseRound.secondRebase) onto main d458b7fe",
     "change": "legions-registry.ts withRegistryLock: mkdir(path.dirname(filePath), {recursive: true}) before the O_CREAT|O_EXCL open of legions.json.lock; the now-redundant mkdir in writeRegistry (only ever called under the lock, at its two call sites) removed",
     "test": "legions-registry.test.ts 'creates the registry directory on first use and serializes concurrent writers into it': registry path under a nonexistent parent, two concurrent writeLegionEntry calls for different projects -> the file exists, both entries read back, a follow-up removeLegionEntry proceeds (lock released). Fails pre-fix with the same ENOENT (observed: 1 pass 1 fail), passes post-fix (2 pass). The existing suite had no serialization case, so this one covers both",
     "verification": {
@@ -224,13 +247,15 @@
       "reproduction": {
         "script": "/tmp/legion21-smoke/boot-check.sh with EXPECT=enoent|ok (fresh XDG_STATE_HOME: no legion/ dir pre-created), scratch state_dir /tmp/legion21-smoke/bootcheck/state, port 19380, own NATS 14224",
         "preFix_20b7bc67": "mode: enoent - daemon logged `legion daemon listening on 127.0.0.1:19380` and `legion worker stream listening on 127.0.0.1:19381`, then exited 1 with `ENOENT: no such file or directory, open '.../xdg-state/legion/legions.json.lock'` at withRegistryLock (legions-registry.ts:90); xdg-state/legion never created",
-        "postFix_535ddb6e": "mode: ok - same fresh dir: both listening lines (daemon.log lines 1-2), ss shows 127.0.0.1:19380 and :19381 LISTEN on the daemon pid, GET /legion/v1/state served (v24, 0 trees), xdg-state/legion/legions.json created with {\"sjawhar/24\": {port: 19380, pid: <daemon>, startedAt: 2026-09-12T18:37:53Z}}, no tmux server forked, zero error lines, clean SIGTERM stop, ports/container released"
+        "postFix_535ddb6e": "mode: ok - same fresh dir: both listening lines (daemon.log lines 1-2), ss shows 127.0.0.1:19380 and :19381 LISTEN on the daemon pid, GET /legion/v1/state served (v24, 0 trees), xdg-state/legion/legions.json created with {\"sjawhar/24\": {port: 19380, pid: <daemon>, startedAt: 2026-09-12T18:37:53Z}}, no tmux server forked, zero error lines, clean SIGTERM stop, ports/container released",
+        "postFix_reRebased": "mode: ok at 042de1f6fc5b on main d458b7fe: identical outcome - both listening lines, sockets on the daemon pid, state served (v24), xdg-state/legion/legions.json created ({sjawhar/24, port 19380}), no tmux server, zero errors, clean stop"
       },
       "tsc": "packages/daemon 0",
       "biome": "packages/daemon/src: Checked 143 files, No fixes applied",
-      "daemonSuite": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 932 pass, 0 skip, 0 fail, 56 files (931 + 1 new case)",
+      "daemonSuite": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 943 pass, 0 skip, 0 fail, 57 files (932 = 931 + the new registry case before the second rebase; +11 from #966's image-ref/cli tests after it)",
       "tmuxServers": "no legion-omp / scratch server left; answering servers: default, l12rig (another agent's, appeared during this round), legion-sjawhar16 (LEGION-16 rig), legion-sjawharlegion (dogfood)",
-      "ci": "pending at handoff-write time; links recorded in the follow-up handoff commit and the PR body"
+      "ci": "pending at handoff-write time (the previous pushes never got a run - see rebaseRound.secondRebase.why); links recorded in the follow-up handoff commit and the PR body",
+      "contractsAndPiEnvoy": "bun test packages/contracts packages/pi-envoy/src/legion/daemon-api-version.test.ts -> 95 pass, 0 fail"
     },
     "untouched": "worker-rpc.ts, worker-stream-listener.ts, cli/worker-shim.ts, dogfood daemon, ~/.omp/profiles/legion; .legion/ kept"
   }
