@@ -1571,6 +1571,54 @@ describe("ProcessManager", () => {
     }
   });
 
+  it("appends the deployment instructions file as the last --append-system-prompt for root, worker, and controller windows when configured", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const stateDir = await temporaryDir();
+    const deploymentInstructionsFile = path.join(stateDir, "deployment-instructions.md");
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir),
+      deploymentInstructionsFile,
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "split-window") return { stdout: "%2 12345\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, child, "implementer", "implement it");
+    await processes.ensureController();
+
+    const extensionDir = path.resolve(import.meta.dir, "../../../../pi-envoy");
+    const instructionsFragment = `--append-system-prompt "$(cat ${deploymentInstructionsFile})"`;
+    const launches = commands
+      .filter((command) => command[3] === "new-window" || command[3] === "split-window")
+      .map((command) => command.at(-1) ?? "");
+    expect(launches).toHaveLength(3);
+    const [rootLaunch, workerLaunch, controllerLaunch] = launches as [string, string, string];
+
+    expect(rootLaunch).toEndWith(
+      ` --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}' ${instructionsFragment}`
+    );
+    expect(workerLaunch).toEndWith(
+      ` --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/implementer.md)" --append-system-prompt '${addressingFragment("omp", root, child, "implementer").replaceAll("'", "'\\''")}' ${instructionsFragment}`
+    );
+    expect(controllerLaunch).toEndWith(
+      ` --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)" ${instructionsFragment}`
+    );
+    expect(launches.map((launch) => launch.split("--append-system-prompt ").length - 1)).toEqual([
+      3, 3, 2,
+    ]);
+  });
+
   it("rolls back a failed tmux launch instead of retaining an active tree or admission slot", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);

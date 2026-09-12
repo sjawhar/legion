@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { controllerToken, roleToken, roleTopic } from "@legion/contracts";
@@ -794,6 +794,89 @@ describe("startDaemon", () => {
     } finally {
       await first?.stop();
       await second?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("refuses to boot on an unreadable instructions path before loading state, naming the resolved path", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const instructionsPath = path.join(stateDir, "ops", "deployment.md");
+    const daemonConfig = { ...config(stateDir), instructionsPath };
+    let loadedState = false;
+    let natsCreated = false;
+    let probed = false;
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...options.deps,
+            runner: async (command) => {
+              if (command[0] === "sh") probed = true;
+              return { stdout: "", stderr: "", exitCode: 0 };
+            },
+            loadState: async () => {
+              loadedState = true;
+              return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+            },
+            createNatsTransport: async () => {
+              natsCreated = true;
+              throw new Error("NATS must not start after a failed instructions read");
+            },
+          },
+        })
+      ).rejects.toThrow(`instructions file ${instructionsPath} could not be read`);
+
+      expect(probed).toBeFalse();
+      expect(loadedState).toBeFalse();
+      expect(natsCreated).toBeFalse();
+      await expect(stat(path.join(stateDir, "deployment-instructions.md"))).rejects.toThrow();
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("materializes the instructions file under state_dir at boot and hands its path to every launched pane", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const instructionsPath = path.join(stateDir, "ops", "deployment.md");
+    await mkdir(path.dirname(instructionsPath), { recursive: true });
+    await writeFile(instructionsPath, "Required check: `pr-checks-result`.\n", "utf8");
+    const daemonConfig = { ...config(stateDir), instructionsPath };
+    const nats = new FakeNats();
+    const commands: string[][] = [];
+    const options = daemonTestDependencies(nats, [], () => {});
+    const innerRunner = options.deps?.runner;
+    if (!innerRunner) throw new Error("test dependencies are missing a runner");
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          runner: async (command, runnerOptions) => {
+            commands.push(command);
+            return innerRunner(command, runnerOptions);
+          },
+        },
+      });
+      const materialized = path.join(stateDir, "deployment-instructions.md");
+      expect(await readFile(materialized, "utf8")).toBe(
+        "# Deployment instructions (acme/1)\n\nRequired check: `pr-checks-result`.\n"
+      );
+
+      nats.emit(
+        `notifications.envoy.exceptions.notifications.role.${controllerToken(daemonConfig.project)}`,
+        controllerException(daemonConfig.project)
+      );
+      await daemon.drain();
+      const controllerLaunch = commands.find(
+        (command) => command[0]?.endsWith("/tmux") && command[3] === "new-window"
+      );
+      if (!controllerLaunch) throw new Error("controller spawn did not open a tmux window");
+      expect(controllerLaunch.at(-1)).toEndWith(
+        ` --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/controller-root.md)" --append-system-prompt "$(cat ${materialized})"`
+      );
+    } finally {
+      await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });
