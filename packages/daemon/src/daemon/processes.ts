@@ -1429,7 +1429,10 @@ export class ProcessManager {
    * is 0 (the timer is disabled) or after `dispose()`. Uses the same injectable timer surface as the
    * boot watchdog and the registration deadlines (`stopTimeout`), and judges every condition at
    * expiry, never here: a worker re-prompted inside the window fails the idle check then, and its next
-   * idle report arms a fresh clock. Replaces whatever clock was already armed for this token (the
+   * idle report arms a fresh clock. Two arm sites: the client's own idle transition (`workerClient`),
+   * and `retireIdleWorker`'s expiry when it declines for a reason that can change while the worker
+   * stays idle -- that worker will never report idle again, so the expiry is the only thing left that
+   * can arm its next clock. Replaces whatever clock was already armed for this token (the
    * entry-identity check in the expiry callback is what makes the replaced one inert). */
   private armIdleRetire(token: string, client: WorkerRpcClient): void {
     const retireMs = this.deps.config.workerIdleRetireSeconds * 1_000;
@@ -1462,13 +1465,13 @@ export class ProcessManager {
    * -- re-reads the live state and retires the worker only if all of these still hold: the cached
    * client is still `client` and still reports `"idle"` (a prompt that landed inside the window flipped
    * it to `"running"` synchronously); the claim is a ready-confirmed worker claim with a locator (a boot
-   * still in flight is never retired); `phases[claim.issue]` is absent, `completed`, or names a
-   * different role -- phase completion is judged per role, not per issue, so an idle implementer
-   * retires while the tester runs on the same issue; no `pendingAssignment` is queued (a queued task
-   * prompts it in place when a slot frees); the role is not `architect` (a sub-architect parks by design
+   * still in flight is never retired); the role is not `architect` (a sub-architect parks by design
    * and its wakes arrive by a publish that is rejected with no live holder, never by the dead-worker
-   * recovery path); and the tree is neither closing nor closed (`closeTree` owns stopping every worker
-   * under it). Then performs exactly `markWorkerDeadLocked`'s retirement -- `retireWorkerLocator`
+   * recovery path); the tree is neither closing nor closed (`closeTree` owns stopping every worker
+   * under it); no `pendingAssignment` is queued (a queued task prompts it in place when a slot frees);
+   * and `phases[claim.issue]` is absent, `completed`, or names a different role -- phase completion is
+   * judged per role, not per issue, so an idle implementer retires while the tester runs on the same
+   * issue. Then performs exactly `markWorkerDeadLocked`'s retirement -- `retireWorkerLocator`
    * (graceful `shutdown` frame, kill-pane fallback), clear the locator, carry `ompSessionFile` into
    * `resumeSessionFile`, persist -- and never touches `launchFailures`/`promptFailures`: this worker is
    * healthy, the daemon chose to stop it. The socket close this causes reaches
@@ -1478,6 +1481,19 @@ export class ProcessManager {
    * next `spawn_worker` for the role finds a locator-less claim with `resumeSessionFile` and launches
    * with `--resume`, exactly the dead-pane recovery shape. No `promoteWorkerQueue()` afterwards: an idle
    * client was never counted by `runningWorkerCount`, so nothing was freed.
+   *
+   * A decline on exactly the last two conditions -- the role is the issue's active phase, or a
+   * `pendingAssignment` is queued -- re-arms the clock. Both change without this worker ever
+   * transitioning to idle again (`/worker/started` or `promptExistingWorker` re-writing
+   * `phases[issue]` for another role; a promotion draining the queued task), and an already-idle
+   * worker's `onIdle` never fires again, so without the re-arm a worker that finished its turn while
+   * still the recorded phase stays resident for the life of the tree once the phase moves on (the
+   * rig's ordering: reviewer idle 8.7 min, not the active phase for 5.7 of them, no clock pending).
+   * Re-armed inside this same critical section, so it cannot interleave with a prompt; the
+   * identity/idle/disposed checks at the top still hold -- nothing has been awaited since. No other
+   * decline re-arms: a running worker's own next idle report arms; an architect is never retired, so
+   * a re-arm would only spin; a closing or closed tree is `closeTree`'s to stop; a missing claim,
+   * locator, or confirmation, or a replaced client, has no worker of this clock's left to judge.
    */
   private async retireIdleWorker(token: string, client: WorkerRpcClient): Promise<void> {
     await this.workerAdmission.mutateClaim(token, async () => {
@@ -1487,11 +1503,17 @@ export class ProcessManager {
       if (!claim || !("issue" in claim) || !claim.locator || claim.readyConfirmedAt === undefined) {
         return;
       }
-      if (claim.role === "architect" || claim.pendingAssignment !== undefined) return;
-      const phase = this.deps.state.phases[claim.issue];
-      if (phase && !phase.completed && phase.phase === claim.role) return;
+      if (claim.role === "architect") return;
       const treeKey = this.rootForIssue(claim.issue);
       if (treeKey === undefined || this.isTreeGone(treeKey, claim.issue)) return;
+      const phase = this.deps.state.phases[claim.issue];
+      if (
+        claim.pendingAssignment !== undefined ||
+        (phase && !phase.completed && phase.phase === claim.role)
+      ) {
+        this.armIdleRetire(token, client);
+        return;
+      }
       const locator = claim.locator;
       console.info(
         `[legion] retiring idle worker ${token}: idle for ${this.deps.config.workerIdleRetireSeconds}s with no active phase; it resumes from its OMP session on its next assignment`

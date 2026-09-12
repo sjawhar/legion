@@ -8893,6 +8893,8 @@ describe("ProcessManager", () => {
     expect(worker.claim().locator).toEqual(seededLocator);
     expect(worker.revokedSessions).toEqual([]);
     expect(worker.connectAttempts()).toBe(1);
+    // A running decline does not re-arm: this worker's own next idle transition is what arms.
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(0);
 
     // The turn ends: a fresh clock is armed, and this one is live — the first arm's map entry does
     // not block it.
@@ -8939,6 +8941,72 @@ describe("ProcessManager", () => {
     expect(worker.connectAttempts()).toBe(1);
   });
 
+  it("re-arms the clock when expiry declines because the role is the active phase, and retires within one further window once phases[issue] moves to another role", async () => {
+    // The rig's ordering: a reviewer finished its turn while still phases[issue].phase; its clock
+    // expired as a correct no-op; the planner was then resumed and /worker/started re-wrote
+    // phases[issue] = planner. Being already idle, the reviewer never transitions to idle again —
+    // nothing but the expiry itself can arm its next clock.
+    const worker = await idleWorkerFixture({
+      role: "reviewer",
+      phases: { [root]: { phase: "reviewer", sessionId: "ses_reviewer" } },
+    });
+    const seededLocator = structuredClone(worker.claim().locator);
+
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.connectAttempts()).toBe(1);
+    // Declined for a reason that can change without this worker's own idle transition: re-armed.
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
+
+    worker.state.phases[root] = { phase: "planner", sessionId: "ses_planner" };
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoopUntil(() => worker.claim().locator === undefined);
+    await flushEventLoop(50);
+
+    expect(worker.shutdownCalls).toEqual([worker.token]);
+    expect(
+      worker.commands.filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
+    ).toEqual([]);
+    expect(worker.claim().locator).toBeUndefined();
+    expect(worker.claim().resumeSessionFile).toBe(worker.sessionFile);
+    expect(worker.claim().launchFailures).toBeUndefined();
+    expect(worker.claim().promptFailures).toBeUndefined();
+    expect(worker.publications).toEqual([]);
+    // A retired worker's clock does not keep polling.
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(0);
+  });
+
+  it("re-arms the clock when expiry declines because a pendingAssignment is queued, and retires within one further window once it is cleared", async () => {
+    const worker = await idleWorkerFixture({
+      role: "reviewer",
+      claim: { pendingAssignment: "x" },
+    });
+    const seededLocator = structuredClone(worker.claim().locator);
+
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.claim().pendingAssignment).toBe("x");
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
+
+    delete worker.claim().pendingAssignment;
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoopUntil(() => worker.claim().locator === undefined);
+    await flushEventLoop(50);
+
+    expect(worker.shutdownCalls).toEqual([worker.token]);
+    expect(worker.claim().locator).toBeUndefined();
+    expect(worker.claim().resumeSessionFile).toBe(worker.sessionFile);
+    expect(worker.claim().launchFailures).toBeUndefined();
+    expect(worker.claim().promptFailures).toBeUndefined();
+    expect(worker.publications).toEqual([]);
+  });
+
   it("never retires an idle sub-architect, however long its idle window has run", async () => {
     const worker = await idleWorkerFixture({ issue: child, role: "architect" });
     const seededLocator = structuredClone(worker.claim().locator);
@@ -8950,6 +9018,8 @@ describe("ProcessManager", () => {
     expect(worker.claim().locator).toEqual(seededLocator);
     expect(worker.revokedSessions).toEqual([]);
     expect(worker.connectAttempts()).toBe(1);
+    // An architect is never retired, so re-arming would only spin: no clock pending after the fire.
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(0);
   });
 
   it("never arms the idle-retire clock when worker_idle_retire_seconds is 0, while the idle trigger still fires for queue promotion", async () => {
