@@ -12,7 +12,7 @@
   "commits": [
     {
       "change": "lxkxplmn",
-      "commit": "3aa0256fe571",
+      "commit": "4ed969ed8136",
       "title": "fix(daemon): run reconnectWorkers after the API exists so a dead worker's retirement can revoke its capability",
       "files": [
         "packages/daemon/src/daemon/index.ts",
@@ -22,16 +22,14 @@
     },
     {
       "change": "pvvsloly",
-      "commit": "47b782f24b42",
+      "commit": "70e0adf42d20",
       "title": "docs(daemon): comments and invariants follow reconnectWorkers to its post-API position",
       "files": [
-        "packages/daemon/src/daemon/worker-admission.ts",
-        "packages/daemon/src/daemon/processes.ts",
         "packages/daemon/src/daemon/__tests__/processes.test.ts",
         "packages/daemon/src/daemon/AGENTS.md",
         "docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md"
       ],
-      "note": "Plan task 3, comment-only. processes.ts: only retireUnconfirmedBoot's doc comment (api-before-exists clause removed, paragraph reflowed to 100 cols). processes.test.ts: four comment edits, no assertion changes. A grep for `before \\`api\\``/`needs no \\`api\\``/`\\`api\\` exists` across packages/daemon/src and docs/solutions finds only the intentional historical note in the retro doc."
+      "note": "Plan task 3, comment-only. After rebase4 this commit no longer touches processes.ts or worker-admission.ts: #980 rewrote the comments it edited, and the rewrites already describe the current order (see rebase4.conflicts)."
     }
   ],
   "redBeforeFix": {
@@ -54,7 +52,7 @@
     "Rebased onto main (8f6fad36) before CI could run: main had moved (#947 gates-off boot block, #954 boot-probe retries) and GitHub reported the PR CONFLICTING, which suppresses every pull_request workflow — no Tests run ever appeared for the original head c5cdfc04. Only index.test.ts conflicted (main also added `roleToken` to the @legion/contracts import; merged into one import line). index.ts merged cleanly: main's changes are all above the moved region. Gates re-run on the rebased tree: biome exit 0, tsc exit 0, bun test 816 pass / 5 skip / 0 fail (main added 4 tests). Pushed as a sideways bookmark move; nothing was stacked on the branch."
   ],
   "closureAudit": "Confirmed while editing: the span from `new ProcessManager({...})` to `api = startLegionApi(...)` in the new index.ts contains no await (only closure/object construction, the synchronous startEventPump, and createCiStatusFetcher). mintControllerCapability/mintBootToken/mintWorkerBootToken/revokeSessionCapability are reachable only via HTTP handlers, NATS callbacks, timers, promotion cascades gated by enableWorkerPromotion(), or the three moved blocks.",
-  "ci": "Tests run 34733404008 (https://github.com/sjawhar/legion/actions/runs/34733404008) at 87f541a8ece64e31d8e1c7e1a1537009384c4346: pr-title, lint, typecheck, test all success. GitHub: MERGEABLE against main dc464ee7. The run at the final head is named in the PR body's Verification/CI line.",
+  "ci": "Tests run 34734366745 (https://github.com/sjawhar/legion/actions/runs/34734366745) at 7596ffc4ef2de20af4870b11d06804da7a5f87c2: pr-title, lint, typecheck, test all success. GitHub: MERGEABLE against main abaf0817. The run at the final head is named in the PR body's Verification/CI line.",
   "testerNotes": [
     "Follow plan §Tester exactly (docs/plans/2026-09-12-reconnect-workers-after-api.md, 'Tester' section): scratch project sjawhar/11, state under /tmp/legion11-smoke/<main|branch>/daemon, `tmux -L legion-sjawhar11`, port 19371, isolated NATS docker legion11-nats on 127.0.0.1:14223. Main run first from /home/ubuntu/legion-ws-RunDaemon (read-only), branch run from $LEGION_WORKSPACE at the PR head (code head 66bcbb6b; the implement handoff commit sits on top of it).",
     "Expected main signature: `[legion] worker reconnection failed:` followed by `TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')`, locator retained, secret file retained. Expected branch: only the per-worker `[legion] failed to reconnect worker <token>: … Failed to connect` line, locator cleared in `legion state`, secret file gone.",
@@ -62,11 +60,11 @@
     "Fill the PR body's **E2E** line (command/run, observation, head sha, negative control) via `legion gh -- pr edit 955 --body-file …`; keep the rest of the body."
   ],
   "reviewerNotes": [
-    "Behaviour diff is index.ts only (`jj diff --from main --to 3aa0256f -- packages/daemon/src/daemon/index.ts`); its +/- lines are identical to the tested diff across all three rebases. processes.ts diff against main is one doc comment. The regression test carries one post-#962 adaptation line (`runtime: \"tmux\"` on the seeded locator) — see rebase3.testHarnessAdaptation.",
+    "Behaviour diff is index.ts only (`jj diff --from main --to 4ed969ed -- packages/daemon/src/daemon/index.ts`): the block move plus its comments; every executable line matches the tested diff across all four rebases. After rebase4 the PR no longer touches processes.ts or worker-admission.ts. The moved block sits after the WorkerStreamListener block and before the launch hold — see rebase4.conflicts[0].placementRationale.",
     "Spec Testing row 2: the three processes.test.ts reconnect cases pass unmodified; only their comments changed.",
     "PR body carries the what-moved list and the closure-audit sentence (spec Acceptance 4) and `Dispatch: LEGION-11`."
   ],
-  "base": "main@origin dc464ee7da23 (chore: release cli v1.5.1) after the third rebase; previously fd4fce51, 8f6fad36, originally 7db2cd83.",
+  "base": "main@origin abaf08175c9b (chore: release pi-envoy v1.17.3) after the fourth rebase; previously dc464ee7, fd4fce51, 8f6fad36, originally 7db2cd83.",
   "rebase2": {
     "reason": "GitHub reported PR #955 CONFLICTING/DIRTY against main after main moved from 8f6fad36 to fd4fce51 (32 commits, including #967 reverse-dial worker-shim + WorkerStreamListener, #952, #971), which also suppresses every pull_request workflow run. Architect instruction: conflict-only rebase, change nothing else.",
     "command": "jj rebase -s omvmmzoo -d main@origin (rebased all 7 branch commits; commit shape preserved: plan doc, plan handoff, fix+test, comment sweep, implement handoff, test handoff)",
@@ -155,7 +153,108 @@
     "ci": "Tests run 34733404008 (https://github.com/sjawhar/legion/actions/runs/34733404008) at 87f541a8ece64e31d8e1c7e1a1537009384c4346: pr-title, lint, typecheck, test all success. GitHub: MERGEABLE against main dc464ee7. The run at the final head is named in the PR body's Verification/CI line.",
     "testerEvidence": "The tester's rounds 1 and 2 (.legion/test.json) were gathered at heads whose index.ts diff is identical to this one; the only source-level differences since are the one-line locator tag in the regression test and main's two pane->process words in a doc comment."
   },
+  "rebase4": {
+    "reason": "While waiting for CI on rebase3's head 7b3b39fd, main moved from dc464ee7 to abaf0817 (3 commits: #980 `fix(daemon): boot degrades gracefully under host load: probe retry with a launch hold, per-claim reconnect isolation, budgeted provisioning` plus two release commits) and GitHub reported the PR dirty again. Architect instruction: one more rebase in this phase rather than completing on a conflicting head.",
+    "whatMainChanged": "#980 restructured startDaemonLocked around a launch hold: the OMP boot probes now start early and are awaited at `await probes` after `stop` is defined; `enableWorkerPromotion()` became `processManager.enableLaunches()` and moved below that hold together with reconnectRoots/reconcileAdmission/reconcileWorkerAdmission and a new replayHeldRecoveries(); reconnectWorkers got per-claim isolation (a throw is logged `[legion] failed to reconcile worker <token>:` and that claim is left as found). main still ran reconnectWorkers before `api` (the LEGION-11 bug) but edited the comments of both blocks this PR moves, and its AGENTS.md bullet explicitly says the move is LEGION-11's to make.",
+    "command": "jj rebase -s omvmmzoo -d main@origin (all 10 branch commits; shape preserved: plan doc, plan handoff, fix+test, comment sweep, implement handoff, test handoff, implement rebase2 record, test round-2 handoff, implement rebase3 record, then this handoff commit)",
+    "conflicts": [
+      {
+        "file": "packages/daemon/src/daemon/index.ts",
+        "commit": "fix+test (lxkxplmn)",
+        "kind": "three 2-sided conflicts",
+        "resolution": [
+          "Conflict 1 (old reconnectWorkers position, after `new ProcessManager`): main had edited two comment lines there (`enableWorkerPromotion()` -> `enableLaunches()` — boot's launch hold); ours removes the whole block from this position. Resolved: block removed here (ours); main's wording carried into the moved copy (below).",
+          "Conflict 2 (old pending-controller-notice position, after `startEventPump`): main appended one sentence to that comment; ours removes the block from this position. Resolved: removed here; main's sentence carried into the moved copy.",
+          "Conflict 3 (insertion site after the WorkerStreamListener block): ours inserted the moved block immediately before the old `enableWorkerPromotion()` tail; main deleted that tail (it now lives below the launch hold as `enableLaunches()`). Resolved: moved block kept at the insertion site — immediately after the listener block, before `let stopped`, the `stop` definition, and the launch hold — and the deleted tail not re-added.",
+          "Comment lines changed inside the moved block, each a merge of main's #980 wording (no code line changed): (a) `awaited before \\`enableWorkerPromotion()\\` below because` -> `awaited before \\`enableLaunches()\\` below because it` (and the next line reflowed by one word); (b) `\\`enableWorkerPromotion()\\` until the probe has settled. \\`Bun.serve\\` is already accepting` -> `\\`enableLaunches()\\` — boot's launch hold, released only once the OMP probes pass below.` followed by the `Bun.serve` sentence reflowed over three lines with identical words; (c) the pending-notice comment gains main's sentence `Boot's launch hold is still on here, so \\`ensureController\\` records the request instead of opening a pane; \\`replayHeldRecoveries()\\` below the hold spawns it once the probes pass.` after ours (`Runs after \\`api\\` is assigned because \\`ensureController\\` mints the controller capability through it.`)."
+        ],
+        "placementRationale": "Two placements satisfied 'after api and the listener, before enableLaunches()': (a) right after the listener, before the launch hold; (b) after the hold, right before enableLaunches(). (a) is the one main itself specifies for the reconnect ('state load, NATS, the API bind, and the worker reconnect all proceed while a probe is still retrying' — #980's comment and AGENTS.md bullet); (b) would silently delay the reconnect behind the probes, a behaviour change. So (a) is forced by conflict-only, not a judgement call. reconnectWorkers is still awaited before enableLaunches(): moved block -> stop definition -> await probes -> enableLaunches().",
+        "invariantAfterMerge": "Order in the merged file: `const probes = (async () => …)()` (279, started, not awaited) -> `await deps.loadState` (297) -> `await deps.createNatsTransport` (341) -> `new TmuxRuntime` (349) -> `new ProcessManager` (361) -> `startEventPump` (426) -> `api = startLegionApi(` (489) -> `startWorkerStreamListener` (502) -> moved block: leading comment (515), `await processManager.reconnectWorkers()` (533), `pruneSecretFiles()` (538), pending-notice drain/spawn (554) -> `let stopped` (566) -> `const stop` (580) -> `await probes` (654, the launch hold) -> `processManager.enableLaunches()` (674) -> `reconnectRoots()` (679) -> `replayHeldRecoveries()` (685). An awk scan of lines 349-515 finds no statement at top-level indentation containing `await`; every `await` in that span (378, 387-388, 397, 404, 418, 433, 456, 480-481) is inside a closure. `enableWorkerPromotion` no longer appears in index.ts. Invariant holds; no judgement call needed."
+      },
+      {
+        "file": "packages/daemon/src/daemon/worker-admission.ts",
+        "commit": "comment sweep (pvvsloly)",
+        "kind": "two 2-sided conflicts (the `workerPromotionEnabled` doc comment and the `enqueueForRetry` doc comment)",
+        "resolution": "#980 rewrote both comments; its versions no longer state the old order (`called from ProcessManager.enableLaunches() after the daemon's boot probes pass and its HTTP api is assigned`; `reconnectWorkers, run during boot's launch hold`). Our edits dropped; file now equals main."
+      },
+      {
+        "file": "packages/daemon/src/daemon/processes.ts",
+        "commit": "comment sweep (pvvsloly)",
+        "kind": "2-sided conflict on retireUnconfirmedBoot's doc paragraph",
+        "resolution": "#980 rewrote the clause we had removed: it now reads `and would also open a process during boot's launch hold when this runs from reconnectWorkers (before enableLaunches())` — no api-before-exists claim. Our edit dropped; file now equals main (the PR no longer touches processes.ts at all)."
+      },
+      {
+        "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+        "commit": "comment sweep (pvvsloly)",
+        "kind": "two 2-sided conflicts (comment-only on our side)",
+        "resolution": "Conflict 1 (the `manager()` helper): main renamed `skipEnablePromotion`/`enableWorkerPromotion()` to `skipEnableLaunches`/`enableLaunches()` in code and comment but kept `index.ts calls this immediately after api is assigned`, which is false after the move (and, post-#980, false on main as well since enableLaunches() runs after the launch hold). Resolved: main's code line and identifier, our wording: `this once reconnectWorkers has settled, after api is assigned) — only the dedicated` / `boot-ordering test passes skipEnableLaunches to exercise the gate itself.` Conflict 2 (the `skipEnablePromotion models exactly what reconnectWorkers runs under` comment): #980 rewrote it (`during boot, before enableLaunches() releases the launch hold`) — no old-order claim; our edit dropped. Our other two comment edits in this file merged cleanly."
+      },
+      {
+        "file": "packages/daemon/src/daemon/AGENTS.md",
+        "commit": "comment sweep (pvvsloly)",
+        "kind": "no jj conflict, but #980 added its own `Boot ordering in startDaemonLocked` bullet listing reconnectWorkers before the API and ending `This branch does not change where reconnectWorkers runs (before the API, as before); moving it after the API … is LEGION-11's fix, which rebases over this restructure.`",
+        "resolution": "Edited that bullet minimally so no doc states the old order (the architect's standing ruling; the bullet's own text hands the update to LEGION-11): the sequence `NATS, ProcessManager, reconnectWorkers, pruneSecretFiles, the event pump, the pending-controller-notice drain/spawn (…), the API, the worker-stream listener; then the launch hold` became `NATS, ProcessManager, the event pump, the API, the worker-stream listener, reconnectWorkers, pruneSecretFiles, the pending-controller-notice drain/spawn (…); then the launch hold`, and the hand-off sentence became `reconnectWorkers runs after the API so a dead confirmed worker's capability revoke has an api to go through (LEGION-11; the invariant is the boot-ordering bullet below).` Our own invariant bullet: `before enableWorkerPromotion()` -> `before enableLaunches()`."
+      },
+      {
+        "file": "docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md",
+        "commit": "comment sweep (pvvsloly)",
+        "kind": "no conflict",
+        "resolution": "Historical note's identifier follows main's rename: `before enableWorkerPromotion()` -> `before enableLaunches()`."
+      }
+    ],
+    "diffIdentity": {
+      "tested": "jj diff --from 8f6fad36 --to 66bcbb6b --git (the code the tester ran in rounds 1 and 2)",
+      "rebased": "jj diff --from main@origin --to 70e0adf42d20 --git (new code head)",
+      "method": "Both stripped to ^[+-] lines excluding +++/--- file headers, then diffed per file. 1074 lines tested vs 1022 rebased.",
+      "result": "NOT identical. No executable line differs anywhere; index.ts's differences are comment text only. Every differing line, by file:",
+      "differingLines": {
+        "packages/daemon/src/daemon/index.ts": [
+          "REMOVED-side text differs because main (#980) had edited the comments in the old positions before we removed them: `-  // stay gated behind \\`processManager.enableWorkerPromotion()\\` below until \\`api\\` exists: nothing` / `-  // here is protected by call *ordering*, only by the gate.` are now `-  // stay gated behind \\`processManager.enableLaunches()\\` — boot's launch hold, released only` / `-  // once the OMP probes pass below: nothing here is protected by call *ordering*, only by the gate.`; and `-  // boot depends on either finishing.` is now that line plus main's two added lines about the launch hold.",
+          "ADDED-side: `+  // revokes its capability through it, and awaited before \\`enableWorkerPromotion()\\` below because` / `+  // it is the source of truth …` -> `+  // … awaited before \\`enableLaunches()\\` below because it` / `+  // is the source of truth …`.",
+          "ADDED-side: `+  // \\`enableWorkerPromotion()\\` until the probe has settled. \\`Bun.serve\\` is already accepting` + 3 lines -> `+  // \\`enableLaunches()\\` — boot's launch hold, released only once the OMP probes pass below.` + the same Bun.serve sentence reflowed over 3 lines.",
+          "ADDED-side: `+  // mints the controller capability through it.` -> that line continued with main's launch-hold sentence over 3 lines."
+        ],
+        "packages/daemon/src/daemon/__tests__/index.test.ts": [
+          "The two import hunks (`spyOn` from bun:test; `type DaemonStateResponse` from @legion/contracts) no longer appear: main's file already imports both.",
+          "`+        runtime: \"tmux\",` — the rebase3 locator-tag adaptation, unchanged."
+        ],
+        "packages/daemon/src/daemon/__tests__/processes.test.ts": [
+          "`skipEnablePromotion` -> `skipEnableLaunches` in the helper comment's -/+ pair (main's rename).",
+          "The `-    // daemon calls it before \\`api\\` exists, hence before \\`enableWorkerPromotion()\\`.` / `+    // daemon calls it before \\`enableWorkerPromotion()\\`.` pair is gone (our edit dropped; main rewrote that comment)."
+        ],
+        "packages/daemon/src/daemon/processes.ts": [
+          "No longer in the diff (our comment edit dropped; file equals main)."
+        ],
+        "packages/daemon/src/daemon/worker-admission.ts": [
+          "No longer in the diff (our two comment edits dropped; file equals main)."
+        ],
+        "packages/daemon/src/daemon/AGENTS.md": [
+          "Our invariant bullet: `before \\`enableWorkerPromotion()\\`` -> `before \\`enableLaunches()\\``.",
+          "New -/+ pair: the edit to #980's own boot-ordering bullet described under conflicts."
+        ],
+        "docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md": [
+          "`+  \\`enableWorkerPromotion()\\`).` -> `+  \\`enableLaunches()\\`).`"
+        ]
+      }
+    },
+    "redOnMainRecheck": "With main's index.ts restored into the working copy (test file kept), the named test fails: `[legion] failed to reconcile worker legion-acme1-widgets-42-tester:` + `TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')` (#980's per-claim isolation changed the log prefix; the test's `instanceof TypeError` filter still catches it). index.ts restored to the code head afterwards; nothing committed.",
+    "gates": {
+      "install": "bun install --frozen-lockfile -> exit 0 (no changes)",
+      "biome": "bunx biome check packages/daemon/src -> exit 0",
+      "tsc": "cd packages/daemon && bunx tsc --noEmit -> exit 0",
+      "namedTest": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test packages/daemon/src/daemon/__tests__/index.test.ts -t \"retires a ready-confirmed worker\" -> 1 pass, 0 fail, 9 expect() calls",
+      "bunTest": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test packages/daemon -> 979 pass, 5 skip, 0 fail, 3957 expect() calls, 984 tests across 57 files, exit 0"
+    },
+    "heads": {
+      "fixCommit": "4ed969ed8136",
+      "codeHead": "70e0adf42d20 (comment-sweep commit)",
+      "pushedHeadBeforeThisHandoff": "7596ffc4ef2de20af4870b11d06804da7a5f87c2 (rebased `implement: record rebase3 onto main`)",
+      "finalHead": "the `implement: record rebase4` commit carrying this file, .legion/-only on top of 7596ffc4"
+    },
+    "ci": "Tests run 34734366745 (https://github.com/sjawhar/legion/actions/runs/34734366745) at 7596ffc4ef2de20af4870b11d06804da7a5f87c2: pr-title, lint, typecheck, test all success. GitHub: MERGEABLE against main abaf0817. The run at the final head is named in the PR body's Verification/CI line.",
+    "testerEvidence": "Rounds 1 and 2 (.legion/test.json) were gathered at heads whose index.ts executable lines are identical to this one; since then only comment text (main's renames and launch-hold sentences merged into the moved block), the one-line locator tag in the regression test, and doc/comment merges changed."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T02:37:10.875Z"
+  "completed": "2026-09-13T03:04:09.990Z"
 }
