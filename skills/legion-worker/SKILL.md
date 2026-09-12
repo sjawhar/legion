@@ -11,10 +11,6 @@ phase gets its own long-lived process against the same jj workspace, run in turn
 the phase assigned to you, report its completion to the architect, and leave the durable
 copy the next phase can trust.
 
-This skill documents the target Dispatch-native contract. `LEGION_ISSUE` as a Dispatch key,
-the `dispatch_ask` tool, and the `Dispatch: <KEY>` PR-body linkage land with PR B (#TBD);
-until that PR merges, this skill's contract is not yet runnable on `main`.
-
 ## Identity, scope, and role
 
 The daemon spawns you as a separate `omp --mode rpc` process (behind `legion worker-shim`,
@@ -95,12 +91,14 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 4. `test.json`
 5. `review.json`
 
-Read only files that precede the assigned phase. There is no handoff schema (rejected
-design — no schema validation runs anywhere in this pipeline): write the phase-specific
-fields the next phase and the architect need, consistent with what predecessor phases
-already wrote. The durable copy lives in `$LEGION_WORKSPACE/.legion/<phase>.json`. If a
-committed handoff conflicts with memory or a prior transcript, the committed file wins: it
-is the copy that survived.
+Read only files that precede the assigned phase. Every handoff is validated when it is read:
+`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the file, and the
+ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that fails validation as missing.
+Fields outside the declared shape stay on disk for the next worker but the daemon ignores them.
+Write the phase-specific fields the next phase and the architect need, consistent with what
+predecessor phases already wrote. The durable copy lives in
+`$LEGION_WORKSPACE/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
+transcript, the committed file wins: it is the copy that survived.
 
 ## jj Safety Rules
 
@@ -138,6 +136,14 @@ capability it needs; invoke GitHub through the credential helper:
 legion gh -- <gh args…>
 ```
 
+Three facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
+(`packages/pi-envoy/src/legion/gh-shim.ts`) that execs `legion gh -- "$@"`, so `gh …` and
+`legion gh -- …` are the same call, and each call redeems a fresh token from your session's
+grant — identity is supplied per call, never stored. Never run `gh auth login` or
+`gh auth setup-git`; there is no login state to create. The shim refuses `pr merge` (and a raw
+`gh api …/merge`): no worker role merges a pull request — the merge queue does, under its own
+authority.
+
 ## GitHub PR comment attribution
 
 Append this exact structured footer to **every** pull-request comment and review that this
@@ -157,6 +163,15 @@ legion gh -- pr comment <pr-number> \
   --body $'Verification complete.\n\n<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->' \
   --repo <owner>/<repo>
 ```
+
+## Planner artifact
+
+The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
+No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
+and spec content goes into the issue, never into a PR (the root `AGENTS.md`'s `docs/plans/` row
+is human-authored design history, not a Legion artifact). A skill step that says "save the plan
+to a file" is satisfied by the handoff write in the completion gate below; the planner's only
+commit is `plan: record handoff`.
 
 ## Implementer push and pull request
 
@@ -212,17 +227,34 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
   Findings about naming, duplication, or wording are batched into the single `Fast-follow`
   line instead of iterating per push.
+- **Rebase only on a real conflict.** Sami, 2026-09-11, verbatim:
+  "Please don't do unnecessary rebases (i.e. unless there are merge conflicts). The CI queue is too long and slow."
+  The implementer rebases the issue branch only when GitHub reports it `CONFLICTING` or the
+  controller asks because of a conflict — never to pick up `main` or to refresh CI. A single
+  failed CI job is re-run on its own with `legion gh -- run rerun <run-id> --failed`, never by
+  pushing a new commit.
+- **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
+  field names naming, duplication, or wording cleanup only; anything that changes behaviour,
+  hides an error, or breaks a gate lands in this PR.
 - The tester fills in the `E2E` section: the real surface a user reaches the criterion
   through, the exact command or run id, what was observed, the head SHA, and one negative
   control — a deliberately broken input and the refusal or failure it produced. A unit or
-  integration test is a regression lock, never proof of a criterion.
+  integration test is a regression lock, never proof of a criterion. Environment or
+  secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
+  `.legion/test.json`, and only when the issue's acceptance criteria call for it — never
+  re-pasted into the PR body each round.
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head and records the verdict.
-  Skip the `Thermo` line entirely on a docs-only PR. Post every correctness finding as a
-  PR review comment and return the issue to the architect; when clean, have the architect send
-  the implementer back to push the `.legion/` deletion (the review App cannot push), then
-  review **that** head and approve it by name.
+  Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round**,
+  `CHANGES_REQUESTED` or `APPROVED`, carrying every inline comment in that single call —
+  `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
+  with `commit_id`, `event` (`REQUEST_CHANGES` or `APPROVE`), `body` (with the Legion footer),
+  and a `comments[]` array of `{path, line, side, body}`, one entry per finding — never one
+  `pr review` call per finding (each submission fires a `pr-review` wake). Then return the
+  issue to the architect; when clean, have the architect send the implementer back to push
+  the `.legion/` deletion (the review App cannot push), then review **that** head and approve
+  it by name.
 - Once a base is frozen for others to stack on, never rewrite it — fixes land as new
   commits on top, and the `Chain` line records what is frozen.
 - The merger confirms the approved head still equals the current head, then publishes
