@@ -274,8 +274,8 @@ export async function handleWorkerReady(
   // bootstrap cannot answer a negotiate_protocol request until this response returns, so the
   // shim connect and the pending-prompt delivery it enables must happen after we respond, not
   // before. A connect/prompt failure leaves pendingAssignment queued exactly as it is today —
-  // workerClient never caches a failed connect, so the next touch (a probe, a resume, another
-  // spawnWorker) retries it.
+  // `ProcessManager.clientFor` never caches a failed connect, so the next touch (a probe, a
+  // resume, another spawnWorker) retries it.
   Promise.resolve(ctx.deps.processManager.workerReady(issue, role, sessionId, generation)).catch(
     (error) => {
       console.error(

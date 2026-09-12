@@ -1073,8 +1073,8 @@ describe("ProcessManager", () => {
     const spawning = processes.spawnRoot(root);
     await launchStarted.promise;
     // The real root process outside this event loop calls /process/started then /process/ready
-    // for its own generation before this continuation ever resumes from `launchShimmedProcess`
-    // -- `readyConfirmedAt` must already be clear by now (spawnTree's own pre-launch clear) so
+    // for its own generation before this continuation ever resumes from `runtime.spawn` --
+    // `readyConfirmedAt` must already be clear by now (spawnTree's own pre-spawn clear) so
     // this confirmation is recorded, not lost to a race with that clear.
     processes.confirmRootReady(root, 1);
     expect(managedState.trees[root]?.readyConfirmedAt).toBeDefined();
@@ -1151,8 +1151,8 @@ describe("ProcessManager", () => {
     // effect would.
     await processes.beginLinger(root);
     // ...then it is re-admitted immediately, starting generation 2's own launch (queued behind
-    // generation 1's still-open tmux call, via `launchShimmedProcess`'s per-issue serialize
-    // lane) before the stale generation-1 launch ever returns.
+    // generation 1's still-open tmux call, via the tmux runtime's per-issue launch queue)
+    // before the stale generation-1 launch ever returns.
     state.issues[root].status = "todo";
     expect(processes.admit(root)).toBe("spawned");
 
@@ -2546,10 +2546,10 @@ describe("ProcessManager", () => {
   });
 
   it("throws StopFailed and leaves the tree lingering (not closed) when a root locator is a corrupt record missing a pane id", async () => {
-    // `TmuxWindowLocator.tmuxPaneId` (the root's own locator type) is optional — unlike the
-    // strictly-required `WorkerLocator.tmuxPaneId` every worker claim carries — so this is a
-    // real, type-reachable state for a root: a launch that recorded only a window id before a
-    // pane id was ever confirmed, or a pre-pane-id legacy record.
+    // A tree locator's `tmuxPaneId` is optional (a pre-pane-id legacy record), so this is a
+    // real, loadable state for a root. The tmux runtime treats it as a corrupt record rather
+    // than degrading: `stop` rejects (`missing a pane id`) without any kill, `ProcessManager`
+    // surfaces that as `StopFailed`, and the tree stays lingering with its locator intact.
     const state = newLegionState("omp", 1);
     tree(state);
     if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
@@ -6824,12 +6824,13 @@ describe("ProcessManager", () => {
       shutdown();
     };
     let connectAttempts = 0;
-    // The first connect attempt is `spawnWorker`'s own liveness probe (`probeWorkerSocket` via
-    // the cached, negotiating `workerClient`) — a genuine dead socket (connect failure), not
+    // The first connect attempt is `spawnWorker`'s own liveness probe (`probeWorker` via the
+    // cached, negotiating `clientFor`) — a genuine dead socket (connect failure), not
     // merely a busy one that answers `get_state` late (a connected-but-slow client now queues
     // instead of retiring+respawning — see `spawnWorker`'s liveness dialect). The second is
-    // `retireWorkerLocator`'s own raw, non-negotiating `stopClient` connect, used only to send
-    // the shutdown frame — succeeding here is what this test's `shutdownCalls` assertion needs.
+    // the tmux runtime's own raw, non-negotiating stop-time dial (`TmuxRuntime.stop`), used
+    // only to send the shutdown frame — succeeding here is what this test's `shutdownCalls`
+    // assertion needs.
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       connectWorkerRpc: async () => {
@@ -7420,7 +7421,7 @@ describe("ProcessManager", () => {
     // another reconnect — connect #3 below is only retireWorkerLocator's own best-effort
     // shutdown probe (an unconditional part of confirming death), never a second reconnect
     // attempt. If the one-reconnect-per-generation guard were broken, this would instead chain
-    // into a fresh `workerClient` reconnect call before even reaching retirement, landing at
+    // into a fresh `clientFor` reconnect call before even reaching retirement, landing at
     // connect #4 (or more, looping) instead of settling at exactly 3.
     secondClient.close();
     await Bun.sleep(0);
@@ -8862,8 +8863,9 @@ describe("ProcessManager", () => {
 
     await processes.reconnectWorkers();
 
-    // Exactly the one probe connect -- the identity mismatch bails before `stopClient` ever
-    // gets a chance to connect (which would otherwise reach the socket path a respawn reuses).
+    // Exactly the one probe connect -- the identity mismatch bails before the runtime's
+    // stop-time dial ever gets a chance to connect (which would otherwise reach the socket path
+    // a respawn reuses).
     expect(connectAttempts).toEqual(["/state/workers/tester.sock"]);
     expect(commands.filter((c) => c[3] === "kill-pane")).toEqual([]);
     const claim = managedState.roles[token];
@@ -9174,8 +9176,8 @@ describe("ProcessManager", () => {
     // Models `workerReady`'s atomic confirmation state change. Called with no preceding await,
     // its `mutateClaim` registration lands on the per-token queue essentially immediately —
     // ahead of `reconnectWorkers`' own retirement decision, which only reaches its `mutateClaim`
-    // call after its `workerClient` connect attempt rejects (several microtask ticks later) —
-    // so this wins the race to run first.
+    // call after its `clientFor` connect attempt rejects (several microtask ticks later) — so
+    // this wins the race to run first.
     const confirm = () =>
       processes.mutateLiveRoleClaim(root, root, token, async () => {
         const current = managedState.roles[token];
