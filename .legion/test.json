@@ -1,0 +1,104 @@
+{
+  "head": "00401091620d0189368ce786429d4c197c12ec10",
+  "pr": 983,
+  "verdict": "FAIL",
+  "verdictComment": "https://github.com/sjawhar/legion/pull/983#issuecomment-5649558086",
+  "envScrub": "AC3a/AC3b ran via `env -u <every LEGION_*/DISPATCH_*/ENVOY_* var present>` (18 names, verified with printenv: none remained) and OMP_PROFILE=legion; the tester pane's LEGION_OMP_PATH (a hand-built 18.1.15 binary) was among the scrubbed names.",
+  "criteria": [
+    {
+      "id": "1",
+      "name": "tag ancestry and release asset",
+      "result": "PASS",
+      "commands": [
+        "cd /home/ubuntu/oh-my-pi && git merge-base --is-ancestor 0e57a6ca v18.1.18-sami.20260912-104423; echo $?  -> 0",
+        "git rev-parse v18.1.18-sami.20260912-104423^{commit} -> dec271b0991180c0e36e6bdfa96f8f90159ae040 (tag object type: commit; git tag --points-at dec271b0 -> v18.1.18-sami.20260912-104423)",
+        "git log -1 --format='%H %s' 0e57a6ca -> 0e57a6cae5469010d5c4a85cd048a27ee3f4d88f fix(rpc): observe extension send rejections when no prompt scope is active",
+        "legion gh -- release view v18.1.18-sami.20260912-104423 --repo sjawhar/oh-my-pi --json ... -> isDraft:false, isPrerelease:false, publishedAt 2026-09-12T10:48:36Z, targetCommitish dec271b0991180c0e36e6bdfa96f8f90159ae040, assets: omp-v18.1.18-sami.20260912-104423-linux-x64.tar.gz (125748304 bytes), omp-v18.1.18-sami.20260912-104423-darwin-arm64.tar.gz (67512555 bytes)"
+      ],
+      "note": "Fork checkout /home/ubuntu/oh-my-pi is knives-managed; read-only git queries only."
+    },
+    {
+      "id": "2",
+      "name": "pin constant, derivation, mise install",
+      "result": "PASS",
+      "commands": [
+        "bun packages/daemon/src/daemon/omp-pin.ts -> github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423",
+        "mise x github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 -- omp --version -> omp/18.1.18 (exit 0); mise where -> /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423",
+        "config.ts:7 `import { DEFAULT_OMP_INVOCATION } from \"./omp-pin\"`; config.ts:739 uses it as the omp_invocation default; omp-pin.ts:5 DEFAULT_OMP_INVOCATION = `mise x ${OMP_FORK_PIN} -- omp`",
+        "grep 'sami\\.2026' packages/daemon -> omp-pin.ts:4 (the pin), worker.Dockerfile:20 (JJ_TOOL, a jj pin, not omp), and __tests__ fixtures ci-fixtures.ts:157, environment.test.ts:14, index.test.ts:226, processes.test.ts:165 (all the intentional placeholder 18.0.3-sami.20260824-002841). No other hard-coded omp version.",
+        "scripts/smoke/up.sh:33 reads the pin via `bun .../omp-pin.ts`; worker.Dockerfile:49,73,82-84 prints omp-pin.ts into /omp-pin and installs `$(cat /omp-pin)`"
+      ]
+    },
+    {
+      "id": "3a",
+      "name": "probe-image on the pinned build",
+      "result": "PASS",
+      "commands": [
+        "env -u <LEGION_*/DISPATCH_*/ENVOY_*> OMP_PROFILE=legion bun packages/daemon/src/cli/index.ts probe-image --omp \"$(mise where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423)/bin/omp\" -> `probe-image: OK (/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp)`, exit 0",
+        "negative control: same command with --omp /nonexistent/omp -> `[legion] Configured OMP invocation does not expose pi.agents: sh: 1: exec: /nonexistent/omp: not found`, exit 1"
+      ]
+    },
+    {
+      "id": "3b",
+      "name": "headless no-turn send survives",
+      "result": "PASS",
+      "rigAssessment": "Implementer's rig /tmp/legion-32-repro (drive.ts + repro-extension.mjs) judged sound and reused verbatim except cwd (its cwd dir was missing; copied to /tmp/legion-32-test). Path traced on the OLD tag's source: rpc-mode.ts:1166 `abort` -> agent-session.ts:7695 sets autoResumeSuppressed; the extension's pi.sendMessage(deliverAs:'aside', triggerTurn:true) from a timer (no RPC prompt scope) -> sendCustomMessage aside branch agent-session.ts:7242 folds into context and returns false -> runtime-init.ts invokingTask rejects 'send did not invoke the agent' -> RpcExtensionUserMessageTracker attaches no handler outside a prompt scope -> unhandledRejection. That is exactly the window 0e57a6ca's `invokingTask.catch(() => {})` covers. The real envoy.ts deliver path uses the same options (envoy.ts:281-282: deliverAs aside|steer, triggerTurn:true).",
+      "commands": [
+        "OLD: env -u <scrub> bun drive.ts /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.15-sami.20260908-220934/bin/omp repro-extension.mjs -> `[Unhandled Rejection] Error: send did not invoke the agent` at cli.js:796598, `exit code=1`; RESULT crash string seen: true, get_state answered after send: false",
+        "NEW: env -u <scrub> bun drive.ts /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp repro-extension.mjs -> message_start/message_end emitted, `{\"id\":\"s\",\"type\":\"response\",\"command\":\"get_state\",\"success\":true,...}`, `shutdown` answered `Unknown command: shutdown` (a worker-shim frame, not an OMP RPC command), alive until killed (exit 143); RESULT crash string seen: false, get_state answered after send: true",
+        "Both builds run twice (once with the pane env, once scrubbed): identical outcomes."
+      ]
+    },
+    {
+      "id": "3c",
+      "name": "Worker Image workflow",
+      "result": "PASS",
+      "commands": [
+        "legion gh -- run list --workflow worker-image.yaml --branch legion/LEGION-32 -> 34720622086 completed success @1a57753cae7e pull_request 2026-09-12T21:40:30Z; 34720677581 completed success @00401091620d pull_request 2026-09-12T21:41:40Z (only these two)",
+        "run 34720622086 --log: `mise github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 [1/3] download omp-v18.1.18-sami.20260912-104423-linux-x64.tar.gz` ... `✓ installed`; `#37 6.676 omp/18.1.18`; `#47 [stage-2 11/11] RUN omp plugin install ... && legion probe-image ...`; `#47 10.65 probe-image: OK (/opt/omp/bin/omp)`; the only lines naming the OLD pin are the PR body echoed in the build metadata. Image digest sha256:64c14121...",
+        "run 34720677581 --log (head): layers #14-#47 all `CACHED` (only .legion/implement.json changed); `#47 CACHED` is the same probe layer that printed OK. Image ghcr.io/sjawhar/legion-worker:sha-00401091620d digest sha256:e20105e0..."
+      ]
+    },
+    {
+      "id": "4",
+      "name": "old-string sweep",
+      "result": "FAIL",
+      "commands": [
+        "sweep of every jj-tracked file at head for 18.1.15-sami.20260908-220934 -> scripts/smoke/README.md:73 and .legion/implement.json:8,15 (the handoff quoting the value it replaced; deleted before merge). No other file.",
+        "jj diff --from 571a11a1 --to 00401091 --summary -- scripts/smoke -> empty (scripts/smoke untouched, per the LEGION-10 architect)",
+        "legion gh -- pr view 957 -> head 37b17c5a9d5b8a994218e98ffb2e5f3c51f17571, OPEN, files include scripts/smoke/README.md and scripts/smoke/up.sh",
+        "legion gh -- pr diff 957 -> README.md hunk: `-The generated configuration uses ... oh-my-pi@18.1.15-sami.20260908-220934 -- omp ...` / `+The generated configuration uses ... oh-my-pi@18.1.15-sami.20260908-220934 -- omp ... — unless LEGION_OMP_PATH is set ...` (first differing char at index 435; the version literal is unchanged). Post-#957 README lines naming the OLD pin: 1; naming the NEW pin: 0. Other OLD-pin lines in the #957 diff are .legion/plan.json (3), .legion/review.json (1), and an unchanged context line `readonly omp_pin=\"github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934\"` in scripts/smoke/up.sh (#957's merge-base predates LEGION-23's omp-pin.ts derivation)."
+      ],
+      "finding": "The spec's premise for excluding README.md:73 — that PR #957 moves it — is false at #957's current head. After both PRs merge the smoke README still documents 18.1.15-sami.20260908-220934. Within LEGION-32's own scope nothing else carries the old string.",
+      "remedy": "Escalated to the LEGION-32 architect (envoy id 66f70a3b9ccc6b3f890a045fb2764afb). Options: (a) recommended — #957 changes the README line to reference the pin constant (omp-pin.ts) instead of a literal version; (b) this PR edits README.md:73 and accepts the merge-queue conflict with #957."
+    },
+    {
+      "id": "5",
+      "name": "deployment parity",
+      "result": "PASS",
+      "commands": [
+        "yaml.safe_load('/home/ubuntu/.config/legion/sjawhar-legion/legion.yaml')['omp_invocation'] -> 'mise x github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 -- omp' (66 bytes)",
+        "bun -e 'import { DEFAULT_OMP_INVOCATION } from \"./packages/daemon/src/daemon/omp-pin.ts\"; process.stdout.write(DEFAULT_OMP_INVOCATION)' -> identical 66 bytes; Python == -> True",
+        "legion.yaml has no LEGION_OMP_PATH/omp_path key; omp_launch_prefix is [env, OMP_PROFILE=legion, secrets, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, --]"
+      ]
+    },
+    {
+      "id": "scope+ci",
+      "name": "PR diff scope and CI",
+      "result": "PASS",
+      "commands": [
+        "legion gh -- pr view 983 --json files -> .legion/implement.json (+42/-0), packages/daemon/src/daemon/omp-pin.ts (+1/-1); headRefOid 00401091620d0189368ce786429d4c197c12ec10; base main",
+        "jj diff --from 571a11a1 --to 00401091 --git -- packages/daemon/src/daemon/omp-pin.ts -> the one-line OMP_FORK_PIN change only",
+        "legion gh -- pr checks 983 -> build pass (run 34720677581), lint pass, pr-title pass, test pass, typecheck pass (run 34720864589); exit 0"
+      ]
+    }
+  ],
+  "prBodyE2E": "E2E: headless omp --mode rpc — drove the pinned build (mise where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423) with negotiate_protocol, abort, an extension aside send outside any prompt scope, then get_state; observed no `send did not invoke the agent` and get_state success:true, at head 00401091620d. Negative control: the old pin 18.1.15-sami.20260908-220934 under the same driver → `[Unhandled Rejection] Error: send did not invoke the agent`, exit 1.",
+  "environmentNotes": [
+    "The legion daemon on 127.0.0.1:13370 was unreachable for ~2 minutes mid-run (bash tool: 'Unable to connect'); gh-backed checks resumed once it returned. No impact on results.",
+    "Two LEGION_GRANT preambles in one bash command make the second (stale) grant win and 403; every gh-backed proof was re-run with a single preamble."
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T00:05:11.432Z"
+}
