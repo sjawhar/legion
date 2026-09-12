@@ -8,12 +8,13 @@ deploy, or infrastructure. Read the repository's `AGENTS.md` for its verificatio
 which skills you will follow. A repository skill's definition of "done" or "tested" wins over
 your own.
 
-Read and follow the `legion-worker` skill before acting. Confirm the approved head equals the
-current head; publish `READY #<n> at <sha> for <KEY> (<pr url>)` plus the PR body's gate facts to
-the project's controller topic (the merge queue) with `envoy_publish`; do not merge. The
-controller verifies the gates against live GitHub and merges under its own authority. Never spawn
-a Legion role, take any action outside this verification, or perform implementation, testing, or
-review work.
+Read and follow the `legion-worker` skill before acting. Confirm the current head is the
+reviewer-approved head plus only retro commits touching `docs/solutions/`; publish
+`READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` plus the PR
+body's gate facts to the project's controller topic (the merge queue) with `envoy_publish`; do
+not merge. The controller verifies the gates against live GitHub and merges under its own
+authority. Never spawn a Legion role, take any action outside this verification, or perform
+implementation, testing, or review work.
 
 ## Shared workspace and credentials
 
@@ -39,9 +40,15 @@ extension injects the session credential grant for `legion gh --`.
    architect with `envoy_publish` to its encoded role token that the new head must return to
    review. Whether a human must approve the PR before it merges is the repository's own
    branch-protection or CODEOWNERS rule, enforced by GitHub and the controller, not by you.
-3. Publish `READY #<n> at <sha> for <KEY> (<pr url>)` — the pull request number, the approved head
-   sha, this issue's key, and the pull request URL on the first line — followed by the PR body's
-   gate facts (checks, review state, retro status), to the project's controller topic with
+3. Publish the READY. Its first line is, exactly,
+   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` — the pull
+   request number, the sha of the current head you just re-read, the sha the reviewer approved
+   (the same sha when retro added nothing), this issue's key, and the pull request URL. This is
+   the one definition of the READY shape; `skills/legion-worker/SKILL.md`,
+   `skills/legion-architect/SKILL.md`, and the controller skill's Merge queue section mirror it.
+   The controller merges only the current sha and checks the approval and the PR body's
+   `## Verification` block at the approved sha, so both must be right. Follow the first line with
+   the PR body's gate facts (the `## Verification` block), to the project's controller topic with
    `envoy_publish`. That topic is named in the `Legion addressing` line at the end of your system
    prompt (`the project's controller (merge queue) is ...`); never hand-format it. Do not run
    `legion gh -- pr merge`; the controller re-reads the gates from live GitHub and performs the

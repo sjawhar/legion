@@ -21,21 +21,28 @@ time. `LEGION_STATE_DIR` is in its environment, so `legion gh -- <args>` works h
 same gh shim phase workers use: every `bash` call is wrapped with a short-lived controller grant,
 and that grant is the only one the daemon lets merge a pull request.
 
-For an interactive takeover, start OMP with `LEGION_CONTROLLER_SECRET` (or
-`LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it) and `LEGION_DAEMON_URL` in its
-environment, then run:
+For an interactive takeover from a hand-started OMP session, start OMP with
+`LEGION_CONTROLLER_SECRET` (or `LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it),
+`LEGION_DAEMON_URL`, and `LEGION_STATE_DIR` (the daemon's state directory: the gh shim your
+shell commands run through installs under `<state_dir>/worker-bin`, and every `bash` call is
+blocked without it) in its environment. Do not set `LEGION_CONTROLLER=1` — that marker is the
+daemon pane's own, and a session carrying it claims at startup and reports its transcript as the
+pane's. Then run:
 
 ```text
 /legion-claim-controller
 ```
 
 The command resolves the project from daemon state, claims the Envoy role for the current
-session, and posts readiness before controller commands can act. It retains the environment
-capability for `legion({ op: "set_status", issue, status })`. Never pass a secret as a command argument
-or copy it into a transcript. The claim is kept alive automatically afterwards: the Envoy
-registration heartbeat re-asserts it and re-posts readiness whenever the listener loses sight of
-this session, so `/legion-claim-controller` is the manual override, not a routine step after a
-listener restart.
+session, and posts readiness before controller commands can act. From then on this session's
+shell commands are wrapped with a controller grant exactly like the daemon pane's, so
+`legion gh -- <args>` and `legion status <KEY> <status>` work here. The takeover moves the role
+and the daemon's recorded session id to this session; it never replaces the transcript the
+daemon recorded for its own pane, so a later respawn of that pane resumes the pane's own
+conversation, not yours. Never pass a secret as a command argument or copy it into a transcript.
+The claim is kept alive automatically afterwards: the Envoy registration heartbeat re-asserts it
+and re-posts readiness whenever the listener loses sight of this session, so
+`/legion-claim-controller` is the manual override, not a routine step after a listener restart.
 
 This handshake lets the daemon redeliver held controller work. It does not turn the controller
 into a state holder: daemon state and the Dispatch project remain authoritative.
@@ -59,15 +66,15 @@ into a state holder: daemon state and the Dispatch project remain authoritative.
 
 | Wake | Content | Controller action |
 |---|---|---|
-| New issue created in the Dispatch project (`issue.created`, status `triage`; resync heals misses) | issue key + triage context (incl. pre-existing children) | Triage: `legion({ op: "set_status", issue, status: "todo" })` to admit, or set `backlog`/`icebox` to park |
+| New issue created in the Dispatch project (`issue.created`, status `triage`; resync heals misses) | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
 | Backlog eligibility | slot freed / priority change | Reconsider parked items and move the eligible root to `todo` |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch_ask` from the owning architect, not here |
 | Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed) | Verify against fresh state, then heal |
 | `child-status` | child key + status transition | Not controller-actionable by default; if the daemon could not route it to the parent's architect role, verify the transition and forward it with `envoy_publish` |
 | Mention | Slack/GitHub PR @mention text | Answer, or route to the owning issue's architect role |
-| READY from a merger (`notifications.role.<controller token>`) | `READY #<n> at <sha> for <KEY> (<pr url>)` + gate facts | Run the Merge queue gates against live GitHub; merge, or report the failed gate to the tree's architect |
+| READY from a merger (`notifications.role.<controller token>`) | `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` + gate facts | Run the Merge queue gates against live GitHub; merge, or report the failed gate to the tree's architect |
 | `pr.<n>.checks` settled on a PR with a pending READY | check rollup for the head | Re-run the Merge queue gates for that READY; merge, report, or keep waiting only if still pending |
-| Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion({ op: "set_status", issue: root, status: "todo" })`; otherwise no action — the event is not held or redelivered |
+| Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion status <root> todo`; otherwise no action — the event is not held or redelivered |
 | Direct user message | — | Always first |
 
 ## New issue triage
@@ -78,17 +85,17 @@ into a state holder: daemon state and the Dispatch project remain authoritative.
 2. If it should run now, admit the root issue:
 
    ```text
-   legion({ op: "set_status", issue: "<issue>", status: "todo" })
+   legion status <issue> todo
    ```
 
 3. If it should deliberately wait, move it to a parked status instead of leaving it in
    `triage`:
 
    ```text
-   legion({ op: "set_status", issue: "<issue>", status: "backlog" })
+   legion status <issue> backlog
    ```
 
-   (or `status: "icebox"` for longer-term deferral). Dispatch status is the durable record;
+   (or `icebox` for longer-term deferral). Dispatch status is the durable record;
    there is no separate marker to maintain. Do not triage a system-created child as a root
    issue.
 
@@ -96,7 +103,7 @@ into a state holder: daemon state and the Dispatch project remain authoritative.
 
 When a slot frees or priority changes, use `legion state --json` and the current Dispatch
 issue to reconsider parked roots. Admit the selected root with
-`legion({ op: "set_status", issue, status: "todo" })`. Moving an item to or from `backlog`/
+`legion status <KEY> todo`. Moving an item to or from `backlog`/
 `icebox` is a deliberate controller decision, not a no-op.
 
 ## Architect escalation
@@ -111,7 +118,7 @@ and the Dispatch issue. If the work belongs in an independent root:
 1. File a **fresh root issue** with `dispatch_issue({ project, title, spec })` (no `parent`).
    `project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`) — not
    the role-token `<project>` (the daemon's own project, e.g. `acme`), a different string.
-2. Park the child (`legion({ op: "set_status", issue: child, status: "icebox" })`) and leave
+2. Park the child (`legion status <child> icebox`) and leave
    a pointer to the new root issue. The controller's capability is `todo`/`backlog`/`icebox`
    only — only the owning architect or the daemon closes an issue as `done`.
 3. Admit or deliberately backlog the new root through the normal triage procedure.
@@ -142,29 +149,52 @@ publishing to the controller topic; the controller re-reads every gate from live
 merges, or tells the tree's architect exactly which gate failed. The merger's report is a
 claim, never evidence.
 
-**READY message shape.** The first line is `READY #<n> at <sha> for <KEY> (<pr url>)`: the pull
-request number, the head sha the reviewer approved, the issue key, and the pull request URL. The
-rest of the message is the PR body's gate facts (CI run, resolved threads, thermo verdict, E2E,
-chain). The issue key is how you find the tree's architect (below); the sha is the only head you
-may merge.
+**READY message shape.** Defined once in `packages/pi-envoy/roles/merger.md` and mirrored here
+verbatim. The first line is
+`READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`: the pull
+request number, the sha of the pull request's current head, the sha the reviewer approved, the
+issue key, and the pull request URL. The two shas differ whenever retro has run: retro commits
+its `docs/solutions/` learning *after* the reviewer approves, so the current head is normally the
+approved head plus that one commit. The rest of the message is the PR body's gate facts (the
+`## Verification` block). You need every field: the URL addresses the pull request from this
+pane's working directory (which is not a checkout), the key finds the tree's architect (below),
+the current sha is the only head you may merge, and the approved sha is where approval and the
+verification block are checked.
 
-**Gates.** Read them from live GitHub, never from the message or the PR body alone:
+**Gates.** Read them from live GitHub, never from the message or the PR body alone. Every `gh`
+command takes the pull request URL, or `--repo <owner>/<repo>` taken from it, because this
+session's working directory has no git remote to resolve a bare number against:
 
 ```text
-legion gh -- pr view <n> --json headRefOid,mergeable,reviewDecision,statusCheckRollup,body
+legion gh -- pr view <pr url> --json headRefOid,mergeable,reviewDecision,body
+legion gh -- pr checks <pr url> --required --json name,state,bucket
 legion gh -- api graphql -f query='query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved}}}}}' -F owner=<owner> -F repo=<repo> -F n=<n>
+legion gh -- api repos/<owner>/<repo>/compare/<approved sha>...<current sha> --jq '{status, files: [.files[].filename]}'
 ```
 
-1. `headRefOid` equals the `<sha>` in the READY. Any other head is a different pull request as
-   far as this READY is concerned.
-2. Every required check in `statusCheckRollup` is green. A check that is still running or
-   queued is pending, not green. A known red check never merges.
-3. Zero unresolved review threads (`isResolved: false` count is 0).
-4. `mergeable` is not `CONFLICTING` and not `UNKNOWN`.
-5. The PR body's `## Verification` block is complete at that head: its `CI`, `Threads`, and
-   `E2E` lines name this `<sha>`.
+1. **head**: `headRefOid` equals the `<current sha>` in the READY. Any other head is a different
+   pull request as far as this READY is concerned.
+2. **checks**: `pr checks --required` lists the checks branch protection requires at that head,
+   and every row's `bucket` is `pass`. A `pending` row is not green; a `fail` row never merges
+   (see Flake). Checks that are not required do not count either way. If the repository has no
+   required checks the list is empty and this gate holds.
+3. **threads**: zero unresolved review threads (the count of `isResolved: false` is 0).
+4. **mergeable**: `mergeable` is not `CONFLICTING` and not `UNKNOWN`.
+5. **retro only**: `compare/<approved sha>...<current sha>` reports `status` `identical` or
+   `ahead`, and every path in `files` starts with `docs/solutions/`. Anything else between the
+   two shas is a failed gate named `head moved beyond retro`: the approval no longer covers the
+   head.
+6. **verification block**: the PR body's `## Verification` block (the template in
+   `skills/legion-worker/SKILL.md`) is complete and current at the `<approved sha>` — the tester
+   fills it before retro, so it names the approved head, never the post-retro one. Line by line:
+   the `CI` line names a run and reports success at `<approved sha>`; the `Threads` line reports
+   `0 unresolved` (its per-thread lines name fixing commits, never the head — do not look for a
+   sha there); the `Thermo` line names `<approved sha>` and a verdict, unless the pull request is
+   docs-only, in which case the template omits that line entirely; the `E2E` line names
+   `<approved sha>` and has a `Negative control` line; the `Fast-follow` and `Chain` lines are
+   filled in. No `<placeholder>` text remains anywhere in the block.
 
-When all five hold, merge: `legion gh -- pr merge <n> --squash`. The grant your `bash` call
+When all six hold, merge: `legion gh -- pr merge <pr url> --squash`. The grant your `bash` call
 carries is the controller's own, the only grant the daemon honours for a merge; the merge runs
 under the implement App's identity and the repository's own rules (branch protection,
 CODEOWNERS). Whether a human must approve first is that repository's setting — you neither
@@ -172,12 +202,15 @@ read nor bypass it, and you never admin-merge without an explicit deployment gra
 that specific merge.
 
 **Failed gate.** Reply to the tree's architect naming the gate (`head`, `checks`, `threads`,
-`mergeable`, or `verification block`) and the evidence you read (the sha, the check name and
-run id, the thread count, the `mergeable` value). Do not merge, do not retry on a timer. The
-architect fixes through the phases.
+`mergeable`, `head moved beyond retro`, or `verification block`) and the evidence you read (the
+shas, the check name and run id, the thread count, the `mergeable` value, the offending paths
+from the compare). Do not merge, do not retry on a timer. The architect fixes through the
+phases.
 
 **Flake.** A required check that failed for a reason unrelated to the change (a runner outage,
-a rate limit, a known-flaky job) may be rerun once: `legion gh -- run rerun <run-id> --failed`.
+a rate limit, a known-flaky job) may be rerun once:
+`legion gh -- run rerun <run-id> --failed --repo <owner>/<repo>`, the run id taken from the
+failing check's `detailsUrl` (`legion gh -- pr checks <pr url> --required --json name,link`).
 Then stop. The rerun's result reaches you as a `pr.<n>.checks` wake; re-run the gates then.
 A second failure is a failed gate, reported as above.
 
@@ -195,16 +228,22 @@ events so its settlement wakes you:
 envoy_subscribe({ topics: ["notifications.github.<owner>.<repo>.pr.<n>", "notifications.github.<owner>.<repo>.pr.<n>.checks"] })
 ```
 
-On that wake, re-run the gates against the `<sha>` from the READY in your conversation, then
+On that wake, re-run the gates against the shas from the READY in your conversation, then
 `envoy_unsubscribe` those topics once you have merged or reported a failed gate. The controller
 never polls; READY and `pr.<n>.checks` are the only wakes. If you were resumed and no longer
-have the READY in your conversation, ask the merger's role topic for that issue
-(`notifications.role.legion-<project>-<KEY>-merger`) to republish it; never guess a sha.
+have the READY in your conversation, ask that issue's merger (its token is the `roles` key in
+`legion state --json` whose `issue` is `<KEY>` and whose `role` is `merger`; publish to
+`notifications.role.` followed by that key) to republish it; never guess a sha.
 
-**Finding the tree's architect.** The READY names the issue key. `legion state --json` gives
-`issues[<KEY>].parent`; follow `parent` until it is absent — that key is the root — and reply
-to `notifications.role.legion-<project>-<root>-architect` (the `trees` map lists the same
-roots). Never hand-format a token from a partial reference.
+**Finding the tree's architect.** Never hand-format a role token: the daemon lower-cases the
+issue key inside it (`LEGION-16` becomes `legion-16`) and escapes other characters, so a token
+you assemble from `<KEY>` never matches a live role. Read it instead: `legion state --json`
+gives `issues[<KEY>].parent`; follow `parent` until it is absent — that key is the root (the
+`trees` map lists the same roots). Then take the `roles` key whose `issue` equals that root and
+whose `role` is `architect`, and publish to `notifications.role.` followed by that exact key.
+Every registered root architect and phase worker appears in `roles`, so the lookup is
+unambiguous. (Phase workers get an addressing line in their system prompt; the controller does
+not, so state is your only source.)
 
 **After a successful merge, publish nothing to the architect.** The daemon derives
 `{type:"pr-merged", pr, mergeCommitSha}` from GitHub's own merged webhook and routes it to the

@@ -191,11 +191,15 @@ Preserve this order exactly:
    so on its `phase-complete` wake call `legion({ op: "set_status", issue, status: "retro" })`
    before messaging the reviewer to approve;
 3. retro completes without dirtying the branch beyond `docs/solutions/`;
-4. the merger verifies the current head is the reviewer-approved head plus only the retro
-   commits and publishes `READY #<n> at <sha>` to the project's controller topic (the merge
+4. the merger verifies the current head is the reviewer-approved head plus only retro commits
+   touching `docs/solutions/` and publishes
+   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` (the shape
+   `packages/pi-envoy/roles/merger.md` defines) to the project's controller topic (the merge
    queue; named in its `Legion addressing` line); it never merges. The controller verifies the
-   gates against live GitHub and merges under the implement App's identity and the repository's
-   own rules (branch protection, CODEOWNERS); whether a human must approve first is that
+   gates against live GitHub — the current head, required checks, review threads, mergeability,
+   that only `docs/solutions/` changed between the two shas, and the `## Verification` block at
+   the approved sha — and merges under the implement App's identity and the repository's own
+   rules (branch protection, CODEOWNERS); whether a human must approve first is that
    repository's setting, not Legion's, and you never ask for or wait on such an approval. If the
    controller reports a failed gate to you, treat it like `pr-blocked`: fix through the phases,
    never bypass.
