@@ -9,13 +9,14 @@
 // against a real HTTP round trip).
 import { afterAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { roleToken } from "@legion/contracts";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import type { DaemonConfig } from "../config";
-import { newLegionState } from "../legion-state";
+import { newLegionState, type WorkerLocator } from "../legion-state";
+import { parseProcStatStartTicks } from "../proc-stat";
 import { ProcessManager, type ProcessManagerDeps } from "../processes";
 import { fakeDispatchClient } from "./ci-fixtures";
 
@@ -83,12 +84,16 @@ async function ensureSession(): Promise<void> {
 }
 
 /** Opens a fresh window in the smoke session running `legion worker-shim` around `innerCommand`,
- * returning its window and (sole) pane id. */
+ * returning a locator for its (sole) pane with the same process identity `launchShimmedProcess`
+ * records for a real launch: the pane pid tmux reports and that process's real
+ * `/proc/<pid>/stat` start ticks. A locator without that identity never verifies, so the daemon
+ * would treat the pane as already gone and never kill it -- exactly the behaviour the identity
+ * check exists for, and exactly not what these tests are proving. */
 async function openShimWindow(
   socketPath: string,
   innerCommand: string,
   env: Record<string, string>
-): Promise<{ windowId: string; paneId: string }> {
+): Promise<WorkerLocator & { panePid: number; paneStartTicks: number }> {
   const envPairs = Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
   const shellCommand = `${process.execPath} ${CLI_ENTRYPOINT} worker-shim --socket ${socketPath} -- bun ${innerCommand}`;
   const opened = await run(
@@ -98,7 +103,7 @@ async function openShimWindow(
       SESSION,
       "-P",
       "-F",
-      "#{window_id} #{pane_id}",
+      "#{window_id} #{pane_id} #{pane_pid}",
       ...envPairs,
       shellCommand
     )
@@ -106,11 +111,20 @@ async function openShimWindow(
   if (opened.exitCode !== 0) {
     throw new Error(`Unable to open shim window: ${opened.stderr}`);
   }
-  const [windowId, paneId] = opened.stdout.trim().split(" ");
-  if (!windowId || !paneId) {
+  const [windowId, paneId, pidToken] = opened.stdout.trim().split(" ");
+  const panePid = Number(pidToken);
+  if (!windowId || !paneId || !Number.isSafeInteger(panePid) || panePid <= 0) {
     throw new Error(`tmux new-window did not report ids: ${opened.stdout}`);
   }
-  return { windowId, paneId };
+  const paneStartTicks = parseProcStatStartTicks(await readFile(`/proc/${panePid}/stat`, "utf8"));
+  return {
+    tmuxSession: SESSION,
+    tmuxWindowId: windowId,
+    tmuxPaneId: paneId,
+    socketPath,
+    panePid,
+    paneStartTicks,
+  };
 }
 
 async function waitForSocket(target: string): Promise<void> {
@@ -367,9 +381,9 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       await ensureSession();
       const stateDir = await scratchDir();
       const socketPath = path.join(stateDir, "stuck-tester.sock");
-      const { windowId, paneId } = await openShimWindow(socketPath, STUCK_OMP, {});
+      const locator = await openShimWindow(socketPath, STUCK_OMP, {});
       await waitForSocket(socketPath);
-      expect(await paneAlive(paneId)).toBe(true);
+      expect(await paneAlive(locator.tmuxPaneId)).toBe(true);
 
       const root = "LEGION-9001";
       const state = newLegionState("realshutdown", 1);
@@ -385,12 +399,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         role: "tester",
         generation: 1,
         sessionId: "ses_tester",
-        locator: {
-          tmuxSession: SESSION,
-          tmuxWindowId: windowId,
-          tmuxPaneId: paneId,
-          socketPath,
-        },
+        locator,
       };
       const commands: string[][] = [];
       const workerStopTimeoutSeconds = 1;
@@ -404,7 +413,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
 
       expect(state.trees[root]?.status).toBe("closed");
       expect(state.roles[token]).toBeUndefined();
-      expect(await waitForPaneGone(paneId)).toBe(false);
+      expect(await waitForPaneGone(locator.tmuxPaneId)).toBe(false);
       // Proves this actually went through the timeout-then-kill fallback rather than closing
       // gracefully for an unrelated reason (e.g. a connect failure short-circuiting straight to
       // a kill): the wrapped process never reacts to stdin closing, so `stopProcess` must have
@@ -413,6 +422,57 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       expect(
         commands.some((command) => command[0] === "tmux" && command.includes("kill-pane"))
       ).toBe(true);
+    },
+    30_000
+  );
+
+  it.skipIf(process.env.LEGION_E2E !== "1")(
+    "never kills a real pane whose recorded identity is not the process running in it: the stuck worker's claim clears, the tree closes, and the pane survives",
+    async () => {
+      await ensureSession();
+      const stateDir = await scratchDir();
+      const socketPath = path.join(stateDir, "reissued-tester.sock");
+      const opened = await openShimWindow(socketPath, STUCK_OMP, {});
+      await waitForSocket(socketPath);
+      expect(await paneAlive(opened.tmuxPaneId)).toBe(true);
+
+      const root = "LEGION-9004";
+      const state = newLegionState("realshutdown", 1);
+      state.trees[root] = {
+        root,
+        generation: 1,
+        status: "active",
+        launchFailures: 0,
+      };
+      const token = roleToken("realshutdown", root, "tester");
+      // The same live pane, recorded as a process started one tick earlier: what a locator
+      // looks like once tmux has reissued its pane id to some other role's process.
+      const recordedStartTicks = opened.paneStartTicks - 1;
+      state.roles[token] = {
+        issue: root,
+        role: "tester",
+        generation: 1,
+        sessionId: "ses_tester",
+        locator: { ...opened, paneStartTicks: recordedStartTicks },
+      };
+      const commands: string[][] = [];
+      const processes = new ProcessManager(
+        processManagerDeps(config(stateDir, 0, { workerStopTimeoutSeconds: 1 }), state, commands)
+      );
+
+      try {
+        await processes.closeTree(root);
+
+        expect(state.trees[root]?.status).toBe("closed");
+        expect(state.roles[token]).toBeUndefined();
+        expect(
+          commands.some((command) => command[0] === "tmux" && command.includes("kill-pane"))
+        ).toBe(false);
+        // The pane the daemon declined to kill is still running.
+        expect(await paneAlive(opened.tmuxPaneId)).toBe(true);
+      } finally {
+        await run(tmuxArgv("kill-pane", "-t", opened.tmuxPaneId));
+      }
     },
     30_000
   );
@@ -462,7 +522,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         daemon = startLegionApi(cfg, apiDeps);
         const port = daemon.server.port;
 
-        const { windowId, paneId } = await openShimWindow(socketPath, SELF_REPORT_OMP, {
+        const locator = await openShimWindow(socketPath, SELF_REPORT_OMP, {
           LEGION_DAEMON_URL: `http://127.0.0.1:${port}`,
           LEGION_TREE: root,
           LEGION_GENERATION: "1",
@@ -473,12 +533,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         await waitForSocket(socketPath);
         const rootTree = state.trees[root];
         if (!rootTree) throw new Error("test setup expects the root tree to already be recorded");
-        rootTree.locator = {
-          tmuxSession: SESSION,
-          tmuxWindowId: windowId,
-          tmuxPaneId: paneId,
-          socketPath,
-        };
+        rootTree.locator = locator;
 
         // Authenticates the root exactly through the real boot handshake (mint -> /process/started
         // -> a real, capability-backed secret) before the fixture ever POSTs /process/exit. Without
@@ -516,7 +571,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
 
         expect(result).not.toBe(timeout);
         expect(state.trees[root]?.status).toBe("closed");
-        expect(await waitForPaneGone(paneId)).toBe(false);
+        expect(await waitForPaneGone(locator.tmuxPaneId)).toBe(false);
         // The one assertion that actually proves `reportRootExit` ran (not just that the pane
         // exited for some other reason): a 200 here is only reachable through the real,
         // capability-authenticated `/process/exit` -> `reportRootExit` path given this tree's

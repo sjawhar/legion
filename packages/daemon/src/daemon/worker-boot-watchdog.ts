@@ -1,7 +1,5 @@
 import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { WorkerLocator } from "./legion-state";
-import type { TmuxServer } from "./tmux";
-import * as tmux from "./tmux";
 import { probeWorkerSocket, type WorkerRpcClient } from "./worker-rpc";
 
 /** The boot watchdog's own poll interval, both for its connect-retry loop and for
@@ -35,8 +33,9 @@ export interface WorkerBootWatchdogDeps {
    * `WorkerBootWatchdog`'s own doc comment. */
   registrationDeadlineIntervals(): number;
   now(): number;
-  tmux: TmuxServer;
-  isOmpPane(pid: number): Promise<boolean>;
+  /** Does `locator`'s pane still run exactly the process it recorded? `ProcessManager`'s
+   * `verifyPaneProcess` (pid + `/proc` start ticks + OMP), never a pane-id-only liveness check. */
+  paneProcessVerified(locator: WorkerLocator): Promise<boolean>;
   workerClient(token: string, socketPath: string): Promise<WorkerRpcClient>;
   /** Overridable for tests; defaults to a real timer. */
   sleep?(ms: number): Promise<void>;
@@ -163,9 +162,11 @@ export class WorkerBootWatchdog {
   }
 
   /**
-   * True if this watch should treat `locator` as still alive: either its tmux pane still holds
-   * a running OMP process, or its shim socket accepts a connection and negotiates the RPC
-   * protocol — matching the reconnect contract everywhere else in `processes.ts` (connect
+   * True if this watch should treat `locator` as still alive: either its tmux pane still runs
+   * the process the locator recorded (`paneProcessVerified` -- pid, start ticks, and OMP; never
+   * the pane id alone, since a reissued id running another role's OMP re-armed this watch
+   * forever before identity was checked), or its shim socket accepts a connection and negotiates
+   * the RPC protocol — matching the reconnect contract everywhere else in `processes.ts` (connect
    * failure means dead; a connected socket whose follow-up `get_state` fails only means the
    * shim is busy, never a reason to treat it as dead). `get_state` here is advisory only, run
    * for its `runState`-seeding side effect; a rejection is caught and logged, never folded into
@@ -174,9 +175,7 @@ export class WorkerBootWatchdog {
    * dead (no pane, no socket).
    */
   private async probeAlive(token: string, locator: WorkerLocator): Promise<boolean> {
-    const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
-    const pid = await tmux.panePid(this.deps.tmux, target);
-    if (pid !== undefined && (await this.deps.isOmpPane(pid))) return true;
+    if (await this.deps.paneProcessVerified(locator)) return true;
     const probe = await probeWorkerSocket(
       (socketPath) => this.deps.workerClient(token, socketPath),
       locator.socketPath,

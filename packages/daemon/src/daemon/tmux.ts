@@ -170,12 +170,6 @@ export async function splitWindow(
   return { paneId, pid };
 }
 
-/** Trusts no recorded window id until it is confirmed live, so a human-killed window falls back to a fresh one. */
-export async function windowAlive(server: TmuxServer, windowId: string): Promise<boolean> {
-  const probe = await server.run(argv(server, "list-panes", "-t", windowId, "-F", "#{pane_id}"));
-  return probe.exitCode === 0;
-}
-
 /** Reads the live pid of `target`'s pane — the pane itself for a pane id, or a window's first
  * pane for a window id — or `undefined` if it cannot be read. `list-panes -t` always lists the
  * target's whole window (a pane id resolves to its window; without `-a`/`-s` there is no
@@ -193,20 +187,6 @@ export async function panePid(server: TmuxServer, target: string): Promise<numbe
   const row = /^%\d+$/.test(target) ? rows.find((r) => r[0] === target) : rows[0];
   const pid = Number(row?.[1]);
   return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
-}
-
-/** Reads a window's own pane id (its first/sole pane), or `undefined` if it cannot be read.
- * Used to backfill a locator's `tmuxPaneId` once a window recorded before that field existed —
- * or written by some other pane-id-less path — is confirmed alive, so the reconciliation
- * sweep's pane-level check (see `listUnknownPanes`) eventually has a real id to compare against
- * instead of permanently exempting that window. */
-export async function firstPaneId(
-  server: TmuxServer,
-  windowId: string
-): Promise<string | undefined> {
-  const panes = await server.run(argv(server, "list-panes", "-t", windowId, "-F", "#{pane_id}"));
-  const paneId = panes.stdout.trim().split(/\s+/)[0];
-  return panes.exitCode === 0 && paneId && /^%\d+$/.test(paneId) ? paneId : undefined;
 }
 
 export async function killWindow(server: TmuxServer, windowId: string): Promise<void> {

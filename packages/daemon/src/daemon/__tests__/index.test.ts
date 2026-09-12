@@ -36,6 +36,12 @@ async function flushEventLoopUntil(condition: () => boolean, maxTicks = 20_000):
   }
 }
 
+/** A `/proc/<pid>/stat` line for whatever pid the fake tmux reported: every pane a daemon under
+ * test launches must record a process identity, and no real process exists behind these pids. */
+async function fakeProcStat(pid: number): Promise<string> {
+  return `${pid} (sh) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 4242 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n`;
+}
+
 class FakeNats {
   readonly subscriptions: Array<{
     subject: string;
@@ -190,6 +196,7 @@ function daemonTestDependencies(
         };
       },
       statPrompt: async () => {},
+      readProcessStat: fakeProcStat,
       readPluginManifest: async () => validLegionPluginManifest,
       envoyPublish: async (topic, payload) => {
         publications.push({ topic, payload: JSON.parse(payload) });
@@ -373,6 +380,7 @@ describe("startDaemon", () => {
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
@@ -459,6 +467,7 @@ describe("startDaemon", () => {
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           envoyPublish: async (topic, payload) => {
             published.push({ topic, payload });
           },
@@ -604,6 +613,7 @@ describe("startDaemon", () => {
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
@@ -691,6 +701,7 @@ describe("startDaemon", () => {
           }),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -1090,6 +1101,7 @@ describe("startDaemon", () => {
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -1158,6 +1170,7 @@ describe("startDaemon", () => {
           }),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -1308,6 +1321,7 @@ describe("startDaemon", () => {
           createNatsTransport: async () => new FakeNats(),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
@@ -1456,6 +1470,7 @@ describe("startDaemon", () => {
         },
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
+        readProcessStat: fakeProcStat,
         readPluginManifest: async () => validLegionPluginManifest,
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
@@ -1661,6 +1676,7 @@ describe("startDaemon", () => {
         }),
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
+        readProcessStat: fakeProcStat,
         readPluginManifest: async () => {
           manifestReadCount += 1;
           return validLegionPluginManifest;
@@ -1717,6 +1733,7 @@ describe("startDaemon", () => {
         }),
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
+        readProcessStat: fakeProcStat,
         readPluginManifest: async () => validLegionPluginManifest,
         envoyPublish: async () => {
           throw new Error("listener down");
@@ -1789,6 +1806,7 @@ describe("startDaemon", () => {
       }),
       resolveDaemonEnvironment: async () => daemonEnvironment,
       statPrompt: async () => {},
+      readProcessStat: fakeProcStat,
       envoyPublish: async () => {},
       dispatchClient: fakeDispatchClient(),
       tokenManager: {

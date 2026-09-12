@@ -64,6 +64,14 @@ export interface TmuxWindowLocator {
   tmuxPaneId?: string;
   socketPath?: string;
   ompSessionFile?: string;
+  /** The pane's root process id as tmux reported it at launch, paired with `paneStartTicks`:
+   * together the identity `verifyPaneProcess` (processes.ts) re-checks before ever trusting or
+   * killing this pane. A recreated tmux server hands out the same pane ids again, so the id
+   * alone can name some other role's live process. Absent only on a locator persisted before
+   * this field existed; such a locator never verifies and is treated as dead on its first probe. */
+  panePid?: number;
+  /** Field 22 of `/proc/<panePid>/stat` (start time in clock ticks since boot), read at launch. */
+  paneStartTicks?: number;
 }
 
 export interface TreeState {
@@ -113,6 +121,10 @@ export interface WorkerLocator {
   tmuxPaneId: string;
   socketPath: string;
   ompSessionFile?: string;
+  /** See `TmuxWindowLocator.panePid`. */
+  panePid?: number;
+  /** See `TmuxWindowLocator.paneStartTicks`. */
+  paneStartTicks?: number;
 }
 
 export interface WorkerRoleClaim {
@@ -165,13 +177,13 @@ export interface ControllerPendingNotice {
 }
 
 export interface LegionState {
-  version: 23;
+  version: 24;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
   controllerLocator?: Pick<
     TmuxWindowLocator,
-    "tmuxSession" | "tmuxWindowId" | "tmuxPaneId" | "socketPath"
+    "tmuxSession" | "tmuxWindowId" | "tmuxPaneId" | "socketPath" | "panePid" | "paneStartTicks"
   >;
   roles: Record<string, RoleClaim>;
   spawnCapabilities: Record<string, SpawnCapability>;
@@ -240,6 +252,8 @@ const TreeStateSchema = z
         tmuxPaneId: z.string().optional(),
         socketPath: z.string().optional(),
         ompSessionFile: z.string().optional(),
+        panePid: z.number().int().positive().optional(),
+        paneStartTicks: z.number().int().nonnegative().optional(),
       })
       .strict()
       .optional(),
@@ -289,6 +303,8 @@ const WorkerLocatorSchema = z
     tmuxPaneId: z.string(),
     socketPath: z.string(),
     ompSessionFile: z.string().optional(),
+    panePid: z.number().int().positive().optional(),
+    paneStartTicks: z.number().int().nonnegative().optional(),
   })
   .strict();
 const WorkerRoleClaimSchema = z
@@ -337,7 +353,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(23),
+    version: z.literal(24),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -349,6 +365,8 @@ const LegionStateSchema = z
         tmuxWindowId: z.string(),
         tmuxPaneId: z.string().optional(),
         socketPath: z.string().optional(),
+        panePid: z.number().int().positive().optional(),
+        paneStartTicks: z.number().int().nonnegative().optional(),
       })
       .strict()
       .optional(),
@@ -405,7 +423,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 23,
+    version: 24,
     project,
     issues: {},
     trees: {},
@@ -832,6 +850,18 @@ function migrateV22State(state: unknown): unknown {
   return { ...rest, version: 23 };
 }
 
+/** v23 -> v24: every locator (`TreeState.locator`, `WorkerLocator`, `controllerLocator`) gains
+ * optional `panePid`/`paneStartTicks` (see `TmuxWindowLocator`) -- a pure version bump. A
+ * locator persisted before this change is deliberately left without identity, neither cleared
+ * nor backfilled: `verifyPaneProcess` never verifies it, so its first probe treats it as dead
+ * and the ordinary path resurrects (`--resume`) or retires it exactly once. Clearing it here
+ * would strand a root instead (the resync probe visits only located trees); backfilling it from
+ * the live pane would trust the very reissued-pane-id ambiguity this field exists to remove. */
+function migrateV23State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 23) return state;
+  return { ...state, version: 24 };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -868,13 +898,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     (state) => migrateV20State(state, migratedAt),
     migrateV21State,
     migrateV22State,
+    migrateV23State,
   ];
   const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 23) {
+  if (version !== 24) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 
