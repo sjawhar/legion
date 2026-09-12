@@ -1,0 +1,139 @@
+{
+  "issue": "LEGION-22",
+  "branch": "legion/LEGION-22",
+  "pr": {
+    "number": 967,
+    "url": "https://github.com/sjawhar/legion/pull/967",
+    "base": "main"
+  },
+  "headSha": "fb3c2310793b",
+  "specVersion": 3,
+  "summary": "worker-rpc split into connectWorkerRpc (unix dial) + createWorkerRpcClient(socket) attached through socket.data.handlers; CapabilityService.resolveWorkerClaim is the one boot-token→claim lookup for /worker/started and the new worker-stream-listener.ts (TCP, bound with the API on worker_stream_port = port + 1, hello → hello_ack → WorkerRpcClient keyed by claim token, awaitRegistration); legion worker-shim --connect tcp://host:port --boot-token-file dials, spawns OMP only after hello_ack, reconnects 200ms→5s replaying gap frames in order; --socket refactored onto the shared createShimBridge with its five test cases byte-unchanged; architect-assigned UTF-8 split-read fix landed as line-reader.ts shared by all three socket readers.",
+  "commits": [
+    {
+      "change": "qzowsqvo",
+      "message": "refactor(daemon): split connectWorkerRpc into the unix dial and createWorkerRpcClient over any Bun socket",
+      "task": "T1"
+    },
+    {
+      "change": "vmlzsvqm",
+      "message": "refactor(daemon): one boot-token→claim lookup (CapabilityService.resolveWorkerClaim) shared by /worker/started and the stream listener",
+      "task": "T2"
+    },
+    {
+      "change": "pkqpvswq",
+      "message": "feat(daemon): worker_stream_port / LEGION_WORKER_STREAM_PORT (default port + 1) for the worker stream listener",
+      "task": "T3"
+    },
+    {
+      "change": "rmzlroxt",
+      "message": "feat(daemon): WorkerStreamListener accepts reverse-dialed worker-shim streams by boot token and registers them as WorkerRpcClients",
+      "task": "T4"
+    },
+    {
+      "change": "ktptrsmz",
+      "message": "feat(daemon): bind the worker stream listener with the API; a taken worker_stream_port fails startup by name",
+      "task": "T5"
+    },
+    {
+      "change": "vxwxsvok",
+      "message": "feat(cli): legion worker-shim --connect tcp://host:port --boot-token-file: reverse-dial the daemon, spawn OMP after hello_ack, reconnect with 200ms→5s backoff",
+      "task": "T6"
+    },
+    {
+      "change": "uuslntxl",
+      "message": "fix(daemon): decode worker stream reads with a streaming TextDecoder so a UTF-8 character split across two reads survives (shared line-reader for the rpc client and both shim readers)",
+      "task": "architect ruling 4 (adjacent finding, in scope)"
+    },
+    {
+      "change": "qunovqls",
+      "message": "test(daemon): real-process E2E for legion worker-shim --connect against a real API and listener, with a mid-stream listener restart",
+      "task": "T7"
+    },
+    {
+      "change": "nmorytyz",
+      "message": "docs(daemon): worker stream listener, worker_stream_port, and worker-shim --connect",
+      "task": "T8"
+    },
+    {
+      "change": "wxzknkyk",
+      "message": "test(cli): make the check-config cases hermetic to ambient LEGION_/DISPATCH_/ENVOY_ env (a Legion pane exports DISPATCH_URL without DISPATCH_TOKEN)",
+      "task": "adjacent: required for the full-suite gate inside a Legion worker pane"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/src/daemon/worker-rpc.ts",
+    "packages/daemon/src/daemon/line-reader.ts (new)",
+    "packages/daemon/src/daemon/worker-stream-listener.ts (new)",
+    "packages/daemon/src/daemon/api/auth.ts",
+    "packages/daemon/src/daemon/api/routes/workers.ts (lines 137–165 only)",
+    "packages/daemon/src/daemon/api.ts",
+    "packages/daemon/src/daemon/config.ts (five additive insertions at the plan's positions)",
+    "packages/daemon/src/daemon/index.ts (import, DaemonHandle, listener start after startLegionApi, stop() before api.stop(), final log/return)",
+    "packages/daemon/src/cli/worker-shim.ts",
+    "packages/daemon/src/cli/index.ts (import + workerShimCommand)",
+    "packages/daemon/src/daemon/AGENTS.md (worker-rpc.ts row rewritten, worker-stream-listener.ts row after secrets.ts, one invariant bullet appended)",
+    "AGENTS.md (one command line after the --socket line)",
+    "tests: daemon/__tests__/{worker-rpc,worker-stream-listener,worker-stream-e2e,config,index}.test.ts, daemon/__tests__/{ci-fixtures,processes.test,processes.thermo-ops.test,real-shutdown-e2e.test}.ts (workerStreamPort field only), cli/__tests__/{worker-shim,index}.test.ts"
+  ],
+  "architectRulingsApplied": {
+    "1_hello_ack": "Listener writes exactly one {\"type\":\"hello_ack\"} line before any RPC frame (before createWorkerRpcClient attaches, so no waiter frame can precede it); the shim spawns OMP only on the first ack and flushes its backlog only on each ack (bridge.onConnect after the ack, skipped if the stream dropped in the same tick).",
+    "2_shared_lookup": "CapabilityService.resolveWorkerClaim(state, bootToken) in api/auth.ts; /worker/started (api/routes/workers.ts 137–165) and the listener (via LegionApi.resolveWorkerBootToken) both call it. The six existing /worker/started cases in api.test.ts pass unchanged. getWorkerBootToken had no callers left and was removed.",
+    "3_shared_bridge": "createShimBridge(log) inside worker-shim.ts; the five socket-mode cases in worker-shim.test.ts are byte-unchanged (jj diff shows only the two import lines removed from that region) and pass.",
+    "4_utf8": "Own commit uuslntxl after T6: line-reader.ts (streaming TextDecoder) used by the rpc client's data handler and both shim readers (listen + connect), reset on close; one regression test writes a 3-byte character (€) split across two reads through the client's installed handlers and asserts the decoded response frame is intact — fails on the pre-fix decode, passes after (both runs recorded in this session).",
+    "5_config_bind": "PR #962 was OPEN (mergedAt null) at 09:36Z and again at the T5 boundary. index.ts passes the literal \"127.0.0.1\" at the single startWorkerStreamListener site with the plan's comment; the two console.log lines also carry the literal. Merger: swap all three to config.bind once #962 is on main. No second bind field was added."
+  },
+  "deviationsFromPlan": [
+    "T6 spawn timing: the plan spawned OMP after `await Promise.race([acked, exit])`. The daemon's first RPC frame can share a TCP read with hello_ack (the listener acks and a waiter resolved by awaitRegistration negotiates in the same turn), so both lines reach the shim's onLine synchronously and the second found no child. The shim now spawns synchronously inside the ack callback; bridge.onConnect still happens after the race with the plan's `dropped` guard. Pinned by the 'closes the child's stdin on a shutdown frame … including one sharing the ack's read' case (the plan's own version of that test exposed the gap).",
+    "T6 deps type: connect mode takes its own `WorkerShimConnectDeps { spawn, connect, sleep, log }` instead of widening `WorkerShimDeps` (which the plan did by adding connect/sleep stubs to the socket-mode backlog case). Ruling 3 required the five socket-mode cases byte-unchanged; the separate type also keeps socket mode from depending on connect/sleep it never uses. defaultWorkerShimDeps() returns the intersection.",
+    "T4 unregistration: the plan removed a closed stream from `registrations` via `client.closed.catch().finally()`; that is two microtask hops behind a caller's own `await client.closed`, so the plan's first test observed the stale entry. Now `client.closed.then(unregister, unregister)`, registered at register time so it always runs ahead of later continuations.",
+    "T6 kill/restart test: the plan emitted frames 4–6 immediately after `first.stop()`; the shim's socket had not yet observed the FIN, so those bytes went into a half-dead TCP socket and were lost — a TCP fact, not the shim's guarantee (the spec promises frames produced *during the gap*). The test now waits for the shim's own `unavailable … retrying in 200ms` log before emitting, and waits for the `retrying in 400ms` log (a real refused dial after the real 200 ms backoff) instead of `Bun.sleep(250)` before restarting the fake daemon.",
+    "T7 e2e: no `Bun.sleep(300)` before restarting the listener; the shim redials immediately after a clean post-ack drop and the refused-dial backoff schedule is pinned in worker-shim.test.ts. Runtime ~1.4 s.",
+    "T5 tests: written against index.test.ts's real fixtures (`config(stateDir)`, `daemonTestDependencies`) rather than the plan's sketched module-level `daemonConfig`, with per-test stateDir cleanup like the surrounding cases.",
+    "UTF-8 fix shape: one shared `line-reader.ts` (read-side twin of socket-writer.ts, which the plan forbids editing) instead of three inline TextDecoders — the architect asked for the shared decode path; the rpc client's `if (!line) return` became dead (the reader skips empty lines) and was removed.",
+    "Extra commit wxzknkyk (outside the ownership list; not a #962 file): `legion start --check-config` tests read process.env through loadStartConfig and fail in every Legion worker pane because the pane exports DISPATCH_URL + DISPATCH_TOKEN_FILE without DISPATCH_TOKEN (`dispatch_url is set but DISPATCH_TOKEN is not`). Pre-existing env leak; the describe now scrubs LEGION_/DISPATCH_/ENVOY_ around its cases. Needed for the assignment's `bun test packages/daemon` green gate from this pane; CI never saw it because CI has no DISPATCH_URL.",
+    "Typecheck command: `bunx tsc --noEmit -p packages/daemon` from the repo root resolves a global typescript 6 (no root devDependency) that rejects tsconfig `baseUrl`; the package's own `typecheck` (`cd packages/daemon && bunx tsc --noEmit`, typescript 5.9.3) is what CI runs and is clean."
+  ],
+  "gates": {
+    "headSha": "fb3c2310793b",
+    "biome": "cd packages/daemon && bunx biome check src/ → clean (139 files)",
+    "tsc": "cd packages/daemon && bunx tsc --noEmit → clean",
+    "bunTest": "bun test packages/daemon → 855 pass, 5 skip (LEGION_E2E-gated), 0 fail, 860 tests / 55 files",
+    "e2e": "bun test packages/daemon/src/daemon/__tests__/worker-stream-e2e.test.ts → 3 pass / 0 fail / 12 expect() [1424 ms] (quoted in the PR body)",
+    "ci": "GitHub Actions Tests run 34687715347 at fb3c2310793bbc57d029e0f883c232837b223dee: pr-title, lint, typecheck, test all pass (https://github.com/sjawhar/legion/actions/runs/34687715347)"
+  },
+  "testerNotes": {
+    "acceptanceMap": {
+      "1": "worker-shim.test.ts → describe cmdWorkerShimConnect (5 mirror cases + shutdown/forwarding); `bun test packages/daemon/src/cli/__tests__/worker-shim.test.ts`",
+      "2": "worker-shim.test.ts 'backs off 200ms → 5s…' (fake connect/sleep, exact schedule [200,400,800,1600,3200,5000,5000], reset after ack) and 'survives the daemon listener being killed and restarted…' (real TCP, fakeDaemon, frames 4–6 buffered during the gap, [1,2,3]/[4,5,6,7] with one spawn); e2e case 1 (real listener killed and restarted under the real CLI shim)",
+      "3": "worker-rpc.test.ts: every case × unix + tcp (createWorkerRpcClient on the accepted socket); worker-stream-listener.test.ts first case (hello + agent_start in one write → ack, registration, runState running, negotiate)",
+      "4": "worker-stream-listener.test.ts it.each rejection rows (not json / malformed ×3 / unknown boot token / hello too long) + stale generation + already-bound; e2e negative controls; by hand on the rig: `printf 'not json\\n' | nc 127.0.0.1 19371` → closed, daemon.log `[legion] worker-stream: rejected hello (not json)`, /legion/v1/state sha256 unchanged (done this session)",
+      "5": "five socket-mode shim cases unchanged; processes*.test.ts; smoke checkpoints 1–4 and 13 on tmux (see smoke below)",
+      "6": "worker-stream-listener.test.ts 'awaitRegistration rejects on its own fake-clock timeout and clears the timer when the hello lands first' (injected setTimeout/clearTimeout)"
+    },
+    "ports": "Unit/e2e tests bind ephemeral ports only (port: 0) and no tmux. The rig daemon binds 19370 (API) and 19371 (worker stream) on 127.0.0.1; the rig's NATS 14222, listener 19020.",
+    "rerunE2E": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/worker-stream-e2e.test.ts — spawns `bun packages/daemon/src/cli/index.ts worker-shim --connect tcp://127.0.0.1:<ephemeral> --boot-token-file <tmp> -- bun fake-omp-rpc.ts` as a real child; stdout carries the shim's summary/retry lines, stderr the CLI errors.",
+    "smokeRig": {
+      "dir": "/tmp/legion22-smoke",
+      "scripts": "up-wrapper.sh (up.sh/down.sh from a worker pane: scrubs LEGION_*, maps ENVOY_GITHUB_WEBHOOK_SECRET→GITHUB_WEBHOOK_SECRET, DISPATCH_TOKEN from the pane's DISPATCH_TOKEN_FILE; run under `secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 --`), checkpoint.sh <n>, create-root.sh, restart-daemon.sh (gate-off restart for checkpoint 4; needs the two App keys via secrets), watch-checkpoints.sh",
+      "coordinates": "SMOKE_DIR=/tmp/legion22-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 SMOKE_WEBHOOK_MODE=envoy; OMP_PROFILE=legion (dogfood plugin 1.3.0 is compatible — this branch does not change the daemon API contract); LEGION_OMP_PATH=/home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix (the pinned mise OMP dies at its first RPC prompt — docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md)",
+      "rootIssue": "LEGSMOKE-33 (the rig's root-issue file). LEGSMOKE-32 was created by mistake BEFORE the daemon and bridge were up — the bridge relays live only and reduceIssueUpdated ignores unknown keys, so that daemon never learned it; it was set to icebox and is not part of the run. Gotcha for re-runs: create the root only after `up.sh` reports the bridge ready (or let up.sh create it; its POSSIBLE_DUPLICATE 409 is the pre-existing rig bug the LEGION-21 run noted — create-root.sh passes force:true).",
+      "checkpoints": "All at fb3c2310793b on this branch daemon (SMOKE_WEBHOOK_MODE=envoy, root LEGSMOKE-33): 1 OK 10:08:39Z (past triage; controller locator live), 2 OK 10:08:39Z (in_progress; architect locator live), 3 OK 10:11:59Z (spec artifact + open Approve gate + child issue), 4 OK 10:12:29Z after restart-daemon.sh (gate-off boot marked designApproved: gate-off; architect released child LEGSMOKE-34, tree active), 13 OK 10:12:29Z (4 processes on legion-sjawhar24 carry no bearer/boot secret; default server hosts no legion-sjawhar24). Both daemon boots logged `legion worker stream listening on 127.0.0.1:19371`; the by-hand `printf not json | nc 127.0.0.1 19371` negative control logged `[legion] worker-stream: rejected hello (not json)` with /legion/v1/state sha256 unchanged. Rig torn down with down.sh at 10:13Z; state.json, daemon.log(.before-101159), root-issue remain under /tmp/legion22-smoke/rig for a re-run (up.sh reuses them). Log: /tmp/legion22-smoke/checkpoints.log."
+    },
+    "grantPrefixQuirk": "The worker extension's tool_call hook prepends its `export LEGION_GRANT=…` block 1–3 times per bash call; the last export wins and is the one that 403s. Grants live 60 s and are reusable, so the shell now shadows `export` to record every grant of the call and `pickgrant` probes them with `legion gh -- api rate_limit` before a credentialed command. Define the recorder in one call, then `pickgrant && legion gh -- …` / `pickgrant && jj git push` in later calls. Memory id c25cf1df0a379492 records the same bug from an earlier session."
+  },
+  "rebaseNotesForMerger": {
+    "config.bind": "index.ts: `hostname: \"127.0.0.1\"` in the startWorkerStreamListener call and the two `listening on 127.0.0.1:` console.log lines → config.bind once #962 is on main; drop the comment's second sentence.",
+    "pr962Overlap": "config.ts inserts at (original) 90, 176, 627, 843, 906 — none inside #962's hunks. index.ts: import after `./worker-rpc` (adjacent to #962's import block — keep both), listener start right after startLegionApi, stop() block before api.stop(). api/routes/workers.ts: 137–165 replaced; #962's 134–136 / 194–196 are adjacent — keep both verbatim. daemon/AGENTS.md: line 39 rewritten, rows/bullet appended after 41 and 58. Test fixtures: both PRs add a field to the same DaemonConfig literals — keep both fields.",
+    "mainDrift": "main moved to 7add4d03 (pi-envoy v1.5.0) after the branch base; `git merge-tree --write-tree 7add4d03 fb3c2310` is conflict-free (#954 touched index.ts/index.test.ts in unrelated regions)."
+  },
+  "deploymentNote": "Every daemon now also binds port + 1 unless worker_stream_port is set. Dogfood: 127.0.0.1:13370 → 13371 on the next restart (free at planning time; re-check with `ss -ltn` or set worker_stream_port). Smoke rig: 19370 → 19371; up.sh's occupancy check does not cover it, so a collision surfaces as `worker_stream_port 19371 on 127.0.0.1 is unavailable` at daemon startup.",
+  "smoke": {
+    "result": "PASS 1-4 and 13",
+    "log": "/tmp/legion22-smoke/checkpoints.log",
+    "head": "fb3c2310793b"
+  },
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T10:14:07.449Z"
+}
