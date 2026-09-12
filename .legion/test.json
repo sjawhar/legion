@@ -1,0 +1,101 @@
+{
+  "issue": "LEGION-17",
+  "spec": "dispatch://LEGION-17/spec (version 4) — Acceptance list and Testing table",
+  "pr": {
+    "number": 956,
+    "url": "https://github.com/sjawhar/legion/pull/956",
+    "headSha": "df631359bf0a9732ee7ff8b81b71854eccbcd041",
+    "headNote": "`implement: record handoff` — adds only .legion/implement.json; last code commit b31d077bcfbc09cc46b6aae5663b2e2e86a72d34",
+    "base": "main (8f6fad3670993105b8082504fb701a789ac075d1 at branch time); GitHub reports MERGEABLE",
+    "ci": {
+      "testsRunId": 34677668796,
+      "testsRunUrl": "https://github.com/sjawhar/legion/actions/runs/34677668796",
+      "conclusion": "success at df631359 (jobs typecheck, lint, test, pr-title all success; event pull_request, attempt 1, created 2026-09-12T06:15:40Z)",
+      "alsoAtHead": [
+        "Tests run 34677661589 — success at df631359 (a second pull_request-triggered run of the same workflow 9 s earlier, same four jobs; https://github.com/sjawhar/legion/actions/runs/34677661589)",
+        "Legion Envoy and Contracts run 34677661581 — success at df631359"
+      ],
+      "prBodyUpdated": "Verification section edited with `legion gh pr edit 956 --body-file …`: CI line now names run 34677668796 at df631359; E2E paragraph carries the real-surface evidence from criteria A, B, and C and the negative control; gate paragraph records the tester's 828/3/0 re-run."
+    }
+  },
+  "verdict": "PASS",
+  "environment": {
+    "box": "the shared Legion rig (load average 51 at start; the planner saw 100-500)",
+    "workspace": "/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-17 at df631359 (working copy also held the extension-provisioned, uncommitted .omp/config.yml — never committed)",
+    "envNote": "Every daemon-suite and --check-config command ran with `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE`: the pane carries DISPATCH_URL without DISPATCH_TOKEN, which makes resolveDaemonConfig refuse (`dispatch_url is set but DISPATCH_TOKEN is not`) — a rig property, not a LEGION-17 behaviour (docs/solutions/legion/worker-pane-shell-gotchas.md §2). Scratch `legion start` runs additionally unset LEGION_STATE_DIR, LEGION_INSTRUCTIONS, ENVOY_NATS_URL, ENVOY_URL and set XDG_STATE_HOME to a scratch dir (with MISE_STATE_DIR pinned to the real one) so no registry file outside /tmp could be touched.",
+    "harnessSymptom": "The multi-`export LEGION_GRANT` symptom reproduced (2–3 blocks per bash call). Worked around with the export-shadowing shell function from docs/solutions/legion/worker-pane-shell-gotchas.md §1 (sourced from /tmp/legion17-grant-trap.sh), so every `legion gh`, `jj git push`, and `legion handoff complete` used the first daemon-minted grant of its call through the normal helpers."
+  },
+  "criteria": {
+    "A_configParsingAndResolution": {
+      "result": "PASS",
+      "surface": "real CLI `bun run packages/daemon/src/cli/index.ts start legion17/tester-a --check-config --config /tmp/legion17-a/cfg/legion.yaml`, cwd /tmp (not the config's directory /tmp/legion17-a/cfg); legion.yaml: project legion17/tester-a, state_dir ./state, instructions ./ops/deployment.md, dummy github_apps",
+      "evidence": [
+        "A1 valid: stdout `Config OK: project=legion17testera`, exit 0.",
+        "A2 `instructions: ''`: stderr `error: instructions must not be empty` (thrown from config.ts requireNonEmpty via loadConfigFromFile), exit 1.",
+        "A3 key absent + `LEGION_INSTRUCTIONS=''`: stderr `error: LEGION_INSTRUCTIONS must not be empty` (thrown from resolveDaemonConfig), exit 1.",
+        "A4 resolved values (throwaway driver /tmp/legion17-a/precedence.ts calling the exported loadStartConfig from cwd /tmp, the same code path --check-config runs): file key + LEGION_INSTRUCTIONS=/tmp/legion17-a/elsewhere/env.md → instructionsPath=/tmp/legion17-a/cfg/ops/deployment.md, stateDir=/tmp/legion17-a/cfg/state (file wins; both config-relative against the config dir, not cwd).",
+        "A5 key absent + LEGION_INSTRUCTIONS=relative/env.md → instructionsPath=relative/env.md (env used as given, never made config-relative).",
+        "A6 neither → instructionsPath undefined.",
+        "Real-surface precedence proof is also C2 below (legion start names the file's missing.md while LEGION_INSTRUCTIONS points at a real file).",
+        "Regression locks green inside the full suite: config.test.ts (37), cli/__tests__/index.test.ts (15)."
+      ],
+      "observation": "`legion start` (and therefore `--check-config`) requires the positional <PROJECT>: citty positionals are required by default and startCommand does not set required:false, so the plan's and assignment's `legion start --check-config --config <file>` form prints usage + `Missing required positional argument: PROJECT` (exit 1). Pre-existing on main, untouched by this PR; passing the file's own project string reproduces the spec'd behaviour exactly. Not a LEGION-17 defect."
+    },
+    "B_threeFragmentsInstructionsLast": {
+      "result": "PASS",
+      "command": "cd packages/daemon && TMPDIR=/tmp/legion17-b/tmp env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 src/daemon/__tests__/real-deployment-instructions-e2e.test.ts",
+      "output": "bun test v1.3.14 — 1 pass, 0 fail, 4 expect() calls, Ran 1 test across 1 file. [1.66s]",
+      "argvRecord": {
+        "path": "/tmp/legion17-b/tmp/legion-real-instructions-e2e-4tmymu/state/controller/argv.json (copied to /tmp/legion17-b/argv.json by a 20 ms poll before afterAll removed it)",
+        "argv": [
+          "--mode",
+          "rpc",
+          "--append-system-prompt",
+          "# Legion Controller Root\n\nYou are the resident, wake-driven Legion controller. … never performs phase-worker work or forwards raw events into an architect session.",
+          "--append-system-prompt",
+          "# Deployment instructions (sjawhar/legion)\n\n## Required checks\n\n- `pr-checks-result` must pass.\n\nIt's the operator's call: ask `notifications.role.librarian` first."
+        ],
+        "note": "Last --append-system-prompt value = header `# Deployment instructions (sjawhar/legion)` (legionId as written, project token was `realinstructions`) + blank line + file content with the shell's `$(cat)` trailing-newline strip. Real tmux server legion-realinstructions, real legion worker-shim, argv-recorder-omp.ts fixture."
+      },
+      "fullSuite": {
+        "command": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000",
+        "output": "828 pass, 3 skip, 0 fail, 3367 expect() calls, Ran 831 tests across 55 files. [28.94s], exit 0 — matches the implementer's head (828/3/0). No timeouts; the `get_state timed out` lines in the log are fixtures throwing on purpose inside passing processes.test.ts cases.",
+        "log": "/tmp/legion17-b/full-suite-1.log"
+      },
+      "regressionLocks": "processes.test.ts 191 pass / 3 skip and index.test.ts 20 pass inside that run (spawn-command counts 3/3/2 with the instructions fragment last; controller 1 without)."
+    },
+    "C_bootRefusalBeforeStateLoad": {
+      "result": "PASS",
+      "surface": "real `bun run packages/daemon/src/cli/index.ts start legion17/tester-c --config /tmp/legion17-c/cfg/legion.yaml` from cwd /tmp; scratch legion.yaml: project legion17/tester-c, port 13971 (unused), envoy_url/dispatch_url http://127.0.0.1:9, nats_urls nats://127.0.0.1:9, dispatch_project LEGT, state_dir ./state, dummy github_apps; env DISPATCH_TOKEN=scratch-token, XDG_STATE_HOME=/tmp/legion17-c/xdg-state, MISE_STATE_DIR=/home/ubuntu/.local/state/mise, DISPATCH_URL/DISPATCH_TOKEN_FILE/LEGION_STATE_DIR/LEGION_INSTRUCTIONS/ENVOY_NATS_URL/ENVOY_URL unset. The production daemon (127.0.0.1:13370, state dir /home/ubuntu/.local/state/legion/sjawhar-legion, config /home/ubuntu/.config/legion/sjawhar-legion/legion.yaml) was never started, stopped, or written; a read-only GET of its /legion/v1/state returned 200 afterwards.",
+      "evidence": [
+        "C1 `instructions: ./missing.md`: exit 1 in 0.5 s; stderr `error: [legion] instructions file /tmp/legion17-c/cfg/missing.md could not be read: ENOENT: no such file or directory, open '/tmp/legion17-c/cfg/missing.md'` at materializeDeploymentInstructions (deployment-instructions.ts:25) ← startDaemonLocked (index.ts:413). Afterwards state dir held only bin/legion and secrets/dispatch-token (both written before the instructions step); NO state.json, NO deployment-instructions.md; daemon.lock absent (released on failure). /tmp/legion17-c/xdg-state stayed empty (no legions.json).",
+        "C2 `instructions: ./missing.md` in the file AND `LEGION_INSTRUCTIONS=/tmp/legion17-c/cfg/real.md` exported: identical refusal naming /tmp/legion17-c/cfg/missing.md, exit 1, no state.json, no deployment-instructions.md — the file key beats the env var on the real surface.",
+        "C3 `instructions: ./real.md` (content `## Scratch deployment rules\\n\\nRequired check: \\`pr-checks-result\\`.\\n`): daemon pid 270821 started 06:22:35.84; /tmp/legion17-c/cfg/state/deployment-instructions.md observed at 06:22:37.71 with exactly `# Deployment instructions (legion17/tester-c)\\n\\n## Scratch deployment rules\\n\\nRequired check: \\`pr-checks-result\\`.\\n` (project as written in legion.yaml, not the sanitized token legion17testerc). At that instant state.json did not exist and the daemon's only child was pid 272140 `…/omp models --no-extensions --extension /tmp/legion-omp-probe-78ZwAB/probe.mjs --json` — the verifyOmpAgentsCapability probe — so materialization precedes the OMP probes and state load. Killed by its own pid (`kill 270821`, exit 143) immediately after; confirmed dead; the orphaned probe exited on its own and its /tmp/legion-omp-probe-78ZwAB dir was removed by the tester. No private tmux server legion-legion17testerc was ever forked (no pane launch reached)."
+      ]
+    },
+    "D_skillsAndDocs": {
+      "result": "PASS",
+      "evidence": [
+        "skills/legion-worker/SKILL.md, skills/legion-architect/SKILL.md, skills/legion-controller/SKILL.md: each new `## Deployment instructions` section, unwrapped, equals the spec Change bullet paragraph byte-for-byte (compared with an awk unwrap + string equality: VERBATIM MATCH ×3).",
+        "skills/legion-oracle/SKILL.md: first paragraph under `## Research Strategy`, unwrapped, equals the spec's oracle sentence byte-for-byte (VERBATIM MATCH).",
+        "`jj diff --summary --from 8f6fad367099 --to df631359bf0a`: 24 paths — no docs/plans/*.md, no .omp/config.yml; the only .legion additions are plan.json and implement.json. Docs touched: AGENTS.md (WHERE TO LOOK row), packages/daemon/src/daemon/AGENTS.md (file table row + config paragraph + startup-probe paragraph), packages/pi-envoy/AGENTS.md (roles row), scripts/smoke/README.md, scripts/smoke/up.sh, scripts/smoke/up.test.sh."
+      ]
+    },
+    "E_liveLegionDeploymentCheck": {
+      "result": "not run — operator step",
+      "note": "Spec: runs when Sami restarts the LEGION deployment on a release containing this change; no worker restarts the shared daemon. Nothing on 127.0.0.1:13370 or its state dir was touched."
+    }
+  },
+  "findings": [],
+  "observationsOutOfScope": [
+    "`legion start --check-config` needs the positional <PROJECT> (see criteria.A.observation) — pre-existing citty default on main, not introduced or changed by this PR.",
+    "Two `Tests` workflow runs fired at df631359 nine seconds apart (34677661589 then 34677668796), both success; both event=pull_request, triggering_actor legion-implementer[bot] — consistent with the push followed by the PR-body edit re-triggering the workflow. Recorded the later one as the head run."
+  ],
+  "artifacts": {
+    "scratchConfigs": "/tmp/legion17-a (criterion A), /tmp/legion17-c (criterion C), /tmp/legion17-b (argv.json, e2e-single.log, full-suite-1.log)",
+    "prBodyBeforeAfter": "/tmp/legion17-pr-body.md, /tmp/legion17-pr-body-new.md"
+  },
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T06:26:31.315Z"
+}
