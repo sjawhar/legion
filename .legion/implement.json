@@ -1,0 +1,64 @@
+{
+  "issue": "LEGION-14",
+  "spec": {
+    "ref": "dispatch://LEGION-14/spec",
+    "version": 4
+  },
+  "planDoc": "docs/plans/2026-09-12-resync-queued-root-anomaly.md",
+  "fixChangeId": "mspqmpzy",
+  "fixCommitSha": "8fec55b322e8",
+  "fixCommitParent": {
+    "changeId": "nqzvolrp",
+    "commit": "cddc7a0b",
+    "description": "plan: record handoff"
+  },
+  "prNumber": 952,
+  "prUrl": "https://github.com/sjawhar/legion/pull/952",
+  "ci": {
+    "workflow": "Tests",
+    "runId": "34674989204",
+    "url": "https://github.com/sjawhar/legion/actions/runs/34674989204",
+    "headSha": "8fec55b322e8b0424d0a8e1664e4f3c00660b46e",
+    "jobs": {
+      "lint": "success",
+      "pr-title": "success",
+      "typecheck": "success",
+      "test": "success"
+    },
+    "note": "no job named pr-checks-result exists in this repository's Tests workflow; these four jobs are the whole rollup, and the daemon published ci-green for this head at 05:29:25Z"
+  },
+  "branch": "legion/LEGION-14",
+  "filesChanged": [
+    "packages/daemon/src/daemon/resync.ts",
+    "packages/daemon/src/daemon/__tests__/resync.test.ts"
+  ],
+  "testsAdded": [
+    "does not report a queued root as zero-owner-tree while the admission cap is saturated",
+    "reports a todo root whose tree is dead as zero-owner-tree",
+    "reports a todo root queued for admission without a tree entry as zero-owner-tree",
+    "reports a todo root whose tree launch failed once, as launch-failed only"
+  ],
+  "hasActiveTreeRemoved": true,
+  "gate": "const treeStatus = deps.state.trees[node.key]?.status; if (treeStatus === \"active\" || treeStatus === \"queued\" || treeStatus === \"launch-failed\") continue;",
+  "detailStringUnchanged": true,
+  "deviationsFromPlan": [],
+  "observed": {
+    "newTestsPreFix": "2 fail, 2 pass — queued roots LEGION-11/LEGION-12 reported as zero-owner-tree; launch-failed root reported as zero-owner-tree then launch-failed (exactly the plan's Step 2 prediction)",
+    "newTestsPostFix": "4 pass, 0 fail",
+    "resyncTestFile": "36 pass, 0 fail (baseline 32 + 4)",
+    "daemonPackageSuite": "815 pass, 0 fail, 5 skip across 53 files; neither known flake (--check-config, reconnectRoots deadline) appeared",
+    "tsc": "exit 0 (noUnusedLocals: proves hasActiveTree had no other caller)",
+    "biome": "exit 0 on both changed files, no fixes applied",
+    "rigLoad": "lighter than at plan time: resync.test.ts 0.4 s wall, daemon suite 30 s wall, jj commands 2-45 s"
+  },
+  "testerNotes": [
+    "Task 2 (live proof) is yours: run /tmp/legion14-live/run-resync.ts (verbatim in the plan doc; cwd MUST be packages/daemon) over /tmp copies of $LEGION_STATE_DIR/state.json.v22.bak and state.json, pre-fix module via `jj file show -r mspqmpzy- packages/daemon/src/daemon/resync.ts` (i.e. commit cddc7a0b) with the plan's sed import rewrite, fixed module from the workspace. Never load a $LEGION_STATE_DIR path directly; never restart the daemon.",
+    "Run bun test as `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test` (pane env carries DISPATCH_URL without DISPATCH_TOKEN; see docs/solutions/legion/worker-pane-shell-gotchas.md §2).",
+    "LEGION-12 rig bug is live in this pane and will be in yours: the extension stacks N `export LEGION_GRANT=` blocks per bash call (N grew 1 -> 4 in this session) and only the first redeems. Source the export-shadowing function from docs/solutions/legion/worker-pane-shell-gotchas.md §1 (a copy is at /tmp/legion14-grant-trap.sh) once, and end every command with `; grant_release`. Grants expire 60 s after mint: put the grant-consuming command (legion gh, jj git push, legion handoff complete) FIRST in the call — a `jj bookmark set` taking 40 s before a push made the push's first credential attempt 403 even with the right grant.",
+    "The daemon at /home/ubuntu/legion-ws-RunDaemon restarted three times during this phase (pids 639483 -> 1737586 -> 1777135 -> 2598100) and was fully down 05:12-05:29Z. While its API is down every bash call is blocked with `Unable to connect` (the hook cannot mint a grant); use eval to probe 127.0.0.1:13370, or a hub-supervised port watcher, and wait. Not caused by this change: the daemon runs main's code, not this branch. `legion handoff write` needs no daemon; this handoff was written during the outage through a subprocess carrying the pane's exact env (omp process env + this session's omp-attribution overlay in JJ_CONFIG).",
+    "PR body Verification section: CI line filled (Tests run 34674989204, all four jobs success at 8fec55b322e8; no pr-checks-result job exists in this repository). E2E and Negative control lines are yours; keep the rest of the body current rather than replacing it."
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T05:31:01.202Z"
+}
