@@ -10,7 +10,7 @@ import { type IssueKey, roleToken } from "@legion/contracts";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { type LegionState, newLegionState } from "../legion-state";
 import { startWorkerStreamListener, type WorkerStreamListener } from "../worker-stream-listener";
-import { fakeDispatchClient } from "./ci-fixtures";
+import { fakeDispatchClient, waitFor } from "./ci-fixtures";
 
 const CLI_ENTRYPOINT = path.join(import.meta.dir, "..", "..", "cli", "index.ts");
 const FAKE_OMP = path.join(
@@ -87,17 +87,6 @@ async function tokenFile(contents: string): Promise<string> {
   return file;
 }
 
-/** Polls `predicate` every 10 ms for up to 10 s (a fresh `bun` CLI child takes a moment to boot).
- * Real processes and sockets cannot be driven by fake timers, so this awaits the observable
- * condition itself rather than a guessed duration. */
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 1000; attempt += 1) {
-    if (predicate()) return;
-    await Bun.sleep(10);
-  }
-  throw new Error("condition never became true");
-}
-
 function spawnShim(args: string[]): {
   proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   stdout(): Promise<string>;
@@ -172,7 +161,8 @@ describe("worker stream end to end (real CLI shim, real API, real listener)", ()
       "--boot-token-file",
       file,
     ]);
-    await waitFor(() => logs.length >= 2); // at least the first dial and its 200 ms retry
+    // 10 s: a fresh `bun` CLI child takes a moment to boot before its first dial.
+    await waitFor(() => logs.length >= 2, 10_000); // at least the first dial and its 200 ms retry
     expect(new Set(logs)).toEqual(new Set(["worker-stream: rejected hello (unknown boot token)"]));
     expect(listener.registrations.size).toBe(0);
     shim.proc.kill();

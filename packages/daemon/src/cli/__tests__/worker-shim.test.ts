@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { IssueKey } from "@legion/contracts";
+import { waitFor } from "../../daemon/__tests__/ci-fixtures";
 import type { ResolvedWorkerClaim } from "../../daemon/api/auth";
 import type { WorkerRoleClaim } from "../../daemon/legion-state";
 import { connectWorkerRpc } from "../../daemon/worker-rpc";
@@ -36,16 +37,6 @@ async function waitForSocket(target: string): Promise<void> {
     await Bun.sleep(10);
   }
   throw new Error(`worker-shim socket never appeared at ${target}`);
-}
-
-/** Polls `predicate` every 10 ms for up to 5 s. Real-socket I/O cannot be driven by fake timers,
- * so this awaits the observable condition itself rather than a guessed duration. */
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    if (predicate()) return;
-    await Bun.sleep(10);
-  }
-  throw new Error("condition never became true");
 }
 
 /** The daemon side reduced to the wire contract: accepts, expects `hello` with `tok-1`, answers

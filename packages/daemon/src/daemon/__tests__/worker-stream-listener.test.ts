@@ -7,6 +7,7 @@ import {
   type WorkerStreamListener,
   type WorkerStreamListenerOptions,
 } from "../worker-stream-listener";
+import { waitFor } from "./ci-fixtures";
 
 const CLAIM_TOKEN = "legion-acme-LEGION-1-tester";
 const claim: WorkerRoleClaim = { issue: "LEGION-1" as IssueKey, role: "tester", generation: 2 };
@@ -83,16 +84,6 @@ async function dial(port: number) {
 }
 
 const hello = (bootToken: string) => `${JSON.stringify({ type: "hello", bootToken })}\n`;
-
-/** Polls `predicate` every 10 ms for up to 5 s. Real-socket I/O cannot be driven by fake timers,
- * so this awaits the observable condition itself rather than a guessed duration. */
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    if (predicate()) return;
-    await Bun.sleep(10);
-  }
-  throw new Error("condition never became true");
-}
 
 describe("WorkerStreamListener", () => {
   it("acks a hello whose token resolves, registers the stream, and speaks RPC over it — including bytes that followed the hello in the same write", async () => {
