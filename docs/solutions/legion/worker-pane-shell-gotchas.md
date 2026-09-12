@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports and their 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, and a pane OMP_SESSION_ID that is not yours"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12) and the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, and a pane OMP_SESSION_ID that is not yours"
 category: legion
 tags:
   - legion
@@ -21,6 +21,8 @@ related_issues:
   - "LEGION-18"
   - "sjawhar/legion#953"
   - "LEGION-12"
+  - "sjawhar/legion#974"
+  - "LEGION-16"
   - "LEGION-14"
   - "sjawhar/legion#952"
   - "LEGION-29"
@@ -28,7 +30,8 @@ related_issues:
   - "LEGION-13"
   - "sjawhar/legion#978"
 symptoms:
-  - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
+  - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.12.0, before the one that carries LEGION-12)"
+  - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
   - "the same 403 on the FIRST grant of a call, after a slow jj command ran ahead of the push"
   - "bun test from the repository root: hundreds of 'document is not defined' and ECONNREFUSED failures outside the changed package"
   - "Refusing to move bookmark backwards or sideways: legion/<KEY> after jj split"
@@ -45,103 +48,82 @@ symptoms:
 # Worker-Pane Shell Gotchas
 
 Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1 and 3 are from
-LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 and the §1 alternative are
-from LEGION-22; 7–8 and the §1 per-call workaround are from LEGION-18; the 60-second grant lifetime in §1, the
-`packages/daemon` note in §2, and §9 are from LEGION-14, whose four workers hit §1–§3 again; the §1 attribution
-finding and the `packages/pi-envoy` note in §2 are from LEGION-29; the §2 environment-argument paragraph is from
-LEGION-13 (sjawhar/legion#978). None was part of the scope of the issue whose workers hit it; §1 is filed as LEGION-12
-(a rig bug in the pi-envoy extension's tool-call hook), §7 as LEGION-29, and §2's check-config leak was fixed by
-LEGION-13. Until the rest are fixed, these are the workarounds.
+LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 are from LEGION-22; 7–8 are
+from LEGION-18; the 60-second grant lifetime in §1, the `packages/daemon` note in §2, and §9 are from LEGION-14, whose
+four workers hit §1–§3 again; the `packages/pi-envoy` note in §2 and the independent confirmation of §1's cause are
+from LEGION-29; the §2 environment-argument paragraph and §10 are from LEGION-13 (sjawhar/legion#978). None was part of
+the scope of the issue whose workers hit it. Section 1's cause was found and fixed by LEGION-12 (pull request #974): its
+workarounds are recorded only so a worker still running the old plugin recognizes them, and must not be used on the
+fixed one. §2's check-config leak was fixed by LEGION-13. §7 is filed as LEGION-29; until it is fixed, that section is
+the workaround.
 
-## 1. Stacked `export LEGION_GRANT=…` lines: only the first per call redeems
+## 1. Credential lines multiplying in a bash call: the model was copying its own transcript (fixed in LEGION-12)
 
-The pi-envoy `legion.ts` tool-call hook prepends `export LEGION_GRANT='<uuid>'` (plus `unset GH_TOKEN …`,
-`GH_CONFIG_DIR`, `PATH`) to every bash call. The number of prepended blocks grows over a session — observed 1 → 10 in
-one implementer session. Only the **first** grant of each call redeems; the rest 403 (`Unable to redeem LEGION_GRANT
-(403)`). Since the last `export` wins, `jj git push` (credential helper), `legion gh`, and `legion handoff complete`
-fail once N > 1.
+**What was seen.** The Legion extension for Oh My Pi (`packages/pi-envoy/extensions/legion.ts`) attaches a one-time
+credential to every bash call a phase worker makes: it mints a grant from the daemon and, until the release that
+carries LEGION-12 (every `@sjawhar/pi-legion-envoy` version through 1.12.0), put it at the top of the command as shell
+text — an `export` line setting `LEGION_GRANT`, three `unset` lines, the isolated `GH_CONFIG_DIR`, and a `PATH` with
+the worker's `gh` shim first. Over a session the number of such blocks at the top of one call grew (1 → 10 in one
+LEGION-9 implementer session; 2–4 per call on LEGION-29). Only the **first** block's grant ever redeemed; every later
+one answered `Unable to redeem LEGION_GRANT (403)`. Because the last `export` wins in a shell, `jj git push` (through
+the credential helper), `legion gh`, and `legion handoff complete` failed whenever a later block existed.
 
-A `trap … DEBUG` in the persistent shell does **not** observe the injected lines, so it cannot capture the first
-grant. A shell function shadowing `export` does. Source this once per session (kept at `/tmp/legion9-grant-trap.sh`
-on the rig; recreate it if gone):
+**What was actually happening.** The hook never multiplied. Oh My Pi writes a hook's revised tool input back into
+the assistant message (`prepareToolCallDispatch` in the agent loop), so the credential block appeared in the
+transcript as text the model itself had written. On later calls the model read its own transcript and copied the
+block into new commands with made-up or stale ids — a literal `'...'` placeholder, a counting pattern like
+`1f2e3d4c-5b6a-…`, or a verbatim copy of an earlier call's id. The hook's block was always first and always real;
+the imitations followed it; the shell's last `export` won; `legion …` ran under an id the daemon had never minted.
+The count grew as the context filled with more examples. Measured on the LEGION-12 rig with a stand-in daemon:
+one hook invocation and one grant mint per bash call, every time, while the blocks in the command text climbed
+1,2,1,2,2,2,3,3,4,… (see `packages/pi-envoy/scripts/grant-rig/`). LEGION-29's implementer and tester reached the same
+conclusion independently: they probed each block's id against the daemon, every block after the first was one the
+daemon had never issued, and the same command sent once through eval's `tool.bash` redeemed first time. The LEGION-16
+controller transcript (an interactive terminal session, no `task` spawns) is a third case: its third bash call already
+carried a `'...'` placeholder block in a single-line form the hook never wrote. Once the controller owns the merge
+queue, this failure mode breaks `legion gh -- pr merge` intermittently, not only worker pushes and phase reports.
 
-```bash
-export() {
-  case "$1" in
-    LEGION_GRANT=*)
-      if [ -z "${_legion_grant_lock:-}" ]; then
-        _legion_grant_lock=1; _legion_grant_n=1
-        LEGION_GRANT="${1#LEGION_GRANT=}"; builtin export LEGION_GRANT
-      else
-        _legion_grant_n=$((_legion_grant_n + 1))
-      fi ;;
-    *) builtin export "$@" ;;
-  esac
-}
-grant_release() {
-  echo "[grants this call: ${_legion_grant_n:-0}; used ${LEGION_GRANT:0:8}]"
-  unset _legion_grant_lock; _legion_grant_n=0
-}
-```
+**How to tell a stale id from an unminted one.** A grant lives 60 seconds and redeems any number of times inside
+that window (`GRANT_TTL_MS` in `packages/daemon/src/daemon/api.ts`; `resolveGrant` in `api/auth.ts` checks
+existence and expiry, nothing else). So a 403 within seconds of the call means the id was never minted — imitation,
+not expiry.
 
-End every command body with `; grant_release` so the next call's first grant is accepted. Verify a grant without
-side effects: `printf 'protocol=https\nhost=github.com\n' | LEGION_GRANT=<g> legion credential get` — a
-`username=…` line is good, `403` is stale.
+**The 60-second lifetime is a separate gotcha, and it stays live after the fix.** The hook mints the grant when the
+bash call starts, before your command runs, and it expires 60 seconds later whichever way it is delivered. A slow
+command ahead of the one that redeems it burns the lifetime: on LEGION-14, `jj bookmark set … && jj git push …` in one
+call, with the `bookmark set` taking about forty seconds on a loaded box, made the push's first credential-helper call
+return the same `Unable to redeem LEGION_GRANT (403)` with a perfectly good grant. (That particular push still landed
+on a later helper call; do not count on it.) Put the command that redeems the grant — `legion gh`, `jj git push`,
+`legion handoff complete`, `legion credential` — **first** in its bash call, or alone in one. The recipe in section 3
+puts the bookmark move and the push in the same call; on a loaded box, split them.
 
-**Grants also expire 60 seconds after they are minted** (`GRANT_TTL_MS` in `packages/daemon/src/daemon/api.ts`), and
-the hook mints them at the start of the bash call, before your command runs. So a slow command ahead of the
-grant-consuming one can burn the whole lifetime: on LEGION-14, `jj bookmark set … && jj git push …` in one call, with
-the `bookmark set` taking about forty seconds on a loaded box, made the push's first credential-helper call return the
-same `Unable to redeem LEGION_GRANT (403)` even though the shadowing function above had correctly kept the first
-grant. (That particular push still landed on a later helper call; do not count on it.) Put the command that redeems
-the grant — `legion gh`, `jj git push`, `legion handoff complete`, `legion credential` — **first** in its bash call, or
-alone in one. The recipe in section 3 below puts the bookmark move and the push in the same call; on a loaded box, split
-them.
+**The fix (pi-envoy 1.8.x — the post-merge task fills in the released version; LEGION-12, pull request #974).** The
+grant now travels in the bash tool's per-command `env` (the `env` argument every Oh My Pi bash call accepts), together
+with the cleared `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, the isolated `GH_CONFIG_DIR`, and the shim-first `PATH`. The
+command text is never touched, so nothing credential-shaped is written back into the transcript for the model to copy.
+The hook's keys are spread last, so even a model that imitates a previous call's `env` object cannot displace the
+grant minted for the current call. Oh My Pi applies that `env` to the one command only; nothing enters the persistent
+shell.
 
-Two observations for whoever fixes the hook: the count is per session, not per tool; and in this shell (bash
-5.2.37), inside a function, `builtin export "$@"` with an expanded `NAME=value` word returned 0 without binding the
-variable — a plain assignment followed by `builtin export NAME` did. Cause not investigated.
+**On a fixed plugin, do not use the old workarounds.** Three were recorded for the old plugin: the `export()` shell
+function that kept only the first credential per call (LEGION-9, kept at `/tmp/legion9-grant-trap.sh` on the rig), the
+`pickgrant` probe that tried every seen grant against the daemon (LEGION-22), and pinning the first block's id inline
+as `LEGION_GRANT=<that-uuid> legion gh -- …` (LEGION-18). On the fixed plugin all three are obsolete: there is no
+credential text left for them to read, and redefining `export` in the persistent shell only obscures later failures.
+Recognize them by their names and delete them. On a pane still running the old plugin, the LEGION-18 form is the
+simplest and needs no shell function: when a call 403s, read the *first* credential line the hook prepended to that
+call and name that id explicitly on the next command — an explicit assignment on the command line outranks every
+prepended `export`, and an unredeemed grant stays valid for its 60 seconds.
 
-**Simpler per-call workaround (LEGION-18):** an injected grant that was never redeemed stays valid for minutes. When
-a call 403s, read the *first* `export LEGION_GRANT='…'` line the tool prepended to that call and name it explicitly on
-the next one — `LEGION_GRANT=<that-uuid> legion gh -- …`, `LEGION_GRANT=<that-uuid> jj -R "$LEGION_WORKSPACE" git push …`,
-`LEGION_GRANT=<that-uuid> legion handoff complete …`. An explicit assignment on the command line outranks every
-prepended `export`. This worked on every retry across three LEGION-18 rounds (pushes, thread replies, thread resolves,
-`pr edit`, `pr checks --watch`, `handoff complete`).
+**One caveat.** A worker session resumed from a transcript recorded before the fix still shows the model its own
+old credential blocks and may keep writing them for a while, and so may a model that re-runs an earlier command
+verbatim from its transcript. Such a line is text the shell executes, so for that one call it overrides the grant the
+hook put in `env`, and `legion …` still 403s — the fix removes the seed, it cannot rewrite what the model already
+sees. Command text starts at `cd -- "$LEGION_WORKSPACE" && …`; never begin it with a credential block. The imitations
+stop once the old examples age out of context; a fresh session never sees one.
 
-**Do not paste the preamble yourself.** The hook prepends its block to whatever command text you send. If your own
-text contains a copy of an earlier call's block (easy when re-running a previous command verbatim), that stale copy
-is the last `export` and wins — the same 403 with only one *injected* grant in sight. Command text starts at
-`cd -- "$LEGION_WORKSPACE" && …`.
-
-**LEGION-29 evidence on where the extra blocks come from.** Its implementer and tester both saw 2–4
-`export LEGION_GRANT='…'` blocks per call and traced every block after the first to the *model's own command text*:
-the assistant re-emits the previous call's injected prelude, and the extra blocks often carry UUIDs that never
-existed on the daemon (a `POST /legion/v1/gh-token` probe of each returned `Invalid or expired grant` for all but
-the first block, which redeemed for its whole 60 s). The same command issued once through eval's `tool.bash`
-redeemed first time. So in that session the hook injected exactly one grant per call and only the replayed copies
-403'd; whether LEGION-9's 1 → 10 growth had the same cause is not established by either record. The per-call
-workaround above (pin the first block's uuid inline) covers both cases.
-
-**Alternative (LEGION-22): probe the grants instead of locking on the first.** Grants are reusable for their whole
-60 s TTL (`GRANT_TTL_MS` in `api.ts`; `resolveGrant` checks expiry only), so a shell can record every grant the hook
-injected and, right before a credentialed command, keep the first one the daemon accepts:
-
-```bash
-export() { case "$1" in LEGION_GRANT=*) LEGION_GRANTS_SEEN="${LEGION_GRANTS_SEEN:+$LEGION_GRANTS_SEEN }${1#LEGION_GRANT=}";; esac; builtin export "$@"; }
-pickgrant() {
-  local g
-  for g in ${LEGION_GRANTS_SEEN:-}; do
-    if LEGION_GRANT="$g" legion gh -- api rate_limit >/dev/null 2>&1; then builtin export LEGION_GRANT="$g"; unset LEGION_GRANTS_SEEN; return 0; fi
-  done
-  unset LEGION_GRANTS_SEEN; return 1
-}
-```
-
-Define both once (the persistent shell can be reset between rounds — if `type -t pickgrant` prints nothing, define them
-again), then `pickgrant && jj git push …` / `pickgrant && legion gh -- …` / `pickgrant && legion handoff complete …`.
-It needs no `grant_release` bookkeeping and self-heals if a later grant is the live one. Observed 1 → 10 stacked
-blocks over one implementer session; the first block redeemed every time.
+**Verify a grant without side effects** (still true): `printf 'protocol=https\nhost=github.com\n' | legion credential get`
+inside the same bash call — a `username=…` line is good, `403` is stale.
 
 ## 2. `bun test` in a pane: inject the env the code reads, and run it from `packages/daemon`
 
@@ -262,7 +244,7 @@ need the per-call `LEGION_GRANT` the bash hook injects — so queue those until 
 
 ## 9. While the daemon's API is down, every bash tool call fails before your command runs
 
-Section 8's symptom has a specific cause worth knowing: the same tool-call hook that prepends the grant (section 1)
+Section 8's symptom has a specific cause worth knowing: the same tool-call hook that attaches the grant to each bash call (section 1)
 must mint it from the daemon at `LEGION_DAEMON_URL` (`http://127.0.0.1:13370` on this rig) before the bash command
 starts. If the daemon is restarting — it did three times during LEGION-14's implement phase, unrelated to the branch
 under work, and was fully down for seventeen minutes — the hook fails and the tool returns `Unable to connect. Is the
