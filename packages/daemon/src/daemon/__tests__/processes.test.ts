@@ -33,7 +33,7 @@ import { runResync } from "../resync";
 import type { Locator, TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { fakeDispatchClient } from "./ci-fixtures";
-import { fakeWorkerRpcClient } from "./fake-runtime";
+import { FakeRuntime, fakeWorkerRpcClient } from "./fake-runtime";
 
 const root = "LEGION-42";
 const child = "LEGION-43";
@@ -296,19 +296,22 @@ function manager(
   // Mirrors index.ts: the private server and the secret-file project come from the fixture's
   // `state.project`, never a constant — the live-tmux tests below give each run its own project
   // and drive `tmux -L legion-<project>` themselves, so a hardcoded socket would spawn onto a
-  // server those tests never look at (and leak it).
-  const runtime = new TmuxRuntime({
-    tmux: { run: deps.run, socket: `legion-${state.project}` },
-    project: state.project,
-    stateDir: deps.config.stateDir,
-    connectWorkerRpc: connectWorkerRpc ?? (async () => fakeWorkerRpcClient()),
-    workerRpcTimeoutMs: () => deps.config.workerRpcTimeoutSeconds * 1000,
-    now: deps.now,
-    sleep: deps.sleep,
-    readProcessCmdline: readProcessCmdline ?? (async () => "omp\0"),
-    issueLocators: (issue) => locatorsForIssue(state, issue),
-    persist: deps.saveState,
-  });
+  // server those tests never look at (and leak it). A test that injects its own `runtime`
+  // (the FakeRuntime lifecycle case) gets exactly that runtime and no tmux at all.
+  const runtime =
+    options.runtime ??
+    new TmuxRuntime({
+      tmux: { run: deps.run, socket: `legion-${state.project}` },
+      project: state.project,
+      stateDir: deps.config.stateDir,
+      connectWorkerRpc: connectWorkerRpc ?? (async () => fakeWorkerRpcClient()),
+      workerRpcTimeoutMs: () => deps.config.workerRpcTimeoutSeconds * 1000,
+      now: deps.now,
+      sleep: deps.sleep,
+      readProcessCmdline: readProcessCmdline ?? (async () => "omp\0"),
+      issueLocators: (issue) => locatorsForIssue(state, issue),
+      persist: deps.saveState,
+    });
   const processManager = new ProcessManager({ ...deps, runtime });
   liveManagers.push(processManager);
   // Every existing test exercises worker-queue promotion as already "booted" (index.ts calls
@@ -5577,6 +5580,65 @@ describe("ProcessManager", () => {
       }
     }
   );
+
+  it("runs a root's whole lifecycle over a non-tmux Runtime: spawn, probe alive, close, reconcile", async () => {
+    // The behavioural half of the runtime-agnostic gate: `ProcessManager` driven end to end by
+    // `FakeRuntime`, whose locators are the kubernetes union member — nothing tmux-shaped exists
+    // anywhere in this test, so any manager path that still assumed a pane would fail here.
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.admission.active.push(root);
+    const runtime = new FakeRuntime();
+    const commands: string[][] = [];
+    // No injected `sleep`: the manager's root-registration deadline must stay a real (long)
+    // timer here, or it would fire at once and retire this never-confirmed root before the
+    // assertions below — `dispose()` (afterEach) cancels it.
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      runtime,
+      run: async (command) => {
+        commands.push(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    const locator = state.trees[root]?.locator;
+    expect(locator?.runtime).toBe("kubernetes");
+    expect(runtime.spawned.map((spawn) => [spawn.kind, spawn.spec.role, spawn.spec.issue])).toEqual(
+      [["root", "architect", root]]
+    );
+    expect(runtime.spawned[0]?.spec.secrets).toEqual({ LEGION_BOOT_TOKEN: "boot-token" });
+    expect(runtime.spawned[0]?.spec.env).toMatchObject({
+      LEGION_TREE: root,
+      LEGION_ROLE: "architect",
+      LEGION_DAEMON_URL: "http://127.0.0.1:13999",
+    });
+    expect(await processes.probe(root)).toBe("alive");
+    // What a real root's `/process/ready` does; the graceful close below then finds a confirmed,
+    // reachable process rather than one whose shim never connected.
+    processes.confirmRootReady(root, 1);
+    expect(state.trees[root]).toMatchObject({ status: "active", launchFailures: 0 });
+
+    await processes.closeTree(root);
+
+    // The root was stopped through the runtime (gracefully: `probe` said alive, so no
+    // skipGraceful), its record cleared, and the tree closed.
+    expect(runtime.stopped.map((stop) => [stop.locator, stop.options?.skipGraceful])).toEqual([
+      [locator, false],
+    ]);
+    expect((await runtime.probe(locator as Locator)).status).toBe("dead");
+    expect(state.trees[root]?.status).toBe("closed");
+    expect(state.trees[root]?.locator).toBeUndefined();
+
+    // Nothing recorded, nothing known: the sweep hands the runtime an empty handle set.
+    await processes.reconcileOrphans(0);
+    expect(runtime.reconciled).toEqual([{ known: new Set(), graceMs: 0 }]);
+    // And the manager never issued a tmux command of its own.
+    expect(commands.filter((command) => command[0] === "tmux")).toEqual([]);
+  });
 
   it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
     const stateDir = await temporaryDir();

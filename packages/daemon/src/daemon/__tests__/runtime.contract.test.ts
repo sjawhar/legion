@@ -760,6 +760,27 @@ describe("ProcessManager stays runtime-agnostic", () => {
       /from "\.\/tmux"|writeSecretFile|connectWorkerRpc|readProcessCmdline/
     );
   });
+
+  it("processes.ts reads no runtime-specific locator field or type", () => {
+    expect(source).not.toMatch(
+      /tmuxPaneId|tmuxWindowId|tmuxSession|socketPath|podName|podUid|TmuxLocator|K8sLocator|runtime-tmux/
+    );
+  });
+
+  it("ProcessManager's members carry no tmux vocabulary", () => {
+    // Identifiers only — class members (`private ... name`, `name(`), locals (`const|let name`),
+    // and `ProcessManagerDeps` fields — never comments or string handles a runtime hands back.
+    const identifiers = new Set<string>();
+    for (const match of source.matchAll(
+      /^\s*(?:private |protected |readonly |async |static |get )*([A-Za-z_$][\w$]*)\s*[(:=?]/gm
+    )) {
+      identifiers.add(match[1] as string);
+    }
+    for (const match of source.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)/g)) {
+      identifiers.add(match[1] as string);
+    }
+    expect([...identifiers].filter((name) => /pane|window/i.test(name))).toEqual([]);
+  });
 });
 
 describe("runtime helpers", () => {
