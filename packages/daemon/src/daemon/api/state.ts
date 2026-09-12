@@ -63,7 +63,11 @@ export function buildLegionStateResponse(state: LegionState): DaemonStateRespons
 
   const gates: DaemonStateResponse["gates"] = {};
   for (const [key, gate] of Object.entries(state.gates)) {
-    gates[key] = { designAskId: gate.designAskId, designApproved: gate.designApproved };
+    gates[key] = {
+      artifactId: gate.artifactId,
+      latestVersion: gate.latestVersion,
+      ...(gate.approvedVersion === undefined ? {} : { approvedVersion: gate.approvedVersion }),
+    };
   }
 
   const roles: DaemonStateResponse["roles"] = {};

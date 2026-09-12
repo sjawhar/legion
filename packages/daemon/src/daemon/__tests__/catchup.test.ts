@@ -96,14 +96,15 @@ describe("derived catch-up", () => {
   it("derives an overseer snapshot from tree state", async () => {
     const { state, root, child } = stateForTree();
     state.prs["acme/widgets#7"] = prState(root);
-    state.gates[root] = { designAskId: "ask-root" };
-    state.gates[child] = { designAskId: "ask-child", designApproved: "ask-child" };
+    // Approved at 2 but edited since (latest 3): the snapshot must say closed, not just echo fields.
+    state.gates[root] = { artifactId: "art-root", latestVersion: 3, approvedVersion: 2 };
+    state.gates[child] = { artifactId: "art-child", latestVersion: 2, approvedVersion: 2 };
 
     expect(await overseerCatchup(state, root)).toEqual({
       type: "catchup-overseer",
       gates: {
-        [root]: { designAskId: "ask-root" },
-        [child]: { designAskId: "ask-child", designApproved: "ask-child" },
+        [root]: { artifactId: "art-root", latestVersion: 3, approvedVersion: 2, open: false },
+        [child]: { artifactId: "art-child", latestVersion: 2, approvedVersion: 2, open: true },
       },
       childCounts: {
         [root]: { total: 1, open: 0, closed: 1 },

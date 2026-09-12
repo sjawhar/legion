@@ -1,5 +1,10 @@
 import type { IssueDetails, IssueKey, IssueSummary } from "@legion/contracts";
-import type { IssueStatus, LegionState, PendingStatusWrite } from "./legion-state";
+import type {
+  IssueStatus,
+  LegionState,
+  PendingStatusWrite,
+  SpecArtifactResolver,
+} from "./legion-state";
 
 /** A non-2xx response from the Dispatch HTTP API: `status` is the HTTP status code, `message` is
  * the server's `error` field (or its raw body when the response is not the expected JSON shape). */
@@ -110,6 +115,25 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
         actor,
       });
     },
+  };
+}
+
+/** The one Dispatch read outside resync: `migrateV23State`'s resolver for a v23 design gate. Reads
+ * the issue once and returns its primary artifact's id (the spec document) with the highest
+ * version number that artifact carries. Throws naming the issue when the primary artifact is
+ * missing from the issue's `artifacts` or has no versions — the caller refuses to start on it. */
+export function specArtifactResolver(client: DispatchClient): SpecArtifactResolver {
+  return async (issue) => {
+    const details = await client.getIssue(issue);
+    const spec = details.artifacts.find((artifact) => artifact.id === details.primary_artifact_id);
+    if (!spec) {
+      throw new Error(`${issue} has no primary artifact ${details.primary_artifact_id}`);
+    }
+    const latestVersion = Math.max(...spec.versions.map((version) => version.number));
+    if (!Number.isSafeInteger(latestVersion) || latestVersion <= 0) {
+      throw new Error(`${issue}'s spec document ${spec.id} has no versions`);
+    }
+    return { artifactId: spec.id, latestVersion };
   };
 }
 

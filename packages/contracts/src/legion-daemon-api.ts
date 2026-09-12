@@ -56,9 +56,13 @@ const stateTree = z.strictObject({
   readyConfirmedAt: z.number().optional(),
   locator: stateTreeLocator.optional(),
 });
+// The design gate as the daemon records it: the root spec document (`artifactId`) with the
+// highest version the daemon has seen and, once a human approves, the version they approved.
+// The gate is open exactly when `approvedVersion === latestVersion` (see `designGateOpen`).
 const stateGate = z.strictObject({
-  designAskId: nonEmptyString.optional(),
-  designApproved: nonEmptyString.optional(),
+  artifactId: nonEmptyString,
+  latestVersion: z.number().int().positive(),
+  approvedVersion: z.number().int().positive().optional(),
 });
 // `role` matches `RoleClaim.role`'s own persisted type (a plain non-empty string, not the
 // stricter `legionRole` enum request schemas use): a stored claim's role always belongs to
@@ -215,7 +219,14 @@ export const LegionDaemonApi = {
     response: z.object({}),
   },
   GatesRegister: {
-    request: architectCapability.extend({ issue: nonEmptyString, askId: nonEmptyString }),
+    // `artifactId` and `version` are the `artifact` and `version` values from
+    // `dispatch_request_approval`'s result: the document a human must approve, at the version the
+    // architect requested approval of.
+    request: architectCapability.extend({
+      issue: nonEmptyString,
+      artifactId: nonEmptyString,
+      version: z.number().int().positive(),
+    }),
     response: z.object({}),
   },
   Grant: {

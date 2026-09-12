@@ -2,6 +2,8 @@ import { type IssueKey, isLegionRole, type LegionRole, roleToken } from "@legion
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { DispatchIssueEvent } from "./dispatch-events";
 import {
+  type DesignGate,
+  designGateOpen,
   ISSUE_STATUSES,
   type IssueNode,
   type IssueStatus,
@@ -956,23 +958,34 @@ function reduceChildStatus(state: LegionState, event: DispatchIssueEvent): Effec
   );
 }
 
-/** Approves the design gate. Idempotent independent of the outer seq fence: once
- * `gates[key].designApproved` is set, this is a no-op regardless of `event.seq` — a later,
- * unrelated ask (or an ask reply thread growing after approval) on the same issue would still
- * pass the per-issue seq fence, so the approval itself needs its own guard against re-emitting
- * `design-approved` a second time. */
-function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effect[] {
-  if (!state.issues[event.key]) return [];
-  const raw = asRecord(event.payload);
-  const askId = stringValue(raw?.id);
-  const answer = asRecord(raw?.answer);
-  const selected = Array.isArray(answer?.selected)
-    ? answer.selected.filter((value): value is string => typeof value === "string")
-    : [];
+/** The design gate an artifact event addresses: `state.gates[event.key]` only when the issue node
+ * exists (a schema-valid but dangling gate record is never mutated or routed) and the gate names
+ * the event's document — a review of any other document on the issue changes no gate. */
+function gateFor(
+  state: LegionState,
+  event: DispatchIssueEvent,
+  artifactId: string | undefined
+): DesignGate | undefined {
+  if (!state.issues[event.key] || artifactId === undefined) return undefined;
   const gate = state.gates[event.key];
-  if (!askId || !gate || gate.designApproved !== undefined) return [];
-  if (gate.designAskId !== askId || !selected.includes("Approve")) return [];
-  gate.designApproved = askId;
+  return gate && gate.artifactId === artifactId ? gate : undefined;
+}
+
+/** A human approved the root's spec document at `payload.version` (the contract's
+ * `ArtifactReviewEventPayload`). Records that version and, only when it is the document's current
+ * version (`designGateOpen`), wakes the architect with `design-approved` in the shape it has
+ * always had. An approval below `latestVersion` is recorded and emits nothing: the gate stays
+ * closed until the current version is approved. Idempotent independent of the outer seq fence:
+ * an approval already recorded at this same version is a no-op, so a redelivered
+ * `artifact.approved` at a newer seq can never re-emit the wake. */
+function reduceArtifactApproved(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  const raw = asRecord(event.payload);
+  const gate = gateFor(state, event, stringValue(raw?.artifact_id));
+  const version = raw?.version;
+  if (!gate || typeof version !== "number" || gate.approvedVersion === version) return [];
+  gate.approvedVersion = version;
+  gate.latestVersion = Math.max(gate.latestVersion, version);
+  if (!designGateOpen(gate)) return [];
   return routeActive(
     state,
     event.key,
@@ -981,14 +994,55 @@ function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effec
   );
 }
 
+/** A human requested changes on the root's spec document (`ArtifactReviewEventPayload` with
+ * `reason` set — the decoder rejects one without it). Retracts any recorded approval — a
+ * changes-requested review is the contract's only way to retract one — and wakes the architect
+ * with the reviewer's reason (and login, when the payload's `actor` carries one). */
+function reduceArtifactChangesRequested(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  const raw = asRecord(event.payload);
+  const gate = gateFor(state, event, stringValue(raw?.artifact_id));
+  const version = raw?.version;
+  const reason = stringValue(raw?.reason);
+  if (!gate || typeof version !== "number" || reason === undefined) return [];
+  delete gate.approvedVersion;
+  gate.latestVersion = Math.max(gate.latestVersion, version);
+  const author = stringValue(asRecord(raw?.actor)?.id);
+  return routeActive(
+    state,
+    event.key,
+    {
+      type: "design-changes-requested",
+      version,
+      reason,
+      ...(author === undefined ? {} : { author }),
+    },
+    dispatchEnvelope(event.eventId)
+  );
+}
+
+/** The root's spec document gained a version (`ArtifactVersionEventPayload`; named or unnamed —
+ * the contract's staleness compares version numbers only). Raises `latestVersion` and emits
+ * nothing: a spec edited after approval closes the gate silently (the architect made the edit, or
+ * Dispatch already delivered this event to its session), and the next approval at the new version
+ * reopens it. */
+function reduceArtifactVersion(state: LegionState, event: DispatchIssueEvent): Effect[] {
+  const raw = asRecord(event.payload);
+  const gate = gateFor(state, event, stringValue(raw?.artifact_id));
+  const number = asRecord(raw?.version)?.number;
+  if (!gate || typeof number !== "number") return [];
+  gate.latestVersion = Math.max(gate.latestVersion, number);
+  return [];
+}
+
 /**
  * The Dispatch counterpart to `reduceGithubEvent`: derives Legion's issue lifecycle (triage
  * through done), child-tree wakes, and the design gate from native Dispatch issue events —
- * `issue.created`/`issue.updated`/`issue.closed`/`child.status`/`ask.answered`. Every other event
- * type (comments, artifacts, messages) is already delivered to the right role/session by
- * Dispatch's own routing (see the design's "Intake and events" section) and produces no effect
- * here. `config` is accepted for signature parity with `reduceGithubEvent`; no Dispatch event
- * currently needs it.
+ * `issue.created`/`issue.updated`/`issue.closed`/`child.status` and, for the gate,
+ * `artifact.approved`/`artifact.changes_requested`/`artifact.version`. Every other event type
+ * (comments, asks, messages) is already delivered to the right role/session by Dispatch's own
+ * routing (see the design's "Intake and events" section) and produces no effect here; in
+ * particular `ask.answered` no longer touches the gate. `config` is accepted for signature parity
+ * with `reduceGithubEvent`; no Dispatch event currently needs it.
  *
  * At-most-once per (issue, seq): before dispatching to a sub-reducer, an event whose `seq` is not
  * strictly newer than `state.issues[event.key].lastAppliedSeq` is dropped outright — no mutation,
@@ -997,9 +1051,10 @@ function reduceAskAnswered(state: LegionState, event: DispatchIssueEvent): Effec
  * After a recognized sub-reducer runs (whether or not it produced an effect — a no-op redelivered
  * again must stay a no-op), `lastAppliedSeq` is stamped to `event.seq` on `state.issues[event.key]`
  * if that node exists. Unknown additive event types return before this stamp: they have no Legion
- * state meaning and are acknowledged without mutation. `child.status`/`ask.answered` against a key
- * this daemon has no node for skip the stamp because their reducers begin with an explicit node
- * existence guard, so a schema-valid but dangling gate or tree record cannot be mutated or routed.
+ * state meaning and are acknowledged without mutation. `child.status` and the artifact events
+ * against a key this daemon has no node for skip the stamp because their reducers begin with an
+ * explicit node existence guard, so a schema-valid but dangling gate or tree record cannot be
+ * mutated or routed.
  */
 export function reduceDispatchEvent(
   state: LegionState,
@@ -1023,8 +1078,14 @@ export function reduceDispatchEvent(
     case "child.status":
       effects = reduceChildStatus(state, event);
       break;
-    case "ask.answered":
-      effects = reduceAskAnswered(state, event);
+    case "artifact.approved":
+      effects = reduceArtifactApproved(state, event);
+      break;
+    case "artifact.changes_requested":
+      effects = reduceArtifactChangesRequested(state, event);
+      break;
+    case "artifact.version":
+      effects = reduceArtifactVersion(state, event);
       break;
     default:
       return [];

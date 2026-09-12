@@ -1,6 +1,11 @@
 import { type IssueKey, LegionDaemonApi, roleTopic } from "@legion/contracts";
-import { type DispatchClient, DispatchHttpError, writeStatus } from "../../dispatch-client";
-import type { IssueStatus, LegionState } from "../../legion-state";
+import { writeStatus } from "../../dispatch-client";
+import {
+  type DesignGate,
+  designGateOpen,
+  type IssueStatus,
+  type LegionState,
+} from "../../legion-state";
 import { type EnvelopeJson, routeActive } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import {
@@ -11,17 +16,6 @@ import {
   requiredString,
   validateContractResponse,
 } from "../http";
-
-/** The `designApproved` marker a gate carries when the deployment's design gate is `off`: the
- * daemon, not a human, satisfied it. Distinguishable from an ask id in state dumps and tests. */
-export const GATE_OFF_APPROVAL = "gate-off";
-
-/** The resolution a gate-off ask carries on Dispatch: what the dashboard shows in place of an
- * answer, written for the human who would otherwise have been asked. */
-export const GATE_OFF_ASK_REASON =
-  "The design gate is off for this deployment (gates.design: off): the Legion daemon approved it " +
-  "when the architect registered it, so no human answer is needed. Closed by the daemon so it does " +
-  "not wait in anyone's inbox.";
 
 /** `routeActive` takes the triggering envelope only to keep one signature with the reducers; the
  * gate-off wake has no Dispatch event behind it. */
@@ -72,11 +66,12 @@ export async function handleIssueStatus(
 }
 
 /** Publishes the `design-approved` wake for a gate the daemon satisfied itself (`gates.design:
- * off`), to exactly the role the reducer's `ask.answered` path would have chosen (`routeActive`:
- * the issue's active phase worker if any, else its tree's architect). Best-effort: the state
- * already carries the approval, so a resumed architect's catch-up shows it; a 404 no-holder is
- * silent, anything else is logged. */
-async function publishDesignApproved(
+ * off`), to exactly the role the reducer's `artifact.approved` path would have chosen
+ * (`routeActive`: the issue's active phase worker if any, else its tree's architect).
+ * Best-effort: the state already carries the approval, so a resumed architect's catch-up shows
+ * it; a 404 no-holder is silent, anything else is logged. Shared by the register route and the
+ * boot fixup. */
+export async function publishDesignApproved(
   state: LegionState,
   issue: IssueKey,
   envoyPublish: (topic: string, payloadJson: string) => Promise<void>
@@ -95,51 +90,19 @@ async function publishDesignApproved(
   }
 }
 
-/** Closes the architect's design-gate ask on Dispatch once the daemon has satisfied the gate, so a
- * question nobody needs to answer never sits in a human's inbox. Best-effort like the wake: state
- * already carries the approval. A 409 means someone closed it first (answered by hand, or a
- * previous attempt landed) and is silent; anything else is logged, never retried. */
-async function resolveGateOffAsk(
-  dispatchClient: Pick<DispatchClient, "resolveAsk">,
-  issue: IssueKey,
-  askId: string
-): Promise<void> {
-  try {
-    await dispatchClient.resolveAsk(askId, GATE_OFF_ASK_REASON);
-  } catch (error) {
-    if (error instanceof DispatchHttpError && error.status === 409) return;
-    console.error(
-      `[legion] design gate is off but the design-gate ask ${askId} for ${issue} could not be closed on Dispatch; it stays open as a record: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-}
-
-/** Everything the daemon does after marking a gate `designApproved: GATE_OFF_APPROVAL` and saving:
- * wake the architect as a human answer would, and close the ask it opened. Shared by the register
- * route and the boot fixup so the two paths cannot drift. */
-export async function satisfyGateOff(
-  state: LegionState,
-  issue: IssueKey,
-  askId: string,
-  deps: {
-    envoyPublish: (topic: string, payloadJson: string) => Promise<void>;
-    dispatchClient: Pick<DispatchClient, "resolveAsk">;
-  }
-): Promise<void> {
-  await publishDesignApproved(state, issue, deps.envoyPublish);
-  await resolveGateOffAsk(deps.dispatchClient, issue, askId);
-}
-
-/** Registers the design gate's ask id: the architect opens `dispatch_ask` on its root issue, then
- * records the resulting ask id here so `ask.answered` (`reducers.ts`'s `reduceAskAnswered`) knows
- * which answer approves the gate.
+/** Registers the design gate's document: the architect requests approval of its root spec with
+ * `dispatch_request_approval`, then records the returned document id (`artifactId`) and version
+ * here so the `artifact.approved`/`artifact.changes_requested`/`artifact.version` reducers know
+ * which document is the gate and which version is current. Re-registering the same document
+ * keeps any approval already recorded and only raises `latestVersion`; registering a different
+ * document replaces the gate wholesale, since an approval pins one document's version and cannot
+ * carry to another.
  *
- * With `gates.design: off` the daemon satisfies the gate itself: the register records
- * `designApproved: GATE_OFF_APPROVAL`, publishes the same `design-approved` wake a human answer
- * would, and closes the ask on Dispatch (`resolved`, `GATE_OFF_ASK_REASON`) so the architect
- * proceeds without anyone clicking and nobody is left a question to answer. Both side effects are
- * best-effort: state is already approved, so a resumed architect's catch-up shows it, and a
- * still-open ask answered later is a no-op (`reduceAskAnswered` skips an approved gate). */
+ * With `gates.design: off` the daemon satisfies the gate itself: a gate that is not open after
+ * this write is approved at its `latestVersion` and the same `design-approved` wake a human
+ * approval would produce is published, so an architect that registered anyway proceeds without
+ * anyone clicking. The publish is best-effort: state is already approved, so a resumed
+ * architect's catch-up shows it. */
 export async function handleGatesRegister(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -150,19 +113,28 @@ export async function handleGatesRegister(
   if (!treeContains(ctx.deps.state, tree, issue)) {
     throw new HttpError(403, "Issue is outside tree");
   }
-  const askId = requiredString(body, "askId");
-  const gateOff = ctx.config.gates.design === "off";
+  const artifactId = requiredString(body, "artifactId");
+  const version = body.version;
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version <= 0) {
+    throw new HttpError(400, "Expected positive integer version");
+  }
   const prior = ctx.deps.state.gates[issue];
-  ctx.deps.state.gates[issue] = {
-    ...prior,
-    designAskId: askId,
-    ...(gateOff && prior?.designApproved === undefined
-      ? { designApproved: GATE_OFF_APPROVAL }
-      : {}),
-  };
+  const gate: DesignGate =
+    prior && prior.artifactId === artifactId
+      ? {
+          artifactId,
+          latestVersion: Math.max(prior.latestVersion, version),
+          ...(prior.approvedVersion === undefined
+            ? {}
+            : { approvedVersion: prior.approvedVersion }),
+        }
+      : { artifactId, latestVersion: version };
+  const gateOffApproves = ctx.config.gates.design === "off" && !designGateOpen(gate);
+  if (gateOffApproves) gate.approvedVersion = gate.latestVersion;
+  ctx.deps.state.gates[issue] = gate;
   await ctx.save();
-  if (gateOff && prior?.designApproved === undefined) {
-    await satisfyGateOff(ctx.deps.state, issue, askId, ctx.deps);
+  if (gateOffApproves) {
+    await publishDesignApproved(ctx.deps.state, issue, ctx.deps.envoyPublish);
   }
   return Response.json(validateContractResponse(LegionDaemonApi.GatesRegister.response, {}));
 }

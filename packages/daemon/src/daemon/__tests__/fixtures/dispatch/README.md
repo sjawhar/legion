@@ -25,8 +25,19 @@ and closed; nothing here touches the real `LEGION` project.
 | `issue-updated-icebox.json` | `issue.updated` | `status: "icebox"`. |
 | `issue-closed.json` | `issue.closed` | `status: "done"`, `closed_at` set. |
 | `child-status.json` | `child.status` | Delivered to the parent; payload `{child_key, from, to}` (already has `from`/`to`, unlike `issue.updated`). |
-| `ask-opened.json` | `ask.opened` | Options `[{label:"Approve"}, {label:"Reject"}]`, matching the architect's design-gate ask shape. |
-| `ask-answered.json` | `ask.answered` | **Reconstructed, not a raw capture**: `POST /asks/{id}/answer` is human-only (403 for an agent bearer), so this session cannot answer its own ask. Built from `ask-opened.json` (real) with an `answer` object copied field-for-field from a genuine selection-based `ask.answered` read via `GET /api/v1/issues/LEGION-4/events` (event id 134, read-only, LEGION project) — only the selected option (`"Approve"`) and answering actor are substituted to match this fixture's own ask. |
+
+The three `artifact.*` events the design gate consumes are **built from the published contract,
+not captured**: `POST /api/v1/artifacts/{id}/reviews` is human-only (403 for an agent bearer), so
+this session cannot review a document. Their payloads are the JSON in the project document "Spec
+approval" (`dispatch_doc_read({ project: "LEGION", artifact: "spec-approval-design-md" })`,
+section "Contract (exact shapes the daemon pins)") verbatim, wrapped in the fixtures' `Event`
+envelope, with the contract's truncated ids (`5025ec5b-…`, `18258070-…`) completed to full UUIDs.
+
+| File | Event | Notes |
+| --- | --- | --- |
+| `legsmoke-3-artifact.approved.json` | `artifact.approved` | Contract JSON verbatim (`version: 12`, `reason: null`, `ask_id` set — approved by answering the approval ask). Event id 241, seq 5, actor user sjawhar. This is the `design-approved` wake input. |
+| `legsmoke-3-artifact.changes_requested.json` | `artifact.changes_requested` | Same shape with `reason` set (required for this type) and `ask_id: null` (given from the document header). Seq 6. This is the `design-changes-requested` wake input. |
+| `legsmoke-3-artifact.version.json` | `artifact.version` | The emitter's shape (`packages/envoy/internal/dispatch/api/server.go` `versionEventPayload` + `model.Version`): `version` is an object `{number, named, summary, authors, created_at}`, not a bare integer. Unnamed version 13 written by the architect session; seq 7. Closes the gate silently after an approval at 12. |
 
 GitHub `issues.opened` (for the "GitHub webhook events are ignored" reducer test) reuses the
 existing fixture in `envelope-goldens.test.ts`; it is not a Dispatch event and needed no capture.
@@ -39,5 +50,6 @@ The issue topic carries every event (the outbox does not gate `notifications.dis
 - `legsmoke-3-issue.updated-human-todo.json` — a human moving LEGSMOKE-3 from `triage` to `todo`
   through the dashboard's Status control (actor `{kind:"user", id:"sjawhar"}`); this is the
   "admit" input the daemon reacts to.
-- `legsmoke-3-ask.answered-approve.json` — the human answering the design-gate ask with
-  `selected: ["Approve"]` (actor user sjawhar); this is the `design-approved` wake input.
+- `legsmoke-3-ask.answered-approve.json` — the human answering the former design-gate ask with
+  `selected: ["Approve"]` (actor user sjawhar). Since the gate moved to document approval this is
+  the negative input: `ask.answered` must leave the gate untouched.

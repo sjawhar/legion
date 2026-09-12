@@ -44,17 +44,18 @@ export interface IssueNode {
   status?: IssueStatus;
   /** The highest Dispatch event `seq` this daemon has applied to this issue, across every event
    * type keyed on it (`issue.created`/`updated`/`closed` on itself, `child.status` delivered to
-   * it as a parent, `ask.answered` against its own design gate) — the at-most-once fence:
-   * `reduceDispatchEvent` drops any incoming event with `seq <= lastAppliedSeq` before mutating
-   * state or emitting an effect, and stamps this to the incoming `seq` after processing every
-   * event it does not drop, including a no-op one, so a redelivered no-op can't be reprocessed
-   * either. `child.status`/`ask.answered` against an issue this daemon has never created a node
-   * for stay unfenced by this field, but that is harmless: their own reducers are already no-ops
-   * without a node (`child.status`'s target) or a registered gate (`ask.answered`'s), so there is
-   * nothing for a redelivery to corrupt. Undefined until this issue's first Dispatch event is
-   * applied — Dispatch's own `Issue.last_seq` is the source this daemon is fencing against, so a
-   * millisecond-precision `updated_at` comparison is neither needed nor safe (same-millisecond
-   * redeliveries are indistinguishable by clock alone; this replaces that former fence). */
+   * it as a parent, `artifact.approved`/`artifact.changes_requested`/`artifact.version` against
+   * its own design gate) — the at-most-once fence: `reduceDispatchEvent` drops any incoming event
+   * with `seq <= lastAppliedSeq` before mutating state or emitting an effect, and stamps this to
+   * the incoming `seq` after processing every event it does not drop, including a no-op one, so a
+   * redelivered no-op can't be reprocessed either. `child.status` and the artifact events against
+   * an issue this daemon has never created a node for stay unfenced by this field, but that is
+   * harmless: their own reducers are already no-ops without a node (`child.status`'s target) or a
+   * registered gate on that node (the artifact events'), so there is nothing for a redelivery to
+   * corrupt. Undefined until this issue's first Dispatch event is applied — Dispatch's own
+   * `Issue.last_seq` is the source this daemon is fencing against, so a millisecond-precision
+   * `updated_at` comparison is neither needed nor safe (same-millisecond redeliveries are
+   * indistinguishable by clock alone; this replaces that former fence). */
   lastAppliedSeq?: number;
 }
 
@@ -164,8 +165,27 @@ export interface ControllerPendingNotice {
   eventId: string;
 }
 
+/** The design gate on a root issue: a human's approval of the root's spec document, pinned to a
+ * document version the way a pull-request review is pinned to a commit. `artifactId` is the
+ * Dispatch artifact id of that document and `latestVersion` the highest version number this
+ * daemon has seen for it (from `register_gate`'s `version`, then every `artifact.version` event);
+ * `approvedVersion` is the version the latest `artifact.approved` pinned, absent until a human
+ * approves and deleted again by `artifact.changes_requested`. The gate is open exactly when
+ * `approvedVersion === latestVersion` (`designGateOpen`): a spec edited after approval is closed
+ * again until the new version is approved. */
+export interface DesignGate {
+  artifactId: string;
+  latestVersion: number;
+  approvedVersion?: number;
+}
+
+/** Whether the design gate is open: approved at the document's current version. */
+export function designGateOpen(gate: DesignGate): boolean {
+  return gate.approvedVersion !== undefined && gate.approvedVersion === gate.latestVersion;
+}
+
 export interface LegionState {
-  version: 23;
+  version: 24;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -189,19 +209,27 @@ export interface LegionState {
   >;
   controllerCapabilityHash?: string;
   controllerPendingNotices: ControllerPendingNotice[];
-  /** The design gate per root issue: `designAskId` is the `dispatch_ask` id the architect
-   * registered via `/legion/v1/gates/register`; `designApproved` is set to that same ask id once
-   * `ask.answered` selects `Approve` for it. Both absent before the architect opens the gate. */
-  gates: Record<IssueKey, { designAskId?: string; designApproved?: string }>;
+  /** The design gate per root issue (see `DesignGate`). Absent until the architect registers
+   * one via `/legion/v1/gates/register`. */
+  gates: Record<IssueKey, DesignGate>;
   /** A daemon-owned lifecycle status write that failed its Dispatch PATCH. The recorded status
    * fence (`PendingStatusWrite.statusAtRecord`) lets resync discard the intent once a real
    * status change has superseded it for that issue. */
   pendingStatusWrites: Record<IssueKey, PendingStatusWrite>;
 }
 
+/** Reads a root issue's spec document from Dispatch for `migrateV23State`: the id of the issue's
+ * primary artifact and the highest version number it carries. */
+export type SpecArtifactResolver = (
+  issue: IssueKey
+) => Promise<{ artifactId: string; latestVersion: number }>;
+
 export interface LegionStateInit {
   project: string;
   cap: number;
+  /** Required only when the file on disk is a v23 state with a design gate to keep (see
+   * `migrateV23State`); every other load never calls it. */
+  resolveSpecArtifact?: SpecArtifactResolver;
 }
 
 /** Legion's own issue key: the Dispatch key (`^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-7`). */
@@ -337,7 +365,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(23),
+    version: z.literal(24),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -379,7 +407,11 @@ const LegionStateSchema = z
       .record(
         IssueKeySchema,
         z
-          .object({ designAskId: z.string().optional(), designApproved: z.string().optional() })
+          .object({
+            artifactId: z.string().min(1),
+            latestVersion: z.number().int().positive(),
+            approvedVersion: z.number().int().positive().optional(),
+          })
           .strict()
       )
       .default({}),
@@ -405,7 +437,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 23,
+    version: 24,
     project,
     issues: {},
     trees: {},
@@ -832,6 +864,67 @@ function migrateV22State(state: unknown): unknown {
   return { ...rest, version: 23 };
 }
 
+/** v23 -> v24: the design gate becomes a version-pinned document approval (`DesignGate`) instead
+ * of an ask id. A v23 record `{designAskId?, designApproved?}` cannot say which document or
+ * version it refers to, so each kept gate is resolved once, here, from Dispatch: an approved gate
+ * (a human answered `Approve`, or the daemon satisfied it under `gates.design: off`) becomes
+ * approved at the spec's current version; a registered-but-unanswered one becomes an unapproved
+ * gate on that document. Kept gates are exactly those whose tree record exists and is not closed;
+ * a never-registered gate (neither field set), a gate with no tree record, and a closed tree's
+ * gate are dropped with a log line naming the issue — a finished tree whose issue may be gone
+ * from Dispatch must never keep the daemon from starting. A resolver failure for a kept gate, or
+ * a kept gate with no resolver supplied, throws naming the issue: the daemon refuses to start
+ * rather than mark a gate approved on a guess. */
+async function migrateV23State(
+  state: unknown,
+  resolve: SpecArtifactResolver | undefined
+): Promise<unknown> {
+  if (!recordValue(state) || state.version !== 23) return state;
+  const sourceGates = recordValue(state.gates) ? state.gates : {};
+  const trees = recordValue(state.trees) ? state.trees : {};
+  const gates: Record<string, DesignGate> = {};
+  for (const [issue, source] of Object.entries(sourceGates)) {
+    const gate = recordValue(source) ? source : {};
+    const registered = typeof gate.designAskId === "string";
+    const approved = typeof gate.designApproved === "string";
+    const tree = recordValue(trees[issue]) ? trees[issue] : undefined;
+    const dropReason =
+      !registered && !approved
+        ? "it was never registered"
+        : !tree
+          ? "it has no tree record"
+          : tree.status === "closed"
+            ? "its tree is closed"
+            : undefined;
+    if (dropReason !== undefined) {
+      console.warn(
+        `[legion] dropping the design gate for ${issue} during the v23->v24 migration: ${dropReason}`
+      );
+      continue;
+    }
+    if (!resolve) {
+      throw new Error(
+        `Cannot migrate the design gate for ${issue}: no Dispatch resolver was supplied`
+      );
+    }
+    let spec: { artifactId: string; latestVersion: number };
+    try {
+      spec = await resolve(issue as IssueKey);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new Error(`Cannot migrate the design gate for ${issue}: ${cause}`, { cause: error });
+    }
+    gates[issue] = approved
+      ? {
+          artifactId: spec.artifactId,
+          latestVersion: spec.latestVersion,
+          approvedVersion: spec.latestVersion,
+        }
+      : { artifactId: spec.artifactId, latestVersion: spec.latestVersion };
+  }
+  return { ...state, version: 24, gates };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -869,12 +962,15 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV21State,
     migrateV22State,
   ];
-  const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
+  const state = await migrateV23State(
+    migrations.reduce((current, migrate) => migrate(current), source as unknown),
+    init.resolveSpecArtifact
+  );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 23) {
+  if (version !== 24) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 
