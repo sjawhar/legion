@@ -76,6 +76,7 @@ legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path> -- <om
 | Envoy event routing    | `packages/envoy/`                              | See @packages/envoy/AGENTS.md                  |
 | Shared event contracts | `packages/contracts/`                          | See @packages/contracts/AGENTS.md               |
 | Envoy OMP adapter      | `packages/pi-envoy/`                          | See @packages/pi-envoy/AGENTS.md          |
+| Worker image (Kubernetes) | `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml` | See `docs/kubernetes.md` |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
 
 ## Conventions
