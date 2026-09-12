@@ -226,12 +226,11 @@ function liveRun(command: string[]): Promise<{ stdout: string; exitCode: number 
   return Promise.resolve({ stdout: "", exitCode: 0 });
 }
 
-/** Answers a `list-panes` liveness probe for a pane that is alive. `panePid`'s
- * `-F "#{pane_id} #{pane_pid}"` probe gets one `<pane_id> <pid>` row for the probed target — the
- * pane itself, or `%1` standing in for a window's first pane. */
+/** Answers a `list-panes -t <pane> -F "#{pane_id} #{pane_pid}"` liveness probe for a pane that is
+ * alive: one `<pane_id> <pid>` row for the probed pane. */
 function livePanes(command: string[], pid = 12345): { stdout: string; exitCode: number } {
   const target = command[command.indexOf("-t") + 1];
-  return { stdout: `${target.startsWith("%") ? target : "%1"} ${pid}\n`, exitCode: 0 };
+  return { stdout: `${target} ${pid}\n`, exitCode: 0 };
 }
 
 /** Start ticks the fixture's default `readProcessStat` reports for every pid, so a locator
@@ -6188,7 +6187,7 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root].status).toBe("closed");
   });
 
-  it("rewrites every claim's stale window id once a dead recorded window falls back to a fresh one", async () => {
+  it("opens a fresh window when every recorded pane is gone, leaves the stale locators naming their dead window, and splits later workers into the fresh window", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     await mkdir(workspace, { recursive: true });
@@ -6258,21 +6257,28 @@ describe("ProcessManager", () => {
     expect(
       commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
+    // The stale claims keep naming the window their panes lived in -- a locator's window id is
+    // never rewritten from the outside; each clears through its own probe.
     for (const token of [plannerToken, implementerToken]) {
       const claim = managedState.roles[token];
       if (!claim || !("issue" in claim)) throw new Error(`${token} claim disappeared`);
-      expect(claim.locator?.tmuxWindowId).toBe("@99");
+      expect(claim.locator?.tmuxWindowId).toBe("@42");
     }
+    const tester = managedState.roles[roleToken("omp", root, "tester")];
+    if (!tester || !("issue" in tester)) throw new Error("tester claim disappeared");
+    expect(tester.locator?.tmuxWindowId).toBe("@99");
 
     await processes.spawnWorker(root, root, "reviewer", "review #41");
 
+    // `@42`'s recorded panes still fail; the tester's fully-recorded pane in `@99` verifies, so
+    // the reviewer splits into `@99` rather than opening yet another window.
     expect(
       commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
     const split = commands.find(
       (command) => command[0] === "tmux" && command[3] === "split-window"
     );
-    if (!split) throw new Error("fourth worker did not split into the rewritten window");
+    if (!split) throw new Error("fourth worker did not split into the fresh window");
     expect(split).toContain("@99");
   });
 
@@ -9852,8 +9858,7 @@ describe("ProcessManager", () => {
       "the same pid came back with a different start time",
       { pid: 12345, startTicks: 999_999, observed: /pid 12345 .*999999/ },
     ],
-    // Errors row 3: the process vanished between `list-panes` and the `/proc` read -- unknown
-    // is never alive.
+    // The process vanished between `list-panes` and the `/proc` read: unknown is never alive.
     [
       "its /proc stat vanished after list-panes reported it",
       { pid: 12345, startTicks: undefined, observed: /pid 12345 .*\/proc/ },
@@ -10387,8 +10392,8 @@ describe("ProcessManager", () => {
     expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
     expect(state.roles[token]).toBeUndefined(); // claim removed as for an already-gone pane
     expect(state.trees[root]).toMatchObject({ status: "closed" });
-    expect(log).toMatch(/%1/);
-    expect(log).toMatch(/pid 777/);
+    // The observed identity names the pane and the pid it now runs, on one line.
+    expect(log).toMatch(/%1[^\n]*pid 777/);
     expect(log).toMatch(/recorded pid 12345 start 4242/);
   });
 
@@ -10685,5 +10690,157 @@ describe("ProcessManager", () => {
     });
     expect(log).toMatch(/pid 777/);
     expect(log).toMatch(/recorded pid 12345 start 4242/);
+  });
+
+  /** A deployed daemon's state as the v24 upgrade first sees it: every locator live, running
+   * OMP, and identity-less. The root lives in `@42`/`%0`; when `withWorker` is set an
+   * implementer claim lives beside it in `@42`/`%3`. The fake tmux answers every probed pane as
+   * alive (pid 12345, OMP), hands out `@43`/`%5`/555 for a fresh window and `%6`/666 for a split,
+   * and reports both windows as this daemon's own with activity long past the sweep's grace.
+   * Every shim socket connects and closes gracefully on `shutdown`. */
+  async function legacyLiveTreeFixture(withWorker: boolean): Promise<{
+    processes: ProcessManager;
+    state: LegionState;
+    commands: string[][];
+    sessionFile: string;
+    implementerToken: string;
+    shutdowns: string[];
+  }> {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    const { panePid: _pid, paneStartTicks: _ticks, ...legacyRoot } = locator;
+    state.trees[root].locator = { ...legacyRoot, ompSessionFile: sessionFile };
+    state.trees[root].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
+    const implementerToken = roleToken("omp", root, "implementer");
+    if (withWorker) {
+      state.roles[implementerToken] = {
+        issue: root,
+        role: "implementer",
+        generation: 1,
+        sessionId: "ses_implementer",
+        readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+        locator: {
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@42",
+          tmuxPaneId: "%3",
+          socketPath: "/state/workers/implementer.sock",
+        },
+      };
+    }
+    const shutdowns: string[] = [];
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async (socketPath) => {
+        const client = fakeWorkerRpcClient();
+        const shutdown = client.shutdown;
+        client.shutdown = () => {
+          shutdowns.push(socketPath);
+          shutdown();
+        };
+        return client;
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@43 %5 555\n", exitCode: 0 };
+        if (command[3] === "split-window") return { stdout: "%6 666\n", exitCode: 0 };
+        if (command[3] === "list-windows") {
+          return { stdout: "@42\tlegion-omp\t0\n@43\tlegion-omp\t0\n", exitCode: 0 };
+        }
+        if (command[3] === "list-panes" && command[4] === "-a") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") {
+          const target = command[command.indexOf("-t") + 1];
+          const fresh: Record<string, number> = { "%5": 555, "%6": 666 };
+          return livePanes(command, fresh[target] ?? 12345);
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    return { processes, state: managedState, commands, sessionFile, implementerToken, shutdowns };
+  }
+
+  it("resurrecting a legacy root beside a live legacy worker leaves that worker's window id untouched, resumes the root in a fresh window, and the sweep never kills the window the worker still lives in", async () => {
+    const { processes, state, commands, sessionFile, implementerToken } =
+      await legacyLiveTreeFixture(true);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      // Exactly the composition index.ts's `onProbe` runs on a resync tick.
+      if ((await processes.probe(root)) === "dead") await processes.resurrect(root);
+      await processes.reconcileTmuxWindows(0);
+    } finally {
+      errors.mockRestore();
+    }
+
+    // The root resumed onto a fresh, fully-recorded pane ...
+    const launch = commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
+    expect(launch?.at(-1)).toContain(`--resume=${sessionFile}`);
+    expect(state.trees[root].locator).toMatchObject({
+      tmuxWindowId: "@43",
+      tmuxPaneId: "%5",
+      panePid: 555,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+    // ... while the live legacy worker still records the window its pane actually lives in.
+    const implementer = state.roles[implementerToken];
+    if (!implementer || !("issue" in implementer)) throw new Error("implementer claim missing");
+    expect(implementer.locator).toMatchObject({ tmuxWindowId: "@42", tmuxPaneId: "%3" });
+    // `@42` stays a known window, so the sweep -- grace already elapsed -- reaps nothing.
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-window")).toEqual([]);
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
+  });
+
+  it("spawning a worker on a live legacy tree opens a fresh window without repointing the legacy root, later workers split into that fresh window, and the sweep never kills the legacy root's window", async () => {
+    const { processes, state, commands } = await legacyLiveTreeFixture(false);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await processes.spawnWorker(root, root, "tester", "verify #41");
+      await processes.spawnWorker(root, root, "planner", "plan #41");
+      await processes.reconcileTmuxWindows(0);
+    } finally {
+      errors.mockRestore();
+    }
+
+    // The legacy root still records the window its pane actually lives in.
+    expect(state.trees[root].locator).toMatchObject({ tmuxWindowId: "@42", tmuxPaneId: "%0" });
+    // The tester could verify no recorded pane in `@42`, so it opened `@43`; the planner found
+    // the tester's fully-recorded pane there and split into it.
+    const tester = state.roles[roleToken("omp", root, "tester")];
+    const planner = state.roles[roleToken("omp", root, "planner")];
+    if (!tester || !("issue" in tester) || !planner || !("issue" in planner)) {
+      throw new Error("worker claims missing");
+    }
+    expect(tester.locator).toMatchObject({ tmuxWindowId: "@43", tmuxPaneId: "%5", panePid: 555 });
+    expect(planner.locator).toMatchObject({ tmuxWindowId: "@43", tmuxPaneId: "%6", panePid: 666 });
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "new-window")).toHaveLength(1);
+    expect(commands.find((c) => c[0] === "tmux" && c[3] === "split-window")).toContain("@43");
+    // `@42` stays a known window, so the sweep -- grace already elapsed -- reaps nothing.
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-window")).toEqual([]);
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
+  });
+
+  it("closing a tree whose live legacy root has no recorded identity still asks that root to shut down over its own socket, kills nothing, and closes the tree", async () => {
+    const { processes, state, commands, shutdowns } = await legacyLiveTreeFixture(false);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await processes.closeTree(root);
+    } finally {
+      errors.mockRestore();
+    }
+
+    expect(shutdowns).toEqual(["/state/workers/architect.sock"]);
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
+    expect(state.trees[root]).toMatchObject({ status: "closed" });
+    expect(state.trees[root].locator).toBeUndefined();
   });
 });

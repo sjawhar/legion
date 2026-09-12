@@ -115,6 +115,20 @@ function describePaneVerdict(
   }
 }
 
+/** Whether `current` still names the exact pane `stopped` did -- id AND recorded process
+ * identity. The guards that decide whether a retirement/deletion still applies to the claim's
+ * present locator compare through this, never the pane id alone: a same-role relaunch that was
+ * handed a reissued `%N` would otherwise make a fresh locator look like the stale one a
+ * socket-close retirement was told to clear. */
+function samePaneIdentity(current: PaneLocator | undefined, stopped: PaneLocator): boolean {
+  return (
+    current !== undefined &&
+    current.tmuxPaneId === stopped.tmuxPaneId &&
+    current.panePid === stopped.panePid &&
+    current.paneStartTicks === stopped.paneStartTicks
+  );
+}
+
 export interface ProcessManagerDeps {
   state: LegionState;
   saveState(): Promise<void>;
@@ -272,10 +286,10 @@ export class ProcessManager {
    * reconnect attempt (no loop across successive closes). Never pruned: grows by one entry per
    * generation a worker's socket ever closes, for the process's lifetime. */
   private readonly reconnectAttempted = new Set<string>();
-  /** The pane this daemon most recently opened a fresh window with for an issue that has no
-   * persisted claim in it yet (its first-ever worker, still mid-launch), identity included:
-   * `recordedWindowId` falls back to it so a concurrent second spawn on the same issue can
-   * verify that pane (`probedWindowId`) and split into its window instead of racing to open its
+  /** The pane this daemon most recently opened a fresh window with for an issue, identity
+   * included: one more candidate for `probedWindowId`, so a concurrent second spawn on the same
+   * issue (or any later one, while every persisted locator still names a window nothing
+   * verifies in) can verify that pane and split into its window instead of racing to open its
    * own. Never trusted by window id alone -- after a tmux server recreate the same `@N` can name
    * some other issue's window, so an entry whose pane no longer verifies is dropped. */
   private readonly issueWindows = new Map<IssueKey, PaneLocator>();
@@ -807,7 +821,7 @@ export class ProcessManager {
    * retire a pane that isn't the one it was told to. */
   private async markWorkerDeadLocked(token: string, locator: WorkerLocator): Promise<void> {
     const current = this.deps.state.roles[token];
-    if (!current || !("issue" in current) || current.locator?.tmuxPaneId !== locator.tmuxPaneId) {
+    if (!current || !("issue" in current) || !samePaneIdentity(current.locator, locator)) {
       return;
     }
     await this.retireWorkerLocator(token, locator);
@@ -992,7 +1006,7 @@ export class ProcessManager {
         !("issue" in claim) ||
         claim.readyConfirmedAt !== undefined ||
         claim.generation !== generation ||
-        claim.locator?.tmuxPaneId !== locator.tmuxPaneId
+        !samePaneIdentity(claim.locator, locator)
       ) {
         return;
       }
@@ -1144,10 +1158,15 @@ export class ProcessManager {
         this.revokeRoleClaim(
           architectClaim && "issue" in architectClaim ? architectClaim : undefined
         );
-        const alive = (await this.probe(treeKey)) === "alive";
+        // The graceful branch is skipped only when the pane is proven gone. Any other verdict
+        // -- a legacy identity-less locator, a reissued pane id -- still sends `shutdown` over
+        // the root's own socket: that path is the role's, never a pane's, so it reaches exactly
+        // the process this tree recorded if it is alive at all, and the kill that follows stays
+        // gated on identity inside `stopProcess`.
+        const verdict = await this.verifyPaneProcess(rootLocator);
         try {
           await this.stopProcessSerialized(architectToken, rootLocator, this.treeStopTimeoutMs, {
-            skipGraceful: !alive,
+            skipGraceful: !verdict.verified && verdict.reason === "pane-gone",
           });
           delete tree.locator;
         } catch (error) {
@@ -1174,9 +1193,7 @@ export class ProcessManager {
       // mutation of that exact same object (e.g. a respawn deleting/replacing its `locator` in
       // place) between this point and the delete step below would otherwise change what
       // `claim.locator` reads as by the time it is read again.
-      const stoppedPaneIds = new Map(
-        batch.map(([token, claim]) => [token, claim.locator.tmuxPaneId])
-      );
+      const stoppedLocators = new Map(batch.map(([token, claim]) => [token, { ...claim.locator }]));
       const settled = await Promise.allSettled(
         batch.map(([token, claim]) =>
           this.stopProcessSerialized(token, claim.locator, this.treeStopTimeoutMs)
@@ -1186,7 +1203,7 @@ export class ProcessManager {
         const result = settled[index];
         if (result?.status === "fulfilled") {
           // Re-acquires the token's own critical section for the delete itself, re-checking the
-          // claim's identity (pane id) against the locator that was actually stopped — mirrors
+          // claim's pane identity against the locator that was actually stopped — mirrors
           // `retireUnconfirmedBoot`'s stale-identity guard. `stopProcessSerialized` above already
           // ran under this same lock, but only for the stop call; without re-acquiring it here,
           // a live writer (e.g. `/worker/started`) that raced in in-between (took the lock after
@@ -1195,10 +1212,12 @@ export class ProcessManager {
           // targeted the OLD, now-irrelevant pane.
           await this.workerAdmission.mutateClaim(token, async () => {
             const current = this.deps.state.roles[token];
+            const stopped = stoppedLocators.get(token);
             if (
               current &&
               "issue" in current &&
-              current.locator?.tmuxPaneId === stoppedPaneIds.get(token)
+              stopped !== undefined &&
+              samePaneIdentity(current.locator, stopped)
             ) {
               // Cancels this claim's boot watchdog (a no-op if none is armed) and revokes its
               // session capability before deleting it — the single chokepoint every path that
@@ -2239,70 +2258,46 @@ export class ProcessManager {
     return depth;
   }
 
-  private recordedWindowId(issue: IssueKey): string | undefined {
-    if (this.rootForIssue(issue) === issue) {
-      const windowId = this.deps.state.trees[issue]?.locator?.tmuxWindowId;
-      if (windowId) return windowId;
-    }
-    for (const claim of Object.values(this.deps.state.roles)) {
-      if ("issue" in claim && claim.issue === issue && claim.locator) {
-        return claim.locator.tmuxWindowId;
-      }
-    }
-    return this.issueWindows.get(issue)?.tmuxWindowId;
-  }
-
   /**
-   * After opening a fresh window for `issue` (first spawn, or a fallback from a dead recorded
-   * window), every existing claim for that issue — and the tree locator, if `issue` is a root —
-   * must point at the new window id in the same place, or `recordedWindowId` keeps handing a
-   * later spawn a stale id and each one opens yet another window instead of splitting into it.
-   * `opened` is the pane the window was created with, identity already recorded.
+   * Every locator whose pane this daemon has recorded for `issue`, in the order a spawn should
+   * prefer their windows: the tree's own root locator (when `issue` is a root), each of its
+   * worker claims', and the pane this daemon opened `issue`'s newest window with when that
+   * launch has not persisted its claim yet (`issueWindows`).
    */
-  private rewriteIssueWindowId(issue: IssueKey, opened: PaneLocator): void {
-    this.issueWindows.set(issue, opened);
-    const tree = this.deps.state.trees[issue];
-    if (tree?.locator) tree.locator.tmuxWindowId = opened.tmuxWindowId;
-    for (const claim of Object.values(this.deps.state.roles)) {
-      if ("issue" in claim && claim.issue === issue && claim.locator) {
-        claim.locator.tmuxWindowId = opened.tmuxWindowId;
-      }
-    }
-  }
-
-  /** Every recorded locator for `issue` whose pane lives in `windowId`: the tree's own root
-   * locator (when `issue` is a root), each of its worker claims', and the pane this daemon
-   * opened the window with if that launch has not persisted its claim yet (`issueWindows`). */
-  private recordedLocatorsInWindow(issue: IssueKey, windowId: string): PaneLocator[] {
+  private recordedLocators(issue: IssueKey): PaneLocator[] {
     const found: PaneLocator[] = [];
     const treeLocator =
       this.rootForIssue(issue) === issue ? this.deps.state.trees[issue]?.locator : undefined;
-    if (treeLocator?.tmuxWindowId === windowId) found.push(treeLocator);
+    if (treeLocator) found.push(treeLocator);
     for (const claim of Object.values(this.deps.state.roles)) {
-      if ("issue" in claim && claim.issue === issue && claim.locator?.tmuxWindowId === windowId) {
-        found.push(claim.locator);
-      }
+      if ("issue" in claim && claim.issue === issue && claim.locator) found.push(claim.locator);
     }
     const opened = this.issueWindows.get(issue);
-    if (opened?.tmuxWindowId === windowId) found.push(opened);
+    if (opened) found.push(opened);
     return found;
   }
 
-  /** A recorded window id is reused for a new pane only when at least one recorded pane in it
-   * still verifies as the process its locator recorded (`verifyPaneProcess`). A live window
-   * alone proves nothing: after the private tmux server is recreated, the same `@N` names some
-   * other issue's window, and the in-memory `issueWindows` entry outlives the cleared locators
-   * that once pointed there -- splitting into it would put this issue's worker in a stranger's
-   * window. Otherwise the caller opens a fresh window (`rewriteIssueWindowId` then repoints every
-   * locator for the issue), and the stale entry is dropped here so nothing hands it out again
-   * in between. */
+  /**
+   * The window a new pane for `issue` splits into: the first recorded window (see
+   * `recordedLocators` for the order) that still holds a pane verifying as the process its
+   * locator recorded (`verifyPaneProcess`). A live window alone proves nothing: after the
+   * private tmux server is recreated, the same `@N` names some other issue's window, and the
+   * in-memory `issueWindows` entry outlives the cleared locators that once pointed there --
+   * splitting into it would put this issue's worker in a stranger's window. When no recorded
+   * window verifies, returns `undefined` and the caller opens a fresh one, recorded in
+   * `issueWindows` alone: a locator's `tmuxWindowId` is a fact about where its pane lives and
+   * is never rewritten while that pane may be live. A legacy identity-less locator therefore
+   * keeps naming its real window (so `reconcileTmuxWindows` keeps it known until that locator
+   * clears through its own probe), new workers land in the fresh window, and a dead window's
+   * stale locators clear through their own probes exactly as before. A stale `issueWindows`
+   * entry that no longer verifies is dropped here so nothing hands it out again.
+   */
   private async probedWindowId(issue: IssueKey): Promise<string | undefined> {
-    const candidate = this.recordedWindowId(issue);
-    if (!candidate) return undefined;
-    for (const locator of this.recordedLocatorsInWindow(issue, candidate)) {
-      if ((await this.verifyPaneProcess(locator)).verified) return candidate;
+    for (const locator of this.recordedLocators(issue)) {
+      if ((await this.verifyPaneProcess(locator)).verified) return locator.tmuxWindowId;
     }
-    if (this.issueWindows.get(issue)?.tmuxWindowId === candidate) this.issueWindows.delete(issue);
+    // Reaching here means the in-memory entry (if any) was among the panes that failed.
+    this.issueWindows.delete(issue);
     return undefined;
   }
 
@@ -2498,7 +2493,7 @@ export class ProcessManager {
       );
       const identity = await this.recordedPaneIdentity(window.paneId, window.pid, token);
       const opened = { tmuxWindowId: window.windowId, tmuxPaneId: window.paneId, ...identity };
-      this.rewriteIssueWindowId(issue, opened);
+      this.issueWindows.set(issue, opened);
       return opened;
     });
 
@@ -2772,13 +2767,16 @@ export class ProcessManager {
     if (claim?.sessionId) this.deps.revokeSessionCapability(claim.sessionId);
   }
 
-  /** Called only once `probe` has already confirmed the recorded pane is dead, so `stopProcess`
-   * normally has nothing live to gracefully close and degrades straight to the kill; routed
-   * through it anyway for the rare race where the pane outlived that probe. Best-effort: a
-   * `StopFailed` here is logged and swallowed rather than blocking `resurrectDeadTree` — the
-   * probe already confirmed this pane dead, so a failed kill of an already-dead pane is a stray
-   * cleanup problem, never a reason to refuse resurrecting the tree onto a fresh one. */
-  private async removeTreeWindow(tree: TreeState): Promise<void> {
+  /** Called only once the recorded pane has failed `verifyPaneProcess` (`refused`): gone, or
+   * present but not the recorded process -- a reissued pane id, or a legacy identity-less
+   * locator. Routed through `stopProcess` anyway: the graceful `shutdown` goes over the root's
+   * own role-scoped socket, so a still-live legacy root exits cleanly before its session is
+   * resumed elsewhere; the kill that would follow stays refused by the gate, which trusts the
+   * caller's verdict rather than re-verifying and re-logging the same decision. Best-effort: a
+   * `StopFailed` here is logged and swallowed rather than blocking `resurrectDeadTree` -- the
+   * probe already decided this locator is dead, so a stray cleanup failure is never a reason to
+   * refuse resurrecting the tree onto a fresh pane. */
+  private async removeTreeWindow(tree: TreeState, refused: PaneVerdict): Promise<void> {
     const architectToken = roleToken(this.deps.state.project, tree.root, "architect");
     const architectClaim = this.deps.state.roles[architectToken];
     this.revokeRoleClaim(architectClaim && "issue" in architectClaim ? architectClaim : undefined);
@@ -2786,11 +2784,9 @@ export class ProcessManager {
     delete tree.locator;
     if (!locator) return;
     try {
-      await this.stopProcessSerialized(
-        roleToken(this.deps.state.project, tree.root, "architect"),
-        locator,
-        this.workerStopTimeoutMs
-      );
+      await this.stopProcessSerialized(architectToken, locator, this.workerStopTimeoutMs, {
+        refused,
+      });
     } catch (error) {
       console.error(
         `[legion] failed to clean up ${tree.root}'s dead pane before resurrection:`,
@@ -2934,13 +2930,17 @@ export class ProcessManager {
    * pane exists. See `PANE_GONE_STDERR`. A pane that fails `verifyPaneProcess` -- not the
    * process this locator recorded -- is treated the same way, and is never killed. The caller
    * must never treat the process as stopped, or its claim/locator as safe to delete, when it
-   * cannot confirm that.
+   * cannot confirm that. One log line per decision: the gate logs a refusal it decided itself;
+   * a caller that already decided -- and logged -- that this pane is not the recorded process
+   * (`probe` via `resurrectDeadTree`, `controllerAlive`) passes that verdict as `refused` and the
+   * gate refrains without re-verifying or re-logging. A verified verdict is never accepted that
+   * way: the pane is always re-verified at kill time.
    */
   private async stopProcess(
     token: string,
     locator: PaneLocator,
     timeoutMs: number,
-    options?: { skipGraceful?: boolean }
+    options?: { skipGraceful?: boolean; refused?: PaneVerdict }
   ): Promise<void> {
     const client =
       !options?.skipGraceful && locator.socketPath
@@ -2971,6 +2971,7 @@ export class ProcessManager {
     // contract): return normally so the caller clears this locator. A legacy identity-less
     // locator is never killed by the daemon either; once cleared, its pane is an unrecorded
     // shim pane `reconcileTmuxWindows` reaps after the grace period.
+    if (options?.refused && !options.refused.verified) return;
     const verdict = await this.verifyPaneProcess(locator);
     if (!verdict.verified) {
       if (verdict.reason !== "pane-gone") {
@@ -3001,7 +3002,7 @@ export class ProcessManager {
     token: string,
     locator: PaneLocator,
     timeoutMs: number,
-    options?: { skipGraceful?: boolean }
+    options?: { skipGraceful?: boolean; refused?: PaneVerdict }
   ): Promise<void> {
     return this.workerAdmission.mutateClaim(token, () =>
       this.stopProcess(token, locator, timeoutMs, options)
@@ -3041,11 +3042,11 @@ export class ProcessManager {
   /** Probes the controller's recorded locator for liveness through `verifyPaneProcess`. A
    * locator that does not verify is cleared so `ensureController` spawns afresh -- but the
    * process it recorded is asked to shut down first (`stopProcess`: a graceful `shutdown` over
-   * the controller's own per-role socket, its kill-pane gated by this same verdict so a pane
-   * wearing a reissued id is never killed). On the one-time legacy `no-identity` case that is a
-   * still-live controller, which exits cleanly instead of running beside its replacement until
-   * the tmux sweep reaps it; on a genuinely reissued pane the socket refuses and the gated kill
-   * is a no-op. */
+   * the controller's own per-role socket; the kill that would follow stays refused on this same
+   * verdict, so a pane wearing a reissued id is never killed). On the one-time legacy
+   * `no-identity` case that is a still-live controller, which exits cleanly instead of running
+   * beside its replacement until the tmux sweep reaps it; on a genuinely reissued pane the
+   * socket refuses and nothing is killed. */
   private async controllerAlive(): Promise<boolean> {
     const locator = this.deps.state.controllerLocator;
     if (!locator) return false;
@@ -3059,7 +3060,8 @@ export class ProcessManager {
         await this.stopProcess(
           controllerToken(this.deps.state.project),
           locator,
-          this.workerStopTimeoutMs
+          this.workerStopTimeoutMs,
+          { refused: verdict }
         );
       } catch (error) {
         console.error(
@@ -3072,11 +3074,18 @@ export class ProcessManager {
     return false;
   }
 
+  /** Resurrects `treeKey` onto a fresh pane unless its recorded pane still verifies. The
+   * verdict is taken once here, silently: `probe` (the caller's decision point) has already
+   * logged why the root is being treated as dead, and the verdict is handed down to
+   * `removeTreeWindow` so the kill gate does not log the same decision a third time. */
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {
-    if ((await this.probe(treeKey)) === "alive") return;
     const tree = this.requireTree(treeKey);
+    const verdict = tree.locator
+      ? await this.verifyPaneProcess(tree.locator)
+      : ({ verified: false, reason: "pane-gone" } satisfies PaneVerdict);
+    if (verdict.verified) return;
     const resumeSessionFile = tree.locator?.ompSessionFile;
-    await this.removeTreeWindow(tree);
+    await this.removeTreeWindow(tree, verdict);
     tree.status = "dead";
     await this.spawnRoot(treeKey, true, resumeSessionFile);
   }
