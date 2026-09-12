@@ -258,6 +258,17 @@ export class ProcessManager {
    * from retiring or resurrecting a root after shutdown has begun draining. */
   private disposed = false;
   private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
+  /** Boot's launch hold. False from construction: no path that opens a tmux pane (`admit`,
+   * `advancePromotionSweep`, `resurrect`, `ensureController`, and — through
+   * `WorkerAdmission`'s own gate — `spawnWorker`/`resumeWorker`) launches anything until
+   * `enableLaunches()` runs, once the daemon's boot probes have passed. A spawn requested while
+   * the hold is on queues through the ordinary admission queue and answers `queued`; a
+   * resurrection or controller launch is remembered and replayed by `replayHeldRecoveries()`.
+   * Paths that only stop or kill panes, or talk to a pane that survived the restart, are not
+   * gated: the hold is about opening panes. */
+  private launchesEnabled = false;
+  private readonly heldResurrects = new Set<IssueKey>();
+  private heldControllerRequest = false;
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
   /** Owns the running-worker cap: admission decisions, the FIFO queue, the reservation set, and
@@ -354,11 +365,36 @@ export class ProcessManager {
     });
   }
 
-  /** The only way worker-queue promotion is ever allowed to actually launch or prompt
-   * something. Call once, after the daemon's HTTP `api` is assigned, before the first explicit
-   * `reconcileWorkerAdmission()` -- see `WorkerAdmission`'s own doc comment for why. */
-  enableWorkerPromotion(): void {
+  /** Releases boot's launch hold: the only way any pane-opening path (root admission and
+   * promotion, worker launch and promotion, resurrection, the controller) is ever allowed to
+   * actually open a pane. Call once, after the daemon's boot probes have passed and its HTTP
+   * `api` is assigned, before `reconcileAdmission()`/`reconcileWorkerAdmission()`/
+   * `replayHeldRecoveries()` -- see `launchesEnabled` and `WorkerAdmission`'s own doc comment. */
+  enableLaunches(): void {
+    this.launchesEnabled = true;
     this.workerAdmission.enableWorkerPromotion();
+  }
+
+  /** Replays every resurrection and controller launch that `resurrect`/`ensureController`
+   * held while `launchesEnabled` was false. Each replay's failure is logged and does not stop
+   * the others; call once, right after `enableLaunches()` and the boot reconciles. */
+  async replayHeldRecoveries(): Promise<void> {
+    const trees = [...this.heldResurrects];
+    this.heldResurrects.clear();
+    for (const tree of trees) {
+      try {
+        await this.resurrect(tree);
+      } catch (error) {
+        console.error(`[legion] held resurrection of ${tree} failed:`, error);
+      }
+    }
+    if (!this.heldControllerRequest) return;
+    this.heldControllerRequest = false;
+    try {
+      await this.ensureController();
+    } catch (error) {
+      console.error("[legion] held controller launch failed:", error);
+    }
   }
 
   /** Cancels the armed boot watchdog for `token`, if any — a no-op if none is armed, or if
@@ -413,7 +449,9 @@ export class ProcessManager {
       return "queued";
     }
 
-    if (admission.active.length >= admission.cap) {
+    // While boot's launch hold is on, the cap is treated as full: the tree queues exactly as it
+    // would behind a full cap, and `reconcileAdmission()` promotes it once the hold releases.
+    if (admission.active.length >= admission.cap || !this.launchesEnabled) {
       tree.status = "queued";
       admission.queue.push(issue);
       void this.persist();
@@ -911,9 +949,9 @@ export class ProcessManager {
    * locator-clear and the queue-push are one durable transition), never launched directly here:
    * a direct `launchWorker`
    * call would bypass the running-worker cap, the reservation, and the per-role launch lock —
-   * over-admission, or a second pane racing a concurrent same-role spawn — and would also
-   * dereference `api` before it exists when this runs from `reconnectWorkers` at boot (before
-   * `enableWorkerPromotion()`). The whole decision runs under `mutateClaim(token)`, serialized
+   * over-admission, or a second pane racing a concurrent same-role spawn — and would also open a
+   * pane during boot's launch hold when this runs from `reconnectWorkers` (before
+   * `enableLaunches()`). The whole decision runs under `mutateClaim(token)`, serialized
    * against every other admission/retirement decision for this token (`spawnWorker`,
    * `handleWorkerStarted` via `mutateLiveRoleClaim`) — and re-validates the claim it was handed
    * against the current one before touching anything, since the caller may have captured it,
@@ -1404,6 +1442,12 @@ export class ProcessManager {
       return;
     }
     this.cancelControllerRegistrationDeadline();
+    if (!this.launchesEnabled) {
+      // Spawning the controller opens a pane. Held for `replayHeldRecoveries()`.
+      this.heldControllerRequest = true;
+      console.error("[legion] controller launch held until the OMP probe passes");
+      return;
+    }
     if (!this.controllerSpawn) {
       this.controllerSpawn = (async () => {
         const controllerSecret = await this.deps.mintControllerCapability();
@@ -1734,6 +1778,12 @@ export class ProcessManager {
   }
 
   async resurrect(treeKey: IssueKey): Promise<void> {
+    if (!this.launchesEnabled) {
+      // A resurrection opens a pane. Held for `replayHeldRecoveries()` once boot's probes pass.
+      this.heldResurrects.add(treeKey);
+      console.error(`[legion] resurrection of ${treeKey} held until the OMP probe passes`);
+      return;
+    }
     const current = this.resurrecting.get(treeKey);
     if (current) return current;
 
@@ -1903,7 +1953,9 @@ export class ProcessManager {
     const sweep = this.promotionSweep;
     if (!sweep) return;
     const admission = this.deps.state.admission;
-    if (admission.active.length >= admission.cap) {
+    // Boot's launch hold counts as a full cap: queued trees stay queued until `enableLaunches()`
+    // and the `reconcileAdmission()` that follows it.
+    if (admission.active.length >= admission.cap || !this.launchesEnabled) {
       if (sweep.inFlight === 0) this.promotionSweep = undefined;
       await this.persist();
       return;

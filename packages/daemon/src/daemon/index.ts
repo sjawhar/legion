@@ -311,7 +311,7 @@ async function startDaemonLocked(
   // it needs no `api` reference (it only probes existing connections; it never mints a boot
   // token) — but a reconnect's own `get_state` response can still synchronously fire
   // `onIdle` -> `promoteWorkerQueue`, which is why that trigger (and `reconcileWorkerAdmission`)
-  // stay gated behind `processManager.enableWorkerPromotion()` below until `api` exists: nothing
+  // stay gated behind `processManager.enableLaunches()` below until `api` exists: nothing
   // here is protected by call *ordering*, only by the gate.
   try {
     await processManager.reconnectWorkers();
@@ -482,10 +482,11 @@ async function startDaemonLocked(
   // (computed fresh from `state.roles`/`state.admission`, not accumulated), so an early real
   // request arriving during this window is never over-admitted; it only serializes behind
   // these calls on the same `admissionLock`, which can at most let it jump ahead of a queued
-  // tree/worker in FIFO order. `enableWorkerPromotion()` opens the gate `reconcileWorkerAdmission`
-  // (and every `onIdle`/`markWorkerDead`/`closeTree` trigger from this point on) requires —
-  // see `WorkerAdmission.workerPromotionEnabled`'s doc comment.
-  processManager.enableWorkerPromotion();
+  // tree/worker in FIFO order. `enableLaunches()` releases the launch hold every pane-opening
+  // path (`admit`, `spawnWorker`, `resurrect`, `ensureController`, and every
+  // `onIdle`/`markWorkerDead`/`closeTree` promotion trigger from this point on) waits behind —
+  // see `ProcessManager.launchesEnabled` and `WorkerAdmission.workerPromotionEnabled`.
+  processManager.enableLaunches();
   // Before `reconcileAdmission`'s own promotion cascade, which can take a while (spawning
   // multiple queued roots): a restored active-with-a-locator-but-never-confirmed tree must have
   // its registration deadline armed immediately, not only once that cascade finishes, or it sits
@@ -493,6 +494,9 @@ async function startDaemonLocked(
   processManager.reconnectRoots();
   await processManager.reconcileAdmission();
   await processManager.reconcileWorkerAdmission();
+  // A resurrection or controller launch requested while the hold was on (the pending-notice
+  // `ensureController` above, an exception routed to a dead root) runs now.
+  await processManager.replayHeldRecoveries();
   const ready = nats.ready();
 
   let stopped = false;
