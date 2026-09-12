@@ -1,0 +1,184 @@
+{
+  "issue": "LEGION-28",
+  "pr": {
+    "number": 980,
+    "url": "https://github.com/sjawhar/legion/pull/980",
+    "branch": "legion/LEGION-28",
+    "testedHead": "ea96e1b3e917cb0b0e4a52ce979ddedb4692f1a8"
+  },
+  "spec": {
+    "ref": "dispatch://LEGION-28/spec",
+    "version": 4,
+    "contract": "Acceptance items 1, 2, 3, 5, 6, 7 and the Errors table; item 4 is LEGION-11's (out of scope, observed but not judged)."
+  },
+  "passed": 6,
+  "failed": 0,
+  "failures": [],
+  "verdicts": {
+    "1": {
+      "result": "pass",
+      "surface": "index.test.ts (unit) + the real daemon (item 7 run)",
+      "evidence": "Unit: 'binds the API and loads state while the OMP probe is still timing out, launches nothing during the hold, and promotes the queued root and worker once it passes' fetches the bound port over HTTP during the hold (200, state loaded, admission.queue=[issue], no new-window/split-window, startDaemon unresolved), then asserts the promotion (new-window + split-window with --resume) and the two backoff sleeps [10000, 20000]; 'keeps retrying a probe the runner killed past the old bound' asserts sleeps [10000,20000,40000,80000,160000,300000,300000] over 7 kills. Real daemon: see item 7."
+    },
+    "2": {
+      "result": "pass",
+      "surface": "index.test.ts (unit) + real daemon negative control",
+      "evidence": "Unit: 'refuses to serve an OMP invocation without pi.agents' rejects with 'does not expose pi.agents' after state load, asserts NATS closed and the instance lock released (a second start succeeds); 'does not retry a definitive pi.agents negative' asserts exactly one attempt and no sleep for both the missing marker and a launch-prefix failure; 'refuses to serve an installed pi-legion-envoy that omp does not actually load' covers the plugin probe. Real daemon: LEGION_OMP_PATH -> stand-in printing LEGION_OMP_AGENTS=missing: exit 1, 'error: [legion] Configured OMP invocation does not expose pi.agents: LEGION_OMP_AGENTS=missing', no listener on 19390/19391 afterwards, no tmux server, daemon.lock released; the 3 s-slow variant served /legion/v1/state 200 from +1.5 s until the exit at +4 s, refused after."
+    },
+    "3": {
+      "result": "pass",
+      "surface": "processes.test.ts (unit) + the real daemon boot with three dead seeded claims",
+      "evidence": "Unit 'a throw while reconnecting one worker claim is logged with its token and leaves that claim alone while every other claim is reconciled': three claims, revokeSessionCapability throws TypeError for the second; asserts kill-pane for %1 and %3 only, claims 1/3 locator cleared with resumeSessionFile preserved, claim 2 locator %2 intact and no resumeSessionFile, exactly one console.error containing 'failed to reconcile worker <token2>' with the thrown error. Real daemon: planner and reviewer claims (sessionId set, sockets absent) each logged '[legion] failed to reconcile worker legion-sjawhar28t-zzl28t-1-<role>: ... TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')' and kept their locators (GET /state roles hasLocator=true); the tester claim (no sessionId) was retired cleanly (hasLocator=false); boot continued to the probes, the API, and the launches. The 'worker reconnection failed' last-resort line never appeared."
+    },
+    "4": {
+      "result": "out of scope (LEGION-11)",
+      "surface": "observed on the real daemon",
+      "evidence": "The production TypeError (api.revokeSessionCapability undefined at boot-time reconnect on main's ordering) is exactly what item 3's isolation logged per claim; the dead claims' records were left in place as the spec's item 4 text describes until LEGION-11 lands. Not judged for this PR."
+    },
+    "5": {
+      "result": "pass",
+      "surface": "packages/daemon/src/daemon/AGENTS.md at ea96e1b3",
+      "evidence": "Describes: transient vs definitive probe outcomes with the backoff (10 s doubling to 5 min, unbounded; IMAGE_PROBE_RETRY bounded for legion probe-image), the launch hold (every pane-opening path queues/holds: admit, advancePromotionSweep, launchOrQueue/resumeOrQueueExisting, resurrect, ensureController; stop/kill paths and surviving-pane paths not gated), 'GET /legion/v1/state answers and the durable lane keeps acking' during the probe, the per-claim reconnect isolation with the '[legion] failed to reconcile worker <token>:' line and reconnectRoots' twin, slow_command_timeout_seconds (default 300, its env var, what it budgets, the timedOut shape), and the clone-into-temporary-sibling rule with the 'removing incomplete clone' log and the no-sweep decision. The old 'Before loading state ... probes' claim is gone (zero matches). Boot ordering bullet matches index.ts as read."
+    },
+    "6": {
+      "result": "pass",
+      "surface": "workspace.test.ts + fetch.test.ts + config.test.ts (unit) and a real-filesystem run of provisionIssueWorkspace with defaultRunner against https://github.com/sjawhar/legion",
+      "evidence": "[A] pre-state: final dir exists=true has .jj=false siblings=[\"legion\"]\n[legion] removing incomplete clone at /tmp/legion28-rig/item6-state/repos/github.com/sjawhar/legion (no .jj) before cloning again\n[A] provisioning threw after 1.8 s wall:\n    Command timed out after 1 s (ran 1.0 s): jj git clone https://github.com/sjawhar/legion /tmp/legion28-rig/item6-state/repos/github.com/sjawhar/legion.clone-BIkSkV\n    Fetching into new repo in \"/tmp/legion28-rig/item6-state/repos/github.com/sjawhar/legion.clone-BIkSkV\"\n    \n[A] post-state: final dir exists=false siblings=[]\n[B] provisioning succeeded in 4.2 s: {\"repoCloneDir\":\"/tmp/legion28-rig/item6-state/repos/github.com/sjawhar/legion\",\"workspaceDir\":\"/tmp/legion28-rig/item6-state/workspaces/sjawhar/legion/zzl28t-6\",\"bookmark\":\"legion/ZZL28T-6\"}\n[B] final dir has .jj=true siblings=[\"legion\"]\n[B] jj log -r main in /tmp/legion28-rig/item6-state/repos/github.com/sjawhar/legion: exit=0 9e0b24f55e45 chore: release cli v1.3.2 [skip ci] \n[B] jj log -r main in /tmp/legion28-rig/item6-state/workspaces/sjawhar/legion/zzl28t-6: exit=0 9e0b24f55e45 chore: release cli v1.3.2 [skip ci] \n[B] jj bookmark list legion/ZZL28T-6: exit=0 legion/ZZL28T-6: msqzpzvl 27a83535 (no description set)"
+    },
+    "7": {
+      "result": "pass",
+      "surface": "real daemon: bun run packages/daemon/src/cli/index.ts start sjawhar/28t --config /tmp/legion28-rig/legion.yaml (own NATS + Envoy listener built from this head, real GitHub App tokens, live Dispatch with an inert project, private tmux -L legion-sjawhar28t)",
+      "evidence": {
+        "hold": "API 200 from +2 s; 0 panes / no tmux server at every 2 s sample from +0 to +50 s; daemon alive at every sample; attempt-1 line at +5 s, attempt-2 line at +21 s; 'controller launch held until the OMP probe passes' logged; state during the hold: trees.ZZL28T-1.status=queued, admission.queue=[ZZL28T-1], controllerLocator=null.",
+        "release": "attempt 3 (real OMP pi.agents probe) 21:22:32Z passed, attempt 4 (plugin probe) 21:22:36Z passed, 'legion daemon listening on 127.0.0.1:19380' at +52 s; tmux server process started 21:22:4x (after the hold); panes after: %1 @1 zzl28t-1 (root architect pane, cwd the provisioned workspace) and %2 @2 controller; state after: trees.ZZL28T-1 active generation 1 locator {@1,%1}, admission.active=[ZZL28T-1], controllerLocator {@2,%2}; the real-remote clone of sjawhar/legion-smoke was observed as legion-smoke.clone-e94IRj then legion-smoke (with .jj; jj log -r main works).",
+        "pollTable": [
+          "('+  0.0s', True, None, 0, False, False, False)",
+          "('+  2.0s', True, 200, 0, False, False, False)",
+          "('+  4.0s', True, 200, 0, False, False, False)",
+          "('+  6.0s', True, 200, 0, True, False, False)",
+          "('+  8.1s', True, 200, 0, True, False, False)",
+          "('+ 10.1s', True, 200, 0, True, False, False)",
+          "('+ 12.1s', True, 200, 0, True, False, False)",
+          "('+ 14.1s', True, 200, 0, True, False, False)",
+          "('+ 16.1s', True, 200, 0, True, False, False)",
+          "('+ 18.1s', True, 200, 0, True, False, False)",
+          "('+ 20.1s', True, 200, 0, True, False, False)",
+          "('+ 22.1s', True, 200, 0, True, True, False)",
+          "('+ 24.1s', True, 200, 0, True, True, False)",
+          "('+ 26.1s', True, 200, 0, True, True, False)",
+          "('+ 28.1s', True, 200, 0, True, True, False)",
+          "('+ 30.1s', True, 200, 0, True, True, False)",
+          "('+ 32.1s', True, 200, 0, True, True, False)",
+          "('+ 34.1s', True, 200, 0, True, True, False)",
+          "('+ 36.2s', True, 200, 0, True, True, False)",
+          "('+ 38.2s', True, 200, 0, True, True, False)",
+          "('+ 40.2s', True, 200, 0, True, True, False)",
+          "('+ 42.2s', True, 200, 0, True, True, False)",
+          "('+ 44.2s', True, 200, 0, True, True, False)",
+          "('+ 46.2s', True, 200, 0, True, True, False)",
+          "('+ 48.2s', True, 200, 0, True, True, False)",
+          "('+ 50.2s', True, 200, 0, True, True, False)",
+          "('+ 52.2s', True, 200, 2, True, True, True)"
+        ],
+        "daemonLogLines": [
+          "[legion] failed to reconnect worker legion-sjawhar28t-zzl28t-1-planner: 415 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */",
+          "error: Failed to connect",
+          "[legion] failed to reconnect worker legion-sjawhar28t-zzl28t-1-tester: 415 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */",
+          "error: Failed to connect",
+          "[legion] failed to reconnect worker legion-sjawhar28t-zzl28t-1-reviewer: 415 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */",
+          "error: Failed to connect",
+          "[legion] failed to reconcile worker legion-sjawhar28t-zzl28t-1-planner: 300 |     natsRequest: (subject, data) => nats.request(subject, data),",
+          "TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')",
+          "[legion] failed to reconcile worker legion-sjawhar28t-zzl28t-1-reviewer: 300 |     natsRequest: (subject, data) => nats.request(subject, data),",
+          "TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')",
+          "[legion] worker-queue promotion trigger ignored: not yet enabled (still booting)",
+          "[legion] controller launch held until the OMP probe passes",
+          "[legion] OMP pi.agents probe failed transiently (attempt 1); retrying in 10s: command timed out after 5 s (ran 5.0 s)",
+          "[legion] OMP pi.agents probe failed transiently (attempt 2); retrying in 20s: command timed out after 5 s (ran 5.0 s)",
+          "[legion] failed to PATCH Dispatch status=in_progress for ZZL28T-1 (recorded for resync retry): not found",
+          "legion daemon listening on 127.0.0.1:19380",
+          "legion worker stream listening on 127.0.0.1:19381"
+        ],
+        "wrapperLog": [
+          "2026-09-12T21:21:52Z probe attempt=1 pid=37742 HANG (exec sleep 60) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs",
+          "2026-09-12T21:22:07Z probe attempt=2 pid=47155 HANG (exec sleep 60) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs",
+          "2026-09-12T21:22:32Z probe attempt=3 pid=71410 PASS-THROUGH argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github-",
+          "2026-09-12T21:22:36Z probe attempt=4 pid=74886 PASS-THROUGH argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github-",
+          "2026-09-12T21:22:43Z pane-launch pid=80830 (inert sleep) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github-sja",
+          "2026-09-12T21:22:43Z pane-launch pid=80864 (inert sleep) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github-sja",
+          "2026-09-12T21:29:19Z probe attempt=1 pid=316788 HANG (exec sleep 60) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/install",
+          "2026-09-12T21:29:34Z probe attempt=2 pid=324966 HANG (exec sleep 60) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/install",
+          "2026-09-12T21:29:40Z probe attempt=1 pid=328650 HANG (exec sleep 60) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/install",
+          "2026-09-12T21:29:55Z probe attempt=2 pid=336104 HANG (exec sleep 60) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/install",
+          "2026-09-12T21:30:20Z probe attempt=3 pid=356547 PASS-THROUGH argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github",
+          "2026-09-12T21:31:06Z probe attempt=4 pid=383035 PASS-THROUGH argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github",
+          "2026-09-12T21:31:10Z probe attempt=5 pid=385366 PASS-THROUGH argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github",
+          "2026-09-12T21:31:17Z pane-launch pid=390113 (inert sleep) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github-sj",
+          "2026-09-12T21:31:17Z pane-launch pid=390157 (inert sleep) argv: secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- /home/ubuntu/.mise/installs/github-sj"
+        ],
+        "panesAfter": [
+          "%1 @1 zzl28t-1 pid=80435 @legion_owner=legion-sjawhar28t start=\"cd /tmp/legion28-rig/daemon/workspaces/sjawhar/legion-smoke/zzl28t-1 && /home/ubuntu/.mise/installs/bun/1.3.14/bin/bun /home/ubuntu/.local/state/legion/sjawhar-legion",
+          "%2 @2 controller pid=80550 @legion_owner=legion-sjawhar28t start=\"cd /tmp/legion28-rig/daemon/controller && /home/ubuntu/.mise/installs/bun/1.3.14/bin/bun /home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/l"
+        ],
+        "launchLogLine": "none — the daemon writes no log line when it opens a pane; the launch evidence is the wrapper's pane-launch entries (21:22:43Z, '--mode rpc --append-system-prompt # Legion Root Architect' and '# Legion Controller Root'), the state locators, and the pane list.",
+        "negativeControl": "== 21:23:30Z NEGATIVE CONTROL: daemon pid=108361; LEGION_OMP_PATH=/tmp/legion28-rig/missing-omp.sh (prints LEGION_OMP_AGENTS=missing to stderr, exit 0); port 19390; tmux -L legion-sjawhar28n\n== 21:23:32Z (+2.0s) daemon exit code = 1\n-- /legion/v1/state polled while alive (elapsed, HTTP): [('+ 0.0s', None), ('+ 1.0s', None)]\n-- GET http://127.0.0.1:19390/legion/v1/state after exit: None URLError(ConnectionRefusedError(111, 'Connection refused'))\n-- tmux -L legion-sjawhar28n list-panes -a: error connecting to /home/ubuntu/.tmux/sockets/tmux-1000/legion-sjawhar28n (No such file or directory)\n-- daemon-negative.log:\n   142 |           output.includes(OMP_AGENTS_CAPABILITY_MARKER) &&\n   143 |           !output.includes(\"LEGION_OMP_AGENTS=missing\");\n   144 |         return { passed: false, definitive: !transient, detail };\n   145 |       },\n   146 |       async (detail) =>\n   147 |         new Error(\n                     ^\n   error: [legion] Configured OMP invocation does not expose pi.agents: LEGION_OMP_AGENTS=missing\n-- wrapper-negative.log:\n   2026-09-12T21:23:31Z missing-omp pid=108626 argv: models --no-extensions --extension /tmp/legion-omp-probe-lWeN1k/probe.mjs --json\n== 21:23:58Z NEGATIVE CONTROL (slow variant): pid=123328; LEGION_OMP_PATH=/tmp/legion28-rig/missing-omp-slow.sh (sleep 3, then LEGION_OMP_AGENTS=missing, exit 0)\n== 21:24:02Z (+4.0s) daemon exit code = 1\n-- /legion/v1/state polled every 0.5 s while alive (elapsed, HTTP): [('+ 0.0s', None), ('+ 0.5s', None), ('+ 1.0s', None), ('+ 1.5s', 200), ('+ 2.0s', 200), ('+ 2.5s', 200), ('+ 3.0s', 200), ('+ 3.5s', 200)]\n-- GET /legion/v1/state after exit: URLError(ConnectionRefusedError(111, 'Connection refused'))\n-- tmux -L legion-sjawhar28n list-panes -a: error connecting to /home/ubuntu/.tmux/sockets/tmux-1000/legion-sjawhar28n (No such file or directory)\n-- daemon-negative-slow.log (frames elided):\n   error: [legion] Configured OMP invocation does not expose pi.agents: LEGION_OMP_AGENTS=missing",
+        "sigtermDuringHold": "== 21:29:19Z run 3 (probe hangs on every attempt): pid=316196\n== 21:29:40Z (+21.0s) two attempts logged; /state HTTP 200; lock file: 316196 (daemon pid 316196; bun child pid may differ)\n== 21:29:40Z SIGTERM during the hold -> exit code -15; lock file after: present: 316196; /state: None\n-- log lines: [legion] failed to reconnect worker legion-sjawhar28t-zzl28t-1-planner: 415 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */ | [legion] failed to reconnect worker legion-sjawhar28t-zzl28t-1-tester: 415 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */ | [legion] failed to reconnect worker legion-sjawhar28t-zzl28t-1-reviewer: 415 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */ | [legion] failed to reconcile worker legion-sjawhar28t-zzl28t-1-planner: 300 |     natsRequest: (subject, data) => nats.request(subject, data), | [legion] failed to reconcile worker legion-sjawhar28t-zzl28t-1-reviewer: 300 |     natsRequest: (subject, data) => nats.request(subject, data), | [legion] worker-queue promotion trigger ignored: not yet enabled (still booting) | [legion] controller launch held until the OMP probe passes | [legion] OMP pi.agents probe failed transiently (attempt 1); retrying in 10s: command timed out after 5 s (ran 5.0 s) | [legion] OMP pi.agents probe failed transiently (attempt 2); retrying in 20s: command timed out after 5 s (ran 5.0 s)\n== 21:31:17Z (+97.0s) restart: alive=True; listening=True; /state HTTP 200\n-- restart log lines: [legion] failed to reconnect worker legion-sjawhar28t-zzl28t-1-planner: 415 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */ |       at startDaemonLocked (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-28/packages/daemon/src/daemon/index.ts:326:26) | [legion] failed to reconnect worker legion-sjawhar28t-zzl28t-1-reviewer: 415 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */ |       at startDaemonLocked (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-28/packages/daemon/src/daemon/index.ts:326:26) | [legion] failed to reconcile worker legion-sjawhar28t-zzl28t-1-planner: 300 |     natsRequest: (subject, data) => nats.request(subject, data), |       at markWorkerDeadLocked (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-28/packages/daemon/src/daemon/processes.ts:806:1 | [legion] failed to reconcile worker legion-sjawhar28t-zzl28t-1-reviewer: 300 |     natsRequest: (subject, data) => nats.request(subject, data), |       at markWorkerDeadLocked (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-28/packages/daemon/src/daemon/processes.ts:806:1 | [legion] controller launch held until the OMP probe passes | [legion] OMP pi.agents probe failed transiently (attempt 1); retrying in 10s: command timed out after 5 s (ran 5.0 s) | [legion] OMP pi.agents probe failed transiently (attempt 2); retrying in 20s: command timed out after 5 s (ran 5.0 s) | [legion] OMP pi.agents probe failed transiently (attempt 3); retrying in 40s: command timed out after 5 s (ran 5.1 s) | [legion] failed to PATCH Dispatch status=in_progress for ZZL28T-1 (recorded for resync retry): not found | legion daemon listening on 127.0.0.1:19380 | legion worker stream listening on 127.0.0.1:19381\n== 21:31:17Z restart daemon SIGTERM after boot -> exit 0"
+      }
+    }
+  },
+  "errorsTable": {
+    "probe times out": "pass — retried with 10 s then 20 s backoff, API served, no pane, each attempt logged with limit and wall time (real daemon runs 1, 2, 3)",
+    "probe definitively negative": "pass — exit 1, message names the failure, API/NATS/lock closed (real daemon negative control, two variants)",
+    "reconnect of one claim throws": "pass — logged with token, loop continued to the other claims, failing claim untouched (unit + real daemon)",
+    "provisioning command killed at its budget": "pass — 'Command timed out after 1 s (ran 1.0 s): jj git clone https://github.com/sjawhar/legion <tmp>' + stderr; nothing at the final path; no .clone-* sibling (real filesystem, real remote). The root launch-failure accounting on that error is covered by processes.test.ts's existing launch-failure tests (unchanged by this branch) and was not driven on the real daemon because the probe shares the same budget key.",
+    "final clone directory exists without .jj": "pass — '[legion] removing incomplete clone at <dir> (no .jj) before cloning again' then a fresh clone (real filesystem)",
+    "spawn requested while the probe has not passed": "pass (unit + boot-queued root) — processes.test.ts 'queues a root admitted and a worker spawned while launches are held...' and 'holds a resurrection and a controller launch...'; on the real daemon the seeded queued root stayed queued through the hold and was promoted after; POST /worker/spawn itself needs a live architect capability and was not driven",
+    "slow_command_timeout_seconds not a positive integer": "pass (unit) — config.test.ts refuses 0 via env naming LEGION_SLOW_COMMAND_TIMEOUT_SECONDS and -5 via YAML naming slow_command_timeout_seconds"
+  },
+  "commands": [
+    "cd packages/daemon && bun test  -> run 1: 880 pass / 5 skip / 2 fail (load flakes, see findings); run 2: 882 pass / 5 skip / 0 fail (887 tests, 56 files)",
+    "cd packages/workspace && bun test  -> 10 pass / 0 fail",
+    "cd packages/daemon && bun test src/daemon/__tests__/processes.test.ts -t 'a throw while reconnecting one worker claim|a throw while re-arming one root|queues a root admitted and a worker spawned while launches are held|holds a resurrection and a controller launch'  -> 4 pass",
+    "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test src/daemon/__tests__/real-shutdown-e2e.test.ts  -> 3 pass; LEGION_TMUX_LIVE=1 bun test processes.test.ts -t '<the three real-tmux tests>'  -> 3 pass",
+    "cd packages/daemon && bunx biome check src/  -> Checked 143 files, no fixes; cd packages/workspace && bunx biome check src/  -> Checked 3 files, no fixes",
+    "cd packages/daemon && bunx tsc --noEmit  -> clean; cd packages/workspace && bunx tsc --noEmit  -> clean",
+    "bunx biome check packages/ (repo root)  -> cannot run: `bunx biome` at the root resolves an unrelated npm package (prints 'Saved lockfile' in bunx's cache, exit 0, checks nothing); the real binary packages/daemon/node_modules/.bin/biome check packages/ exits 1 on 'Found a nested root configuration' (packages/claude-envoy-bridge/biome.json) — pre-existing, lint therefore run per package",
+    "legion gh -- pr checks 980  -> lint pass, pr-title pass, test pass, typecheck pass at ea96e1b3; legion gh -- run list --commit ea96e1b3...  -> Tests runs 34718107115 and 34718107742, all jobs success",
+    "item 7: docker run -d --name legion28-nats -p 127.0.0.1:14228:4222 nats:2.10 -js; go build -o out/envoy-listener ./cmd/listener (this head) and run it on 19028; bun /tmp/legion28-rig/seed-state.resolved.ts /tmp/legion28-rig/daemon sjawhar28t; env LEGION_SLOW_COMMAND_TIMEOUT_SECONDS=5 DISPATCH_URL=http://localhost:8766 DISPATCH_TOKEN=<box token> secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bun run packages/daemon/src/cli/index.ts start sjawhar/28t --config /tmp/legion28-rig/legion.yaml; poll: curl http://127.0.0.1:19380/legion/v1/state and TMUX_TMPDIR=/home/ubuntu/.tmux/sockets tmux -L legion-sjawhar28t list-panes -a every 2 s",
+    "item 7 negative: same, with LEGION_OMP_PATH=/tmp/legion28-rig/missing-omp.sh (and missing-omp-slow.sh), --config legion-negative.yaml (project sjawhar/28n, port 19390, no hang wrapper)",
+    "item 6: secrets GH_AGENT_APP_PRIVATE_KEY_B64 -- bun /tmp/legion28-rig/item6-driver.resolved.ts /tmp/legion28-rig/item6-state sjawhar/legion"
+  ],
+  "rig": {
+    "config": "project: sjawhar/28t\nport: 19380\nenvoy_url: http://127.0.0.1:19028\nnats_urls:\n  - nats://127.0.0.1:14228\ndispatch_project: ZZL28T\nrepos:\n  - sjawhar/legion-smoke\nadmission_cap: 4\nworker_cap: 6\nmax_recursion_depth: 8\nlinger_hours: 72\nmax_fix_attempts: 3\nresync_interval_seconds: 3600\nworker_boot_timeout_seconds: 600\nstate_dir: /tmp/legion28-rig/daemon\nomp_invocation: mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp\nomp_launch_prefix:\n  - /tmp/legion28-rig/hang-probe.sh\n  - secrets\n  - ANTHROPIC_API_KEY\n  - GEMINI_API_KEY\n  - OPENAI_API_KEY\n  - --\ngates:\n  design: off\ngithub_apps:\n  implement:\n    app_id: \"3202636\"\n    private_key_command: 'printf \"%s\" \"$GH_AGENT_APP_PRIVATE_KEY_B64\" | base64 --ignore-garbage --decode'\n  review:\n    app_id: \"3202653\"\n    private_key_command: 'printf \"%s\" \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 --ignore-garbage --decode'\n",
+    "wrapper": "#!/bin/sh\n# LEGION-28 acceptance-7 launch-prefix wrapper. The daemon prepends this to BOTH boot probes and\n# every pane launch (omp_launch_prefix). Probe argv contains `models`; a pane launch (root,\n# worker, controller) contains `--mode rpc`.\n#   probes : the first HANG_ATTEMPTS attempts hang past the daemon's slow-command budget\n#            (`exec sleep 60`, exec so the kill reaches the sleeping process itself); later\n#            attempts exec the real launch command unchanged.\n#   panes  : inert — the pane opens and stays alive (`exec sleep`), but no OMP session boots, so\n#            this scratch daemon never runs a live agent against Dispatch/GitHub.\nrig=/tmp/legion28-rig\ncount_file=\"$rig/probe.count\"\nlog=\"$rig/wrapper.log\"\nHANG_ATTEMPTS=\"${HANG_ATTEMPTS:-2}\"\ncase \" $* \" in\n  *\" --mode rpc \"*)\n    echo \"$(date -u +%FT%TZ) pane-launch pid=$$ (inert sleep) argv: $*\" >>\"$log\"\n    exec sleep 3600\n    ;;\nesac\nn=$(cat \"$count_file\" 2>/dev/null || echo 0)\necho $((n + 1)) >\"$count_file\"\nif [ \"$n\" -lt \"$HANG_ATTEMPTS\" ]; then\n  echo \"$(date -u +%FT%TZ) probe attempt=$((n + 1)) pid=$$ HANG (exec sleep 60) argv: $*\" >>\"$log\"\n  exec sleep 60\nfi\necho \"$(date -u +%FT%TZ) probe attempt=$((n + 1)) pid=$$ PASS-THROUGH argv: $*\" >>\"$log\"\nexec \"$@\"\n",
+    "negativeStandIn": "#!/bin/sh\n# Negative control: an \"OMP\" that loads the probe extension but reports no pi.agents — the\n# definitive marker on stderr (where the real probe extension writes it), clean exit 0.\necho \"$(date -u +%FT%TZ) missing-omp pid=$$ argv: $*\" >>/tmp/legion28-rig/wrapper-negative.log\necho \"LEGION_OMP_AGENTS=missing\" >&2\nexit 0\n",
+    "seed": "state.json seeded via legion-state.ts saveState: issues/trees ZZL28T-1 queued in admission.queue; controllerPendingNotices=[1 seeded notice] with no controller role; roles legion-sjawhar28t-zzl28t-1-{planner,tester,reviewer} with readyConfirmedAt set and locators whose socketPath does not exist (planner and reviewer carry a sessionId, tester does not)",
+    "paneInertness": "the wrapper heads omp_launch_prefix, so every pane launch (argv contains --mode rpc) runs `exec sleep 3600` instead of OMP: the pane opens and stays alive, the daemon records the locator, and no live agent acts against Dispatch/GitHub; worker_boot_timeout_seconds=600 keeps the registration deadline outside the capture window",
+    "artifacts": "/tmp/legion28-rig (session-local; not committed): daemon-positive.log, daemon-positive-run1.log, capture-run1.txt, capture-run2.txt, capture-negative.txt, capture-sigterm.txt, daemon-negative*.log, daemon-sigterm-during-hold.log, daemon-restart-after-sigterm.log, item6.out, wrapper*.log"
+  },
+  "testQualityReview": [
+    "index.test.ts acceptance-1 test is behavioural (real HTTP fetch during the hold, pane commands counted, promotion asserted) and asserts the two log lines by regex on their informational content (attempt number, delay, limit, wall time) — spec-mandated content, wording-coupled but not incidental.",
+    "index.test.ts 'keeps retrying a probe the runner killed...' asserts options.timeoutMs === 300_000 inside the fake runner — a wiring assertion, but it is the spec's 'each attempt runs under slow_command_timeout_seconds' contract; acceptable.",
+    "workspace.test.ts first test asserts the exact provisioning argv sequence (pre-existing style, extended for the temp clone target) and that every call carried commandTimeoutMs — the latter is the item-6 contract ('provisioning commands get their own budget').",
+    "workspace.test.ts 'removes an incomplete clone...' and processes.test.ts item-3 test assert log lines via stringContaining on the spec-mandated content (path + '(no .jj)'; 'failed to reconcile worker <token>'), not full sentences.",
+    "fetch.test.ts runner tests use a real `sleep 30` killed at 200 ms (exit 143, timedOut.limitMs=200, elapsedMs>=200) and a real `true` with no timedOut key — behavioural.",
+    "No test asserts implementation wiring only or pins incidental wording beyond the above; none recommended for deletion."
+  ],
+  "observations": [
+    "Load flake (not introduced here): the first full `bun test` in packages/daemon failed 'ProcessManager > dispose() stops every armed boot watchdog's connect-retry loop for good' (a worker-started publication landed between dispose and the assertion) and 'ProcessManager > repeated dead-before-ready cycles escalate to launch-failed' (tree observed status 'dead' mid-transition after windowCount>=2). Neither test name appears in the branch diff; both pass 3/3 standalone and the full rerun was 882 pass / 0 fail; CI's test job is green at the head. Host load average 32–46 during the runs.",
+    "scripts/smoke/README.md line 73 still reads 'Startup probes that exact OMP executable for pi.agents; it refuses to start before opening NATS or its API if the probe or any required tool fails.' — stale: NATS and the API now open before the probe passes and a definitive failure closes them (line 86 of the same file already says so). Docs wording; reviewer/implementer to fix.",
+    "The daemon emits no log line when it opens a root or controller pane; the launch evidence in item 7 is the wrapper's pane-launch log, the state locators, and the tmux pane list. The plan's recipe mentions 'the root's new-window' in daemon.log, which does not exist. Not a spec requirement.",
+    "SIGTERM during the hold (probe hanging on every attempt) kills the process immediately (exit by signal 15; no handler is installed until after the hold — the plan's accepted risk) and leaves daemon.lock with the dead pid; the next start reclaimed the lock and booted normally (97 s, two hung attempts then real probes), promoting the still-queued root. Nothing lost.",
+    "The killed real `jj git clone` returned in 1.0 s of a 1 s budget (the SIGTERM reached jj and its git child released the pipes promptly), so the plan's SIGKILL-escalation fast-follow was not needed on this host.",
+    "`legion status`/`legion stop <team>` cannot see the daemon during the hold (registry entry written when startDaemon resolves) — the accepted, documented consequence; not exercised.",
+    "Item 4 (LEGION-11): the exact production TypeError was reproduced on the real daemon and is now contained per claim; the dead claims' locators remain until LEGION-11 moves the reconnect after the API. Recorded, not judged.",
+    "Rig note: tmux on this box lives under TMUX_TMPDIR=/home/ubuntu/.tmux/sockets (login env); a pane listing without that variable looks at /tmp/tmux-1000 and wrongly reports no server. Run 1's during-hold pane check had that flaw and was redone as run 2 with the correct environment; run 1's remaining evidence agrees with run 2.",
+    "The tester posted no PR comment; the PR body's CI and E2E lines were filled in at ea96e1b3 and the Fast-follow line names the README wording and the missing launch log line."
+  ],
+  "documentationFeedback": "packages/daemon/src/daemon/AGENTS.md covers item 5 completely and matches the code as read (boot ordering, hold, retry policy, isolation, budget, clone rule). scripts/smoke/README.md line 73 contradicts its own line 86 (see observations).",
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T21:35:21.872Z"
+}
