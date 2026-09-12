@@ -9027,6 +9027,121 @@ describe("ProcessManager", () => {
     expect(launchedClaim.locator).toBeDefined();
   });
 
+  it("a throw while reconnecting one worker claim is logged with its token and leaves that claim alone while every other claim is reconciled", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const roles = ["planner", "tester", "reviewer"] as const;
+    const tokens = roles.map((role) => roleToken("omp", root, role));
+    roles.forEach((role, index) => {
+      state.roles[tokens[index] as string] = {
+        issue: root,
+        role,
+        generation: 1,
+        sessionId: `ses-${index + 1}`,
+        readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+        locator: {
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@42",
+          tmuxPaneId: `%${index + 1}`,
+          socketPath: `/state/workers/${role}.sock`,
+          ompSessionFile: `/state/sessions/${role}.json`,
+        },
+      };
+    });
+    const commands: string[][] = [];
+    const failure = new TypeError("api.revokeSessionCapability is not a function");
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      revokeSessionCapability: (sessionId) => {
+        if (sessionId === "ses-2") throw failure;
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes")
+          return { stdout: "", exitCode: 1 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let isolationLogs: unknown[][];
+    try {
+      await processes.reconnectWorkers();
+      isolationLogs = errorSpy.mock.calls.filter((call) =>
+        String(call[0]).includes("failed to reconcile worker")
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    const killed = commands
+      .filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
+      .map((command) => command.at(-1));
+    expect(killed.sort()).toEqual(["%1", "%3"]);
+    for (const index of [0, 2]) {
+      const claim = managedState.roles[tokens[index] as string];
+      if (!claim || !("issue" in claim)) throw new Error(`claim ${index + 1} disappeared`);
+      expect(claim.locator).toBeUndefined();
+      expect(claim.resumeSessionFile).toBe(`/state/sessions/${roles[index]}.json`);
+    }
+    const untouched = managedState.roles[tokens[1] as string];
+    if (!untouched || !("issue" in untouched)) throw new Error("claim 2 disappeared");
+    expect(untouched.locator?.tmuxPaneId).toBe("%2");
+    expect(untouched.resumeSessionFile).toBeUndefined();
+    expect(isolationLogs).toEqual([
+      [expect.stringContaining(`failed to reconcile worker ${tokens[1]}`), failure],
+    ]);
+  });
+
+  it("a throw while re-arming one root's registration deadline is logged with its tree and leaves the other roots armed", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 3);
+    const roots = ["LEGION-41", "LEGION-42", "LEGION-43"] as const;
+    for (const key of roots) {
+      state.issues[key] = { key, title: key, status: "in_progress", children: [] };
+      state.trees[key] = {
+        root: key,
+        generation: 1,
+        status: "active",
+        launchFailures: 0,
+        locator: {
+          tmuxSession: "legion-omp",
+          tmuxWindowId: `@${key.slice(-2)}`,
+          tmuxPaneId: `%${key.slice(-2)}`,
+          socketPath: `/state/workers/${key}.sock`,
+        },
+      };
+      state.admission.active.push(key);
+    }
+    let sleeps = 0;
+    const failure = new Error("timer registry exploded");
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      sleep: () => {
+        sleeps += 1;
+        if (sleeps === 2) throw failure;
+        return new Promise<void>(() => {});
+      },
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let isolationLogs: unknown[][];
+    try {
+      expect(() => processes.reconnectRoots()).not.toThrow();
+      isolationLogs = errorSpy.mock.calls.filter((call) =>
+        String(call[0]).includes("failed to reconcile root")
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(sleeps).toBe(3);
+    expect(isolationLogs).toEqual([
+      [expect.stringContaining("failed to reconcile root LEGION-42"), failure],
+    ]);
+  });
+
   it("persists a retirement's queue-push in the same save as its locator-clear, so a reload after a crash mid-drain still finds the token queued", async () => {
     const stateDir = await temporaryDir();
     const stateFile = path.join(stateDir, "state.json");
