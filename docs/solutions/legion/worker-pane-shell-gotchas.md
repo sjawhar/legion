@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12) and the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, and a pane OMP_SESSION_ID that is not yours"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12) and the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, and a phase completion refused with 409 after a respawn"
 category: legion
 tags:
   - legion
@@ -29,14 +29,16 @@ related_issues:
   - "sjawhar/legion#970"
   - "LEGION-13"
   - "sjawhar/legion#978"
+  - "LEGION-37"
 symptoms:
-  - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.12.0, before the one that carries LEGION-12)"
+  - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
   - "the same 403 on the FIRST grant of a call, after a slow jj command ran ahead of the push"
   - "bun test from the repository root: hundreds of 'document is not defined' and ECONNREFUSED failures outside the changed package"
   - "Refusing to move bookmark backwards or sideways: legion/<KEY> after jj split"
   - "rig daemon's first jj git clone killed at the 30 s runner timeout; launchFailures 1; tree queued"
   - "legion handoff write: Handoff data field schemaVersion is not allowed"
+  - "legion handoff complete: Unable to report phase completion (409): Phase for <KEY> is no longer owned by this worker"
   - "legion handoff complete: Unable to report phase completion (403): Invalid or expired grant"
   - "[handoff] Warning: phase recorded; no architect was live to receive the summary"
   - "envoy_publish: no holder for role legion-<project>-<KEY>-architect"
@@ -51,7 +53,8 @@ Things every phase worker on `sjawhar/legion` hits in a worker pane or on the sm
 LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 are from LEGION-22; 7–8 are
 from LEGION-18; the 60-second grant lifetime in §1, the `packages/daemon` note in §2, and §9 are from LEGION-14, whose
 four workers hit §1–§3 again; the `packages/pi-envoy` note in §2 and the independent confirmation of §1's cause are
-from LEGION-29; the §2 environment-argument paragraph and §10 are from LEGION-13 (sjawhar/legion#978). None was part of
+from LEGION-29; the §2 environment-argument paragraph and §10 are from LEGION-13 (sjawhar/legion#978); §11 is from
+LEGION-12's own retro and is filed as LEGION-37. None was part of
 the scope of the issue whose workers hit it. Section 1's cause was found and fixed by LEGION-12 (pull request #974): its
 workarounds are recorded only so a worker still running the old plugin recognizes them, and must not be used on the
 fixed one. §2's check-config leak was fixed by LEGION-13. §7 is filed as LEGION-29; until it is fixed, that section is
@@ -61,7 +64,7 @@ the workaround.
 
 **What was seen.** The Legion extension for Oh My Pi (`packages/pi-envoy/extensions/legion.ts`) attaches a one-time
 credential to every bash call a phase worker makes: it mints a grant from the daemon and, until the release that
-carries LEGION-12 (every `@sjawhar/pi-legion-envoy` version through 1.12.0), put it at the top of the command as shell
+carries LEGION-12 (every `@sjawhar/pi-legion-envoy` version through 1.16.0), put it at the top of the command as shell
 text — an `export` line setting `LEGION_GRANT`, three `unset` lines, the isolated `GH_CONFIG_DIR`, and a `PATH` with
 the worker's `gh` shim first. Over a session the number of such blocks at the top of one call grew (1 → 10 in one
 LEGION-9 implementer session; 2–4 per call on LEGION-29). Only the **first** block's grant ever redeemed; every later
@@ -97,16 +100,17 @@ on a later helper call; do not count on it.) Put the command that redeems the gr
 `legion handoff complete`, `legion credential` — **first** in its bash call, or alone in one. The recipe in section 3
 puts the bookmark move and the push in the same call; on a loaded box, split them.
 
-**The fix (the first pi-envoy release after 1.12.0 — the post-merge task fills in the exact version; LEGION-12, pull
+**The fix (the first pi-envoy release after 1.16.0 — the post-merge task fills in the exact version; LEGION-12, pull
 request #974).** The grant now travels in the bash tool's per-command `env` (the `env` argument every Oh My Pi bash
 call accepts), together with the cleared `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, the isolated `GH_CONFIG_DIR`, and the
 shim-first `PATH`. The command text is never touched, so nothing credential-shaped is written back into the transcript
 for the model to copy. The hook's keys are spread last, so even a model that imitates a previous call's `env` object
 cannot displace the grant minted for the current call. Oh My Pi applies that `env` to the one command only; nothing
-enters the persistent shell. The flip side: those six variables (`LEGION_GRANT`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`,
-`GH_CONFIG_DIR`, `PATH`) now live in a per-command scope that is popped when the command ends, so a worker's own
-`export PATH=…` — or any change to one of those six — inside one bash call no longer carries into the next call, which
-it did while the hook's `export` lines ran in the persistent shell. Set what you need in each call, or put it in the
+enters the persistent shell. The flip side: with per-command delivery, **no variable a worker sets in one bash call
+survives into the next** — not the six the hook sets (`LEGION_GRANT`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`,
+`GH_CONFIG_DIR`, `PATH`) and not an unrelated one of your own; the LEGION-12 tester proved both on the rig. Under text
+delivery an `export` in one call did carry into the next, and some workers leaned on that. The operator decided this
+is the host's contract, not something to work around: set what a command needs in that command, or put it in the
 call's own `env`.
 
 **On a fixed plugin, do not use the old workarounds.** Three were recorded for the old plugin: the `export()` shell
@@ -285,3 +289,25 @@ Get the id from `envoy_whoami` (`session_id`) or from `legion state` → `roles[
 the two agree, and both are the id the daemon registered at `/worker/started`. Never from the environment, and — per
 [session-id-remint-stale-transcript-identity](../envoy/session-id-remint-stale-transcript-identity.md) — never from a
 `whoami` result earlier in your own transcript either.
+
+## 11. `legion handoff complete` answers 409 "no longer owned by this worker" after a respawn (LEGION-37)
+
+On LEGION-12 the implementer was revived three times for later rounds (opening the pull request, a rebase, the
+review cleanup). Each round ended with `legion handoff complete`; the last one answered
+`Unable to report phase completion (409): {"error":"Phase for LEGION-12 is no longer owned by this worker"}` although
+the same worker, the same session, and a freshly minted credential had just pushed the branch and edited the pull
+request without trouble. This is not the credential problem of section 1 (that is a 403, and a 403 within seconds of
+the call means the id was never minted); it is the daemon's phase-ownership check in `handlePhaseComplete`
+(`packages/daemon/src/daemon/api/routes/workers.ts`). The daemon records one active phase per issue
+(`state.phases[<KEY>]`, with the role and the session id it was assigned to). The check passes only while that record
+still names your role and your session; it answers 409 when the record has moved on — the architect assigned a later
+phase, or the daemon respawned or re-assigned around you — even though your role claim itself is intact. LEGION-37
+tracks why a worker revived for a follow-up round ends up on the wrong side of that check.
+
+What to do: do not retry, and do not write a second handoff file (nothing about the branch is wrong). Report the
+completion to the architect yourself with `envoy_publish` to `notifications.role.legion-<project>-<KEY>-architect`,
+carrying exactly what the summary would have said — the head, what changed, the test counts, the CI run ids — and
+name the 409 in it so the architect knows the daemon holds no record of the completion. The architect can act on the
+message directly; a `phase-complete` event will not arrive. Contrast section 7's 202 (`no architect was live`), where
+the daemon does keep the record and a repeat of the same command later delivers it: after a 409 a repeat only 409s
+again.
