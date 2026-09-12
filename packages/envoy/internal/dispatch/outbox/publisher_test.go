@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,6 +58,20 @@ func (p *recordingPublisher) setFailTopic(topic string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.failTopic = topic
+}
+
+type blockingFailPublisher struct {
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int64
+}
+
+func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
+	if p.calls.Add(1) == 1 {
+		close(p.started)
+		<-p.release
+	}
+	return errors.New("publisher unavailable")
 }
 
 func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
@@ -428,7 +443,9 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 		Actor:   model.Actor{Kind: "session", ID: "session-writer"},
 		Payload: map[string]any{"reply_to": rootID},
 	}
-	publishAuthorRoutes(context.Background(), deps, item, event)
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+		t.Fatalf("publish author routes: %v", err)
+	}
 
 	if got := publisher.all(); len(got) != 0 {
 		t.Fatalf("published %d author route(s) for an agent replying to itself, want 0: %#v", len(got), got)
@@ -450,7 +467,9 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
 		},
 	}
-	publishAuthorRoutes(context.Background(), deps, item, event)
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+		t.Fatalf("publish author routes: %v", err)
+	}
 
 	got := publisher.all()
 	if len(got) != 1 || got[0].Topic != "notifications.agent.planner" {
@@ -469,7 +488,9 @@ func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing
 		Actor:   model.Actor{Kind: "user", ID: "alice"},
 		Payload: map[string]any{"by": map[string]any{"kind": "user", "id": "alice"}, "topics": []any{}},
 	}
-	publishAuthorRoutes(context.Background(), deps, item, event)
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+		t.Fatalf("publish author routes: %v", err)
+	}
 
 	if got := publisher.all(); len(got) != 0 {
 		t.Fatalf("published %d author route(s) with no session_id, want 0: %#v", len(got), got)
@@ -540,11 +561,14 @@ func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.
 		return publishedAt(t, database, event.ID) != nil
 	})
 	items := publisher.all()
-	if len(items) != 3 {
-		t.Fatalf("published items after retry = %#v, want the issue topic twice (the retry republishes it) plus the author route once", items)
+	if len(items) != 2 {
+		t.Fatalf("published items after retry = %#v, want the issue topic once and the author route once", items)
 	}
-	if items[2].Topic != "notifications.agent.planner" {
-		t.Fatalf("retried author route topic = %q, want notifications.agent.planner", items[2].Topic)
+	if items[0].Topic != "notifications.dispatch.issue.T-1.subscription.removed" {
+		t.Fatalf("issue topic = %q, want notifications.dispatch.issue.T-1.subscription.removed", items[0].Topic)
+	}
+	if items[1].Topic != "notifications.agent.planner" {
+		t.Fatalf("retried author route topic = %q, want notifications.agent.planner", items[1].Topic)
 	}
 }
 
@@ -563,7 +587,7 @@ func TestLoadRootCommentAuthorTerminatesOnACycle(t *testing.T) {
 	var ok bool
 	go func() {
 		defer close(done)
-		_, ok = loadRootCommentAuthor(context.Background(), Deps{Store: database}, commentID)
+		_, ok, _ = loadRootCommentAuthor(context.Background(), Deps{Store: database}, commentID)
 	}()
 	select {
 	case <-done:
@@ -751,7 +775,7 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	}
 }
 
-func TestUnpublishedEventScanUsesEventsUnpublishedIndex(t *testing.T) {
+func TestReadyEventScanUsesEventsUnpublishedIndex(t *testing.T) {
 	database := openTestStore(t)
 	seedIssue(t, database, "T-1", nil)
 	if _, err := database.Pool.Exec(context.Background(), `
@@ -775,12 +799,12 @@ func TestUnpublishedEventScanUsesEventsUnpublishedIndex(t *testing.T) {
 		select e.id, e.issue_key, e.seq, e.type, e.actor, e.notify, e.created_at, e.payload, i.route
 		from events e
 		join issues i on i.key = e.issue_key
-		where e.published_at is null
+		where e.published_at is null and (e.next_attempt_at is null or e.next_attempt_at <= now())
 		order by e.id
 		limit $1
 	`, batchSize)
 	if err != nil {
-		t.Fatalf("explain unpublished event scan: %v", err)
+		t.Fatalf("explain ready event scan: %v", err)
 	}
 	defer rows.Close()
 	var plan []string
@@ -795,33 +819,75 @@ func TestUnpublishedEventScanUsesEventsUnpublishedIndex(t *testing.T) {
 		t.Fatalf("iterate plan: %v", err)
 	}
 	if !strings.Contains(strings.Join(plan, "\n"), "Index Scan using events_unpublished") {
-		t.Fatalf("unpublished event scan plan =\n%s\nwant Index Scan using events_unpublished", strings.Join(plan, "\n"))
+		t.Fatalf("ready event scan plan =\n%s\nwant Index Scan using events_unpublished", strings.Join(plan, "\n"))
 	}
 }
 
-func TestRunMarksEventPublishedAfterRouteFailure(t *testing.T) {
+func TestRunRetriesEventWhenRequiredRoleRouteFails(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
 	seedIssue(t, database, "T-1", &route)
 	event := appendEvent(t, database, broker, model.Event{
 		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Role publication is best effort"},
+		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Retry role delivery"},
 	})
 	publisher := &recordingPublisher{failTopic: "notifications.role.legion-controller-x"}
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	waitFor(t, time.Second, "issue topic publication", func() bool {
-		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) != nil
+	waitFor(t, time.Second, "issue topic publication despite a failing role route", func() bool {
+		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) == nil
 	})
-	if publishedAt(t, database, event.ID) == nil {
-		t.Fatal("event was not marked published after a route publish failure")
+	publisher.setFailTopic("")
+	waitFor(t, 7*time.Second, "retried publication once the role route succeeds", func() bool {
+		return publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if len(items) != 2 {
+		t.Fatalf("published items after retry = %#v, want issue topic once and role route once", items)
 	}
-	time.Sleep(retryInterval + time.Second)
-	published := publisher.all()
-	if len(published) != 1 || published[0].Topic != "notifications.dispatch.issue.T-1.message.created" {
-		t.Fatalf("published issue events after route failure = %#v, want exactly one issue-topic event", published)
+	if items[0].Topic != "notifications.dispatch.issue.T-1.message.created" {
+		t.Fatalf("issue topic = %q, want notifications.dispatch.issue.T-1.message.created", items[0].Topic)
+	}
+	if items[1].Topic != "notifications.role.legion-controller-x" {
+		t.Fatalf("retried route topic = %q, want notifications.role.legion-controller-x", items[1].Topic)
+	}
+}
+
+func TestRunRetriesEventWhenRequiredAuthorRouteFails(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	root := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "writer"}, "Draft", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID: "reply", IssueKey: new("T-1"), Body: "Reviewed", ReplyTo: &root,
+		}},
+	})
+	publisher := &recordingPublisher{failTopic: "notifications.agent.writer"}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "issue topic publication despite a failing author route", func() bool {
+		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) == nil
+	})
+	publisher.setFailTopic("")
+	waitFor(t, 7*time.Second, "retried publication once the author route succeeds", func() bool {
+		return publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if len(items) != 2 {
+		t.Fatalf("published items after retry = %#v, want issue topic once and author route once", items)
+	}
+	if items[0].Topic != "notifications.dispatch.issue.T-1.comment.created" {
+		t.Fatalf("issue topic = %q, want notifications.dispatch.issue.T-1.comment.created", items[0].Topic)
+	}
+	if items[1].Topic != "notifications.agent.writer" {
+		t.Fatalf("retried author route = %q, want notifications.agent.writer", items[1].Topic)
 	}
 }
 
@@ -850,6 +916,74 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 	})
 	if publishedAt(t, database, event.ID) == nil {
 		t.Fatal("event remained unpublished after successful retry")
+	}
+}
+
+func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	for range batchSize {
+		appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-1"),
+			Type:     "message.created",
+			Actor:    model.Actor{Kind: "session", ID: "worker"},
+			Payload:  model.Message{ID: "message", IssueKey: "T-1", Body: "poison"},
+		})
+	}
+	valid := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.created",
+		Actor:    model.Actor{Kind: "session", ID: "worker"},
+		Payload:  model.Message{ID: "valid", IssueKey: "T-1", Body: "deliver"},
+	})
+	publisher := &recordingPublisher{failures: batchSize}
+
+	scan(context.Background(), Deps{Store: database, Publisher: publisher, Broker: broker})
+
+	if publishedAt(t, database, valid.ID) == nil {
+		t.Fatal("ready event after poison batch was not published")
+	}
+	items := publisher.all()
+	if len(items) != 1 || items[0].SourceEventID != fmt.Sprint(valid.ID) {
+		t.Fatalf("published items = %#v, want only ready event %d", items, valid.ID)
+	}
+	var attempts int
+	var nextAttempt *time.Time
+	if err := database.Pool.QueryRow(context.Background(), `select attempt_count, next_attempt_at from events where id = 1`).Scan(&attempts, &nextAttempt); err != nil {
+		t.Fatalf("read poison retry state: %v", err)
+	}
+	if attempts != 1 || nextAttempt == nil {
+		t.Fatalf("poison retry state = attempts %d next=%v, want attempt 1 with a scheduled retry", attempts, nextAttempt)
+	}
+}
+
+func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload:  model.Message{ID: "message-1", IssueKey: "T-1", Body: "Retry me"},
+	})
+	publisher := &blockingFailPublisher{started: make(chan struct{}), release: make(chan struct{})}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	select {
+	case <-publisher.started:
+	case <-time.After(time.Second):
+		t.Fatal("initial outbox scan did not start")
+	}
+	for range 65 {
+		broker.Publish(model.Event{})
+	}
+	close(publisher.release)
+	time.Sleep(100 * time.Millisecond)
+	if calls := publisher.calls.Load(); calls > 70 {
+		t.Fatalf("overflowed subscription caused %d scans, want a bounded number before retry interval", calls)
 	}
 }
 
@@ -891,8 +1025,8 @@ func seedIssue(t *testing.T, database *store.Store, key string, route *string) {
 		t.Fatalf("create project: %v", err)
 	}
 	if _, err := database.Pool.Exec(context.Background(), `
-		insert into issues (key, project_key, number, title, route, created_by)
-		values ($1, 'TT', 1, 'Test issue', $2, '{"kind":"user","id":"alice"}')
+		insert into issues (key, project_key, number, title, route, created_by, rank)
+		values ($1, 'TT', 1, 'Test issue', $2, '{"kind":"user","id":"alice"}', 'U')
 	`, key, route); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}

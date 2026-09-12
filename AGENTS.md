@@ -51,6 +51,7 @@ legion state                         # Read daemon state
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
 legion handoff complete --summary <text>  # Workers: report phase completion to the tree's architect, keeping the role claimed (authenticates via LEGION_GRANT exactly like `legion gh`/`legion credential` — no session secret in the request)
 legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-worker OMP process to the daemon over a unix socket (daemon-spawned, not run by hand)
+legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path> -- <omp argv…>  # Same bridge, reverse-dialed: the shim dials the daemon's worker stream listener and authenticates with its boot token (Kubernetes runtime; daemon-spawned)
 ```
 
 ## Version Control
@@ -107,10 +108,15 @@ human or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispat
 `legion status <issue> <status>`.
 
 **Gate:** the design gate is the architect's `dispatch_ask` on the root issue with an `Approve`
-option. Whether a human must approve a pull request before it merges is the repository's own
-branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. The merger publishes
-`READY` to the merge queue, which merges under its own authority and the repository's rules.
-No lifecycle labels exist; GitHub issues are never read or written by Legion.
+option, armed per deployment by `gates.design` in `legion.yaml` (`root-issues`, the default, or
+`off`). With `off`, the daemon satisfies the gate the moment the architect registers it
+(`designApproved: "gate-off"`), sends the same `design-approved` wake a human answer would, and
+closes the ask on Dispatch (`resolved`, with a reason the dashboard shows), so no one has to click
+and nothing waits in a human's inbox. Whether a human must approve a pull
+request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion
+neither reads nor writes it. The merger publishes `READY` to the merge queue, which merges under
+its own authority and the repository's rules. No lifecycle labels exist; GitHub issues are never
+read or written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
 the phase-verdict artifacts. No lifecycle labels carry worker state.

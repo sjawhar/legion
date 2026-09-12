@@ -15,16 +15,21 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 
 ## Native Dispatch tools
 
-The twelve native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
+The thirteen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
 `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
-`dispatch_doc_read`, `dispatch_artifact`, `dispatch_read`, and `dispatch_search` — register only when the shared
+`dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`, and `dispatch_search` — register only when the shared
 configuration resolves a URL and bearer token. Set
 `dispatch.enabled: true`, `dispatch.serverUrl`, and `dispatch.token` in
-`~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`; `DISPATCH_URL`
-and `DISPATCH_TOKEN` override those settings; `DISPATCH_TOKEN_FILE` (a path whose
-trimmed contents are the token — how the Legion daemon delivers it to a pane) wins
-over both and never falls back when unreadable. A successful mutation returns
-`details.topic`, and the `tool_result` hook subscribes to that exact retained
+`~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`. A repository
+`dispatch.serverUrl` can use only `dispatch.token` from that same repository
+file; override its endpoint only with `DISPATCH_URL` plus `DISPATCH_TOKEN` or
+`DISPATCH_TOKEN_FILE`. `DISPATCH_TOKEN_FILE` is a path whose trimmed contents
+are the token — how the Legion daemon delivers it to a pane — and never falls
+back when unreadable. A human mints a personal token in Dispatch Settings → Agent
+tokens, then supplies it through `dispatch.token` or `DISPATCH_TOKEN`; the server
+attributes that session's writes to the minting human. `DISPATCH_AGENT_TOKEN` is
+the shared devbox fallback, not a token to configure for an individual agent. A
+successful mutation returns `details.topic`, and the `tool_result` hook subscribes to that exact retained
 Dispatch topic — a new subscription also tells the model (`pi.sendMessage`
 with `deliverAs: "steer"`, the same channel `deliver` uses for inbound
 envelopes, since the host does not let a `tool_result` handler amend what the
@@ -36,6 +41,7 @@ topic and the removed session's agent topic directly; only the session the
 payload names renders it and drops the matching local NATS subscription
 (so the dead-connection recovery path does not resurrect it) — every other
 subscriber ignores it.
+`dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
 
 ## Where to look
 
@@ -46,7 +52,7 @@ subscriber ignores it.
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
-| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the twelve native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, pass the live session id/title to `executeDispatchTool`, and subscribe from a successful result's `details.topic`. |
+| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the thirteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, pass the live session id/title to `executeDispatchTool`, and subscribe from a successful result's `details.topic`. |
 | Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon appends each as `--append-system-prompt` |
 | Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/README.md` | Claims a role and receives a message from a real, installed-plugin `omp` TUI session against a live Envoy; see `scripts/README.md` for the runbook |
 

@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
 
@@ -24,6 +25,20 @@ type connectionState struct {
 }
 
 type connectionContextKey struct{}
+
+type backfillInjectionContextKey struct{}
+
+// backfillInjectionToken is installed only on a backfill's own server calls.
+type backfillInjectionToken struct{ _ byte }
+
+func withBackfillInjection(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backfillInjectionContextKey{}, &backfillInjectionToken{})
+}
+
+func isBackfillInjection(ctx context.Context) bool {
+	_, ok := ctx.Value(backfillInjectionContextKey{}).(*backfillInjectionToken)
+	return ok
+}
 
 // servicePersistenceAdapter observes ygo's otherwise asynchronous persistence
 // callbacks. A failed update evicts its room so the next access reloads durable
@@ -46,7 +61,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
-	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) {
+	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
 	_, err := a.store.AppendUpdate(context.Background(), room, update)
@@ -57,7 +72,7 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 }
 
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
-	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) {
+	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
 	_, err := a.store.AppendUpdate(ctx, room, update)
@@ -96,12 +111,24 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if room == "" {
 		room = path.Base(r.URL.Path)
 	}
+	if _, err := s.requestActor(r); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if _, err := uuid.Parse(room); err != nil {
+		http.Error(w, "document not found", http.StatusNotFound)
+		return
+	}
+	if _, err := s.issueOpen(r.Context(), room); err != nil {
+		http.Error(w, "document not found", http.StatusNotFound)
+		return
+	}
 	if err := s.awaitRoomRecovery(r.Context(), room); err != nil {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if _, err := s.requestActor(r); err != nil {
-		s.srv.ServeHTTP(w, r)
+	if !s.canOpenRoom(room) || !s.canAddConnection() {
+		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	if s.srv.GetDoc(room) == nil {
@@ -126,6 +153,9 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
+	}
+	if !s.canAddConnection() {
+		return websocket.ConnectionConfig{}, false
 	}
 	if s.roomFailure(room) != nil {
 		return websocket.ConnectionConfig{}, false
@@ -174,6 +204,9 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	if err := s.awaitRoomRecovery(ctx, info.Room); err != nil {
 		return err
 	}
+	if isBackfillInjection(ctx) {
+		return nil
+	}
 	if s.roomClosed(info.Room) {
 		return ErrIssueClosed
 	}
@@ -203,7 +236,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	state.mu.Lock()
 	state.closed = !open
 	state.mu.Unlock()
-	doc.OnUpdate(func(_ []byte, _ any) {
+	doc.OnUpdate(func(_ []byte, origin any) {
+		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
+			return
+		}
 		s.recordConnectedActors(room)
 		s.scheduleSettle(room)
 	})
@@ -232,4 +268,17 @@ func (s *Service) removeConnection(room string, id uint64) {
 	state.mu.Lock()
 	delete(state.connected, id)
 	state.mu.Unlock()
+}
+
+func (s *Service) settleLastPeer(_ context.Context, room string) {
+	state := s.room(room)
+	state.mu.Lock()
+	if state.settle == nil || !state.settle.Stop() {
+		state.mu.Unlock()
+		return
+	}
+	s.settleWG.Done()
+	generation := state.gen
+	state.mu.Unlock()
+	s.settleRoom(room, generation)
 }

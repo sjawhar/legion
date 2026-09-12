@@ -63,13 +63,18 @@ func (c cachedSession) expired(now time.Time) bool {
 // GET /v1/sessions. This mirrors store.Registry, which already solved the same
 // problem for the interest registry.
 type SessionRegistry struct {
-	kv  nats.KeyValue
-	ttl time.Duration
+	kv   nats.KeyValue
+	kvMu sync.RWMutex
+	ttl  time.Duration
 
 	mu             sync.RWMutex
 	cache          map[string]cachedSession
 	cacheRevisions map[string]uint64
 	watchErr       error
+
+	watcherMu         sync.Mutex
+	watcher           nats.KeyWatcher
+	watcherGeneration uint64
 
 	// readyCh is closed when watch() finishes its initial scan of existing KV
 	// entries (signalled by the nil sentinel WatchAll() emits after delivering
@@ -126,17 +131,19 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 }
 
 // Ping verifies the session KV bucket is reachable AND the cache watcher is
-// still alive. Returns nil on success. It uses kv.Status() (one round-trip) so
-// /healthz and the self-health watchdog stay fast — they must never iterate
-// keys. Once the initial scan has completed, a dead watcher is also reported as
-// an error: the watchdog can then SIGTERM the listener so the restart policy
-// rebuilds the watcher on a fresh conn. A cache frozen by a dead watcher would
-// otherwise serve dead sessions forever, which is worse than a restart.
+// still alive. It uses kv.Status() (one round-trip) so /healthz and the
+// self-health monitor stay fast — they must never iterate keys. Once the
+// initial scan has completed, a dead watcher is reported so /healthz exposes
+// the stale cache while NATS reconnects.
 func (r *SessionRegistry) Ping() error {
 	if r == nil {
 		return ErrNoKV
 	}
-	if _, err := r.kv.Status(); err != nil {
+	kv := r.currentKV()
+	if kv == nil {
+		return ErrNoKV
+	}
+	if _, err := kv.Status(); err != nil {
 		return err
 	}
 	return r.watchHealthError()
@@ -144,8 +151,8 @@ func (r *SessionRegistry) Ping() error {
 
 // watchHealthError reports a dead-watcher failure once the initial scan has
 // completed. It returns nil during normal startup (before readyCh closes) so a
-// listener still warming up is never marked unhealthy, and nil while the watcher
-// is alive. Surfaced via Ping() for /healthz and the self-health watchdog.
+// listener still warming up is never marked unhealthy, and nil while the
+// watcher is alive. Surfaced through Ping() by /healthz and the monitor.
 func (r *SessionRegistry) watchHealthError() error {
 	if r == nil || !r.CacheReady() {
 		return nil
@@ -161,22 +168,68 @@ var ErrNoKV = fmt.Errorf("session registry: KV unavailable")
 // errSessionWatcherStopped is the sentinel watchErr recorded when the KV
 // watcher's Updates() channel closes after the initial scan — typically the
 // underlying conn died and took the JetStream subscription with it. The cache
-// is frozen at that point, so Ping() surfaces this to trigger a restart.
+// is frozen at that point, so Ping() exposes the failure.
+
 var errSessionWatcherStopped = fmt.Errorf("session registry watcher stopped")
 
 func (r *SessionRegistry) watch() {
-	w, err := r.kv.WatchAll()
-	if err != nil {
+	if err := r.startWatch(r.currentKV()); err != nil {
 		slog.Error("session registry watch failed", slog.String("error", err.Error()))
 		r.setWatchErr(err)
 		// Unblock callers of WaitForCacheReady even on watcher failure — they'd
 		// rather see the empty-cache symptom (Put write-through still surfaces
-		// local sessions) than hang. The self-health watchdog catches a
-		// persistently broken registry via its KV pings.
+		// local sessions) than hang. /healthz exposes the unavailable registry.
 		r.signalReady()
-		return
 	}
-	for entry := range w.Updates() {
+}
+
+// Rewatch recreates the KV watcher against conn and clears a sticky terminal
+// watcher error only after the replacement watcher starts successfully.
+func (r *SessionRegistry) Rewatch(conn *nats.Conn) error {
+	if r == nil || conn == nil {
+		return ErrNoKV
+	}
+	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
+	if err != nil {
+		return fmt.Errorf("open session registry JetStream: %w", err)
+	}
+	kv, err := js.KeyValue(SessionBucket)
+	if err != nil {
+		return fmt.Errorf("open session registry KV bucket: %w", err)
+	}
+	if err := r.startWatch(kv); err != nil {
+		return fmt.Errorf("watch session registry KV bucket: %w", err)
+	}
+	return nil
+}
+
+func (r *SessionRegistry) startWatch(kv nats.KeyValue) error {
+	if kv == nil {
+		return ErrNoKV
+	}
+	watcher, err := kv.WatchAll()
+	if err != nil {
+		return err
+	}
+
+	r.watcherMu.Lock()
+	previous := r.watcher
+	r.watcherGeneration++
+	generation := r.watcherGeneration
+	r.watcher = watcher
+	r.setKV(kv)
+	r.watcherMu.Unlock()
+
+	r.setWatchErr(nil)
+	if previous != nil {
+		_ = previous.Stop()
+	}
+	go r.consumeWatch(watcher, generation)
+	return nil
+}
+
+func (r *SessionRegistry) consumeWatch(watcher nats.KeyWatcher, generation uint64) {
+	for entry := range watcher.Updates() {
 		if entry == nil {
 			// WatchAll() emits a nil sentinel after delivering the current value
 			// of each existing key. Treat that as "initial scan complete".
@@ -197,13 +250,16 @@ func (r *SessionRegistry) watch() {
 		}
 		r.mu.Unlock()
 	}
-	// Reaching here means w.Updates() closed: the watcher terminated (the conn
-	// dropped and took the JetStream subscription with it, or the bucket was
+	if !r.finishWatch(generation) {
+		return
+	}
+	// Reaching here means watcher.Updates() closed: the watcher terminated (the
+	// conn dropped and took the JetStream subscription with it, or the bucket was
 	// removed). Without recording this, the cache would keep serving whatever it
 	// last held forever and /healthz would still report ready. Flag it; Ping()
 	// gates on CacheReady(), so a close before the initial scan completes still
 	// unblocks waiters via signalReady() without wedging /healthz mid-startup.
-	werr := watcherTerminalError(w)
+	werr := watcherTerminalError(watcher)
 	r.setWatchErr(werr)
 	slog.Error("session registry watcher stopped", slog.String("error", werr.Error()))
 	r.signalReady()
@@ -240,6 +296,28 @@ func (r *SessionRegistry) expiryFor(created time.Time, updatedAtMillis int64) ti
 	return time.Now().Add(r.ttl)
 }
 
+func (r *SessionRegistry) currentKV() nats.KeyValue {
+	r.kvMu.RLock()
+	defer r.kvMu.RUnlock()
+	return r.kv
+}
+
+func (r *SessionRegistry) setKV(kv nats.KeyValue) {
+	r.kvMu.Lock()
+	r.kv = kv
+	r.kvMu.Unlock()
+}
+
+func (r *SessionRegistry) finishWatch(generation uint64) bool {
+	r.watcherMu.Lock()
+	defer r.watcherMu.Unlock()
+	if generation != r.watcherGeneration {
+		return false
+	}
+	r.watcher = nil
+	return true
+}
+
 func (r *SessionRegistry) setWatchErr(err error) {
 	r.mu.Lock()
 	r.watchErr = err
@@ -259,9 +337,8 @@ func (r *SessionRegistry) signalReady() {
 // WaitForCacheReady blocks until watch() has finished its initial scan of
 // existing KV entries, or until the context is cancelled. Callers should set a
 // bounded timeout: WatchAll() on a healthy cluster completes in milliseconds.
-// On error the caller should log + proceed (fail open) — Put write-through
-// keeps local sessions visible and the self-health watchdog arranges a restart
-// for a persistently broken link.
+// On error the caller logs and proceeds (fail open); Put write-through keeps
+// local sessions visible and /healthz exposes an unavailable registry.
 func (r *SessionRegistry) WaitForCacheReady(ctx context.Context) error {
 	if r == nil || r.readyCh == nil {
 		return nil
@@ -272,6 +349,14 @@ func (r *SessionRegistry) WaitForCacheReady(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// TTL returns the liveness window configured by the backing session bucket.
+func (r *SessionRegistry) TTL() time.Duration {
+	if r == nil {
+		return 0
+	}
+	return r.ttl
 }
 
 // CacheReady reports whether the initial KV scan has completed. Observability
@@ -299,8 +384,8 @@ func (r *SessionRegistry) CacheSize() int {
 	return len(r.cache)
 }
 
-// WatchError returns the watcher startup error string, or "" when the watcher
-// started cleanly. Surfaced via /healthz for observability.
+// WatchError returns the active watcher's terminal error string, or "" while
+// the watcher is running. Surfaced via /healthz for observability.
 func (r *SessionRegistry) WatchError() string {
 	if r == nil {
 		return ""
@@ -311,6 +396,17 @@ func (r *SessionRegistry) WatchError() string {
 		return ""
 	}
 	return r.watchErr.Error()
+}
+
+// WatchFailed reports whether the current watcher has stopped. The listener
+// uses it to distinguish a rebuildable dead cache from a transient KV timeout.
+func (r *SessionRegistry) WatchFailed() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.watchErr != nil
 }
 
 func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
@@ -329,7 +425,11 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 	if err != nil {
 		return err
 	}
-	revision, err := r.kv.Put(sessionID, buf)
+	kv := r.currentKV()
+	if kv == nil {
+		return ErrNoKV
+	}
+	revision, err := kv.Put(sessionID, buf)
 	if err != nil {
 		return err
 	}
@@ -358,7 +458,11 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 		return ErrNoKV
 	}
 	revision := r.cachedRevision(sessionID)
-	entry, err := r.kv.Get(sessionID)
+	kv := r.currentKV()
+	if kv == nil {
+		return ErrNoKV
+	}
+	entry, err := kv.Get(sessionID)
 	opts := []nats.DeleteOpt{}
 	if err == nil {
 		if entry.Revision() > revision {
@@ -368,10 +472,10 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 	} else if !errors.Is(err, nats.ErrKeyNotFound) {
 		return err
 	}
-	if err := r.kv.Delete(sessionID, opts...); err != nil {
+	if err := kv.Delete(sessionID, opts...); err != nil {
 		return err
 	}
-	entries, err := r.kv.History(sessionID)
+	entries, err := kv.History(sessionID)
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
 		r.mu.Lock()

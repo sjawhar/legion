@@ -21,6 +21,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { Upload } from "../artifacts/Upload";
+import { ApprovalChip } from "../doc/ApprovalChip";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
@@ -58,6 +59,7 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
             {document.name}
           </Link>
         )}
+        <ApprovalChip artifact={document} />
       </div>
       <span className={`text-xs ${textSecondaryOnCanvas}`}>{document.kind}</span>
       <span className="text-xs">

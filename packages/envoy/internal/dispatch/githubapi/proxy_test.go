@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -116,5 +117,20 @@ func TestRefreshAndStoreRefusesLoggedOutUser(t *testing.T) {
 	}
 	if _, err := refreshAndStore(context.Background(), cfg, &auth.Tokens{}); err == nil {
 		t.Fatal("expected an error when the user record is gone")
+	}
+}
+
+func TestProxyRejectsOversizedRequestBodyBeforeForwarding(t *testing.T) {
+	client := &fakeHTTPClient{status: http.StatusOK}
+	request := httptest.NewRequest(http.MethodPost, "/api/github/graphql", strings.NewReader(strings.Repeat("x", 8<<20)))
+	response := httptest.NewRecorder()
+
+	ProxyGraphQL(response, request, accessTestConfig(client))
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized proxy status = %d body=%s, want %d", response.Code, response.Body.String(), http.StatusRequestEntityTooLarge)
+	}
+	if client.calls != 0 {
+		t.Fatalf("oversized proxy forwarded %d request(s), want 0", client.calls)
 	}
 }

@@ -9,8 +9,8 @@ import type { DurableMessageControl } from "../nats-transport";
 
 /** A `DispatchClient` double for tests that need one wired (every `LegionApiDeps`,
  * `ProcessManagerDeps`, and `RunResyncDeps` requires one) but do not assert on Dispatch writes
- * themselves — `listIssues` returns empty, `setStatus` is a no-op spy, `getIssue` throws unless a
- * scenario overrides it. */
+ * themselves — `listIssues` returns empty, `setStatus` and `resolveAsk` are no-op spies, `getIssue`
+ * throws unless a scenario overrides it. */
 export function fakeDispatchClient(overrides: Partial<DispatchClient> = {}): DispatchClient {
   return {
     listIssues: async () => [],
@@ -18,8 +18,20 @@ export function fakeDispatchClient(overrides: Partial<DispatchClient> = {}): Dis
       throw new Error(`fakeDispatchClient.getIssue not stubbed for ${key}`);
     },
     setStatus: async () => {},
+    resolveAsk: async () => {},
     ...overrides,
   };
+}
+
+/** Polls `predicate` every 10 ms until it holds or `timeoutMs` elapses. Real sockets and child
+ * processes cannot be driven by fake timers, so a test awaits the observable condition itself
+ * rather than a guessed duration. */
+export async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  for (let attempt = 0; attempt < timeoutMs / 10; attempt += 1) {
+    if (predicate()) return;
+    await Bun.sleep(10);
+  }
+  throw new Error("condition never became true");
 }
 
 interface Subscription {
@@ -158,6 +170,7 @@ export function config(): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    workerStreamPort: 13371,
     gates: { design: "root-issues" },
     githubApps: {},
     stateDir: "/state",

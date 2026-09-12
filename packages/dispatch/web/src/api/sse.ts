@@ -24,6 +24,8 @@ const knownEventTypes: Record<EventType, true> = {
   "issue.closed": true,
   "artifact.created": true,
   "artifact.version": true,
+  "artifact.approved": true,
+  "artifact.changes_requested": true,
   "ask.opened": true,
   "ask.edited": true,
   "ask.answered": true,
@@ -97,7 +99,11 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
       ["project", event.project, "artifacts"],
       ["projects"],
     ];
-    if (event.type.startsWith("ask.")) {
+    if (
+      event.type.startsWith("ask.") ||
+      event.type === "artifact.approved" ||
+      event.type === "artifact.changes_requested"
+    ) {
       keys.push(["inbox"]);
     }
     if (event.type === "subscription.removed") {
@@ -117,6 +123,12 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     ["inbox"],
   ];
 
+  if (event.type === "issue.created" || event.type === "issue.updated") {
+    if (event.project !== undefined) {
+      keys.push(["issues", "project", event.project]);
+    }
+    return keys;
+  }
   if (event.type.startsWith("issue.")) {
     return keys;
   }
@@ -128,6 +140,18 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
       keys.push(["artifact", id]);
     }
     keys.push(["comments", event.issue_key]);
+    return keys;
+  }
+
+  if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
+    keys.push(
+      ["artifacts", event.issue_key],
+      ["artifact", event.payload.artifact_id],
+      ["asks", event.issue_key]
+    );
+    if (event.payload.ask_id !== null) {
+      keys.push(["ask-thread", event.payload.ask_id]);
+    }
     return keys;
   }
 

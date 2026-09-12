@@ -435,7 +435,7 @@ func joinAcrossBoundary(doc *Node, selection spliceSelection, r Range, with *Nod
 func buildMergedTextblock(doc *Node, selection spliceSelection, r Range, with *Node) (*Node, bool, error) {
 	left := nodeAtPath(doc, selection.first.path)
 	right := nodeAtPath(doc, selection.last.path)
-	if left.Type == right.Type && !attrsEqual(left.Attrs, right.Attrs) {
+	if left.Type == right.Type && !nodeAttrsEqual(left.Attrs, right.Attrs, false) {
 		return nil, false, nil
 	}
 	prefix, err := inlineRange(left, selection.first.pos, selection.first.pos+1, r.From)
@@ -625,7 +625,7 @@ func listItemAttrs(item *Node) Attrs {
 	if item != nil {
 		return cloneAttrs(item.Attrs)
 	}
-	return Attrs{"label": "•", "listType": "bullet", "checked": nil, "spread": false}
+	return Attrs{"label": "•", "listType": "bullet", "spread": false}
 }
 
 func preservedParagraph(fragment, parent *Node) bool {

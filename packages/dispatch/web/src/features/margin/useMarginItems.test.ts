@@ -122,6 +122,12 @@ test("unanchored comments and their replies leave the margin; replies to anchore
   ).toEqual(["r", "r1"]);
 });
 
+test("does not present unanchored comments while the issue artifact is loading", () => {
+  const loose = comment("unanchored", null, "2026-09-09T00:00:00Z");
+
+  expect(anchoredThreadComments([loose], undefined)).toEqual([]);
+});
+
 function OrderedItems() {
   const { items } = useMarginItems(
     { key: "CORE-1", kind: "issue" },
@@ -272,6 +278,7 @@ test("a document owner loads asks and comments from the artifact routes, hides p
       edited_at: null,
       id: "ask-1",
       issue_key: null,
+      kind: "question",
       multiple: false,
       opened_event_id: 1,
       options: [],

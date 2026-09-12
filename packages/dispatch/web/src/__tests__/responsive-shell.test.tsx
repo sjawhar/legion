@@ -37,6 +37,7 @@ const issue: IssueDetails = {
   project: "CORE",
   route: null,
   status: "todo",
+  rank: "U",
   title: "Responsive shell",
   updated_at: "2026-09-10T00:00:00Z",
 };
@@ -84,6 +85,7 @@ function renderShellAt(width: number): void {
       last_seq: 0,
       parent: issue.parent,
       status: issue.status,
+      rank: issue.rank,
       title: issue.title,
       updated_at: issue.updated_at,
     },

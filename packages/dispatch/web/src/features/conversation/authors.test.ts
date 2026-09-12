@@ -28,6 +28,17 @@ test("session authors prefer the live registry title, then the stamped title, th
     label: "session:01234567…",
     shape: "square",
   });
+  expect(
+    resolveAuthor(
+      {
+        id: "abcdef1234567890",
+        kind: "session",
+        origin: { session_title: "old title" },
+        owner: "alice",
+      },
+      titles
+    )
+  ).toEqual({ initials: "P", label: "Planner (for alice)", shape: "square" });
   expect(resolveAuthor({ id: "alice", kind: "user" }, titles)).toEqual({
     initials: "A",
     label: "alice",

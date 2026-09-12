@@ -337,8 +337,8 @@ function responseWithRegistration(
 
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
-test("declares all twelve native Dispatch tools", () => {
-  expect(dispatchToolNames).toHaveLength(12);
+test("declares all thirteen native Dispatch tools", () => {
+  expect(dispatchToolNames).toHaveLength(13);
   expect(dispatchToolNames).toContain("dispatch_edit_ask");
 });
 

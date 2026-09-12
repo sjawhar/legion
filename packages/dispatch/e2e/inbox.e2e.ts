@@ -316,6 +316,28 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
     await expect(page.getByText("e2e-session-title replied")).toBeVisible();
     await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
     await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
+
+    const questionShaped = await createAsk(
+      issue.key,
+      { options: [{ label: "Ship" }, { label: "Hold" }], question: "Question-shaped Other" },
+      session
+    );
+    await page.reload();
+    const questionCard = page.getByTestId(`ask-${questionShaped.id}`);
+    await questionCard.getByRole("radio", { name: "Other" }).check();
+    await questionCard.getByLabel("Your answer").fill("How does this fit our release plan?");
+    await questionCard.getByRole("button", { name: "Submit answer" }).click();
+    const clarification = questionCard.getByRole("button", {
+      name: "This reads like a question — send as clarification (keeps the ask open)",
+    });
+    await expect(clarification).toBeFocused();
+    await clarification.press("Enter");
+    await expect
+      .poll(() => getAsk(questionShaped.id))
+      .toMatchObject({
+        ask: { answer: null, state: "open" },
+        replies: [{ body: "How does this fit our release plan?" }],
+      });
   } finally {
     await alice.close();
   }

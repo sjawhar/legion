@@ -3,6 +3,7 @@ package cistore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -16,26 +17,44 @@ import (
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
-// connectNATS spins up a throwaway JetStream-enabled NATS server via
-// testcontainers, mirroring internal/store/kv_test.go.
+var (
+	sharedNATSOnce sync.Once
+	sharedNATSURI  string
+	sharedNATSErr  error
+)
+
+func sharedTestNATSURI(t *testing.T) string {
+	t.Helper()
+	sharedNATSOnce.Do(func() {
+		ctr, err := tcnats.Run(context.Background(), "nats:2.10")
+		if err != nil {
+			sharedNATSErr = err
+			return
+		}
+		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(context.Background())
+	})
+	if sharedNATSErr != nil {
+		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
+	}
+	return sharedNATSURI
+}
+
+// connectNATS creates an isolated connection to the package's shared NATS
+// server and removes the KV bucket before each serial test.
 func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	conn := testnats.Connect(t, sharedTestNATSURI(t))
+	js, err := conn.JetStream()
 	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		ctr.Terminate(ctx)
-		t.Fatalf("failed to get NATS URI: %v", err)
-	}
-	conn := testnats.Connect(t, uri)
-	cleanup := func() {
 		conn.Close()
-		ctr.Terminate(ctx)
+		t.Fatalf("open JetStream: %v", err)
 	}
-	return conn, cleanup
+	if err := js.DeleteKeyValue(Bucket); err != nil &&
+		!errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
+		conn.Close()
+		t.Fatalf("reset CI bucket: %v", err)
+	}
+	return conn, conn.Close
 }
 
 func openStore(t *testing.T, conn *natsgo.Conn) *Store {
@@ -505,6 +524,66 @@ func TestRecordHeadOrdersTimestampedUpdatesAndAcceptsMissingTimestamp(t *testing
 	}
 	if got := readHead(t); got.SHA != headC || got.UpdatedAt != "" {
 		t.Fatalf("untimestamped head = %+v, want SHA %q with no timestamp", got, headC)
+	}
+}
+
+func TestRewatchRestartsStoppedWatcher(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	url := conn.ConnectedUrl()
+	conn.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for !s.WatchFailed() {
+		if time.Now().After(deadline) {
+			t.Fatal("stopped watcher did not become unhealthy")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := s.Ping(); err == nil {
+		t.Fatal("stopped watcher should make the CI store unhealthy")
+	}
+
+	replacement, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("connect replacement: %v", err)
+	}
+	defer replacement.Close()
+	if err := s.Rewatch(replacement); err != nil {
+		t.Fatalf("rewatch store: %v", err)
+	}
+	if err := s.Ping(); err != nil {
+		t.Fatalf("ping after rewatch: %v", err)
+	}
+
+	js, err := replacement.JetStream()
+	if err != nil {
+		t.Fatalf("open replacement JetStream: %v", err)
+	}
+	kv, err := js.KeyValue(Bucket)
+	if err != nil {
+		t.Fatalf("open replacement CI bucket: %v", err)
+	}
+	state := State{Owner: "replacement", Repo: "repo", Number: "42", SHA: "abc", Checks: map[string]Check{}, Suites: map[string]Suite{}}
+	value, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal replacement state: %v", err)
+	}
+	if _, err := kv.Put(Key(state.Owner, state.Repo, state.Number, state.SHA), value); err != nil {
+		t.Fatalf("put replacement state: %v", err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		for _, got := range s.List() {
+			if got.Owner == state.Owner && got.Repo == state.Repo && got.Number == state.Number && got.SHA == state.SHA {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rewatched store did not receive replacement state: %+v", s.List())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

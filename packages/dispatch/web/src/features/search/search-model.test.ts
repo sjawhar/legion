@@ -13,6 +13,7 @@ function result(
     id,
     issue,
     kind,
+    owner: { key: issue.key, kind: "issue" },
     rank: 1,
     snippet: "result",
   };
@@ -26,10 +27,13 @@ test("groups results by their first ranked issue while preserving server result 
     result("comment-3", legionThree, "comment"),
     result("comment-2", legionTwo, "comment"),
   ];
-
   expect(groupResults(results)).toEqual([
-    { issue: legionTwo, results: [results[0], results[2]] },
-    { issue: legionThree, results: [results[1]] },
+    {
+      issue: legionTwo,
+      owner: { key: "LEGION-2", kind: "issue" },
+      results: [results[0], results[2]],
+    },
+    { issue: legionThree, owner: { key: "LEGION-3", kind: "issue" }, results: [results[1]] },
   ]);
 });
 

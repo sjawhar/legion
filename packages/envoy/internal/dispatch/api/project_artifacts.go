@@ -41,6 +41,7 @@ func (s *server) listProjectArtifacts(w http.ResponseWriter, r *http.Request) {
 	if artifacts == nil {
 		artifacts = []model.Artifact{}
 	}
+	pointers := make([]*model.Artifact, len(artifacts))
 	for index := range artifacts {
 		versions, err := s.loadVersions(r.Context(), s.deps.Store.Pool, artifacts[index].ID)
 		if err != nil {
@@ -48,6 +49,11 @@ func (s *server) listProjectArtifacts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		artifacts[index].Versions = versions
+		pointers[index] = &artifacts[index]
+	}
+	if err := s.attachApprovals(r.Context(), s.deps.Store.Pool, pointers); err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, artifacts)
 }

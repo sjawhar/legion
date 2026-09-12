@@ -75,24 +75,40 @@ Wave releases, child closures, and your own status are visible from the issue tr
 handoffs; do not narrate them into the spec or a `dispatch_message`. A blocker only Sami can
 clear is a `dispatch_ask`.
 
-Write one root specification containing the accepted scope, adoption/decomposition,
-waves, acceptance criteria, and integration test. When the config-armed root design gate
-applies, run this exact sequence **before any Legion-role spawn**, including a
-sub-architect:
+The issue's primary document **is** the root specification. Extend it in place — a new version
+that keeps the human's own text and adds Summary, Decisions needed, New since we talked, the
+adoption/decomposition and waves, acceptance criteria, and the integration test — never a second
+"spec" artifact beside it (`dispatch_artifact` with the primary document's name replaces the
+human's document; do not do that). Both readers described in
+[Writing for the human](../dispatch/SKILL.md#writing-for-the-human) must be able to follow it.
+When the config-armed root design gate applies, run this exact sequence **before any
+Legion-role spawn**, including a sub-architect:
 
 ```text
-dispatch_artifact({ issue: "<root issue>", name: "spec.md", content: "<root specification>", summary: "<one-line summary>" })
+dispatch_doc_edit({ issue: "<root issue>", ... })   // extend the primary document in place
 askId = dispatch_ask({
   issue: "<root issue>",
-  question: "<specification summary and the decision requested>",
-  options: [{ label: "Approve" }, ...]
+  question: "<what is true today, in one sentence> <what will be true when this lands, in one sentence> <how: one issue or N child issues, and what the first step is> I recommend Approve because <one reason>.",
+  options: [
+    { label: "Approve", description: "Work starts as described; the first worker is spawned now." },
+    { label: "Hold", description: "Nothing starts; reply on the issue with what should change first." },
+  ]
 })
 legion({ op: "register_gate", issue: "<root issue>", askId })
 ```
 
+Both options are required: a question with only `Approve` is not a decision. The whole ask is
+read on a phone by someone who has not read the code: no file paths, line numbers, document
+versions, or role tokens in it. Sami, 2026-09-12, on a gate ask that broke this rule: "I have no
+idea what the fuck you're talking about."
+
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake
-shows `design-approved` on the root. Approval covers the entire tree: later waves,
-re-scopes, and integration-failure children do not repeat this sequence.
+shows `design-approved` on the root. On a deployment whose design gate is off
+(`gates.design: off` in its `legion.yaml`), the daemon satisfies the gate as you register it
+and `design-approved` arrives immediately — proceed. The daemon then closes the ask on Dispatch
+(you will see `ask.resolved` for it); that is expected and needs nothing from you. Approval
+covers the entire tree: later waves, re-scopes, and integration-failure children do not repeat
+this sequence.
 
 ## 2. Children in flight
 

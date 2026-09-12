@@ -66,6 +66,7 @@ test("an ask edit refreshes the issue, its asks list, user state, the inbox, and
       edited_by: { id: "session-1", kind: "session" },
       id: "ask-1",
       issue_key: "CORE-1",
+      kind: "question",
       multiple: false,
       opened_event_id: 1,
       options: [],
@@ -111,6 +112,22 @@ test("issue changes refresh user state and the inbox", () => {
       ["user-state"],
       ["inbox"],
     ]);
+  }
+});
+
+test("issue creation and updates refresh the affected project board query", () => {
+  for (const type of ["issue.created", "issue.updated"] as const) {
+    const invalidated: unknown[][] = [];
+    applyEventInvalidations(
+      {
+        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+          invalidated.push([...queryKey]);
+          return Promise.resolve();
+        },
+      },
+      event(type, {}, { project: "CORE" })
+    );
+    expect(invalidated).toContainEqual(["issues", "project", "CORE"]);
   }
 });
 

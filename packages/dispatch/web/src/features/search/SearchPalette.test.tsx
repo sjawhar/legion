@@ -16,6 +16,7 @@ const results: SearchResult[] = [
     href: "/issues/LEGION-2/spec?q=astrolabe",
     id: "document-2",
     issue: { key: "LEGION-2", status: "done", title: "Navigation instruments" },
+    owner: { key: "LEGION-2", kind: "issue" },
     kind: "document",
     rank: 3,
     snippet: "The <mark>astrolabe</mark> measures altitude.",
@@ -24,6 +25,7 @@ const results: SearchResult[] = [
     href: "/issues/LEGION-3",
     id: "LEGION-3",
     issue: { key: "LEGION-3", status: "todo", title: "Instrument research" },
+    owner: { key: "LEGION-3", kind: "issue" },
     kind: "issue",
     rank: 2,
     snippet: "Research <mark>astrolabe</mark> history.",
@@ -32,6 +34,7 @@ const results: SearchResult[] = [
     href: "/issues/LEGION-2/comments/comment-2",
     id: "comment-2",
     issue: { key: "LEGION-2", status: "done", title: "Navigation instruments" },
+    owner: { key: "LEGION-2", kind: "issue" },
     kind: "comment",
     rank: 1,
     snippet: "Discuss the <mark>astrolabe</mark> diagram.",
@@ -86,6 +89,48 @@ test("renders grouped results with marked snippets and dims a done issue", async
     expect(screen.getAllByRole("option")).toHaveLength(3);
     expect(screen.getAllByText("astrolabe", { selector: "mark" })).not.toHaveLength(0);
     expect(doneGroup?.getAttribute("data-status")).toBe("done");
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("renders document-owned results under the document and opens their discussion", async () => {
+  const search = spyOn(api, "search").mockResolvedValue({
+    results: [
+      {
+        artifact: { name: "Navigation design", slug: "navigation-design" },
+        href: "/projects/CORE/documents/navigation-design?comment=comment-2",
+        id: "comment-2",
+        issue: { key: "", status: "", title: "" },
+        kind: "comment",
+        owner: {
+          artifact_id: "document-2",
+          kind: "document",
+          name: "Navigation design",
+          project: "CORE",
+          slug: "navigation-design",
+        },
+        rank: 1,
+        snippet: "Discuss the <mark>astrolabe</mark> diagram.",
+      },
+    ],
+    took_ms: 1,
+  });
+  const view = renderPalette();
+
+  try {
+    await searchFor("astrolabe");
+
+    const documentGroup = screen
+      .getAllByRole("presentation")
+      .find((group) => group.getAttribute("aria-label") === "CORE: Navigation design");
+    expect(documentGroup).toBeDefined();
+    fireEvent.click(screen.getByRole("option"));
+    expect(screen.getByTestId("current-route").textContent).toBe(
+      "/projects/CORE/documents/navigation-design?comment=comment-2"
+    );
   } finally {
     search.mockRestore();
     view.unmount();

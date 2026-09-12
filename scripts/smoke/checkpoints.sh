@@ -44,8 +44,8 @@ dispatch_issue() {
   dispatch_request "issues/$1"
 }
 
-dispatch_open_asks() {
-  dispatch_request "issues/$1/asks?state=open"
+dispatch_asks() {
+  dispatch_request "issues/$1/asks?state=all"
 }
 
 dispatch_artifacts() {
@@ -240,6 +240,10 @@ checkpoint_two() {
   printf 'CHECKPOINT 2 OK: Dispatch reports %s in_progress; architect locator is live\n' "$root"
 }
 
+# The rig runs with `gates.design: off` (up.sh): the daemon approves the gate the moment the
+# architect registers it and closes the ask on Dispatch, so a smoke exercise never waits on a
+# human. This checkpoint proves that whole path — the gate is registered and daemon-approved, and
+# the ask the architect opened is `resolved` rather than sitting open in someone's inbox.
 checkpoint_three() {
   local root
   local daemon_state
@@ -252,10 +256,12 @@ checkpoint_three() {
   daemon_state="$(state)"
   design_ask_id="$(jq -er --arg root "$root" '.gates[$root].designAskId' <<<"$daemon_state")" ||
     fail "${root} has no registered design-gate ask"
-  asks="$(dispatch_open_asks "$root")"
+  jq -e --arg root "$root" '.gates[$root].designApproved == "gate-off"' >/dev/null <<<"$daemon_state" ||
+    fail "${root} design gate is registered but the daemon did not approve it (gates.design is not off?)"
+  asks="$(dispatch_asks "$root")"
   jq -e --arg ask "$design_ask_id" '
-    any(.[]; .id == $ask and .state == "open" and any(.options[]?; .label == "Approve"))
-  ' >/dev/null <<<"$asks" || fail "${root} lacks an open Approve design-gate ask"
+    any(.[]; .id == $ask and .state == "resolved" and any(.options[]?; .label == "Approve"))
+  ' >/dev/null <<<"$asks" || fail "${root} design-gate ask ${design_ask_id} is not resolved on Dispatch"
   artifacts="$(dispatch_artifacts "$root")"
   jq -e '
     any(.[]; .name == "spec.md" and .primary == true and (.versions | type == "array" and length > 0))
@@ -263,7 +269,7 @@ checkpoint_three() {
   children="$(dispatch_children "$root")"
   jq -e --arg root "$root" 'any(.[]; .parent == $root)' >/dev/null <<<"$children" ||
     fail "${root} has no Dispatch child issue"
-  printf 'CHECKPOINT 3 OK: posted spec artifact, open design gate, and child issue observed\n'
+  printf 'CHECKPOINT 3 OK: posted spec artifact, daemon-approved design gate (ask resolved), and child issue observed\n'
 }
 
 checkpoint_four() {

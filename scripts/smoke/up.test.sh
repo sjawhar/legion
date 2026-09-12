@@ -314,7 +314,9 @@ fi
 printf 'PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)\n'
 
 # The pre-#941 gates block: `merge: human` under `gates:` is exactly what the loader must refuse.
-sed 's/^  design: root-issues$/  design: root-issues\n  merge: human/' "${SMOKE_DIR}/legion.yaml" >"${SMOKE_DIR}/legion-gates-merge.yaml"
+# Anchored on the `gates:` line itself, not on the design gate's value, which the rig changes
+# independently (root-issues before #971, off since).
+sed 's/^gates:$/gates:\n  merge: human/' "${SMOKE_DIR}/legion.yaml" >"${SMOKE_DIR}/legion-gates-merge.yaml"
 grep -Fxq '  merge: human' "${SMOKE_DIR}/legion-gates-merge.yaml" || {
   printf 'fixture error: the gates.merge line was not inserted\n' >&2
   exit 1

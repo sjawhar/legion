@@ -209,6 +209,7 @@ test("API client encodes list filters and artifact version query parameters", as
     status: "in progress",
     parent: "CORE-1",
     updated_since: "2026-09-10T12:00:00Z",
+    labels: ["frontend", "docs"],
   });
   await api.getIssueEvents("CORE-1", { after: 3, limit: 20 });
   await api.getIssueEvents("CORE-1", { before: 40, order: "desc" });
@@ -217,7 +218,7 @@ test("API client encodes list filters and artifact version query parameters", as
   await api.resolveIssue("owner/repo#42");
 
   expect(stub.requests.map(({ path }) => path)).toEqual([
-    "/api/v1/issues?pinned=true&project=CORE&status=in+progress&parent=CORE-1&updated_since=2026-09-10T12%3A00%3A00Z",
+    "/api/v1/issues?pinned=true&project=CORE&status=in+progress&parent=CORE-1&updated_since=2026-09-10T12%3A00%3A00Z&label=frontend&label=docs",
     "/api/v1/issues/CORE-1/events?after=3&limit=20",
     "/api/v1/issues/CORE-1/events?before=40&order=desc",
     "/api/v1/issues/CORE-1/events?ids=42%2C10",
@@ -379,6 +380,9 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.getArtifactText("artifact-1");
   await api.getArtifactVersion("artifact-1", 3);
   await api.createArtifactVersion("artifact-1", { summary: "Save" });
+  await api.listArtifactReviews("artifact-1");
+  await api.createArtifactReview("artifact-1", { state: "approved" });
+  await api.requestArtifactApproval("artifact-1");
   await api.getMyState();
   await api.putIssueState("CORE-1", { pinned: true });
   await api.whoAmI();
@@ -409,6 +413,9 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/api/v1/artifacts/artifact-1/text"],
     ["GET", "/api/v1/artifacts/artifact-1/versions/3"],
     ["POST", "/api/v1/artifacts/artifact-1/versions"],
+    ["GET", "/api/v1/artifacts/artifact-1/reviews"],
+    ["POST", "/api/v1/artifacts/artifact-1/reviews"],
+    ["POST", "/api/v1/artifacts/artifact-1/approval-requests"],
     ["GET", "/api/v1/me/state"],
     ["PUT", "/api/v1/me/issues/CORE-1/state"],
     ["GET", "/auth/whoami"],

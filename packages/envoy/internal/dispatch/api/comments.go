@@ -574,7 +574,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	comment.Body = input.Body
-	comment.EditedAt = commentTimestamp(editedAt)
+	comment.EditedAt = timestampPtr(&editedAt)
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
@@ -695,7 +695,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		comment.Resolved = true
 		comment.ResolvedBy = &actor
-		comment.ResolvedAt = commentTimestamp(resolvedAt)
+		comment.ResolvedAt = timestampPtr(&resolvedAt)
 	case "accept", "reject":
 		if comment.Suggestion == nil {
 			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept and reject require a suggestion")
@@ -778,7 +778,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			return
 		}
 		comment.ResolvedBy = &actor
-		comment.ResolvedAt = commentTimestamp(resolvedAt)
+		comment.ResolvedAt = timestampPtr(&resolvedAt)
 	}
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
@@ -864,7 +864,7 @@ func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestio
 	record := docs.MarkRecord{
 		Kind:      "comment",
 		By:        docs.ActorRef(comment.Author),
-		CreatedAt: comment.CreatedAt.UTC().Format(time.RFC3339Nano),
+		CreatedAt: timestampValue(comment.CreatedAt),
 		Text:      comment.Body,
 		Resolved:  comment.Resolved,
 		Replies:   make([]docs.MarkReply, 0, len(replies)),
@@ -873,7 +873,7 @@ func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestio
 		record.Replies = append(record.Replies, docs.MarkReply{
 			By:   docs.ActorRef(reply.Author),
 			Text: reply.Body,
-			At:   reply.CreatedAt.UTC().Format(time.RFC3339Nano),
+			At:   timestampValue(reply.CreatedAt),
 		})
 	}
 	if comment.Suggestion != nil {
@@ -925,8 +925,8 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 		}
 		comment.ResolvedBy = &value
 	}
-	comment.ResolvedAt = commentTimestampPtr(resolvedAt)
-	comment.EditedAt = commentTimestampPtr(editedAt)
+	comment.ResolvedAt = timestampPtr(resolvedAt)
+	comment.EditedAt = timestampPtr(editedAt)
 	if len(suggestion) > 0 {
 		var value model.Suggestion
 		if err := json.Unmarshal(suggestion, &value); err != nil {
@@ -935,18 +935,6 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 		comment.Suggestion = &value
 	}
 	return comment, nil
-}
-
-func commentTimestampPtr(value *time.Time) *string {
-	if value == nil {
-		return nil
-	}
-	return commentTimestamp(*value)
-}
-
-func commentTimestamp(value time.Time) *string {
-	text := value.UTC().Format(time.RFC3339Nano)
-	return &text
 }
 
 func commentEventPayload(comment model.Comment, artifactName, askQuestion, askState, threadRootID string) model.CommentEventPayload {

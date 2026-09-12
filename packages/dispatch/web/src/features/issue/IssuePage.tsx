@@ -35,7 +35,6 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
   surfaceMutedDisabledBg,
-  surfaceMutedStrongBg,
   textMutedHoverToSecondary,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
@@ -45,6 +44,7 @@ import {
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
+import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import {
@@ -60,6 +60,7 @@ import { firstHighlightTerm } from "../search/search-model";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
+import { IssueLabels } from "./IssueLabels";
 import { IssueTabs } from "./IssueTabs";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { useIssueDrafts } from "./useIssueDrafts";
@@ -190,6 +191,7 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
 }
 
 function IssueHeader({
+  documentArtifact,
   isClosed,
   issue,
   onShowDiffChange,
@@ -200,6 +202,7 @@ function IssueHeader({
   toolbar,
   version,
 }: {
+  documentArtifact: Artifact | undefined;
   isClosed: boolean;
   issue: Issue;
   onShowDiffChange(next: boolean): void;
@@ -236,6 +239,13 @@ function IssueHeader({
     onSuccess: (next, input) => {
       mergeIssue(queryClient, next);
       drafts.onIssueSuccess(next, input);
+      void queryClient.invalidateQueries({ queryKey: ["issues"] });
+    },
+  });
+  const labelsMutation = useMutation({
+    mutationFn: (labels: string[]) => api.patchIssue(issue.key, { labels }),
+    onSuccess: (next) => {
+      mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
@@ -356,6 +366,9 @@ function IssueHeader({
             ))}
           </select>
         </label>
+        {showDocumentControls && documentArtifact !== undefined ? (
+          <ApprovalChip artifact={documentArtifact} variant="header" />
+        ) : null}
         {showDocumentControls && toolbar !== undefined ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <label
@@ -475,24 +488,22 @@ function IssueHeader({
           Saving…
         </span>
       ) : null}
-      {issue.labels.length === 0 && issue.parent === null ? null : (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          {issue.labels.map((label) => (
-            <span
-              className={`break-all rounded-full px-2 py-1 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}
-              key={label}
-            >
-              {label}
-            </span>
-          ))}
-          {issue.parent === null ? null : (
-            <Link
-              className={`text-sm underline ${linkText} ${linkHoverText}`}
-              to={buildIssuePath({ key: issue.parent, kind: "issue" })}
-            >
-              Parent: {issue.parent}
-            </Link>
-          )}
+      <IssueLabels
+        disabled={isClosed}
+        labels={issue.labels}
+        onSave={(labels) => labelsMutation.mutateAsync(labels)}
+        project={issue.project}
+        saveError={labelsMutation.isError}
+        saving={labelsMutation.isPending}
+      />
+      {issue.parent === null ? null : (
+        <div className="mt-2">
+          <Link
+            className={`text-sm underline ${linkText} ${linkHoverText}`}
+            to={buildIssuePath({ key: issue.parent, kind: "issue" })}
+          >
+            Parent: {issue.parent}
+          </Link>
         </div>
       )}
       {updateState.isError ? (
@@ -690,6 +701,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         </p>
       ) : null}
       <IssueHeader
+        documentArtifact={primaryArtifact}
         isClosed={isClosed}
         issue={issue.data}
         onShowDiffChange={setSpecShowDiff}

@@ -11,6 +11,7 @@ import {
   type DispatchEvent,
   DispatchEventSchema,
   type EditCommentInput,
+  IssueEventPayloadSchema,
   MessageEventPayloadSchema,
 } from "./dispatch-api";
 
@@ -31,6 +32,12 @@ test("accepts the typed artifact version event payload", () => {
   };
 
   expect(DispatchEventSchema.safeParse(event)).toMatchObject({ success: true });
+});
+
+test("preserves labels on an issue update event payload", () => {
+  expect(IssueEventPayloadSchema.parse({ labels: ["frontend", "urgent"] })).toEqual({
+    labels: ["frontend", "urgent"],
+  });
 });
 
 test("requires a positive opened event id on an ask event payload", () => {
@@ -59,6 +66,7 @@ test("accepts an artifact-owned ask edit event", () => {
       issue_key: null,
       artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
       author: { kind: "session", id: "session-1" },
+      kind: "question",
       question: "Publish?",
       options: [],
       multiple: false,

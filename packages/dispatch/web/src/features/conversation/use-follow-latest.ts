@@ -1,41 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-const TOP_SLACK_PX = 64;
-const COMPOSER_SELECTOR = '[aria-label="Message composer"]';
+const FOLLOW_POSITION_TOLERANCE_PX = 1;
 const NEWEST_TURN_SELECTOR = "[data-event-seq]";
-
-function composerHeight(): number {
-  return (
-    document.querySelector<HTMLElement>(COMPOSER_SELECTOR)?.getBoundingClientRect().height ?? 0
-  );
-}
-
-function pinnedToTop(): boolean {
-  const newest = document.querySelector<HTMLElement>(NEWEST_TURN_SELECTOR);
-  if (newest === null) {
-    return window.scrollY <= TOP_SLACK_PX;
-  }
-  return Math.abs(newest.getBoundingClientRect().top - composerHeight()) <= TOP_SLACK_PX;
-}
-
-/**
- * Scrolls the newest turn into view directly under the sticky composer. Scrolling to the document
- * top would leave the composer — itself `position: sticky` — rendered over however much of the
- * newest turn its own height covers: the composer and the turns below it keep their pre-scroll
- * document position, and only the composer's own paint position moves to the viewport top once
- * scrolled far enough. The target position places the newest turn's top edge exactly one composer
- * height below the viewport top, computed from its current on-screen position rather than its
- * document offset, so it is correct regardless of whether the composer is already stuck.
- */
-function scrollToNewest(): void {
-  const newest = document.querySelector<HTMLElement>(NEWEST_TURN_SELECTOR);
-  if (newest === null) {
-    window.scrollTo({ top: 0 });
-    return;
-  }
-  const target = window.scrollY + newest.getBoundingClientRect().top - composerHeight();
-  window.scrollTo({ top: Math.max(target, 0) });
-}
 
 export function useFollowLatest({
   enabled,
@@ -58,16 +24,38 @@ export function useFollowLatest({
   const previousItemSeq = useRef<number | undefined>(undefined);
   const previousSends = useRef(ownSendCount);
   const visibleThroughSeq = useRef<number | undefined>(undefined);
+  const followScrollY = useRef<number | undefined>(undefined);
+  const followsLatest = useCallback(
+    () =>
+      window.scrollY <= 0 ||
+      (followScrollY.current !== undefined &&
+        Math.abs(window.scrollY - followScrollY.current) <= FOLLOW_POSITION_TOLERANCE_PX),
+    []
+  );
 
+  // The newest turn must sit immediately beneath the sticky composer. Recording the actual
+  // post-scroll position distinguishes that automated placement from a reader's later scroll,
+  // regardless of whatever height the issue header has at this breakpoint.
   const jumpToLatest = useCallback(() => {
-    scrollToNewest();
+    const newest = document.querySelector<HTMLElement>(NEWEST_TURN_SELECTOR);
+    if (newest === null) {
+      window.scrollTo({ top: 0 });
+    } else {
+      const composerHeight =
+        document
+          .querySelector<HTMLElement>('[aria-label="Message composer"]')
+          ?.getBoundingClientRect().height ?? 0;
+      const target = window.scrollY + newest.getBoundingClientRect().top - composerHeight;
+      window.scrollTo({ top: Math.max(target, 0) });
+    }
+    followScrollY.current = window.scrollY;
     visibleThroughSeq.current = latestItemSeq;
     setNewItemCount(0);
   }, [latestItemSeq]);
 
   useEffect(() => {
     const onScroll = () => {
-      const nextAtTop = pinnedToTop();
+      const nextAtTop = followsLatest();
       const wasAtTop = atTopRef.current;
       atTopRef.current = nextAtTop;
       setAtTop(nextAtTop);
@@ -79,7 +67,7 @@ export function useFollowLatest({
     window.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => window.removeEventListener("scroll", onScroll);
-  }, [latestItemSeq]);
+  }, [followsLatest, latestItemSeq]);
 
   // The mutation's `onSuccess` bumps `ownSendCount` and invalidates the events query in the same
   // tick, but the SSE stream (features/api/sse.ts) can independently invalidate the same query
@@ -104,18 +92,24 @@ export function useFollowLatest({
     if (!changed && !ownSend) {
       return;
     }
-    if (first || ownSend || atTopRef.current) {
+    // A server event may render before the browser dispatches the scroll event that preceded it.
+    // Measure now rather than trusting the listener's last state, or that arrival can pull a reader
+    // back to the newest turn before their scroll was observed.
+    const followsLatestNow = first || ownSend || followsLatest();
+    atTopRef.current = followsLatestNow;
+    setAtTop(followsLatestNow);
+    if (followsLatestNow) {
       jumpToLatest();
       return;
     }
     const visibleThrough = visibleThroughSeq.current ?? latestItemSeq;
     setNewItemCount(itemSeqs.filter((seq) => seq > visibleThrough).length);
-  }, [enabled, itemSeqs, jumpToLatest, latestItemSeq, ownSendCount]);
+  }, [enabled, followsLatest, itemSeqs, jumpToLatest, latestItemSeq, ownSendCount]);
 
   return {
     atTop,
     jumpToLatest,
     newItemCount,
-    pinnedToTop: () => atTop || pinnedToTop(),
+    pinnedToTop: followsLatest,
   };
 }

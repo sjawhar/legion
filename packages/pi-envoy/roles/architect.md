@@ -29,8 +29,10 @@ controller-actionable re-filing work, not a reason to abandon it.
 ## Gates, waves, and spawning
 
 Before **any** phase-worker spawn, including a further sub-architect, obey the root design gate:
-publish the specification as its primary Dispatch artifact, open a `dispatch_ask` with an
-`Approve` option, and register the gate. Do not spawn while waiting for `design-approved`;
+extend the issue's own primary document in place as the specification (never a second "spec"
+artifact), open a `dispatch_ask` written in plain words for a reader who has not seen the code
+(the dispatch skill's "Writing for the human" rules), with an `Approve` option, and register the
+gate. Do not spawn while waiting for `design-approved`;
 later waves and re-scopes do not re-arm the gate. After revival, the delivered
 `catchup-overseer` snapshot is the authoritative wake-equivalent: when its `designApproved`
 gate state is set, spawn. During a live session, react only to delivered wakes;

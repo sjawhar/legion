@@ -185,8 +185,14 @@ func liveRoleHolder(registry *store.Registry, sessions *session.SessionRegistry,
 		return "", session.SessionEntry{}, nil
 	}
 	entry, err := sessions.Get(holder)
-	if err != nil {
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		if _, err := registry.ReleaseExpiredRoleClaim(role, holder, sessions.TTL()); err != nil {
+			return "", session.SessionEntry{}, fmt.Errorf("drop expired role claim: %w", err)
+		}
 		return "", session.SessionEntry{}, nil
+	}
+	if err != nil {
+		return "", session.SessionEntry{}, fmt.Errorf("read role holder session: %w", err)
 	}
 	return holder, entry, nil
 }
@@ -505,6 +511,7 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			writeJSONError(w, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
 			return
 		}
+		previous := ""
 		var supersedable []string
 		if body.Soft {
 			// The registry sees only interest rows; liveness is this registry's
@@ -516,7 +523,7 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 				writeJSONError(w, http.StatusServiceUnavailable, "read role holder: "+err.Error())
 				return
 			}
-			previous := strings.TrimSpace(body.PreviousSessionID)
+			previous = strings.TrimSpace(body.PreviousSessionID)
 			if holder != "" && holder != body.SessionID {
 				if previous != "" && holder == previous {
 					supersedable = append(supersedable, holder)
@@ -528,7 +535,7 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 				}
 			}
 		}
-		item, err := d.registry.SetRole(body.SessionID, machineID, body.Role, body.Soft, supersedable...)
+		item, err := d.registry.SetRoleWithPrevious(body.SessionID, machineID, body.Role, previous, body.Soft, supersedable...)
 		var held *store.ErrRoleHeld
 		if errors.As(err, &held) {
 			writeJSON(w, http.StatusConflict, map[string]string{

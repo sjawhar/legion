@@ -1,8 +1,11 @@
 import type {
   Agent,
+  AgentToken,
   AnswerAskInput,
   Artifact,
   ArtifactDetails,
+  ArtifactReview,
+  ArtifactReviewState,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionContent,
@@ -15,6 +18,7 @@ import type {
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
+  CreatedAgentToken,
   CreateIssueInput,
   CreateMessageInput,
   CreateProjectInput,
@@ -88,6 +92,7 @@ export interface ListIssuesOptions {
   status?: string;
   parent?: string;
   updated_since?: string;
+  labels?: string[];
 }
 
 export interface ListEventsOptions {
@@ -99,6 +104,17 @@ export interface ListEventsOptions {
 }
 
 export type ArtifactOwner = { issue: string } | { project: string };
+
+export interface CreateArtifactReviewInput {
+  state: ArtifactReviewState;
+  reason?: string;
+}
+
+export interface RequestArtifactApprovalResponse {
+  ask: Ask;
+  artifact_id: string;
+  version: number;
+}
 
 function normalizeAsk(ask: Ask): Ask {
   return Array.isArray(ask.options) ? ask : { ...ask, options: [] };
@@ -120,7 +136,15 @@ function pathWithQuery(path: string, values: object): string {
   const query = new URLSearchParams();
 
   for (const [key, value] of Object.entries(values)) {
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        query.append(key, item);
+      }
+    } else if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
       query.set(key, String(value));
     }
   }
@@ -187,8 +211,21 @@ export class DispatchApiClient {
     await this.response(`/api/v1/settings/repo-projects/${repoPath(repo)}`, { method: "DELETE" });
   }
 
+  listAgentTokens(): Promise<AgentToken[]> {
+    return this.json<AgentToken[]>("/api/v1/me/agent-tokens");
+  }
+
+  createAgentToken(input: { name: string }): Promise<CreatedAgentToken> {
+    return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input);
+  }
+
+  async revokeAgentToken(id: string): Promise<void> {
+    await this.response(`/api/v1/me/agent-tokens/${pathSegment(id)}`, { method: "DELETE" });
+  }
+
   listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
-    return this.json<IssueSummary[]>(pathWithQuery("/api/v1/issues", options));
+    const { labels, ...query } = options;
+    return this.json<IssueSummary[]>(pathWithQuery("/api/v1/issues", { ...query, label: labels }));
   }
   search(
     query: string,
@@ -366,6 +403,21 @@ export class DispatchApiClient {
 
   editArtifact(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
     return this.post<EditArtifactResponse>(`/api/v1/artifacts/${pathSegment(id)}/edits`, input);
+  }
+
+  listArtifactReviews(id: string): Promise<ArtifactReview[]> {
+    return this.json<ArtifactReview[]>(`/api/v1/artifacts/${pathSegment(id)}/reviews`);
+  }
+
+  createArtifactReview(id: string, input: CreateArtifactReviewInput): Promise<ArtifactReview> {
+    return this.post<ArtifactReview>(`/api/v1/artifacts/${pathSegment(id)}/reviews`, input);
+  }
+
+  requestArtifactApproval(id: string): Promise<RequestArtifactApprovalResponse> {
+    return this.post<RequestArtifactApprovalResponse>(
+      `/api/v1/artifacts/${pathSegment(id)}/approval-requests`,
+      {}
+    );
   }
 
   async listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {

@@ -272,41 +272,58 @@ export function SearchPalette({
             </p>
           ) : (
             <div id="search-results" role="listbox">
-              {groups.map((group) => (
-                <Fragment key={group.issue.key}>
-                  <div
-                    aria-label={`${group.issue.key}: ${group.issue.title}`}
-                    className={`flex min-w-0 items-center gap-2 border-b px-3 py-2 text-xs ${borderDefault} ${
-                      group.issue.status === "done" ? textMutedOnSurface : ""
-                    }`}
-                    data-status={group.issue.status}
-                    role="presentation"
+              {groups.map((group) => {
+                const issueOwner = group.owner.kind === "issue";
+                const ownerLabel = issueOwner
+                  ? `${group.issue.key}: ${group.issue.title}`
+                  : `${group.owner.project}: ${group.owner.name}`;
+                const muted = issueOwner && group.issue.status === "done";
+                return (
+                  <Fragment
+                    key={
+                      issueOwner
+                        ? `issue:${group.owner.key}`
+                        : `document:${group.owner.artifact_id}`
+                    }
                   >
-                    <span className="font-medium">{group.issue.key}</span>
-                    <span
-                      className={`min-w-0 flex-1 truncate ${
-                        group.issue.status === "done" ? textMutedOnSurface : textSecondaryOnSurface
+                    <div
+                      aria-label={ownerLabel}
+                      className={`flex min-w-0 items-center gap-2 border-b px-3 py-2 text-xs ${borderDefault} ${
+                        muted ? textMutedOnSurface : ""
                       }`}
+                      data-status={issueOwner ? group.issue.status : undefined}
+                      role="presentation"
                     >
-                      {group.issue.title}
-                    </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}
-                    >
-                      {group.issue.status}
-                    </span>
-                  </div>
-                  {group.results.map((result) => (
-                    <ResultOption
-                      active={result === activeResult}
-                      muted={group.issue.status === "done"}
-                      key={optionId(result)}
-                      onSelect={() => navigateToResult(result)}
-                      result={result}
-                    />
-                  ))}
-                </Fragment>
-              ))}
+                      <span className="font-medium">
+                        {issueOwner ? group.issue.key : group.owner.project}
+                      </span>
+                      <span
+                        className={`min-w-0 flex-1 truncate ${
+                          muted ? textMutedOnSurface : textSecondaryOnSurface
+                        }`}
+                      >
+                        {issueOwner ? group.issue.title : group.owner.name}
+                      </span>
+                      {issueOwner ? (
+                        <span
+                          className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}
+                        >
+                          {group.issue.status}
+                        </span>
+                      ) : null}
+                    </div>
+                    {group.results.map((result) => (
+                      <ResultOption
+                        active={result === activeResult}
+                        muted={muted}
+                        key={optionId(result)}
+                        onSelect={() => navigateToResult(result)}
+                        result={result}
+                      />
+                    ))}
+                  </Fragment>
+                );
+              })}
             </div>
           )}
         </div>

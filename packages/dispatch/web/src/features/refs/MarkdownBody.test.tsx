@@ -33,6 +33,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     ask: {
       id: "ask-1",
       issue_key: "CORE-1",
+      kind: "question",
       author: { id: "alice", kind: "user" },
       question: "Ship it?",
       options: [],
@@ -101,6 +102,7 @@ test("two references in one body each resolve their own inline link and title", 
     ask: {
       id: "ask-1",
       issue_key: "CORE-1",
+      kind: "question",
       author: { id: "alice", kind: "user" },
       question: "Ship it?",
       options: [],
@@ -174,6 +176,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     ask: {
       id: "ask-1",
       issue_key: "CORE-1",
+      kind: "question",
       author: { id: "alice", kind: "user" },
       question: "Ship it?",
       options: [],

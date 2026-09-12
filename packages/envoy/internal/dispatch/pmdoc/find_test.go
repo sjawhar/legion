@@ -411,6 +411,7 @@ func textblockContaining(doc *Node, position int) Range {
 }
 
 func TestSpliceMatchesEngineReplaceRange(t *testing.T) {
+	installCounterBlockIDs(t)
 	for _, fx := range loadSpliceFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
 			doc, err := Parse(fx.Markdown)

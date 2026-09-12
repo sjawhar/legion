@@ -208,10 +208,8 @@ func TestSessionRegistry_Ping_Healthy(t *testing.T) {
 }
 
 func TestSessionRegistry_Ping_ClosedConnReturnsError(t *testing.T) {
-	// Regression for the sami listener stuck-after-recovery scenario — the
-	// session registry's KV handle is bound to the original *nats.Conn. After
-	// bus recovery replaces the conn, this Ping must surface the broken state
-	// so the listener can self-terminate.
+	// A closed KV handle must remain observable through Ping so /healthz can
+	// report the unavailable dependency while NATS reconnects.
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
@@ -233,6 +231,59 @@ func TestSessionRegistry_Ping_NilReceiver(t *testing.T) {
 	if err := reg.Ping(); err != ErrNoKV {
 		t.Fatalf("expected ErrNoKV, got %v", err)
 	}
+}
+
+func TestSessionRegistry_RewatchRestartsStoppedWatcher(t *testing.T) {
+	client := setupNATS(t)
+	registry, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := registry.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for initial cache: %v", err)
+	}
+
+	url := client.Conn.ConnectedUrl()
+	client.Conn.Close()
+	waitFor(t, 5*time.Second, func() bool { return registry.WatchFailed() })
+	if err := registry.Ping(); err == nil {
+		t.Fatal("stopped watcher should make the registry unhealthy")
+	}
+
+	replacement, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("connect replacement: %v", err)
+	}
+	defer replacement.Close()
+	if err := registry.Rewatch(replacement); err != nil {
+		t.Fatalf("rewatch registry: %v", err)
+	}
+	if err := registry.Ping(); err != nil {
+		t.Fatalf("ping after rewatch: %v", err)
+	}
+
+	js, err := replacement.JetStream()
+	if err != nil {
+		t.Fatalf("open replacement JetStream: %v", err)
+	}
+	kv, err := js.KeyValue(SessionBucket)
+	if err != nil {
+		t.Fatalf("open replacement session bucket: %v", err)
+	}
+	entry := SessionEntry{Port: 13381, MachineID: "replacement", Dir: "/replacement"}
+	value, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal replacement entry: %v", err)
+	}
+	if _, err := kv.Put("ses_after_rewatch", value); err != nil {
+		t.Fatalf("put replacement entry: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		got, err := registry.Get("ses_after_rewatch")
+		return err == nil && got == entry
+	})
 }
 
 func TestSessionRegistryWatcherEvictsMalformedValue(t *testing.T) {

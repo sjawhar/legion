@@ -5,7 +5,14 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { Ask, AskEdit, AskRead, Comment } from "../api/types";
+import type {
+  AnswerAskInput,
+  Ask,
+  AskEdit,
+  AskRead,
+  Comment,
+  CreateCommentInput,
+} from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
 import { Inbox } from "../features/inbox/Inbox";
 
@@ -18,6 +25,7 @@ function ask(overrides: Partial<Ask> = {}): Ask {
     edited_at: null,
     id: "ask-1",
     issue_key: "CORE-1",
+    kind: "question",
     multiple: false,
     opened_event_id: 1,
     options: [],
@@ -279,6 +287,85 @@ test("AskCard reveals the Other field only once Other is picked, and submits its
   }
 });
 
+test("AskCard sends a question-shaped Other response as clarification instead of closing the ask", async () => {
+  const answerCalls: AnswerAskInput[] = [];
+  const replyCalls: Array<{ issueKey: string; input: CreateCommentInput }> = [];
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        answerCalls.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      createReply={async (issueKey, replyInput) => {
+        replyCalls.push({ issueKey, input: replyInput });
+        return reply({ ask_id: replyInput.ask_id, body: replyInput.body });
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Other" }));
+    fireEvent.change(view.getByLabelText("Your answer"), {
+      target: { value: "How does this fit our release plan?" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+
+    const choice = await view.findByRole("group", { name: "Question-shaped answer" });
+    expect(choice.textContent).toContain(
+      "This reads like a question — send as clarification (keeps the ask open)"
+    );
+    expect(answerCalls).toEqual([]);
+    const clarification = within(choice).getByRole("button", {
+      name: "This reads like a question — send as clarification (keeps the ask open)",
+    });
+    expect(document.activeElement).toBe(clarification);
+    fireEvent.keyDown(clarification, { key: "Enter" });
+    fireEvent.click(clarification);
+
+    await waitFor(() =>
+      expect(replyCalls).toEqual([
+        {
+          issueKey: "CORE-1",
+          input: { ask_id: "ask-1", body: "How does this fit our release plan?" },
+        },
+      ])
+    );
+    expect(answerCalls).toEqual([]);
+    expect(view.getByTestId("ask-ask-1")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard lets a human explicitly answer with a question-shaped Other response", async () => {
+  const submitted: AnswerAskInput[] = [];
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Other" }));
+    fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "Why wait?" } });
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+    fireEvent.click(await view.findByRole("button", { name: "Answer with it anyway" }));
+
+    await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Why wait?" }]));
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard hides the Other field and drops its text once a real option is picked instead", async () => {
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
@@ -292,6 +379,88 @@ test("AskCard hides the Other field and drops its text once a real option is pic
 
     fireEvent.click(view.getByRole("radio", { name: "Other" }));
     expect(view.getByLabelText("Your answer")).toHaveProperty("value", "");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval-kind ask labels itself Approval requested and offers no Other row", async () => {
+  const input = ask({
+    kind: "approval",
+    options: [{ label: "Approve" }, { label: "Request changes" }],
+    question: "Approve this document?",
+  });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    expect(within(card).getByText("Approval requested")).toBeTruthy();
+    await view.findByRole("radio", { name: "Approve" });
+    expect(within(card).getByRole("radio", { name: "Request changes" })).toBeTruthy();
+    expect(within(card).queryByRole("radio", { name: "Other" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval-kind ask submits Approve with no reason", async () => {
+  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const input = ask({
+    kind: "approval",
+    options: [{ label: "Approve" }, { label: "Request changes" }],
+  });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Approve" }));
+    expect(view.queryByLabelText("Reason")).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+
+    await waitFor(() => expect(submitted).toEqual([{ selected: ["Approve"] }]));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval-kind ask requires a reason before Request changes can submit", async () => {
+  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const input = ask({
+    kind: "approval",
+    options: [{ label: "Approve" }, { label: "Request changes" }],
+  });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Request changes" }));
+    const reasonField = view.getByLabelText("Reason");
+    const submit = view.getByRole("button", { name: "Submit answer" });
+    expect(submit.hasAttribute("disabled")).toBe(true);
+
+    fireEvent.change(reasonField, { target: { value: "Needs another pass" } });
+    expect(submit.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(submit);
+
+    await waitFor(() =>
+      expect(submitted).toEqual([{ selected: ["Request changes"], text: "Needs another pass" }])
+    );
   } finally {
     view.unmount();
   }

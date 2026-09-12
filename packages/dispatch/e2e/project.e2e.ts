@@ -105,7 +105,7 @@ test("project page groups issues by status in board order; filters narrow issues
     await expect(page.getByText("Needs attention")).toHaveCount(0);
     await page.getByRole("button", { name: "Unread" }).click();
 
-    await page.getByRole("combobox", { name: "Label" }).selectOption("frontend");
+    await page.getByRole("button", { name: "frontend" }).click();
     await expect(page.getByText("Needs attention")).toBeVisible();
     await expect(page.getByText("Unread work")).toHaveCount(0);
     await page.getByRole("searchbox", { name: "Search issues" }).fill("attention");

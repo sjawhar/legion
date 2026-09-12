@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -65,6 +65,9 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owner) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Question string             `json:"question"`
 		Options  []model.AskOption  `json:"options"`
@@ -154,8 +157,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	var ask model.Ask
 	if err := tx.QueryRow(r.Context(), `
-		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'question')
 		returning created_at
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON).Scan(&ask.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
@@ -171,6 +174,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	ask.Urgency = urgency
 	ask.Anchor = anchor
 	ask.State = "open"
+	ask.Kind = "question"
 	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -209,6 +213,9 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Question *string            `json:"question"`
 		Options  *[]model.AskOption `json:"options"`
@@ -226,6 +233,10 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
 	if !ok {
+		return
+	}
+	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+		writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask id must be a UUID")
 		return
 	}
 	if input.Question != nil {
@@ -274,6 +285,10 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ASK_NOT_OPEN", http.StatusConflict, "only open asks may be edited")
 		return
 	}
+	if ask.Kind == "approval" {
+		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; retract it and request approval again")
+		return
+	}
 	if actor.Kind == "session" && (ask.Author.Kind != actor.Kind || ask.Author.ID != actor.ID) {
 		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the asking session may edit an ask")
 		return
@@ -312,7 +327,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	ask.EditedAt = askTimestamp(editedAt)
+	ask.EditedAt = timestampPtr(&editedAt)
 	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -334,44 +349,57 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ask)
 }
 
-func askTimestamp(value time.Time) *string {
-	text := value.UTC().Format(time.RFC3339Nano)
+func timestampPtr(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	text := timestampValue(*value)
 	return &text
+}
+
+func timestampValue(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func askTimestamp(value time.Time) *string {
+	return timestampPtr(&value)
+}
+
+func askTimestampPtr(value *time.Time) *string {
+	return timestampPtr(value)
 }
 
 type askTransition struct {
 	EventType string
 	Apply     func(context.Context, pgx.Tx, model.Ask) (model.Ask, error)
+	// After runs once the transition's own event is appended, still inside the
+	// transaction; the events it returns are published with it.
+	After func(context.Context, pgx.Tx, model.Ask) ([]model.Event, error)
 }
 
-func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Selected []string     `json:"selected"`
-		Text     *string      `json:"text"`
-		Actor    *model.Actor `json:"actor"`
-	}
-	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	actor, ok := s.requireHuman(w, r)
-	if !ok {
-		return
-	}
-	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, askTransition{
+// answerTransition is the answer of an ask: option labels for a question, or
+// exactly one of Approve / Request changes for an approval ask.
+func answerTransition(actor model.Actor, selected []string, text *string) askTransition {
+	return askTransition{
 		EventType: "ask.answered",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
-			hasText := input.Text != nil && strings.TrimSpace(*input.Text) != ""
-			if !ask.Multiple && len(input.Selected) > 1 {
-				return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "single-select asks accept at most one selected answer")
+			hasText := text != nil && strings.TrimSpace(*text) != ""
+			if ask.Kind == "approval" {
+				if _, _, err := reviewFromAnswer(selected, text); err != nil {
+					return model.Ask{}, err
+				}
+			} else {
+				if !ask.Multiple && len(selected) > 1 {
+					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "single-select asks accept at most one selected answer")
+				}
+				if len(selected) > 0 && !selectedOptions(ask.Options, selected) {
+					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "selected answers must be ask option labels")
+				}
+				if len(selected) == 0 && !hasText {
+					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "answer requires a selected option or free-text answer")
+				}
 			}
-			if len(input.Selected) > 0 && !selectedOptions(ask.Options, input.Selected) {
-				return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "selected answers must be ask option labels")
-			}
-			if len(input.Selected) == 0 && !hasText {
-				return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "answer requires a selected option or free-text answer")
-			}
-			answer := model.AskAnswer{User: actor.ID, Selected: input.Selected, Text: input.Text, At: time.Now().UTC()}
+			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: time.Now().UTC()}
 			answerJSON, err := encodeJSON(answer)
 			if err != nil {
 				return model.Ask{}, err
@@ -383,7 +411,57 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			ask.Answer = &answer
 			return ask, nil
 		},
-	})
+	}
+}
+
+// answerAskTx answers an ask inside the caller's transaction without appending
+// or publishing its event; the header review path uses it to close an open
+// approval ask alongside the review it writes.
+func (s *server) answerAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, selected []string, text *string) (model.Ask, error) {
+	return s.transitionAskTx(ctx, tx, id, answerTransition(actor, selected, text))
+}
+
+func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Selected []string     `json:"selected"`
+		Text     *string      `json:"text"`
+		Actor    *model.Actor `json:"actor"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	transition := answerTransition(actor, input.Selected, input.Text)
+	// An approval ask's answer is a review of the document it names, pinned to
+	// the document's latest settled version at answer time.
+	transition.After = func(ctx context.Context, tx pgx.Tx, ask model.Ask) ([]model.Event, error) {
+		if ask.Kind != "approval" || ask.Approval == nil {
+			return nil, nil
+		}
+		state, reason, err := reviewFromAnswer(input.Selected, input.Text)
+		if err != nil {
+			return nil, err
+		}
+		artifact, err := s.loadArtifact(ctx, tx, ask.Approval.ArtifactID)
+		if err != nil {
+			return nil, err
+		}
+		version, err := latestVersionNumber(ctx, tx, artifact.ID)
+		if err != nil {
+			return nil, err
+		}
+		askID := ask.ID
+		_, event, err := s.writeReview(ctx, tx, artifact, version, state, actor, reason, &askID)
+		if err != nil {
+			return nil, err
+		}
+		return []model.Event{event}, nil
+	}
+	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, transition)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -392,6 +470,9 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Kind   string       `json:"kind"`
 		Reason string       `json:"reason"`
@@ -440,6 +521,32 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 		return model.Ask{}, err
 	}
 	defer tx.Rollback(ctx)
+	ask, err := s.transitionAskTx(ctx, tx, id, transition)
+	if err != nil {
+		return model.Ask{}, err
+	}
+	event, err := s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(transition.EventType, actor, ask))
+	if err != nil {
+		return model.Ask{}, err
+	}
+	events := []model.Event{event}
+	if transition.After != nil {
+		more, err := transition.After(ctx, tx, ask)
+		if err != nil {
+			return model.Ask{}, err
+		}
+		events = append(events, more...)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.Ask{}, err
+	}
+	s.publish(events...)
+	return ask, nil
+}
+
+// transitionAskTx locks an open ask and applies a transition inside the caller's
+// transaction; it appends no event.
+func (s *server) transitionAskTx(ctx context.Context, tx pgx.Tx, id string, transition askTransition) (model.Ask, error) {
 	unlockedAsk, err := s.loadAsk(ctx, tx, id)
 	if err != nil {
 		return model.Ask{}, err
@@ -463,19 +570,7 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	default:
 		return model.Ask{}, errorf(http.StatusInternalServerError, "ASK_STATE_INVALID", "ask has an invalid state")
 	}
-	ask, err = transition.Apply(ctx, tx, ask)
-	if err != nil {
-		return model.Ask{}, err
-	}
-	event, err := s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(transition.EventType, actor, ask))
-	if err != nil {
-		return model.Ask{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return model.Ask{}, err
-	}
-	s.publish(event)
-	return ask, nil
+	return transition.Apply(ctx, tx, ask)
 }
 
 // listIssueAsks returns every ask on an issue, filtered by state: "open" or
@@ -565,7 +660,7 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 		if err := json.Unmarshal(editedBy, &edit.EditedBy); err != nil {
 			return nil, fmt.Errorf("decode ask edit editor: %w", err)
 		}
-		edit.At = *askTimestamp(at)
+		edit.At = timestampValue(at)
 		edits = append(edits, edit)
 	}
 	if err := rows.Err(); err != nil {
@@ -576,7 +671,7 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
 	ask, err := scanAsk(q.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at
+		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
 		from asks where id = $1
 	`, id))
 	if err != nil {
@@ -589,7 +684,7 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 }
 
 // listIssueAsksColumns are the columns every ask-listing query selects, in scan order.
-const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at`
+const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval`
 
 // pgx caches prepared plans by query text. State and ownership each have a fixed
 // query so the partial open-ask index remains eligible under generic plans.
@@ -668,7 +763,7 @@ func (s *server) loadOwnerAsks(ctx context.Context, q queryer, owner owner, stat
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
 	ask, err := scanAsk(tx.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at
+		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
 		from asks where id = $1 for update
 	`, id))
 	if err != nil {
@@ -733,13 +828,20 @@ func (s *server) attachOpenedEventIDs(
 
 func scanAsk(row pgx.Row) (model.Ask, error) {
 	var ask model.Ask
-	var author, options, anchor, answer, resolution []byte
+	var author, options, anchor, answer, resolution, approval []byte
 	var editedAt *time.Time
 	if err := row.Scan(
 		&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
-		&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt,
+		&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt, &ask.Kind, &approval,
 	); err != nil {
 		return model.Ask{}, err
+	}
+	if len(approval) > 0 {
+		var value model.AskApproval
+		if err := json.Unmarshal(approval, &value); err != nil {
+			return model.Ask{}, fmt.Errorf("decode ask approval: %w", err)
+		}
+		ask.Approval = &value
 	}
 	if err := json.Unmarshal(author, &ask.Author); err != nil {
 		return model.Ask{}, fmt.Errorf("decode ask author: %w", err)
@@ -772,15 +874,8 @@ func scanAsk(row pgx.Row) (model.Ask, error) {
 		}
 		ask.Resolution = &value
 	}
-	ask.EditedAt = askTimestampPtr(editedAt)
+	ask.EditedAt = timestampPtr(editedAt)
 	return ask, nil
-}
-
-func askTimestampPtr(value *time.Time) *string {
-	if value == nil {
-		return nil
-	}
-	return askTimestamp(*value)
 }
 
 func selectedOptions(options []model.AskOption, selected []string) bool {

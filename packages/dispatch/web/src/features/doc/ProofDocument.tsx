@@ -13,6 +13,12 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
+import {
+  secondaryButtonBorder,
+  secondaryButtonDisabledText,
+  secondaryButtonHoverBorder,
+  secondaryButtonText,
+} from "../../theme/classes";
 import { useMargin } from "../margin/Margin";
 import type { MarginOwner } from "../margin/useMarginItems";
 import {
@@ -254,6 +260,16 @@ export function ProofDocument({
     setIsNameDialogOpen(true);
   }, []);
 
+  const copyBlockLink = useCallback(async () => {
+    const blockId = editorRef.current?.blockIdAtSelection();
+    if (blockId === null || blockId === undefined) {
+      return;
+    }
+    await navigator.clipboard.writeText(
+      `${window.location.origin}${window.location.pathname}#b-${blockId}`
+    );
+  }, []);
+
   useEffect(() => {
     onToolbarChange?.({
       connection,
@@ -343,6 +359,10 @@ export function ProofDocument({
           }
           editor = handle;
           editorRef.current = handle;
+          const blockLink = window.location.hash;
+          if (blockLink.startsWith("#b-")) {
+            handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
+          }
           setSearchHighlights(handle.view.dom, highlightTermRef.current);
           if (import.meta.env.VITE_DISPATCH_E2E === "1") {
             inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
@@ -477,6 +497,15 @@ export function ProofDocument({
           <ReferenceTooltip key={reference} reference={reference} route={route} rootRef={root} />
         ))}
       </article>
+      {version === undefined ? (
+        <button
+          className={`min-h-11 rounded border px-3 ${secondaryButtonBorder} ${secondaryButtonDisabledText} ${secondaryButtonHoverBorder} ${secondaryButtonText}`}
+          onClick={() => void copyBlockLink()}
+          type="button"
+        >
+          Copy link to block
+        </button>
+      ) : null}
       {version === undefined ? null : versionQuery.isError ? (
         <section aria-label={`Document version ${version}`} className="space-y-3">
           <p>

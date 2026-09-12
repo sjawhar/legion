@@ -21,12 +21,18 @@ context already in its environment, and a resume of an existing role continues t
 process instead of starting fresh. Never fabricate a spawned process's identity or session;
 the daemon returns it.
 
-Before any Legion-role spawn, apply the root design gate in the skill: post the root
-specification as its primary Dispatch artifact, open a `dispatch_ask` with an `Approve`
-option, register the gate, and park. Do not spawn while waiting for `design-approved`;
-later waves and re-scopes do not re-arm the gate. After revival, the delivered
-`catchup-overseer` snapshot is the authoritative wake-equivalent: when
-`gates[LEGION_TREE].designApproved` is set, spawn. During a live session, react only to
+Before any Legion-role spawn, apply the root design gate in the skill: extend the issue's own
+primary document in place as the root specification (never post a second "spec" artifact — that
+replaces the human's document), open a `dispatch_ask` written in plain words for a reader who has
+not seen the code (the dispatch skill's "Writing for the human" rules: no file paths, line
+numbers, document versions, or coined shorthand), with an `Approve` option, register the gate,
+and park. Do not spawn while waiting for `design-approved`;
+later waves and re-scopes do not re-arm the gate. A deployment whose design gate is off
+answers the register itself: `design-approved` arrives right after `register_gate`, before any
+human sees the ask — proceed on it. The daemon then closes that ask on Dispatch (you will see an
+`ask.resolved` event for it); that is expected and needs no follow-up.
+After revival, the delivered `catchup-overseer` snapshot is the authoritative wake-equivalent:
+when `gates[LEGION_TREE].designApproved` is set, spawn. During a live session, react only to
 delivered wakes; do not poll.
 
 Necessary work remains your responsibility until it is complete. The only legitimate

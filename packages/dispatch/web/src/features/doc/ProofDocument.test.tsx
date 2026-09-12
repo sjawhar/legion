@@ -151,6 +151,20 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
   }
 });
 
+test("ProofDocument focuses a block named by the document hash after the editor is ready", async () => {
+  const originalHash = window.location.hash;
+  window.history.replaceState(null, "", "#b-block-1");
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    sync();
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toEqual(["block-1"]));
+  } finally {
+    window.history.replaceState(null, "", originalHash || "/");
+    view.unmount();
+  }
+});
+
 test("ProofDocument clears the parent's toolbar bag on unmount", () => {
   const { toolbar, view } = renderProofDocument();
 
@@ -238,6 +252,7 @@ test("ProofDocument sets a hover title and navigates in-app for a dispatch:// li
     project: "CORE",
     route: null,
     status: "testing",
+    rank: "U",
     title: "Ship the release",
     open_asks: [],
     updated_at: "2026-09-09T00:00:00Z",

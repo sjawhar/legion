@@ -37,6 +37,7 @@ const issue: IssueDetails = {
   project: "CORE",
   route: null,
   status: "todo",
+  rank: "U",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
 };
@@ -80,8 +81,8 @@ function stubIssueApi() {
   // The server answers a PATCH with the narrow `Issue`, not `IssueDetails`: no artifacts,
   // children, or open asks. The stub mirrors that so the page is exercised against the
   // real response shape.
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, update) =>
-    narrowIssue({ ...issue, ...update })
+  const patchIssue = spyOn(api, "patchIssue").mockImplementation(
+    async (_key, { rank: _rank, ...update }) => narrowIssue({ ...issue, ...update })
   );
 
   return {

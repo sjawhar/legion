@@ -20,6 +20,7 @@ import type {
   Project,
   UpdateIssueInput,
   UserIssueState,
+  Version,
 } from "../web/src/api/types";
 
 const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
@@ -258,6 +259,31 @@ export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artif
     `/api/v1/artifacts/${encodeURIComponent(id)}`,
     "GET",
     undefined,
+    options
+  );
+}
+
+export function requestApproval(
+  id: string,
+  options: ApiOptions = {}
+): Promise<{ ask: Ask; artifact_id: string; version: number }> {
+  return request(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/approval-requests`,
+    "POST",
+    {},
+    options
+  );
+}
+
+export function createNamedVersion(
+  id: string,
+  summary: string,
+  options: ApiOptions = {}
+): Promise<Version> {
+  return request<Version>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/versions`,
+    "POST",
+    { summary },
     options
   );
 }

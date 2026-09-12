@@ -23,6 +23,7 @@ import {
   dispatchIssueSubject,
   dispatchToolSchema,
   dispatchToolSpecs,
+  searchOwnerOf,
   snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -53,6 +54,7 @@ type ToolArguments = {
   readonly version?: unknown;
   readonly anchor?: unknown;
   readonly options?: unknown;
+  readonly labels?: unknown;
   readonly ops?: unknown;
 } & Record<string, unknown>;
 
@@ -205,9 +207,14 @@ function duplicateCandidates(error: DispatchServiceError): DuplicateCandidate[] 
 }
 
 function searchResultLine(result: SearchResult, baseUrl: string): string {
+  const href = new URL(result.href, baseUrl).toString();
+  const owner = searchOwnerOf(result);
+  if (owner.kind === "document") {
+    const reference = `dispatch://${owner.project}/artifact/${owner.slug}`;
+    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
+  }
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
   const label = `${result.issue.key} [${result.issue.status}] ${result.issue.title} - ${result.kind}${artifactName}`;
-  const href = new URL(result.href, baseUrl).toString();
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
 
@@ -314,7 +321,7 @@ async function resolveOwnerArguments(
             "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
               "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
               "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
-              "dispatch://PROJECT/artifact/<slug>"
+              "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename)"
           );
         })())
       : null;
@@ -419,23 +426,24 @@ async function resolveArtifact(
         artifact: await client.getProjectArtifact(owner.project, artifactReference),
       };
     } catch (error) {
-      // The project artifact route resolves only by slug; a caller that supplied the
-      // filename (as shown in the dispatch_artifact upload result) falls back to a
-      // name match against the project's unlinked documents. Issue-attached artifacts
-      // in the same project are excluded: a name match there would silently read or
-      // mutate an issue's artifact instead of the intended project document.
+      // Project artifact routes resolve slugs. The unlinked-only collection gives project
+      // documents the same id, slug, then filename resolution as issue artifacts without
+      // allowing an issue-attached artifact of the same name to become the document owner.
       if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
       const artifacts = await client.listProjectArtifacts(owner.project, true);
-      const matches = artifacts.filter((candidate) => candidate.name === artifactReference);
-      if (matches.length > 1) {
+      const artifact =
+        artifacts.find((candidate) => candidate.id === artifactReference) ??
+        artifacts.find((candidate) => candidate.slug === artifactReference);
+      if (artifact) return { owner, artifact };
+      const names = artifacts.filter((candidate) => candidate.name === artifactReference);
+      if (names.length > 1) {
         throw new Error(
           `artifact name ${artifactReference} is ambiguous in project ${owner.project}; ` +
-            `${matches.length} documents share it — use its slug instead`
+            `${names.length} documents share it — use its slug instead`
         );
       }
-      const artifact = matches[0];
-      if (!artifact) throw error;
-      return { owner, artifact };
+      if (names[0] === undefined) throw error;
+      return { owner, artifact: names[0] };
     }
   }
   const issue = await client.getIssue(owner.issue);
@@ -478,17 +486,39 @@ function toolActor(origin: DispatchOrigin, input: ExecuteDispatchToolInput): Act
   };
 }
 
+/** One line describing a document's approval, or undefined for a draft nobody has asked about. */
+function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined {
+  const approval = artifact.approval;
+  if (approval === undefined || approval.state === "draft") return undefined;
+  switch (approval.state) {
+    case "awaiting":
+      return `Approval: awaiting (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    case "approved":
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
+    case "stale":
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again`;
+    case "changes_requested":
+      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
+  }
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
   references: IssueReferences | string
 ): string {
   const asks = issue.open_asks;
+  const spec = issue.artifacts?.find((artifact) => artifact.primary);
+  const specApproval = spec === undefined ? undefined : approvalLine(spec);
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
     `Status: ${issue.status}`,
+    `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     `Route: ${issue.route ?? "none"}`,
+    ...(specApproval === undefined
+      ? []
+      : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
     "Open asks:",
     ...(asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`)),
     "References:",
@@ -675,6 +705,7 @@ export async function executeDispatchTool(
       const external = optionalString(args, "external");
       const force = optionalBoolean(args, "force");
       const spec = optionalString(args, "spec");
+      const labels = args.labels;
       try {
         const created = await client.issue({
           project,
@@ -683,6 +714,7 @@ export async function executeDispatchTool(
           ...(external === undefined ? {} : { external }),
           ...(force === undefined ? {} : { force }),
           ...(spec === undefined ? {} : { spec }),
+          ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
         return {
@@ -905,11 +937,16 @@ export async function executeDispatchTool(
       const version = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
       const document = await client.docRead(resolved.artifact.id, version);
       const marks = await openArtifactMarks(client, resolved);
+      const approval = approvalLine(resolved.artifact);
+      const trailer = [
+        ...(marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`]),
+        ...(approval === undefined ? [] : [approval]),
+      ];
       return {
         text:
-          marks.length === 0
+          trailer.length === 0
             ? document.markdown
-            : `${document.markdown}\n\nOpen anchored asks/comments: ${marks.join(", ")}`,
+            : `${document.markdown}\n\n${trailer.join("\n")}`,
         details:
           resolved.owner.kind === "project"
             ? {
@@ -917,6 +954,32 @@ export async function executeDispatchTool(
                 document: `${resolved.artifact.project}/${resolved.artifact.slug}`,
               }
             : { issue: resolved.issue?.key },
+      };
+    }
+    case "dispatch_request_approval": {
+      const artifactReference =
+        optionalString(args, "artifact") ??
+        (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact"
+          ? ownerArguments.ref.id
+          : undefined);
+      const resolved = await resolveArtifact(client, documentOwner(), artifactReference);
+      const result = await client.requestApproval(resolved.artifact.id, { actor });
+      if (result.ask === null) {
+        return {
+          text: `${resolved.artifact.name} is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          details: {
+            ...(resolved.owner.kind === "project"
+              ? documentResultDetails(resolved.artifact)
+              : { issue: resolved.issue?.key }),
+            artifact: resolved.artifact.id,
+            version: result.version,
+          },
+        };
+      }
+      const details = await askResultDetails(client, result.ask, resolved);
+      return {
+        text: `Approval requested for ${resolved.artifact.name} at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }
     case "dispatch_artifact": {
@@ -1008,6 +1071,9 @@ export async function executeDispatchTool(
             `Document: ${resolved.artifact.project} / ${resolved.artifact.name}`,
             `Reference: dispatch://${resolved.artifact.project}/artifact/${resolved.artifact.slug}`,
             `Versions: ${resolved.artifact.versions.length}`,
+            ...(approvalLine(resolved.artifact) === undefined
+              ? []
+              : [approvalLine(resolved.artifact) as string]),
           ].join("\n"),
           details: {
             project: resolved.artifact.project,

@@ -8,11 +8,13 @@ export interface Author {
 }
 
 export function resolveAuthor(actor: Actor, titles: ReadonlyMap<string, string>): Author {
-  const label =
+  const name =
     actor.kind === "session"
       ? (titles.get(actor.id) ?? actor.origin?.session_title ?? shortSessionId(actor.id))
       : actor.id;
-  const initials = label
+  const label =
+    actor.kind === "session" && actor.owner !== undefined ? `${name} (for ${actor.owner})` : name;
+  const initials = name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)

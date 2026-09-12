@@ -139,7 +139,7 @@ Then post the comment and run checkpoint 10. The command captures the daemon-log
 | --- | --- | --- |
 | 1 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue has progressed past `triage`; daemon state records a controller window/pane locator for a live tmux window. |
 | 2 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue is `in_progress`, is admitted, and has a recorded architect window/pane locator for a live tmux window. |
-| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact, its registered open design-gate ask offers `Approve`, and a Dispatch child issue exists. |
+| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact, its registered design-gate ask is daemon-approved (`designApproved: "gate-off"`; the rig runs with `gates.design: off`) and `resolved` on Dispatch, and a Dispatch child issue exists. |
 | 4 | `SMOKE_ROOT_ISSUE` optional | A child in a released lifecycle status is tracked in active admission or an active/queued tree. |
 | 5 | `SMOKE_PR` optional | A Legion branch has implementation identity and `Legion-Session:` commit attribution. |
 | 6 | `SMOKE_ARCHITECT_WINDOW`, `SMOKE_VERDICT_FRAGMENT`, `SMOKE_RAW_CHECK_FRAGMENT` | One architect verdict appears in the pane; raw check noise is absent. |

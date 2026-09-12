@@ -278,26 +278,47 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 
 // --- Integration Tests (testcontainers NATS) ---
 
+var (
+	sharedNATSOnce sync.Once
+	sharedNATSURI  string
+	sharedNATSErr  error
+)
+
+func sharedTestNATSURI(t *testing.T) string {
+	t.Helper()
+	sharedNATSOnce.Do(func() {
+		ctr, err := tcnats.Run(context.Background(), "nats:2.10")
+		if err != nil {
+			sharedNATSErr = err
+			return
+		}
+		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(context.Background())
+	})
+	if sharedNATSErr != nil {
+		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
+	}
+	return sharedNATSURI
+}
+
+func resetRegistryBuckets(t *testing.T, conn *natsgo.Conn) {
+	t.Helper()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	for _, bucket := range []string{Bucket, RoleBucket} {
+		if err := js.DeleteKeyValue(bucket); err != nil &&
+			!errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
+			t.Fatalf("reset bucket %s: %v", bucket, err)
+		}
+	}
+}
+
 func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		ctr.Terminate(ctx)
-		t.Fatalf("failed to get NATS URI: %v", err)
-	}
-
-	conn := testnats.Connect(t, uri)
-
-	cleanup := func() {
-		conn.Close()
-		ctr.Terminate(ctx)
-	}
-	return conn, cleanup
+	conn := testnats.Connect(t, sharedTestNATSURI(t))
+	resetRegistryBuckets(t, conn)
+	return conn, conn.Close
 }
 
 func putInterest(t *testing.T, kv natsgo.KeyValue, item Interest) {
@@ -765,8 +786,12 @@ func TestSetRole_ClaimNewRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("roleKV.Get failed: %v", err)
 	}
-	if string(entry.Value()) != "ses_role_a" {
-		t.Fatalf("expected role holder ses_role_a, got %q", string(entry.Value()))
+	var claim RoleClaim
+	if err := json.Unmarshal(entry.Value(), &claim); err != nil {
+		t.Fatalf("decode role claim: %v", err)
+	}
+	if claim.HolderSessionID != "ses_role_a" {
+		t.Fatalf("role holder = %q, want ses_role_a", claim.HolderSessionID)
 	}
 
 	persisted, err := reg.Get("ses_role_a")
@@ -775,6 +800,32 @@ func TestSetRole_ClaimNewRole(t *testing.T) {
 	}
 	if len(persisted.Topics) != 1 || persisted.Topics[0] != "notifications.role.legion-controller" {
 		t.Fatalf("expected persisted role topic, got %v", persisted.Topics)
+	}
+}
+func TestSetRole_PersistsClaimMetadata(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	if _, err := reg.SetRole("ses_role_a", "m1", "legion-controller", false); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+
+	entry, err := reg.roleKV.Get("legion-controller")
+	if err != nil {
+		t.Fatalf("get persisted role claim: %v", err)
+	}
+	var persisted struct {
+		HolderSessionID   string `json:"holder_session_id"`
+		ClaimedAt         int64  `json:"claimed_at"`
+		PreviousSessionID string `json:"previous_session_id"`
+	}
+	if err := json.Unmarshal(entry.Value(), &persisted); err != nil {
+		t.Fatalf("decode persisted role claim: %v", err)
+	}
+	if persisted.HolderSessionID != "ses_role_a" || persisted.ClaimedAt <= 0 ||
+		persisted.PreviousSessionID != "" {
+		t.Fatalf("persisted role claim = %+v", persisted)
 	}
 }
 
@@ -828,8 +879,12 @@ func TestSetRole_TransferRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("roleKV.Get failed: %v", err)
 	}
-	if string(entry.Value()) != "ses_new" {
-		t.Fatalf("expected role holder ses_new, got %q", string(entry.Value()))
+	var claim RoleClaim
+	if err := json.Unmarshal(entry.Value(), &claim); err != nil {
+		t.Fatalf("decode role claim: %v", err)
+	}
+	if claim.HolderSessionID != "ses_new" {
+		t.Fatalf("role holder = %q, want ses_new", claim.HolderSessionID)
 	}
 }
 
@@ -902,13 +957,7 @@ func TestSetRole_OldHolderMissing(t *testing.T) {
 		t.Fatalf("expected returned role topic, got %v", got.Topics)
 	}
 
-	entry, err := reg.roleKV.Get("legion-controller")
-	if err != nil {
-		t.Fatalf("roleKV.Get failed: %v", err)
-	}
-	if string(entry.Value()) != "ses_fresh" {
-		t.Fatalf("expected role holder ses_fresh, got %q", string(entry.Value()))
-	}
+	assertRoleHolder(t, reg, "legion-controller", "ses_fresh")
 }
 
 // --- Reaper Tests (cross-reference sessions for stale interest cleanup) ---
@@ -953,7 +1002,7 @@ func TestInterestReaper(t *testing.T) {
 		t.Fatalf("ses_dead should be deleted, got err: %v", err)
 	}
 }
-func TestReapReleasesRoleClaims(t *testing.T) {
+func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -992,6 +1041,27 @@ func TestReapReleasesRoleClaims(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("reaped interests = %d, want 1", count)
+	}
+	assertRoleHolder(t, reg, role, sessionID)
+}
+func TestReapRoleClaimsDropsDeadHolderAfterTTL(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		sessionID = "ses_dead_role"
+		role      = "legion-controller"
+	)
+	if _, err := reg.SetRole(sessionID, "example-host", role, false); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	count, err := reg.ReapRoleClaims(func(string) bool { return false }, 0)
+	if err != nil {
+		t.Fatalf("ReapRoleClaims: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("reaped role claims = %d, want 1", count)
 	}
 	assertRoleHolder(t, reg, role, "")
 }
@@ -1041,10 +1111,8 @@ func TestPing_HealthyConnReturnsNil(t *testing.T) {
 }
 
 func TestPing_ClosedConnReturnsError(t *testing.T) {
-	// Regression for the sami listener stuck-after-recovery scenario: the bus
-	// recovery path replaces *nats.Conn but leaves Registry.kv handles bound to
-	// the original closed conn. Ping must surface that as an error so the
-	// listener can self-terminate and let restart policy recover.
+	// A closed KV handle must remain observable through Ping so /healthz can
+	// report the unavailable dependency while NATS reconnects.
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 

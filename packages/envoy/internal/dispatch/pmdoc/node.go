@@ -195,11 +195,21 @@ func isInlineNodeType(typeName string) bool {
 	}
 }
 
+// Equal compares document content and structure while ignoring block identity.
 func (n *Node) Equal(o *Node) bool {
+	return equalNode(n, o, false)
+}
+
+// EqualWithBlockIDs compares document content, structure, and block identity.
+func (n *Node) EqualWithBlockIDs(o *Node) bool {
+	return equalNode(n, o, true)
+}
+
+func equalNode(n, o *Node, includeBlockIDs bool) bool {
 	if n == nil || o == nil {
 		return n == o
 	}
-	if n.Type != o.Type || n.Text != o.Text || !attrsEqual(n.Attrs, o.Attrs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
+	if n.Type != o.Type || n.Text != o.Text || !nodeAttrsEqual(n.Attrs, o.Attrs, includeBlockIDs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
 		return false
 	}
 	for i := range n.Marks {
@@ -208,8 +218,37 @@ func (n *Node) Equal(o *Node) bool {
 		}
 	}
 	for i := range n.Children {
-		if !n.Children[i].Equal(o.Children[i]) {
+		if !equalNode(n.Children[i], o.Children[i], includeBlockIDs) {
 			return false
+		}
+	}
+	return true
+}
+
+func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
+	if includeBlockIDs {
+		return attrsEqual(a, b)
+	}
+	for key, av := range a {
+		if key == BlockIDAttr {
+			continue
+		}
+		bv, ok := b[key]
+		if !ok {
+			if av == nil {
+				continue
+			}
+			return false
+		}
+		if !reflect.DeepEqual(normalizeJSON(av), normalizeJSON(bv)) {
+			return false
+		}
+	}
+	for key, bv := range b {
+		if key != BlockIDAttr {
+			if _, ok := a[key]; !ok && bv != nil {
+				return false
+			}
 		}
 	}
 	return true

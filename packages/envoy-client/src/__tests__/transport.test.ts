@@ -662,4 +662,43 @@ describe("EnvoyClient", () => {
     ).rejects.toThrow("message must not be empty (expected: message)");
     expect(recorded.requests).toHaveLength(1);
   });
+  test("sends ENVOY_TOKEN as a bearer token to the listener", async () => {
+    await withEnvoyToken("listener-token", async () => {
+      const recorded = recordFetch([new Response(null, { status: 200 })]);
+      const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+      await client.unregisterSession("ses_closed");
+
+      expect(recorded.requests[0]?.headers.get("Authorization")).toBe("Bearer listener-token");
+    });
+  });
+
+  test("does not send an Authorization header when ENVOY_TOKEN is unset", async () => {
+    await withEnvoyToken(undefined, async () => {
+      const recorded = recordFetch([new Response(null, { status: 200 })]);
+      const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+      await client.unregisterSession("ses_closed");
+
+      expect(recorded.requests[0]?.headers.has("Authorization")).toBe(false);
+    });
+  });
 });
+
+async function withEnvoyToken<T>(token: string | undefined, run: () => Promise<T>): Promise<T> {
+  const previous = process.env.ENVOY_TOKEN;
+  if (token === undefined) {
+    delete process.env.ENVOY_TOKEN;
+  } else {
+    process.env.ENVOY_TOKEN = token;
+  }
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ENVOY_TOKEN;
+    } else {
+      process.env.ENVOY_TOKEN = previous;
+    }
+  }
+}

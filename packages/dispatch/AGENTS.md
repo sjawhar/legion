@@ -10,20 +10,26 @@ production build from `web/dist`.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/features/conversation/` owns the issue's Conversation tab: messages, issue-level comments, and coalesced ask cards from `GET /issues/{key}/events`, with agent titles from `GET /api/v1/agents`. Turns render newest first, with the message composer and its recipient selector sticky above the list and `Load older` below it; a sent or incoming turn appears directly under the composer, an own send always follows even when scrolled into history, and a reader browsing older turns keeps their viewport position as new turns arrive above them.
 - The issue header's Subscribed agents section (`features/issue/SubscribedAgents.tsx`) and the equivalent block on a project document page list sessions from `GET .../subscribers`, live status merged from Envoy, and a human `Unsubscribe` action that notifies the removed session.
+- `features/issue/IssueLabels.tsx` edits issue-header labels with project-label suggestions; `IssueList.tsx` filters project issues by every selected label through URL-backed, repeatable `?label=` parameters.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
   browser API boundary.
 - `web/src/api/sse.ts` opens the issue event stream and invalidates TanStack
   Query cache entries for the affected issue.
 - `web/src/main.tsx` installs React Router and the shared Query client.
-- `web/src/features/search/` owns the global palette, rail `Search` control, and `Ctrl/Cmd+K` shortcut. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node.
+- `web/src/features/search/` owns the global palette, rail `Search` control, and `Ctrl/Cmd+K` shortcut. It groups hits by their issue or standalone project-document owner; document-owned hits use the document name and `/projects/:key/documents/:slug` route, adding an ask or comment query parameter for discussion hits. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node.
+
+Project issue routes default to the persisted List view and offer a keyboard-reachable Board view. Each signed-in user's List/Board choice is retained separately in the browser; board columns follow the lifecycle, card position is the issue's persisted `rank`, and humans can reorder cards or move them only into `triage`, `icebox`, `backlog`, and `todo`.
 
 Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. `features/refs/MarkdownBody.tsx` renders every question, answer, comment, reply, and message through Proof's own parser, in every surface that shows one (Inbox, margin, Conversation, and the phone review sheet), not just the Conversation tab; its `inline` variant drops the wrapping block for option labels and clamped previews. The Conversation coalesces each ask lifecycle into one entry with its question, offered options, answer or resolution, and opened/completed timestamps. The margin keeps an anchored resolved ask visible as a closed decision without an answer form.
 
+A document's approval (`features/doc/ApprovalChip.tsx`) is a human review pinned to a version: the header of an issue document, the issue's Spec header, and a project document page show a chip (`Draft` header-only, `Awaiting approval`, `Approved v12`, `Approved v12 · changed since` when edited after approval, `Changes requested`) that opens the review history, plus `Approve` (`Approve v<latest>` when stale) and `Request changes` (reason required) controls that `POST /artifacts/{id}/reviews`; artifact and document lists show the chip only, never for a draft. An agent's `dispatch_request_approval` opens an ask of `kind: "approval"`, which the Inbox card renders as `Approval requested` with the two fixed options and no Other row, requiring a `Reason` when `Request changes` is chosen; answering it is the same review. Approval is the exception path (Legion's design gate), so nothing about it is prominent.
+
 Answering and asking for clarification are different acts on an ask card (`features/inbox/`). Answering: when an ask offers
 options, free text is an explicit **Other** choice - the last row of the option list, which reveals the `Your answer` field;
-a chosen Other is recorded as `{selected: [], text}` (single) or `{selected, text}` (multiple) and renders under an `Other` label
-once answered. An ask with no options keeps the free-text field alone. Clarifying: the reply thread under an open ask is labelled
-`Ask for clarification` / `Send` (answered asks keep `Reply`) and says `Replying does not answer the question.` The Inbox
+a question-shaped Other response presents an inline default action to send it as clarification (keeping the ask open) or to answer
+with it anyway. A chosen Other is recorded as `{selected: [], text}` (single) or `{selected, text}` (multiple) and renders under an
+`Other` label once answered. An ask with no options keeps the free-text field alone. Clarifying: the reply thread under an open ask
+is labelled `Ask for clarification` / `Send` (answered asks keep `Reply`) and says `Replying does not answer the question.` The Inbox
 partitions the server-ordered rows by `last_reply`: asks whose newest reply is a human's are listed under `Waiting on agents`
 with a `Waiting on <asker>` chip (the agent owes the next turn), everything else under `Needs you` with a `<agent> replied` chip
 when an agent spoke last; both headings appear only when the waiting section is non-empty. The card, its collapsed disclosure,
@@ -45,10 +51,11 @@ On compact screens the sheet lists thread summaries; opening one presents a full
 view with a bottom-pinned reply composer and Back control.
 
 `AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the GitHub
-sign-in link at `/auth/start`. Authenticated humans can create native projects
-(key + name) and manage external repository-to-project mappings at `/settings`.
-All application requests use the same origin so the browser sends the
-signed-in cookie.
+sign-in link at `/auth/start`. Authenticated humans can create native projects,
+manage external repository-to-project mappings, and mint or revoke personal agent
+tokens at `/settings`. A personal token's session writes display the session title
+followed by `(for <owner>)`. All application requests use the same origin
+so the browser sends the signed-in cookie.
 
 ## Dark mode
 
@@ -90,6 +97,8 @@ search highlights, and the bridge between Proof marks and margin cards. `Documen
 the connection and editor creation seams; happy-dom tests use its doubles from
 `web/src/__tests__/document-runtime.ts`, while `e2e/editor.ts` drives the real editor in
 Playwright. Library capability gaps belong in `sjawhar/proof-sdk`, not host-side workarounds.
+Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
+
 
 ## Commands
 

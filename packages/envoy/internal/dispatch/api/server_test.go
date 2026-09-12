@@ -348,8 +348,8 @@ func TestCreateIssueWithMissingOrBlankSpecSeedsPrimaryDocument(t *testing.T) {
 			text := decodeBody[struct {
 				Markdown string `json:"markdown"`
 			}](t, textResponse)
-			if !strings.HasPrefix(text.Markdown, "## Decisions needed") {
-				t.Fatalf("primary document = %q, want it to start with Decisions needed", text.Markdown)
+			if !strings.HasPrefix(text.Markdown, "## Summary") {
+				t.Fatalf("primary document = %q, want it to start with Summary", text.Markdown)
 			}
 		})
 	}
@@ -1578,7 +1578,8 @@ func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
 func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	database := openEmptyTestStore(t)
 	allowed := map[string]struct{}{"alice": {}}
-	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed}
+	sessions := store.NewPgSessionStore(database.Pool)
+	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions}
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: broker, Identity: cookieIdentity, Settle: time.Hour,
@@ -1593,7 +1594,11 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	}
 	handler := http.NewServeMux()
 	Register(handler, deps)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", "signing-key"))
+	generation, err := sessions.EnsureSession(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("establish alice's session: %v", err)
+	}
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key"))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -2167,5 +2172,40 @@ func TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost(t *testing
 	frame := readSSEFrame(t, scanner)
 	if frame[0] != fmt.Sprintf("id: %d", lowID) {
 		t.Fatalf("expected the late-committing lower id %d to be delivered as the cold connection's first frame, got %#v", lowID, frame)
+	}
+}
+
+func TestJSONMutationsRequireApplicationJSON(t *testing.T) {
+	handler := newTestHandler(t)
+	body := `{"key":"TEST","name":"Test project"}`
+
+	plain := httptest.NewRequest(http.MethodPost, "/api/v1/projects", strings.NewReader(body))
+	plain.Header.Set("X-Dispatch-User", "alice")
+	plain.Header.Set("Content-Type", "text/plain")
+	plainResponse := httptest.NewRecorder()
+	handler.ServeHTTP(plainResponse, plain)
+	if plainResponse.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("text/plain mutation status = %d body=%s, want %d", plainResponse.Code, plainResponse.Body.String(), http.StatusUnsupportedMediaType)
+	}
+
+	jsonRequest := httptest.NewRequest(http.MethodPost, "/api/v1/projects", strings.NewReader(body))
+	jsonRequest.Header.Set("X-Dispatch-User", "alice")
+	jsonRequest.Header.Set("Content-Type", "application/json")
+	jsonResponse := httptest.NewRecorder()
+	handler.ServeHTTP(jsonResponse, jsonRequest)
+	if jsonResponse.Code != http.StatusCreated {
+		t.Fatalf("application/json mutation status = %d body=%s, want %d", jsonResponse.Code, jsonResponse.Body.String(), http.StatusCreated)
+	}
+}
+
+func TestUnauthenticatedLargeIssueBodyIsRejectedBeforeDecoding(t *testing.T) {
+	handler := newTestHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues", strings.NewReader(strings.Repeat(" ", 8<<20)))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated large body status = %d body=%s, want %d", response.Code, response.Body.String(), http.StatusUnauthorized)
 	}
 }

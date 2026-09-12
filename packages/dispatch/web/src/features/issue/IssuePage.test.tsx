@@ -40,6 +40,7 @@ const issue: IssueDetails = {
   project: "CORE",
   route: null,
   status: "todo",
+  rank: "U",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
 };
@@ -63,6 +64,7 @@ const openIssueAsk: Ask = {
   edited_at: null,
   id: "ask-open",
   issue_key: "CORE-1",
+  kind: "question",
   multiple: false,
   opened_event_id: 1,
   options: [],
@@ -216,6 +218,49 @@ test("IssuePage hides the Subscribed agents header when there are no subscribers
     );
   } finally {
     view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage edits label chips with project suggestions and cancels unsaved changes", async () => {
+  const labeledIssue = { ...issue, labels: ["bug"] };
+  const restore = stubIssuePage(labeledIssue);
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([
+    { ...labeledIssue, open_asks: 0 },
+    { ...issue, key: "CORE-2", labels: ["frontend", "backend"], open_asks: 0 },
+  ]);
+  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+    ...labeledIssue,
+    labels: ["frontend", "urgent"],
+  });
+  const view = renderIssuePage();
+
+  try {
+    fireEvent.click(await screen.findByRole("button", { name: "bug" }));
+    const input = await screen.findByRole("textbox", { name: "Add label" });
+    await waitFor(() => expect(listIssues).toHaveBeenCalledWith({ project: "CORE" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add frontend" }));
+    fireEvent.change(input, { target: { value: "urgent" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Remove bug" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save labels" }));
+
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["frontend", "urgent"] })
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "frontend" }));
+    const secondInput = await screen.findByRole("textbox", { name: "Add label" });
+    fireEvent.change(secondInput, { target: { value: "backend" } });
+    fireEvent.keyDown(secondInput, { key: "Enter" });
+    fireEvent.keyDown(secondInput, { key: "Escape" });
+
+    expect(screen.queryByRole("textbox", { name: "Add label" })).toBeNull();
+    expect(patchIssue).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "backend" })).toBeNull();
+  } finally {
+    view.unmount();
+    patchIssue.mockRestore();
+    listIssues.mockRestore();
     restore();
   }
 });

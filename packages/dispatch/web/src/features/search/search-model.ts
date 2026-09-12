@@ -1,6 +1,8 @@
-import type { SearchIssueRef, SearchResult, SearchResultKind } from "../../api/types";
+import { searchOwnerOf } from "@legion/contracts";
+import type { SearchIssueRef, SearchOwner, SearchResult, SearchResultKind } from "../../api/types";
 
 export interface ResultGroup {
+  readonly owner: SearchOwner;
   readonly issue: SearchIssueRef;
   readonly results: SearchResult[];
 }
@@ -10,9 +12,12 @@ export function groupResults(results: readonly SearchResult[]): ResultGroup[] {
   const groups = new Map<string, ResultGroup>();
 
   for (const result of results) {
-    const group = groups.get(result.issue.key);
+    const owner = searchOwnerOf(result);
+    const ownerKey =
+      owner.kind === "issue" ? `issue:${owner.key}` : `document:${owner.artifact_id}`;
+    const group = groups.get(ownerKey);
     if (group === undefined) {
-      groups.set(result.issue.key, { issue: result.issue, results: [result] });
+      groups.set(ownerKey, { issue: result.issue, owner, results: [result] });
     } else {
       group.results.push(result);
     }

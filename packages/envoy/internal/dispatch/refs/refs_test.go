@@ -68,8 +68,8 @@ func createReferenceProject(t *testing.T, tx pgx.Tx, key string) {
 func createReferenceIssue(t *testing.T, tx pgx.Tx, key, project string) {
 	t.Helper()
 	if _, err := tx.Exec(context.Background(), `
-		insert into issues (key, project_key, number, title, created_by)
-		values ($1, $2, 1, 'Reference issue', '{"kind":"user","id":"alice"}')
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ($1, $2, 1, 'Reference issue', '{"kind":"user","id":"alice"}', 'U')
 	`, key, project); err != nil {
 		t.Fatalf("create issue %q: %v", key, err)
 	}

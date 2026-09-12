@@ -33,6 +33,8 @@ import (
 const (
 	defaultListenAddr = ":8766"
 	shutdownTimout    = 5 * time.Second
+	readHeaderTimeout = 10 * time.Second
+	idleTimeout       = 2 * time.Minute
 )
 
 type bootConfig struct {
@@ -51,6 +53,9 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if len(os.Args) > 1 && os.Args[1] == "check-documents" {
 		os.Exit(checkDocuments(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "backfill-block-ids" {
+		os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
 	}
 	boot, err := resolveBootConfig(os.Getenv)
 	if err != nil {
@@ -136,10 +141,15 @@ func main() {
 	}
 
 	users := store.NewPgUserStore(database.Pool)
+	sessions := store.NewPgSessionStore(database.Pool)
 
 	var requestIdentity identity.Identity
 	if boot.IdentityHeader == "" {
-		requestIdentity = identity.CookieIdentity{SigningKey: signingKey, AllowedLogins: boot.AllowedLogins}
+		requestIdentity = identity.CookieIdentity{
+			SigningKey:    signingKey,
+			AllowedLogins: boot.AllowedLogins,
+			Sessions:      sessions,
+		}
 	} else {
 		slog.Warn("dispatch: trusting request identity header", "header", boot.IdentityHeader)
 		requestIdentity = identity.HeaderIdentity{
@@ -161,6 +171,7 @@ func main() {
 		SigningKey: signingKey,
 		WebDistDir: webDistDir,
 		Users:      users,
+		Sessions:   sessions,
 		Identity:   requestIdentity,
 
 		AllowedLogins:  boot.AllowedLogins,
@@ -199,8 +210,11 @@ func main() {
 		os.Exit(1)
 	}
 	server := &http.Server{
-		Addr:    listenAddr,
-		Handler: handler,
+		Addr:              listenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		// WriteTimeout remains zero because the event stream is long-lived.
 	}
 
 	go func() {
@@ -482,4 +496,53 @@ func checkDocuments(ctx context.Context, databaseURL string, out io.Writer) int 
 			report.ArtifactID, report.IssueKey, report.Name, report.State, parse, report.Anchors, report.Resolvable)
 	}
 	return exitCode
+}
+
+func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) int {
+	if strings.TrimSpace(databaseURL) == "" {
+		fmt.Fprintln(out, "backfill-block-ids: DATABASE_URL is required")
+		return 1
+	}
+	database, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-block-ids: open database: %v\n", err)
+		return 1
+	}
+	defer database.Pool.Close()
+	if err := database.Migrate(ctx); err != nil {
+		fmt.Fprintf(out, "backfill-block-ids: migrate database: %v\n", err)
+		return 1
+	}
+	if err := docs.MigrateLegacyDocuments(ctx, database); err != nil {
+		fmt.Fprintf(out, "backfill-block-ids: migrate legacy documents: %v\n", err)
+		return 1
+	}
+	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
+	defer service.Shutdown(context.Background())
+	reports, err := service.BackfillBlockIDs(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-block-ids: %v\n", err)
+		return 1
+	}
+	exitCode := 0
+	for _, report := range reports {
+		if !writeBlockIDBackfillReport(out, report) {
+			exitCode = 1
+		}
+	}
+	return exitCode
+}
+
+func writeBlockIDBackfillReport(out io.Writer, report docs.BlockIDBackfill) bool {
+	switch {
+	case report.Err != nil:
+		fmt.Fprintf(out, "%s error (%v)\n", report.ArtifactID, report.Err)
+		return false
+	case report.Skipped != "":
+		fmt.Fprintf(out, "%s skipped (%s)\n", report.ArtifactID, report.Skipped)
+		return true
+	default:
+		fmt.Fprintf(out, "%s stamped=%d\n", report.ArtifactID, report.Stamped)
+		return true
+	}
 }

@@ -15,7 +15,25 @@ export interface ActorOrigin {
 
 export type Actor =
   | { readonly kind: "user"; readonly id: string }
-  | { readonly kind: "session"; readonly id: string; readonly origin?: ActorOrigin };
+  | {
+      readonly kind: "session";
+      readonly id: string;
+      readonly origin?: ActorOrigin;
+      readonly owner?: string;
+    };
+
+export interface AgentToken {
+  readonly id: string;
+  readonly name: string;
+  readonly prefix: string;
+  readonly created_at: string;
+  readonly last_used_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+export interface CreatedAgentToken extends AgentToken {
+  readonly token: string;
+}
 
 export interface Anchor {
   readonly artifact_id: string;
@@ -64,6 +82,7 @@ export interface Issue {
   readonly number: number;
   readonly title: string;
   readonly status: string;
+  readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
   readonly external_links: ExternalLink[];
@@ -77,7 +96,7 @@ export interface Issue {
 }
 
 export interface IssueSummary
-  extends Pick<Issue, "key" | "title" | "status" | "parent" | "updated_at" | "last_seq"> {
+  extends Pick<Issue, "key" | "title" | "status" | "rank" | "parent" | "updated_at" | "last_seq"> {
   readonly labels?: string[];
   readonly open_asks: number;
 }
@@ -101,6 +120,43 @@ export interface Artifact {
   readonly created_at: string;
   readonly versions: Version[];
   readonly referenced_by?: ReferencedBy[];
+  /** Document approval, derived from version-pinned reviews; absent for non-document artifacts. */
+  readonly approval?: ArtifactApproval;
+}
+
+export type ArtifactReviewState = "approved" | "changes_requested";
+
+/** One human review of a document, pinned to the version it was given on. */
+export interface ArtifactReview {
+  readonly id: string;
+  readonly artifact_id: string;
+  readonly version: number;
+  readonly state: ArtifactReviewState;
+  readonly actor: Actor;
+  readonly reason: string | null;
+  readonly ask_id: string | null;
+  readonly created_at: string;
+}
+
+/** The document's approval as of its latest version: `draft` has never been reviewed or
+ *  requested; `awaiting` has an open approval ask; `approved` is approved at the latest version;
+ *  `stale` is approved at an older version; `changes_requested` carries the reviewer's reason. */
+export interface ArtifactApproval {
+  readonly state: "draft" | "awaiting" | "approved" | "stale" | "changes_requested";
+  readonly latest_version: number;
+  readonly version?: number;
+  readonly by?: Actor;
+  readonly at?: string;
+  readonly reason?: string | null;
+  readonly ask_id?: string | null;
+  readonly requested_by?: Actor;
+}
+
+export interface ArtifactBlock {
+  readonly id: string;
+  readonly type: string;
+  readonly from: number;
+  readonly to: number;
 }
 
 export interface Version {
@@ -119,6 +175,9 @@ export interface Ask {
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
   readonly author: Actor;
+  /** `approval` asks are opened by an approval request; their options are fixed
+   *  (`Approve`, `Request changes`) and their answer writes a document review. */
+  readonly kind: "question" | "approval";
   readonly question: string;
   readonly options: AskOption[];
   readonly multiple: boolean;
@@ -245,14 +304,35 @@ export interface SearchArtifactRef {
   readonly name: string;
 }
 
+export type SearchOwner =
+  | { readonly kind: "issue"; readonly key: string }
+  | {
+      readonly kind: "document";
+      readonly project: string;
+      readonly slug: string;
+      readonly artifact_id: string;
+      readonly name: string;
+    };
+
 export interface SearchResult {
   readonly kind: SearchResultKind;
+  /**
+   * Who owns the hit. Servers before project-document search omit it; `searchOwnerOf` derives
+   * the issue owner from `issue` in that case.
+   */
+  readonly owner?: SearchOwner;
+  /** Legacy issue-shaped display metadata, retained for existing consumers. */
   readonly issue: SearchIssueRef;
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
   readonly snippet: string;
   readonly rank: number;
   readonly href: string;
+}
+
+/** The hit's owner, falling back to the issue-shaped fields an older server sends. */
+export function searchOwnerOf(result: Pick<SearchResult, "owner" | "issue">): SearchOwner {
+  return result.owner ?? { kind: "issue", key: result.issue.key };
 }
 
 export interface SearchResponse {
@@ -343,6 +423,18 @@ export interface ArtifactVersionEventPayload {
   readonly diff?: string;
 }
 
+/** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
+ *  pinned to `version`; `reason` is required for changes requested; `ask_id` names the
+ *  approval ask the review answered, null when given from the document header. */
+export interface ArtifactReviewEventPayload {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
+  readonly actor: Actor;
+  readonly reason: string | null;
+  readonly ask_id: string | null;
+}
+
 export interface ChildStatusEventPayload {
   readonly child_key: string;
   readonly from: string;
@@ -381,6 +473,14 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "artifact.version";
       readonly payload: ArtifactVersionEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.approved";
+      readonly payload: ArtifactReviewEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.changes_requested";
+      readonly payload: ArtifactReviewEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: Ask })
   | (DispatchEventBase & {
@@ -468,13 +568,20 @@ export interface CreateIssueInput {
   readonly external?: string;
   readonly spec?: string;
   readonly force?: boolean;
+  readonly labels?: string[];
 
   readonly actor?: Actor;
+}
+
+export interface IssueRankInput {
+  readonly before?: string;
+  readonly after?: string;
 }
 
 export interface UpdateIssueInput {
   readonly title?: string;
   readonly status?: string;
+  readonly rank?: IssueRankInput;
   readonly labels?: string[];
   readonly route?: string | null;
   readonly external_links?: ExternalLink[];
@@ -638,7 +745,9 @@ export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
 
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
+  labels: z.array(z.string()).optional(),
   status: z.string().optional(),
+  rank: z.string().optional(),
   route: z.string().nullish(),
 });
 
@@ -653,6 +762,15 @@ export const ArtifactVersionEventPayloadSchema = z.object({
   name: z.string().optional(),
   version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
   diff: z.string().optional(),
+});
+
+export const ArtifactReviewEventPayloadSchema = z.object({
+  artifact_id: z.string().optional(),
+  name: z.string().optional(),
+  version: z.number().int().optional(),
+  actor: z.object({ kind: z.string(), id: z.string() }).passthrough().optional(),
+  reason: z.string().nullish(),
+  ask_id: z.string().nullish(),
 });
 
 const askEventPayloadFields = {

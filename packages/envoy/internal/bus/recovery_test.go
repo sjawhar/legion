@@ -397,3 +397,29 @@ func TestConnectedReportsLiveConnection(t *testing.T) {
 		t.Fatal("connected client reported unhealthy")
 	}
 }
+
+func TestReconnectHookRunsAfterReconnect(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	hookRan := make(chan *natsgo.Conn, 1)
+	client.AddReconnectHook(func(conn *natsgo.Conn) error {
+		hookRan <- conn
+		return nil
+	})
+	if err := client.Conn.ForceReconnect(); err != nil {
+		t.Fatalf("force reconnect: %v", err)
+	}
+	select {
+	case conn := <-hookRan:
+		if conn != client.Conn {
+			t.Fatal("reconnect hook received a stale connection")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconnect hook did not run")
+	}
+}

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, roleTopic } from "@legion/contracts";
+import { controllerToken, roleToken, roleTopic } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
@@ -240,6 +240,7 @@ function config(stateDir: string): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    workerStreamPort: 0,
     gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     dispatchUrl: "http://127.0.0.1:18766",
@@ -409,6 +410,102 @@ describe("startDaemon", () => {
       expect(started).toBe(true);
       expect(state.admission.active).toEqual([issue]);
       expect(state.trees[issue]?.status).toBe("active");
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("with gates.design off, boot approves every registered gate a human never answered, wakes its architect, and closes its ask", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = { ...config(stateDir), gates: { design: "off" as const } };
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    for (const key of ["WIDGETS-1", "WIDGETS-2", "WIDGETS-3"]) {
+      state.issues[key] = { key, title: key, status: "in_progress", children: [] };
+      state.trees[key] = { root: key, generation: 1, status: "active", launchFailures: 0 };
+    }
+    state.gates["WIDGETS-1"] = { designAskId: "ask-unanswered" };
+    state.gates["WIDGETS-2"] = { designAskId: "ask-human", designApproved: "ask-human" };
+    state.gates["WIDGETS-3"] = {};
+    state.issues["WIDGETS-4"] = { key: "WIDGETS-4", title: "closed", status: "done", children: [] };
+    state.trees["WIDGETS-4"] = {
+      root: "WIDGETS-4",
+      generation: 1,
+      status: "closed",
+      launchFailures: 0,
+    };
+    state.gates["WIDGETS-4"] = { designAskId: "ask-on-closed-tree" };
+    let saved = 0;
+    const published: Array<{ topic: string; payload: string }> = [];
+    const resolvedAsks: string[] = [];
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {
+            saved += 1;
+          },
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async (topic, payload) => {
+            published.push({ topic, payload });
+          },
+          dispatchClient: fakeDispatchClient({
+            resolveAsk: async (id) => {
+              resolvedAsks.push(id);
+            },
+          }),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+      expect(state.gates["WIDGETS-1"]).toEqual({
+        designAskId: "ask-unanswered",
+        designApproved: "gate-off",
+      });
+      expect(state.gates["WIDGETS-2"]).toEqual({
+        designAskId: "ask-human",
+        designApproved: "ask-human",
+      });
+      expect(state.gates["WIDGETS-3"]).toEqual({});
+      expect(state.gates["WIDGETS-4"]).toEqual({ designAskId: "ask-on-closed-tree" });
+      expect(saved).toBeGreaterThan(0);
+      expect(published.filter((p) => p.payload.includes("design-approved"))).toEqual([
+        {
+          topic: roleTopic(roleToken(daemonConfig.project, "WIDGETS-1", "architect")),
+          payload: JSON.stringify({ type: "design-approved" }),
+        },
+      ]);
+      // Only the gate the daemon itself approved: a human-answered ask is already closed on
+      // Dispatch, a closed tree has nobody waiting, and an unregistered gate has no ask.
+      expect(resolvedAsks).toEqual(["ask-unanswered"]);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
@@ -1181,6 +1278,159 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("retries a boot probe whose launch died transiently, then boots once it passes", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    let attempts = 0;
+    const sleeps: number[] = [];
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          runner: async (command) => {
+            if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+            attempts += 1;
+            // The first two pi.agents probes: OMP printed its marker, then died under load.
+            if (attempts <= 2) {
+              return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 1 };
+            }
+            return {
+              stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          },
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          readPluginManifest: async () => validLegionPluginManifest,
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2099-01-01T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+      // Two transient failures → two backoff sleeps, then the pass; the plugin probe adds one more
+      // sh call that passes first time.
+      expect(sleeps).toEqual([5_000, 15_000]);
+      expect(attempts).toBe(4);
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("does not retry a definitive pi.agents negative, and gives up after the last transient retry", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const baseDeps = {
+      loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+      saveState: async () => {},
+      createNatsTransport: async () => {
+        throw new Error("NATS must not start after a failed OMP capability probe");
+      },
+      resolveDaemonEnvironment: async () => daemonEnvironment,
+      dispatchClient: fakeDispatchClient(),
+      readPluginManifest: async () => validLegionPluginManifest,
+      tokenManager: {
+        getToken: async () => ({
+          token: "test-token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "1+legion-implement[bot]@users.noreply.github.com",
+          },
+        }),
+      },
+    };
+    try {
+      // Definitive: the probe extension loaded and reported no pi.agents. One attempt, no sleep.
+      let definitiveAttempts = 0;
+      const definitiveSleeps: number[] = [];
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...baseDeps,
+            runner: async () => {
+              definitiveAttempts += 1;
+              return { stdout: "", stderr: "LEGION_OMP_AGENTS=missing\n", exitCode: 1 };
+            },
+            sleep: async (ms) => {
+              definitiveSleeps.push(ms);
+            },
+          },
+        })
+      ).rejects.toThrow("does not expose pi.agents");
+      expect(definitiveAttempts).toBe(1);
+      expect(definitiveSleeps).toEqual([]);
+
+      // Also definitive: the launch command died before OMP ever loaded the probe extension (no
+      // marker at all) — e.g. the launch prefix's `secrets` denying a key. Never retried.
+      let prefixAttempts = 0;
+      const prefixSleeps: number[] = [];
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...baseDeps,
+            runner: async () => {
+              prefixAttempts += 1;
+              return {
+                stdout: "",
+                stderr: "secrets: ANTHROPIC_API_KEY: access denied\n",
+                exitCode: 1,
+              };
+            },
+            sleep: async (ms) => {
+              prefixSleeps.push(ms);
+            },
+          },
+        })
+      ).rejects.toThrow("does not expose pi.agents: secrets: ANTHROPIC_API_KEY: access denied");
+      expect(prefixAttempts).toBe(1);
+      expect(prefixSleeps).toEqual([]);
+
+      // Transient forever (marker present, OMP keeps dying): every retry is used, then fatal.
+      let transientAttempts = 0;
+      const transientSleeps: number[] = [];
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...baseDeps,
+            runner: async () => {
+              transientAttempts += 1;
+              return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 137 };
+            },
+            sleep: async (ms) => {
+              transientSleeps.push(ms);
+            },
+          },
+        })
+      ).rejects.toThrow("does not expose pi.agents");
+      expect(transientAttempts).toBe(6);
+      expect(transientSleeps).toEqual([5_000, 15_000, 45_000, 90_000, 180_000]);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("prepends the configured omp_launch_prefix to both startup capability probes", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig: DaemonConfig = {
@@ -1568,6 +1818,60 @@ describe("startDaemon", () => {
     } finally {
       first.server.stop();
       await first.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  /** The dependency bundle every startDaemon test in this file uses, on a fresh state. */
+  function daemonDeps(daemonConfig: DaemonConfig): daemonIndex.DaemonStartOptions {
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    return { deps: { ...options.deps, loadState: async () => state, saveState: async () => {} } };
+  }
+
+  it("binds the worker stream listener with the API and closes it with the daemon", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
+    let port: number;
+    try {
+      port = daemon.workerStreamPort;
+      expect(port).toBeGreaterThan(0);
+      // A garbage first line is refused by Legion's own listener — proving the port is ours.
+      const closed = Promise.withResolvers<void>();
+      const socket = await Bun.connect<undefined>({
+        hostname: "127.0.0.1",
+        port,
+        socket: { data() {}, close: () => closed.resolve(), error() {} },
+      });
+      socket.write("not json\n");
+      await closed.promise;
+    } finally {
+      await daemon.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+    await expect(
+      Bun.connect<undefined>({ hostname: "127.0.0.1", port, socket: { data() {} } })
+    ).rejects.toThrow();
+  });
+
+  it("refuses to start when worker_stream_port is bound, naming the setting, and releases the lock", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const occupied = Bun.listen<undefined>({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {} },
+    });
+    try {
+      await expect(
+        startDaemon({ ...daemonConfig, workerStreamPort: occupied.port }, daemonDeps(daemonConfig))
+      ).rejects.toThrow(`worker_stream_port ${occupied.port} on 127.0.0.1 is unavailable`);
+      // The instance lock and API port were released: a second start on a free stream port works.
+      const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
+      await daemon.stop();
+    } finally {
+      occupied.stop(true);
       await rm(stateDir, { recursive: true, force: true });
     }
   });

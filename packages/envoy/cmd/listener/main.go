@@ -150,28 +150,122 @@ func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
 	return err == nil
 }
 
-// runSelfHealthWatchdog periodically pings the KV registries and the durable
-// consumer, self-terminating after `threshold` consecutive failures. Designed
-// for wedged states the bus recovery path cannot repair: a KV-bound JetStream
-// context that stays broken after reconnect (observed on sami after a long
-// Tailscale write-timeout), or a durable consumer the server garbage-collected
-// via consumerInactiveThreshold while this process was alive but unbound —
-// recovery replays nats.Bind, which cannot recreate a missing consumer, so
-// only a restart re-runs the ensure-then-bind boot path.
-//
-// Termination uses SIGTERM so the existing graceful shutdown path runs. Docker
-// `restart: unless-stopped` (on-prem) and ECS task respawn (Fargate) then bring
-// the listener back with a fresh conn.
-func runSelfHealthWatchdog(logger *logging.Logger, registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store, durable func() error, interval time.Duration, threshold int) {
-	terminate := func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
-	probe := func() error { return checkSelfHealth(registry, sessions, ci, durable) }
-	runSelfHealthLoop(logger, probe, terminate, interval, threshold)
+// rewatchListenerKVWatchers recreates cache watchers that are not represented
+// by bus.Client subscriptions. It attempts both so a failed session watcher
+// rebuild cannot leave the CI cache permanently stale too.
+func rewatchListenerKVWatchers(conn *nats.Conn, sessions *session.SessionRegistry, ciStore *cistore.Store) error {
+	var errs []error
+	if sessions != nil {
+		if err := sessions.Rewatch(conn); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if ciStore != nil {
+		if err := ciStore.Rewatch(conn); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
+// from transient JetStream deadlines. Rebuild only while the NATS client is
+// connected; a disconnected client owns its own infinite reconnect loop.
+func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, sessions *session.SessionRegistry, ciStore *cistore.Store) bool {
+	if err == nil || client == nil || !client.Connected() {
+		return false
+	}
+	return errors.Is(err, nats.ErrConsumerNotFound) ||
+		errors.Is(err, nats.ErrConnectionClosed) ||
+		(sessions != nil && sessions.WatchFailed()) ||
+		(ciStore != nil && ciStore.WatchFailed())
+}
+
+func rebuildListenerDependencies(
+	client *bus.Client,
+	sessions *session.SessionRegistry,
+	ciStore *cistore.Store,
+	durableProbe func() error,
+	consumer string,
+	handler nats.MsgHandler,
+) error {
+	if client == nil || !client.Connected() {
+		return nats.ErrConnectionClosed
+	}
+	err := rewatchListenerKVWatchers(client.Conn, sessions, ciStore)
+	if durableProbe == nil || !errors.Is(durableProbe(), nats.ErrConsumerNotFound) {
+		return err
+	}
+	if _, durableErr := startListenerSubscription(client, consumer, handler); durableErr != nil {
+		return errors.Join(err, fmt.Errorf("recreate durable consumer: %w", durableErr))
+	}
+	return err
+}
+
+// runSelfHealthMonitor leaves transient dependency timeouts degraded while
+// NATS reconnects. A terminal watcher, closed KV handle, or missing durable
+// consumer is rebuilt immediately; repeated terminal observations enter the
+// bounded shutdown path so Docker can replace an unrecoverable listener.
+func runSelfHealthMonitor(
+	ctx context.Context,
+	logger *logging.Logger,
+	probe func() error,
+	isUnrecoverable func(error) bool,
+	rebuild func() error,
+	terminate func(),
+	interval time.Duration,
+	threshold int,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	failures := 0
+	terminalFailures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		err := probe()
+		if err == nil {
+			if failures > 0 {
+				logger.Info("self-health recovered", slog.Int("prior_consecutive_failures", failures))
+			}
+			failures = 0
+			terminalFailures = 0
+			continue
+		}
+		failures++
+		logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
+		if isUnrecoverable == nil || !isUnrecoverable(err) {
+			terminalFailures = 0
+			continue
+		}
+
+		terminalFailures++
+		if rebuild != nil {
+			if rebuildErr := rebuild(); rebuildErr != nil {
+				logger.Error("self-health rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", rebuildErr.Error()))
+			} else {
+				logger.Info("self-health rebuild started", slog.Int("consecutive", terminalFailures))
+			}
+		}
+		if terminalFailures < threshold {
+			continue
+		}
+		logger.Error("self-health terminal failure threshold exceeded; terminating for restart",
+			slog.String("error", err.Error()),
+		)
+		if terminate != nil {
+			terminate()
+		}
+		return
+	}
 }
 
 // checkSelfHealth pings the KV-backed registries and the optional durable
 // consumer probe. Returns the first error encountered, or nil when all are
-// healthy. Extracted from the watchdog loop so callers (and tests) can probe
-// the same view of health that the loop uses.
+// healthy.
 func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store, durable func() error) error {
 	if registry != nil {
 		if err := registry.Ping(); err != nil {
@@ -210,29 +304,38 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 	}
 }
 
-// runSelfHealthLoop ticks `probe`, tracking consecutive failures. After
-// `threshold` consecutive failures it invokes `terminate` once and returns.
-// Split from runSelfHealthWatchdog so tests can inject a fake terminate.
-func runSelfHealthLoop(logger *logging.Logger, probe func() error, terminate func(), interval time.Duration, threshold int) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	failures := 0
-	for range ticker.C {
-		err := probe()
-		if err == nil {
-			if failures > 0 {
-				logger.Info("self-health recovered", slog.Int("prior_consecutive_failures", failures))
-			}
-			failures = 0
-			continue
-		}
-		failures++
-		logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
-		if failures >= threshold {
-			logger.Error("self-health threshold exceeded — terminating to let restart policy recover", slog.String("error", err.Error()))
-			terminate()
-			return
-		}
+func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, terminal bool) {
+	statusCode := http.StatusOK
+	status := "degraded"
+	if terminal {
+		statusCode = http.StatusServiceUnavailable
+		status = "unhealthy"
+	}
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": status,
+		"error":  dependency + " unavailable: " + err.Error(),
+	})
+}
+
+type natsDrainer interface {
+	Drain() error
+	Close()
+}
+
+// drainNATSWithDeadline closes conn after its drain completes or the deadline
+// passes. Closing at the deadline makes a blocked drain unable to keep the
+// listener process alive after it has stopped serving HTTP.
+func drainNATSWithDeadline(conn natsDrainer, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- conn.Drain() }()
+	select {
+	case err := <-done:
+		conn.Close()
+		return err
+	case <-time.After(timeout):
+		conn.Close()
+		return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
 	}
 }
 
@@ -255,6 +358,15 @@ func main() {
 		log.Fatal(err)
 	}
 	logger := logging.New(cfg.MachineID)
+	apiToken := os.Getenv("ENVOY_API_TOKEN")
+	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED")); err != nil {
+		log.Fatal(err)
+	}
+	if apiToken == "" {
+		logger.Info("listener API auth: disabled (ENVOY_API_TOKEN)")
+	} else {
+		logger.Info("listener API auth: enabled (ENVOY_API_TOKEN)")
+	}
 
 	// Load webhook config (fast — env var reads only).
 	webhookCfg, err := webhook.LoadWebhookConfig()
@@ -307,9 +419,9 @@ func main() {
 
 	var healthzConsumer string
 	// /healthz is always reachable — returns 200 "starting" before NATS init,
-	// 200 "healthy" after init with live NATS, 503 "unhealthy" if NATS drops.
-	// Consumer lag metrics are included when available (after subscription setup).
-	// 200 "healthy" after init with live NATS, 503 "unhealthy" if NATS drops.
+	// 200 "healthy" after init with live NATS, and 503 "unhealthy" when NATS,
+	// a terminal watcher, or the durable consumer is unavailable. Transient KV
+	// failures return 200 "degraded" while the monitor and NATS reconnect retry.
 	// Consumer lag metrics are included when available (after subscription setup).
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -329,29 +441,29 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
 			return
 		}
-		// Ping JetStream KV buckets. The bus recovery path only restores the main
-		// subject subscription on reconnect; the KV-backed registries hold handles
-		// to the original closed *nats.Conn and never get re-opened. Catching this
-		// here lets the self-health watchdog terminate the listener so the restart
-		// policy can bring it back fresh.
+		if d.sessions != nil && d.sessions.WatchFailed() {
+			writeDependencyHealth(w, "session KV watcher", errors.New(d.sessions.WatchError()), true)
+			return
+		}
+		if d.ciStore != nil && d.ciStore.WatchFailed() {
+			writeDependencyHealth(w, "CI KV watcher", errors.New(d.ciStore.WatchError()), true)
+			return
+		}
 		if d.registry != nil {
 			if err := d.registry.Ping(); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "interest kv unavailable: " + err.Error()})
+				writeDependencyHealth(w, "interest KV", err, errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
 		}
 		if d.sessions != nil {
 			if err := d.sessions.Ping(); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "session kv unavailable: " + err.Error()})
+				writeDependencyHealth(w, "session KV", err, d.sessions.WatchFailed() || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
 		}
 		if d.ciStore != nil {
 			if err := d.ciStore.Ping(); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "ci kv unavailable: " + err.Error()})
+				writeDependencyHealth(w, "CI KV", err, d.ciStore.WatchFailed() || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
 		}
@@ -361,7 +473,11 @@ func main() {
 		}
 		if healthzConsumer != "" {
 			consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, healthzConsumer)
-			if err == nil && consumerInfo != nil {
+			if err != nil {
+				writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
+				return
+			}
+			if consumerInfo != nil {
 				response["num_pending"] = consumerInfo.NumPending
 				response["num_ack_pending"] = consumerInfo.NumAckPending
 			}
@@ -404,7 +520,7 @@ func main() {
 	registerV1Routes(v1, &deps, cfg.MachineID, logger)
 
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := readinessGate(func() bool { return deps.Load() != nil }, v1)
+	v1Handler := apiAuth(apiToken, readinessGate(func() bool { return deps.Load() != nil }, v1))
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
@@ -440,9 +556,8 @@ func main() {
 	// Atlas dropout investigation (PR #610 fixed the silent-fallback half).
 	//
 	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
-	// If the watcher fails to start, signalReady() is called from the error
-	// path so we fail open and let the self-health watchdog catch a persistently
-	// broken registry via its KV pings.
+	// If the watcher fails to start, signalReady() unblocks startup and the
+	// health endpoint exposes the unavailable registry while NATS recovers.
 	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
 		logger.Warn("interest cache warm-up timed out; serving with possibly empty cache",
@@ -461,8 +576,8 @@ func main() {
 	// Wait for the session cache to finish its initial scan before we accept
 	// traffic, mirroring the interest-cache gate above. Bounded at 30s: a healthy
 	// cluster completes in milliseconds. On timeout we fail open — Put
-	// write-through keeps locally-registered sessions visible, and the self-health
-	// watchdog catches a persistently broken registry via its KV pings.
+	// write-through keeps locally-registered sessions visible, while /healthz
+	// reports a persistently unavailable registry.
 	sessionCacheReadyCtx, sessionCacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := sessions.WaitForCacheReady(sessionCacheReadyCtx); err != nil {
 		logger.Warn("session cache warm-up timed out; serving with possibly empty cache",
@@ -476,6 +591,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// KV watchers are not bus subscriptions, so recreate them after every
+	// recovered NATS connection.
+	client.AddReconnectHook(func(conn *nats.Conn) error {
+		return rewatchListenerKVWatchers(conn, sessions, ciStore)
+	})
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
@@ -582,6 +703,7 @@ func main() {
 	// Cross-references envoy_sessions (5-min TTL) with envoy_interests (permanent)
 	// to prune orphaned interests from dead sessions.
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
+	registry.StartRoleClaimReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, sessions.TTL())
 
 	// Phase 6b2: Start the CI summary loop. It emits one pr.<n>.checks event
 	// once the head commit's checks settle; new runs re-arm settlement. The
@@ -597,29 +719,41 @@ func main() {
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, logger)
 
-	// Phase 6c: Self-health watchdog. Periodically pings the JetStream KV
-	// buckets; if they are unreachable for several consecutive checks the
-	// listener self-terminates so the container restart policy (Docker
-	// `restart: unless-stopped` on-prem, ECS task respawn on Fargate) can
-	// bring it back with a fresh NATS conn and registries.
-	//
-	// This is the failure mode observed on the on-prem `sami` listener after a
-	// long Tailscale write-timeout: bus recovery re-established the subject
-	// subscription on a fresh *nats.Conn, but store.Registry and
-	// session.SessionRegistry kept their KV handles bound to the original
-	// closed conn. Restart is cheap and lossless — KV state is durable, NATS
-	// retries undelivered messages, and agent sessions re-register.
-	// The durable probe only treats a definitively missing consumer as
-	// unhealthy — transient lookup failures are already covered by the KV
-	// pings — so a consumer the server garbage-collected out from under a
-	// live-but-unbound process forces the restart that recreates it.
+	// Phase 6c: Keep transient JetStream timeouts observable without restarting
+	// the listener. Terminal watcher/consumer failures are rebuilt immediately;
+	// after three failed recovery intervals, SIGTERM enters the bounded shutdown
+	// path and exits non-zero for Docker to replace the listener.
 	durableProbe := func() error {
 		if _, err := client.JS().ConsumerInfo(bus.Stream, consumer); errors.Is(err, nats.ErrConsumerNotFound) {
 			return err
 		}
 		return nil
 	}
-	go runSelfHealthWatchdog(logger, registry, sessions, ciStore, durableProbe, 30*time.Second, 3)
+	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+	go runSelfHealthMonitor(
+		monitorCtx,
+		logger,
+		func() error {
+			return checkSelfHealth(registry, sessions, ciStore, durableProbe)
+		},
+		func(err error) bool {
+			return isUnrecoverableSelfHealthFailure(err, client, sessions, ciStore)
+		},
+		func() error {
+			return rebuildListenerDependencies(
+				client,
+				sessions,
+				ciStore,
+				durableProbe,
+				consumer,
+				jetStreamDeliveryHandler(deliveryConfig),
+			)
+		},
+		func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) },
+		30*time.Second,
+		3,
+	)
+
 	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
@@ -631,7 +765,8 @@ func main() {
 		logger.Info("received signal, shutting down", slog.String("signal", s.String()))
 	}
 
-	// Stop the CI summary loop first so it doesn't hit the KV on a draining conn.
+	// Stop background loops before draining NATS.
+	monitorCancel()
 	summaryCancel()
 
 	// Ordered shutdown:
@@ -642,11 +777,12 @@ func main() {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}
 
-	// 3. NATS — drain subscription (finishes in-flight deliveries), then close.
-	if err := client.Conn.Drain(); err != nil {
+	// 3. NATS — drain in-flight deliveries, but never let a blocked NATS
+	// request pin the process after its HTTP listener is gone.
+	if err := drainNATSWithDeadline(client.Conn, 10*time.Second); err != nil {
 		logger.Warn("nats drain error", slog.String("error", err.Error()))
 	}
-	client.Conn.Close()
 
 	logger.Info("envoy-listener shutdown complete")
+	os.Exit(1)
 }

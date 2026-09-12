@@ -29,6 +29,10 @@ export function eventDescription(event: Event): string {
       return "Issue closed";
     case "artifact.created":
       return "Artifact created";
+    case "artifact.approved":
+      return `Approved v${event.payload.version}`;
+    case "artifact.changes_requested":
+      return `Changes requested on v${event.payload.version}`;
     case "artifact.version":
       return "Artifact version saved";
     case "suggestion.accepted":
