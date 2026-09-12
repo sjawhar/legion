@@ -1,0 +1,126 @@
+{
+  "issue": "LEGION-13",
+  "spec": "dispatch://LEGION-13/spec (human-approved; requirements record — not restated here)",
+  "planDoc": "docs/plans/2026-09-12-check-config-env-injection.md",
+  "summary": "Thread a required `env: NodeJS.ProcessEnv` through `loadStartConfig`, `cmdCheckConfig`, `cmdStart`, and `cmdRestart` in packages/daemon/src/cli/index.ts; `process.env` is written only in the citty `startCommand.run` and `restartCommand.run` handlers. The two `legion start --check-config` tests pass `{ PATH, HOME }`; one new test pins that `cmdCheckConfig` reads the injected env (DISPATCH_URL without DISPATCH_TOKEN rejects; with DISPATCH_TOKEN accepts). `resolveDaemonConfig` untouched. docs/solutions/legion/worker-pane-shell-gotchas.md § 2 (the `env -u` workaround) is removed in the same PR.",
+  "designFixedBySpec": {
+    "signatures": {
+      "loadStartConfig": "(project: string | undefined, configPath: string | undefined, env: NodeJS.ProcessEnv, options: LoadConfigFileOptions = {}): DaemonConfig — env before the defaulted options; no default for env",
+      "cmdCheckConfig": "export (project, configPath, env: NodeJS.ProcessEnv): Promise<void>",
+      "cmdStart": "(project, configPath, env: NodeJS.ProcessEnv): Promise<void> — also uses env for resolveLegionPaths so the function has one environment",
+      "cmdRestart": "(project: string, configPath, env: NodeJS.ProcessEnv): Promise<void> — forwards env to cmdStart; cmdStop unchanged"
+    },
+    "boundary": "index.ts startCommand.run (:445-447) and restartCommand.run (:473-474) pass process.env; nothing below them names process.env for config resolution",
+    "unchanged": [
+      "packages/daemon/src/daemon/config.ts resolveDaemonConfig (already accepts opts.env, :641-644; the DISPATCH_URL/DISPATCH_TOKEN rule at :697-701 is the spec § Errors row)",
+      "cmdStop, cmdStatus, cmdLegions, postController, cmdSetIssueStatus keep reading process.env (not config resolution; out of scope)",
+      "handoffCommand.complete already injects { env: process.env, fetch } at its boundary"
+    ],
+    "rejected": [
+      "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test as the fix (spec § Rejected)",
+      "process.env mutation in beforeEach/afterEach (spec § Rejected)",
+      "env default parameter = process.env (would let a test silently fall back to ambient state — the bug itself)",
+      "a GhCommandDeps-style deps object for a single injected field (file already uses bare positional env: daemonUrl(env), resolveControllerSecret(env))"
+    ]
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Failing tests first",
+      "files": [
+        "packages/daemon/src/cli/__tests__/index.test.ts:155-209"
+      ],
+      "steps": [
+        "describe block opens with `const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME };` (comment explains PATH/HOME are fixture shape, not read by resolveDaemonConfig)",
+        ":179 and :205 pass `env` as the third argument",
+        "new it(\"resolves Dispatch settings from the injected env, not the process environment\"): same legion.yaml fixture minus github_apps; `{ ...env, DISPATCH_URL: \"http://127.0.0.1:1\" }` rejects with the config.ts:699 message; `{ ...env, DISPATCH_URL, DISPATCH_TOKEN: \"t\" }` resolves"
+      ],
+      "expectedRed": "pane (unprefixed): 13 pass / 2 fail; plain shell: 14 pass / 1 fail (only the new test); tsc: 4 × TS2554 at the cmdCheckConfig call sites"
+    },
+    {
+      "id": 2,
+      "title": "Thread env; process.env only at the citty boundary",
+      "files": [
+        "packages/daemon/src/cli/index.ts:190-211 loadStartConfig",
+        "packages/daemon/src/cli/index.ts:213-235 cmdCheckConfig, cmdStart",
+        "packages/daemon/src/cli/index.ts:245-248 cmdRestart",
+        "packages/daemon/src/cli/index.ts:445-447 startCommand.run",
+        "packages/daemon/src/cli/index.ts:473-474 restartCommand.run"
+      ],
+      "expectedGreen": "15 pass / 0 fail / 32 expect() under all four env shapes; tsc silent; biome check exit 0"
+    },
+    {
+      "id": 3,
+      "title": "Retire the documented env -u workaround",
+      "files": [
+        "docs/solutions/legion/worker-pane-shell-gotchas.md"
+      ],
+      "steps": [
+        "title drops 'the pane's DISPATCH_URL in the daemon test suite'; remove tag bun-test and the check-config symptoms entry; related_issues unchanged",
+        "intro: 'Two things … Neither is part of any issue's scope …' (no history note — jj log is the changelog)",
+        "delete § 2 (lines 69-82); § 3 → § 2"
+      ],
+      "verify": "grep 'env -u' → none; grep -c '^## ' → 2"
+    },
+    {
+      "id": 4,
+      "title": "Gates, two commits (jj split with explicit paths), push legion/LEGION-13, PR with Dispatch: LEGION-13 and READY-format Verification body, implement.json",
+      "gates": [
+        "bunx biome check src/",
+        "bunx tsc --noEmit",
+        "bun test (UNPREFIXED — the whole point; the full daemon suite should now pass in the pane)"
+      ],
+      "commits": [
+        "fix(cli): legion start resolves its config from an injected env, not process.env — index.ts + index.test.ts",
+        "docs(solutions): retire the env -u workaround for the check-config test (LEGION-13) — worker-pane-shell-gotchas.md"
+      ],
+      "jjNotes": "bookmark set legion/LEGION-13 -r @- --allow-backwards after each split (bookmark lands on the empty working copy otherwise); never commit .omp/config.yml"
+    }
+  ],
+  "verificationForTester": {
+    "cwd": "$LEGION_WORKSPACE/packages/daemon at the PR head",
+    "acceptance1": [
+      "bun test src/cli/__tests__/index.test.ts   # unprefixed, inside a live Legion worker pane; record echo \"$DISPATCH_URL ${DISPATCH_TOKEN:-<unset>} $DISPATCH_TOKEN_FILE\" first",
+      "DISPATCH_URL=http://127.0.0.1:1 DISPATCH_TOKEN_FILE=/dev/null bun test src/cli/__tests__/index.test.ts"
+    ],
+    "acceptance2": [
+      "DISPATCH_URL=http://127.0.0.1:1 DISPATCH_TOKEN=t bun test src/cli/__tests__/index.test.ts",
+      "env -u DISPATCH_URL -u DISPATCH_TOKEN bun test src/cli/__tests__/index.test.ts"
+    ],
+    "expected": "each: exit 0, 15 pass, 0 fail",
+    "negativeControls": [
+      "main's index.ts + PR-head test file in a scratch copy, unprefixed in the pane → 13 pass / 2 fail",
+      "operator surface: `env -u DISPATCH_TOKEN DISPATCH_URL=http://127.0.0.1:1 bun src/cli/index.ts start acme99 --check-config --config <legion.yaml without dispatch_url>` → `error: dispatch_url is set but DISPATCH_TOKEN is not; the dispatch tools would not register`, exit 1; with DISPATCH_TOKEN=t → `Config OK: project=acme99`, exit 0. Positional project required; spell the flag --check-config (--checkConfig hung on the scratch copy)"
+    ]
+  },
+  "branchState": {
+    "base": "7db2cd83 (chore: release cli v1.1.2 [skip ci])",
+    "mainOrigin": "9514f63b (#948), 1 commit ahead; its 64-file diff touches none of index.ts, index.test.ts, config.ts, worker-pane-shell-gotchas.md",
+    "rebase": "not required; `jj rebase -d main@origin` conflict-free for this file set",
+    "workingCopy": "A .omp/config.yml (extension-provisioned, empty; never commit)"
+  },
+  "environmentNotes": [
+    "Planner ran `bun install --frozen-lockfile` at the workspace root (node_modules was absent; gitignored).",
+    "This pane's env: DISPATCH_URL=http://localhost:8766, DISPATCH_TOKEN unset, DISPATCH_TOKEN_FILE set — the exact bug shape; baseline `bun test src/cli/__tests__/index.test.ts` → 13 pass / 1 fail here.",
+    "Stacked `export LEGION_GRANT` lines in bash tool calls: only the first redeems; source /tmp/legion9-grant-trap.sh and end command bodies with `; grant_release` before jj git push / legion gh / legion handoff complete (worker-pane-shell-gotchas.md § 1).",
+    "After this lands, `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test` is no longer needed on the rig."
+  ],
+  "validationEvidence": {
+    "where": "/tmp/legion13-plan-check (throwaway copy of packages/daemon with symlinked node_modules and packages/contracts; not a jj workspace) and /tmp/legion13-plan-check/reference.diff (150 lines, 2 files: the exact Task 1 + Task 2 change)",
+    "results": [
+      "complete change: 15 pass / 0 fail under pane-unprefixed, URL+TOKEN_FILE=/dev/null, URL+TOKEN=t, and env -u all three",
+      "complete change: tsc clean; biome check packages/daemon/src/cli/ exit 0",
+      "new tests + old index.ts: pane 13/2 fail, plain shell 14/1 fail, tsc 4 × TS2554",
+      "complete change with `env,` reverted to `env: process.env` in loadStartConfig: 14 pass / 1 fail in BOTH plain shell and URL+TOKEN shape — only the new test fails, which is why it exists (the two pre-existing tests cannot see that regression in CI)",
+      "operator surface on the scratch copy: --check-config with URL and no token → dispatch error, exit 1; with token → Config OK: project=acme99, exit 0"
+    ]
+  },
+  "beyondSpec": [
+    "Third test `resolves Dispatch settings from the injected env, not the process environment` (regression lock on the injection contract; spec § Errors observed through cmdCheckConfig). Not in spec § Design; adds no behaviour.",
+    "docs/solutions/legion/worker-pane-shell-gotchas.md § 2 removal — the doc otherwise instructs workers to do what spec § Rejected forbids; adjacent cleanup the change causes, same PR.",
+    "cmdStart's resolveLegionPaths(process.env, …) → resolveLegionPaths(env, …) and cmdRestart taking env — the architect's 'exactly one convention in the file' applied inside cmdStart and to its one non-citty caller; behaviour identical since the boundary passes process.env."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-12T04:46:00.681Z"
+}
