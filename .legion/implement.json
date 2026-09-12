@@ -160,5 +160,52 @@
     },
     "spec": "dispatch://LEGION-21/spec version 5 (acceptance 1 and 4 tightened, acceptance 5 errors 4 added) - this round satisfies the tightened wording: contract regex gate, FakeRuntime lifecycle test, controllerAlive unknown throw, daemon_url tmux guard",
     "notForThisRound": "`.legion/` deletion is the reviewer-directed step of the next round, not this one (architect ruling)"
+  },
+  "rebaseRound": {
+    "round": 3,
+    "trigger": "LEGION-22 PR #967 merged to main at 5c5c3013 (squash of 6a1d3596) 18:01Z; architect-assigned rebase round with the spec v6 seam (index.ts worker-stream listener hostname + both listening log lines -> config.bind)",
+    "base": "e01661365b2b (chore: release pi-envoy v1.8.1 [skip ci]; main tip at rebase time, descendant of 5c5c3013 - main advanced past #967 by #971 and release commits, so the rebase targets main's tip)",
+    "codeHead": "20b7bc67b2e399503b9fa7e154e1103a82d47358",
+    "prHead": "the `implement: record rebase-round handoff` commit carrying this file, on top of 20b7bc67b2e3",
+    "rebase": {
+      "command": "jj rebase -s 'roots(7add4d03..@)' -d main@origin, then a second no-conflict rebase onto e0166136 after main moved by one release commit",
+      "conflicts": [
+        {
+          "file": "packages/daemon/src/daemon/api/routes/workers.ts",
+          "at": "cutover commit (ProcessManager drives processes through the injected Runtime)",
+          "resolution": "kept #967's resolveWorkerClaim lookup (const resolved = ctx.auth.resolveWorkerClaim(...); 403 unless token matches; const boot = resolved.boot) AND our captured-locator identity (const capturedLocator = { ...claim.locator } compared later with sameProcess); getWorkerBootToken is gone with #967"
+        },
+        {
+          "file": "packages/daemon/src/daemon/__tests__/index.test.ts",
+          "at": "config commit (runtime, daemon_url, and bind config)",
+          "resolution": "both sides were pure additions at the end of describe('startDaemon'): #967's daemonDeps helper + two worker-stream tests, then our kubernetes-refusal test"
+        }
+      ],
+      "autoMerged": "config.ts (their worker_stream_port/LEGION_WORKER_STREAM_PORT + our runtime/daemon_url/bind, both with their tests), index.ts (their listener start/stop + DaemonHandle.workerStreamPort + our runtime selection/contract gate/kubernetes throw/TmuxRuntime from state.project), api/auth.ts, daemon AGENTS.md (both Files-row sets, theirs after ours in table order), root AGENTS.md (their --connect command line), ci-fixtures.ts (their waitFor + our 3 config lines)",
+      "connectWorkerRpc": "signature (socketPath, timeoutMs?) unchanged for TmuxRuntimeDeps.connectWorkerRpc and probeWorker/probeWorkerSocket - no adaptation needed; worker-rpc.ts, worker-stream-listener.ts, cli/worker-shim.ts untouched"
+    },
+    "seam": {
+      "commit": "20b7bc67b2e3",
+      "change": "index.ts: startWorkerStreamListener({ hostname: config.bind, ... }) (was the literal \"127.0.0.1\"); both `listening on` log lines interpolate config.bind; the comment sentence deferring to LEGION-21/config.bind deleted. Nothing else in the listener changed.",
+      "test": "index.test.ts 'refuses to start when worker_stream_port is bound...' now occupies daemonConfig.bind and asserts `worker_stream_port <port> on ${daemonConfig.bind} is unavailable` (the listener's refusal names the hostname it bound); no test asserted the literal in the log lines, so no new test"
+    },
+    "migration": "LEGION-16 PR #961 checked at 18:0x UTC: still OPEN (head 70114855) -> migration stays migrateV23State / state version 24, NOT renumbered",
+    "verification": {
+      "biome": "packages/daemon/src packages/contracts/src packages/pi-envoy/src: Checked 173 files, No fixes applied",
+      "tsc": "daemon 0 (run from packages/daemon), contracts 0, pi-envoy 0",
+      "grepGate": "processes.ts: 0 matches for the eleven forbidden symbols, 0 for /locator\\.runtime|runtime ===/",
+      "daemonSuite": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 931 pass, 0 skip, 0 fail, 56 files (886 ours + 45 from #967)",
+      "contractsAndPiEnvoy": "bun test packages/contracts packages/pi-envoy/src/legion/daemon-api-version.test.ts -> 94 pass, 0 fail",
+      "tmuxServers": "answering servers before and after the live suite: default, legion-sjawhar16 (LEGION-16's rig, not ours), legion-sjawharlegion (dogfood); `tmux -L legion-omp list-windows` -> no server running",
+      "realBoot": {
+        "script": "/tmp/legion21-smoke/boot-check.sh (run under `secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 --`, every per-pane LEGION_* variable scrubbed)",
+        "checkConfig": "--check-config on the smoke rig's own /tmp/legion21-smoke/rig/legion.yaml (daemon_url: http://127.0.0.1:19370) -> `Config OK: project=sjawhar24`",
+        "whyNotTheFullRig": "up.sh hardcodes nats_name=legion-smoke-nats, which LEGION-16's live rig currently owns (mapped to 14223), and that rig's daemon holds 19371 (= our default worker_stream_port for 19370); reusing their NATS would share JetStream durable consumers with a sibling's live rig, recreating it would kill theirs. So: the rig's yaml with port 19380 / daemon_url http://127.0.0.1:19380 / scratch state_dir /tmp/legion21-smoke/bootcheck/state / own NATS container legion21-bootcheck-nats on 14224 with the ENVOY_NOTIFICATIONS stream",
+        "legionStart": "bun run packages/daemon/src/cli/index.ts start sjawhar/24 --config <scratch yaml> -> daemon.log lines 1-2: `legion daemon listening on 127.0.0.1:19380`, `legion worker stream listening on 127.0.0.1:19381`; ss: 127.0.0.1:19380 and 127.0.0.1:19381 LISTEN owned by the daemon's bun pid; GET /legion/v1/state -> {project sjawhar24, version 24, 0 trees, controllerLocator null}; state.json v24 on disk; `tmux -L legion-sjawhar24` -> no server running (a fresh-state boot spawns nothing); zero error/warn lines; SIGTERM -> clean exit; ports and container released",
+        "preexistingFindingOutsideScope": "legions-registry.ts withRegistryLock (line 90) opens `<XDG_STATE_HOME>/legion/legions.json.lock` with O_CREAT before writeRegistry's mkdir, so `legion start` with a fresh XDG_STATE_HOME crashes with ENOENT right AFTER both listening lines (observed on the first boot-check run; identical on main@origin, file untouched by this PR; up.sh:513 pre-creates xdg-state/legion so the rig never hits it). Fix is one line: mkdir(path.dirname(filePath), {recursive:true}) at the top of withRegistryLock. Not fixed here (outside this PR's file scope) - flagged to the architect in the handoff."
+      },
+      "ci": "pending at handoff-write time; the run links are appended in the follow-up handoff commit and in the PR body"
+    },
+    "notForThisRound": "`.legion/` deletion stays for the next, separate round (architect ruling); reviewer's local review.json commit (95d9b139, now rebased) rides along in this push as instructed"
   }
 }
