@@ -235,7 +235,7 @@ function parseHandoffData(raw: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function loadStartConfig(
+export function loadStartConfig(
   project: string | undefined,
   configPath: string | undefined,
   env: NodeJS.ProcessEnv,
@@ -243,10 +243,12 @@ function loadStartConfig(
 ): DaemonConfig {
   let configFile: LoadedConfigFile | undefined;
   if (configPath) {
+    // Relative `state_dir`/`instructions` values resolve against the config file's own directory
+    // (`loadConfigFromFile`'s `configDir`), never the cwd the daemon happened to start from.
     const absolutePath = fs.realpathSync(configPath);
     configFile = loadConfigFromFile(
       fs.readFileSync(absolutePath, "utf8"),
-      fs.realpathSync("."),
+      path.dirname(absolutePath),
       options
     );
   } else if (fs.existsSync("legion.yaml")) {
