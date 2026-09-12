@@ -240,6 +240,7 @@ function config(stateDir: string): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    slowCommandTimeoutSeconds: 300,
     workerStreamPort: 0,
     gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
