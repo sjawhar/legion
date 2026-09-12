@@ -192,10 +192,13 @@ Preserve this order exactly:
    before messaging the reviewer to approve;
 3. retro completes without dirtying the branch beyond `docs/solutions/`;
 4. the merger verifies the current head is the reviewer-approved head plus only the retro
-   commits and publishes `READY #<n> at <sha>` to `notifications.role.pr-queue`; it never
-   merges. The merge queue merges under its own authority and the repository's own rules
-   (branch protection, CODEOWNERS); whether a human must approve first is that repository's
-   setting, not Legion's, and you never ask for or wait on such an approval.
+   commits and publishes `READY #<n> at <sha>` to the project's controller topic (the merge
+   queue; named in its `Legion addressing` line); it never merges. The controller verifies the
+   gates against live GitHub and merges under the implement App's identity and the repository's
+   own rules (branch protection, CODEOWNERS); whether a human must approve first is that
+   repository's setting, not Legion's, and you never ask for or wait on such an approval. If the
+   controller reports a failed gate to you, treat it like `pr-blocked`: fix through the phases,
+   never bypass.
 
 If anything else changes the head, return to review; do not let the merger publish `READY`
 for an obsolete approval.
@@ -229,7 +232,7 @@ corresponding lifecycle procedure.
 | `pr-ready` | Verify the live PR head, green status, and review state. Continue the review/retro/merger order only for that current head. |
 | `pr-review` | Payload `{type:"pr-review", state, author, body}`. Delivered to whichever role is currently active for the issue, falling back to you when no worker phase is active. Follows the same verdict rule as a reviewer's `phase-complete`: `state: "changes_requested"` sends the implementer back in with the review findings, then tester, then reviewer — never the reviewer again and never retro; `state: "approved"` proceeds toward retro (step 5) once the step 6 integration/merge-gate conditions are met. |
 | `pr-blocked` | Read the failed CI evidence and recovery attempts. Assign a focused implementer or corrective child, then return it through testing and review; do not treat the blocked PR as final. |
-| `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The merge queue landed the PR. This is your cue for step 7: post the sign-off comment naming that merge commit and set the issue `done`. Nothing else follows a merge. |
+| `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The controller merged the PR. This is your cue for step 7: post the sign-off comment naming that merge commit and set the issue `done`. Nothing else follows a merge. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
 | `catchup-overseer` | Verify its gates, child counts, and PR verdicts against current artifacts, then resume the applicable numbered lifecycle step. It is a current-state snapshot, not a raw-event replay. For each entry in its `phaseCompletions` (`{issue, role, summary, at}`, phases that completed while you were not live), handle it exactly as a `phase-complete` wake. |

@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when handling Legion controller wakes for root-issue triage, backlog admission, architect escalation, resync healing, or human interaction.
+description: Use when handling Legion controller wakes for root-issue triage, backlog admission, architect escalation, resync healing, merge-queue READY handling, or human interaction.
 ---
 
 # Legion Controller
@@ -13,6 +13,13 @@ routes raw events into an architect.
 
 The Legion extension claims `legion-<project>-controller` and registers controller readiness
 with the daemon during session startup. Do not handle a wake unless that startup succeeded.
+
+The daemon runs the controller as an interactive OMP terminal session in its private tmux
+server (`tmux -L legion-<project> attach` reaches it; the pane runs plain `omp`, not
+`--mode rpc`, and no `legion worker-shim`). Sami may attach and type into this session at any
+time. `LEGION_STATE_DIR` is in its environment, so `legion gh -- <args>` works here through the
+same gh shim phase workers use: every `bash` call is wrapped with a short-lived controller grant,
+and that grant is the only one the daemon lets merge a pull request.
 
 For an interactive takeover, start OMP with `LEGION_CONTROLLER_SECRET` (or
 `LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it) and `LEGION_DAEMON_URL` in its
@@ -58,6 +65,8 @@ into a state holder: daemon state and the Dispatch project remain authoritative.
 | Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed) | Verify against fresh state, then heal |
 | `child-status` | child key + status transition | Not controller-actionable by default; if the daemon could not route it to the parent's architect role, verify the transition and forward it with `envoy_publish` |
 | Mention | Slack/GitHub PR @mention text | Answer, or route to the owning issue's architect role |
+| READY from a merger (`notifications.role.<controller token>`) | `READY #<n> at <sha> for <KEY> (<pr url>)` + gate facts | Run the Merge queue gates against live GitHub; merge, or report the failed gate to the tree's architect |
+| `pr.<n>.checks` settled on a PR with a pending READY | check rollup for the head | Re-run the Merge queue gates for that READY; merge, report, or keep waiting only if still pending |
 | Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion({ op: "set_status", issue: root, status: "todo" })`; otherwise no action — the event is not held or redelivered |
 | Direct user message | — | Always first |
 
@@ -126,3 +135,82 @@ human-facing information. Otherwise resolve the authoritative owning architect r
 route the verified context with `envoy_publish`. Do not route raw event traffic or invent a
 role token from a partial issue reference.
 
+## Merge queue
+
+The controller is the project's merge queue. A merger reports a pull request ready by
+publishing to the controller topic; the controller re-reads every gate from live GitHub and
+merges, or tells the tree's architect exactly which gate failed. The merger's report is a
+claim, never evidence.
+
+**READY message shape.** The first line is `READY #<n> at <sha> for <KEY> (<pr url>)`: the pull
+request number, the head sha the reviewer approved, the issue key, and the pull request URL. The
+rest of the message is the PR body's gate facts (CI run, resolved threads, thermo verdict, E2E,
+chain). The issue key is how you find the tree's architect (below); the sha is the only head you
+may merge.
+
+**Gates.** Read them from live GitHub, never from the message or the PR body alone:
+
+```text
+legion gh -- pr view <n> --json headRefOid,mergeable,reviewDecision,statusCheckRollup,body
+legion gh -- api graphql -f query='query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved}}}}}' -F owner=<owner> -F repo=<repo> -F n=<n>
+```
+
+1. `headRefOid` equals the `<sha>` in the READY. Any other head is a different pull request as
+   far as this READY is concerned.
+2. Every required check in `statusCheckRollup` is green. A check that is still running or
+   queued is pending, not green. A known red check never merges.
+3. Zero unresolved review threads (`isResolved: false` count is 0).
+4. `mergeable` is not `CONFLICTING` and not `UNKNOWN`.
+5. The PR body's `## Verification` block is complete at that head: its `CI`, `Threads`, and
+   `E2E` lines name this `<sha>`.
+
+When all five hold, merge: `legion gh -- pr merge <n> --squash`. The grant your `bash` call
+carries is the controller's own, the only grant the daemon honours for a merge; the merge runs
+under the implement App's identity and the repository's own rules (branch protection,
+CODEOWNERS). Whether a human must approve first is that repository's setting — you neither
+read nor bypass it, and you never admin-merge without an explicit deployment grant from Sami for
+that specific merge.
+
+**Failed gate.** Reply to the tree's architect naming the gate (`head`, `checks`, `threads`,
+`mergeable`, or `verification block`) and the evidence you read (the sha, the check name and
+run id, the thread count, the `mergeable` value). Do not merge, do not retry on a timer. The
+architect fixes through the phases.
+
+**Flake.** A required check that failed for a reason unrelated to the change (a runner outage,
+a rate limit, a known-flaky job) may be rerun once: `legion gh -- run rerun <run-id> --failed`.
+Then stop. The rerun's result reaches you as a `pr.<n>.checks` wake; re-run the gates then.
+A second failure is a failed gate, reported as above.
+
+**Conflicts and unknown mergeability.** `mergeable == CONFLICTING` is the only reason to ask
+for a rebase: reply to the tree's architect asking for one. Never request a rebase for any other
+reason — the CI queue is long and slow, and an unnecessary rebase clogs it for every other pull
+request. `mergeable == UNKNOWN` means GitHub has not finished computing it: do not merge, do
+not poll; re-read on the next `pr.<n>.checks` wake.
+
+**Pending READY.** A READY that cannot merge yet only because checks are still running, a flake
+rerun was issued, or `mergeable` is `UNKNOWN` is pending. Subscribe to that pull request's
+events so its settlement wakes you:
+
+```text
+envoy_subscribe({ topics: ["notifications.github.<owner>.<repo>.pr.<n>", "notifications.github.<owner>.<repo>.pr.<n>.checks"] })
+```
+
+On that wake, re-run the gates against the `<sha>` from the READY in your conversation, then
+`envoy_unsubscribe` those topics once you have merged or reported a failed gate. The controller
+never polls; READY and `pr.<n>.checks` are the only wakes. If you were resumed and no longer
+have the READY in your conversation, ask the merger's role topic for that issue
+(`notifications.role.legion-<project>-<KEY>-merger`) to republish it; never guess a sha.
+
+**Finding the tree's architect.** The READY names the issue key. `legion state --json` gives
+`issues[<KEY>].parent`; follow `parent` until it is absent — that key is the root — and reply
+to `notifications.role.legion-<project>-<root>-architect` (the `trees` map lists the same
+roots). Never hand-format a token from a partial reference.
+
+**After a successful merge, publish nothing to the architect.** The daemon derives
+`{type:"pr-merged", pr, mergeCommitSha}` from GitHub's own merged webhook and routes it to the
+tree's architect itself. A second copy from you would make the architect run its sign-off twice.
+
+**Policy questions go to Sami.** Whether a pull request should merge at all, whether an admin
+merge is warranted, or a gate that looks wrong for this repository is not a controller judgment:
+ask with `dispatch_ask` on the issue, in plain sentences, and leave the READY pending until the
+answer arrives.

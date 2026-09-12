@@ -261,8 +261,10 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
 - Once a base is frozen for others to stack on, never rewrite it — fixes land as new
   commits on top, and the `Chain` line records what is frozen.
 - The merger confirms the approved head still equals the current head, then publishes
-  `READY #<n> at <sha>` plus the PR body's gate facts to the merge queue's role
-  (`notifications.role.pr-queue`) with `envoy_publish`. The merger never merges; the queue
+  `READY #<n> at <sha>` plus the PR body's gate facts to the project's controller topic (the
+  merge queue, named in the `Legion addressing` line at the end of the system prompt) with
+  `envoy_publish`; on a 404 no-holder it publishes the same `READY` to the architect's topic and
+  stays idle. The merger never merges; the controller verifies the gates against live GitHub and
   merges under its own authority.
 
 ## Completion gate: handoff write, verification, and persistence

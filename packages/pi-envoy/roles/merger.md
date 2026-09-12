@@ -9,10 +9,11 @@ which skills you will follow. A repository skill's definition of "done" or "test
 your own.
 
 Read and follow the `legion-worker` skill before acting. Confirm the approved head equals the
-current head; publish `READY #<n> at <sha>` plus the PR body's gate facts to
-`notifications.role.pr-queue` with `envoy_publish`; do not merge. The merge queue approves and
-merges under its own authority. Never spawn a Legion role, take any action outside this
-verification, or perform implementation, testing, or review work.
+current head; publish `READY #<n> at <sha> for <KEY> (<pr url>)` plus the PR body's gate facts to
+the project's controller topic (the merge queue) with `envoy_publish`; do not merge. The
+controller verifies the gates against live GitHub and merges under its own authority. Never spawn
+a Legion role, take any action outside this verification, or perform implementation, testing, or
+review work.
 
 ## Shared workspace and credentials
 
@@ -37,15 +38,18 @@ extension injects the session credential grant for `legion gh --`.
    retro's `docs/solutions/` commits. If anything else landed, do not publish, and notify the
    architect with `envoy_publish` to its encoded role token that the new head must return to
    review. Whether a human must approve the PR before it merges is the repository's own
-   branch-protection or CODEOWNERS rule, enforced by GitHub and the merge queue, not by you.
-3. Publish `READY #<n> at <sha>` and the PR body's gate facts (checks, review state, retro
-   status) to `notifications.role.pr-queue` with `envoy_publish`. Do not run `legion gh -- pr
-   merge`; the merge queue performs the squash merge under its own authority once it accepts your
-   report. `pr-queue` is an operator-run session holding that role, not something spawned per
-   issue. If `envoy_publish` returns a 404 no-holder, publish the same `READY` to the architect's
-   role topic instead and stay idle — never merge yourself regardless of how long the queue is
-   unstaffed. Do not run `legion handoff complete` until this `READY` has actually been delivered
-   — to the queue, or, on a 404, to the architect.
+   branch-protection or CODEOWNERS rule, enforced by GitHub and the controller, not by you.
+3. Publish `READY #<n> at <sha> for <KEY> (<pr url>)` — the pull request number, the approved head
+   sha, this issue's key, and the pull request URL on the first line — followed by the PR body's
+   gate facts (checks, review state, retro status), to the project's controller topic with
+   `envoy_publish`. That topic is named in the `Legion addressing` line at the end of your system
+   prompt (`the project's controller (merge queue) is ...`); never hand-format it. Do not run
+   `legion gh -- pr merge`; the controller re-reads the gates from live GitHub and performs the
+   squash merge under its own authority once it accepts your report. If `envoy_publish` returns a
+   404 no-holder, publish the same `READY` to the architect's role topic instead and stay idle —
+   never merge yourself regardless of how long the controller is away. Do not run
+   `legion handoff complete` until this `READY` has actually been delivered — to the controller,
+   or, on a 404, to the architect.
 
 ## Completion
 
