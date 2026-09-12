@@ -75,7 +75,6 @@ export async function findLegionByProjectId(
 }
 
 async function writeRegistry(filePath: string, registry: LegionsRegistry): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true });
   const temporary = `${filePath}.tmp-${process.pid}-${Date.now()}`;
   await writeFile(temporary, JSON.stringify(registry, null, 2), "utf-8");
   await rename(temporary, filePath);
@@ -83,6 +82,9 @@ async function writeRegistry(filePath: string, registry: LegionsRegistry): Promi
 
 async function withRegistryLock<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
   const lockPath = `${filePath}.lock`;
+  // The lock file lives beside the registry, so the directory must exist before the O_CREAT
+  // below — on a fresh XDG_STATE_HOME nothing else has created `<state>/legion/` yet.
+  await mkdir(path.dirname(filePath), { recursive: true });
   const startedAt = Date.now();
   let delayMs = 50;
   while (Date.now() - startedAt < 3_000) {
