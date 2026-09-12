@@ -1,0 +1,150 @@
+{
+  "issue": "LEGION-30",
+  "round": 1,
+  "pr": {
+    "number": 973,
+    "url": "https://github.com/sjawhar/legion/pull/973",
+    "head_reviewed": "2fa5392651d29785e8ed1764ae00ef806b71fdf9",
+    "code_head": "95f0f339fec1403da4cd973ba60f6457d3e4a350",
+    "branch": "legion/LEGION-30",
+    "ci_at_head": "Tests 34720530047 (lint, typecheck, test, pr-title) + Legion Envoy and Contracts 34720530041, both success at 2fa53926; verified via check-runs API, not from a handoff",
+    "review": {
+      "id": 5188259912,
+      "url": "https://github.com/sjawhar/legion/pull/973#pullrequestreview-5188259912",
+      "event": "REQUEST_CHANGES",
+      "commit_id": "2fa5392651d29785e8ed1764ae00ef806b71fdf9",
+      "threads": 6
+    },
+    "pr_body_edits": "CI line -> runs at 2fa53926 (earlier heads listed); Threads line -> 0 resolved, 6 unresolved with thread ids, lines and one-line summaries; Thermo line -> two-lens verdict at 2fa53926 with the review URL"
+  },
+  "spec": "Dispatch primary document of LEGION-30, version 6",
+  "verdict": "REQUEST_CHANGES at 2fa53926: 1 Major (D1, config validation), 5 Minor fix-now (D2, F1, F3, F5, F6), 7 Minor/Note accepted. The retire path in processes.ts is correct; no runtime behaviour change is requested outside config.ts validation.",
+  "verified_clean": [
+    "retireIdleWorker predicate order (disposed -> client identity/idle -> claim/locator/readyConfirmedAt -> architect -> isTreeGone -> re-arm only on pendingAssignment or active uncompleted phase); no decline re-arms under a closing/closed tree or for an architect; bounded once-per-window poll, no spin",
+    "critical section: inside mutateClaim(token); retireWorkerLocator -> raw stopProcess, never stopProcessSerialized; every client.prompt() site (spawnWorker/launchOrQueue, workerReady, promoteQueuedWorker) is inside the same token's section, so the in-callback re-arm cannot interleave with a prompt",
+    "stop-induced socket close: onWorkerClientClosed reaction runs first, probes once, fails, markWorkerDead queues behind the retire section, markWorkerDeadLocked pane-id check returns; no launchFailures/promptFailures write on either path; no publish (test asserts connectAttempts 2, publications [])",
+    "createCancellableSleep.cancel() resolves the sleep; the idleRetireWaits entry-identity check neutralises superseded/disposed fires; a re-arm racing an in-flight expiry is re-judged live under the lock (worst case: an early but valid graceful retirement only if a whole prompted turn incl. phase/complete landed inside the lock-holder's persist await)",
+    "resumeSessionFile precedence mirrors markWorkerDeadLocked; dispose() sets disposed before cancelling; idleRetireWaits <= 1 entry and <= 1 live timer per token",
+    "root architect (api/routes/process.ts:47, role architect, no locator) and controller (no issue claim): expiry returns without re-arm; no behaviour change",
+    "config: 0 accepted from YAML and env; negative/non-integer rejected naming the key from both sources; positive-integer loops unchanged",
+    "fixtures: processes.test.ts config() -> 0 keeps every existing test's path; the four 600 fixtures have no reachable idle transition (fake clients with onIdle no-op, boot-probe tests, connectWorkerRpc throws, real timers + dispose())",
+    "documents: the four files' new wording is accurate against the code except the two wording items below (F3, F6); the struck claims (never tears / still alive and idle / use those live sessions) are gone",
+    "lens 2: follows rootRegistrationWaits/stopTimeout pattern; one map + three methods + composed onIdle; no cancel hook; no phases[issue] write-site re-arm; worker-admission.ts untouched; tests consumer-observable; no casts; no dead code or .legion leakage",
+    "local at this head: bunx biome check src/ clean; bunx tsc --noEmit clean; bun test 882 pass / 5 skip / 0 fail (56 files)",
+    "positive interaction noted: beginLinger clears phases and stops nothing until expireLinger, so a lingering tree's idle workers now retire after one window instead of sitting resident for lingerHours (per spec: neither closing nor closed)"
+  ],
+  "findings": {
+    "fix_now": [
+      {
+        "id": "D1",
+        "severity": "Major",
+        "lens": 1,
+        "thread": "PRRT_kwDORFy7ds6h0HLc",
+        "where": "config.ts:947 (+ readNonNegativeInteger 287-294, parseEnvNonNegativeInteger 297-304)",
+        "what": "worker_idle_retire_seconds > 2147483 (~24.8 days) overflows the 32-bit setTimeout delay; Bun clamps to 1 ms (reproduced: setTimeout(fn, 31536000*1000) fired after 6 ms on Bun 1.3.14), so a 'never' value retires every finished worker ~1 ms after idle. Reject seconds*1000 > 2147483647 in both parsers and the post-resolve guard, message naming the key and pointing at 0 as the disable value; one config.test.ts assertion per source."
+      },
+      {
+        "id": "D2",
+        "severity": "Minor",
+        "lens": 1,
+        "thread": "PRRT_kwDORFy7ds6h0HLe",
+        "where": "config.ts:298",
+        "what": "Number('  ') is 0 and Number('-0') is -0 (-0 < 0 false): whitespace-only or -0 env value silently disables the timer where the positive twin refuses to start. Trim for the unset check; reject a trimmed value not matching /^\\d+$/; assert both throw naming LEGION_WORKER_IDLE_RETIRE_SECONDS."
+      },
+      {
+        "id": "F1",
+        "severity": "Minor",
+        "lens": 2,
+        "thread": "PRRT_kwDORFy7ds6h0HLg",
+        "where": "processes.test.ts:160-164 (manualSleep docstring) / processes.ts:1521",
+        "what": "No committed test fires a superseded clock, so the entry-identity check at processes.ts:1521 (the only guard against a zero-window retirement under real timers, since cancel() resolves the superseded sleep) has no regression lock; the docstring claims otherwise. Add: idle -> running -> idle (two 600_000 waits), fire older -> no shutdown, one wait pending; fire newer -> one shutdown; plus dispose()-then-fire. (code-quality graded this Major; re-graded Minor because shipped behaviour is correct.)"
+      },
+      {
+        "id": "F3",
+        "severity": "Minor",
+        "lens": 2,
+        "thread": "PRRT_kwDORFy7ds6h0HLi",
+        "where": "processes.ts:1543-1545, config.ts:88-90, AGENTS.md:56",
+        "what": "'wakes arrive by a publish that is rejected with no live holder, never by the dead-worker recovery path' is inaccurate for daemon-routed wakes (onUndeliverable index.ts:324-334 and handleException processes.ts:1916-1929 send a sub-architect 404 to resumeWorker). Accurate reason: the root architect reaches its sub-architect by an OMP-side envoy_publish whose 404 returns to the caller and is never routed through the daemon. Reword all three sites."
+      },
+      {
+        "id": "F5",
+        "severity": "Minor",
+        "lens": 2,
+        "thread": "PRRT_kwDORFy7ds6h0HLk",
+        "where": "processes.ts:1565-1566, processes.test.ts:8827",
+        "what": "Tester-rig timings (8.7 min / 5.7 min) in a source comment; drop the parenthetical, 'Scenario:' in the test."
+      },
+      {
+        "id": "F6",
+        "severity": "Minor",
+        "lens": 2,
+        "thread": "PRRT_kwDORFy7ds6h0HLm",
+        "where": "packages/daemon/src/daemon/AGENTS.md:56",
+        "what": "Bullet omits the re-arm-on-decline behaviour added in the corrective round; add the clause (decline on active-phase/pendingAssignment re-arms inside the same critical section -> retired within one further window once the phase moves or the queued task drains; every other decline leaves it unarmed)."
+      }
+    ],
+    "accepted": [
+      {
+        "id": "F2",
+        "what": "third copy of the retire-locator/carry-session/persist tail (processes.ts:1596-1600 vs 772-776, 972-975)",
+        "why": "deliberate per plan ('reuse the exact markWorkerDeadLocked retirement shape') and the spec's no-new-abstraction budget; calling markWorkerDeadLocked would make its name lie for a healthy worker"
+      },
+      {
+        "id": "F4",
+        "what": "'never retires ... active phase' and '... pendingAssignment' tests are prefix-duplicates of the two re-arm tests",
+        "why": "each names one guard in its title so a failure localises it; cost is two fixture boots"
+      },
+      {
+        "id": "F7",
+        "what": "600_000 literal repeated across idle-retire tests",
+        "why": "cosmetic"
+      },
+      {
+        "id": "F8",
+        "what": "new doc comments wrap at ~104 columns vs 100",
+        "why": "Biome does not enforce comment width; visual only"
+      },
+      {
+        "id": "F9",
+        "what": "post-resolve non-negative guard covers only the cliOverrides path production never takes",
+        "why": "mirrors the existing lifecycleNumbers loop; keep for consistency"
+      },
+      {
+        "id": "N1",
+        "what": "a clock consumed while readyConfirmedAt is unset is not re-armed",
+        "why": "owned by the boot watchdog; workerReady's prompt or the next turn re-arms; same residency as before"
+      },
+      {
+        "id": "N2",
+        "what": "an expiry past the disposed check keeps stopping during dispose()",
+        "why": "same shape as retireUnconfirmedRoot/markWorkerDead; reconnectWorkers heals a half-written locator with no failure count"
+      },
+      {
+        "id": "N3",
+        "what": "log line 'idle for Ns' understates idle time after re-armed windows",
+        "why": "cosmetic"
+      }
+    ],
+    "adjacent_named_not_fixed": "The 32-bit setTimeout clamp (D1) is a pre-existing exposure for every other *_seconds key; none has disable semantics so a huge value is not a natural input there. Architect decides whether to fold a bound into the same validator change or leave it."
+  },
+  "thermo": {
+    "deep_review": "no Blocking/Major; 2 Minor (D1 as graded by the lens; D2) + 3 Notes -- I raised D1 to Major: an accepted config value inverts the feature at runtime",
+    "code_quality": "no Blocking; 1 Major (F1, re-graded Minor by me), 6 Minor (F2-F7), 2 Notes (F8-F9)"
+  },
+  "for_the_implementer": [
+    "One corrective push: D1 + D2 in config.ts (+ config.test.ts), F1 in processes.test.ts, F3 + F5 in processes.ts comments (+ config.ts DaemonConfig doc), F3 + F6 in packages/daemon/src/daemon/AGENTS.md. Dispose each thread individually in the PR body's Threads section naming the fixing commit.",
+    "Keep .legion/ on the branch until the next review is clean; the .legion/ deletion is a separate push at the reviewer's direction.",
+    "This review.json is committed locally on the shared issue workspace (the review App has no contents permission); it rides in your next push."
+  ],
+  "for_the_tester": [
+    "D1/D2 are the only behaviour changes: verify with legion --checkConfig (or the CLI's config check) negative controls -- YAML worker_idle_retire_seconds: 31536000 and env LEGION_WORKER_IDLE_RETIRE_SECONDS in {'31536000', '  ', '-0'} each refuse startup naming the key and pointing at 0; a boundary value 2147483 is accepted; 0 still accepted.",
+    "F1 is test-only; F3/F5/F6 are comments/docs -- reading suffices."
+  ],
+  "next_review": "Re-review the corrective head: verify the six threads' fixes, re-run both thermo lenses at that head, COMMENT if it still carries .legion/ (or REQUEST_CHANGES if anything stands); then, after the .legion/ deletion push, APPROVE that head by SHA (criteria 1-5 and 7; criterion 6 live half stays pending per spec).",
+  "cannot_push": "The reviewer session's credential grant carries no contents permission: `legion/LEGION-30` is advanced locally to the handoff commit but not pushed; the review artifacts are on GitHub (review 5188259912 and the PR body).",
+  "operational": "The live daemon (127.0.0.1:13370) was unreachable ~22:03:30-22:05:40Z (no listener, no `cli/index.ts start` process, then back with pid change) while this session was submitting the review; the bash tool returned 'Unable to connect' during that window and recovered with the daemon. Grants: LEGION-12 stacking workaround from .legion/messages/20260912191117-f0d8c84c-plan-to-implement.json plus newest-first pick worked for every legion gh call.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T22:08:06.777Z"
+}
