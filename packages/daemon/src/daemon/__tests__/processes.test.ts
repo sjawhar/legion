@@ -217,10 +217,21 @@ function liveRun(command: string[]): Promise<{ stdout: string; exitCode: number 
     return Promise.resolve({ stdout: "sjawhar-legion-42\n", exitCode: 0 });
   }
   if (command[0] === "tmux" && command[3] === "list-panes") {
-    return Promise.resolve({ stdout: "12345\n", exitCode: 0 });
+    return Promise.resolve(livePanes(command));
   }
   if (command[0] === "kill") return Promise.resolve({ stdout: "", exitCode: 0 });
   return Promise.resolve({ stdout: "", exitCode: 0 });
+}
+
+/** Answers a `list-panes` liveness probe for a pane that is alive. `panePid`'s
+ * `-F "#{pane_id} #{pane_pid}"` probe gets one `<pane_id> <pid>` row for the probed target — the
+ * pane itself, or `%1` standing in for a window's first pane; any other `list-panes` format gets
+ * a bare `<pid>` line, which `firstPaneId` rejects as a pane id (`/^%\d+$/`) and `windowAlive`
+ * reads only as exit 0. */
+function livePanes(command: string[], pid = 12345): { stdout: string; exitCode: number } {
+  if (!command.includes("#{pane_id} #{pane_pid}")) return { stdout: `${pid}\n`, exitCode: 0 };
+  const target = command[command.indexOf("-t") + 1];
+  return { stdout: `${target.startsWith("%") ? target : "%1"} ${pid}\n`, exitCode: 0 };
 }
 
 function manager(
@@ -255,13 +266,12 @@ function manager(
       if (
         command[0] === "tmux" &&
         command[3] === "list-panes" &&
-        (command.includes("#{pane_id}") || command.includes("#{pane_pid}"))
+        (command.includes("#{pane_id}") || command.includes("#{pane_id} #{pane_pid}"))
       ) {
         if (!launchedAnyWindow) return { stdout: "", exitCode: 1 };
-        return {
-          stdout: command.includes("#{pane_id}") ? "%1\n" : "12345\n",
-          exitCode: 0,
-        };
+        return command.includes("#{pane_id}")
+          ? { stdout: "%1\n", exitCode: 0 }
+          : livePanes(command);
       }
       if (command[0] === "tmux" && command[3] === "split-window") {
         launchedAnyWindow = true;
@@ -1160,9 +1170,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "12345\n", exitCode: 0 };
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -1383,7 +1393,7 @@ describe("ProcessManager", () => {
         if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") return { stdout: "@314 %7 12345\n", exitCode: 0 };
         if (command[3] === "list-panes" && command.includes("%7")) {
-          return { stdout: "12345\n", exitCode: 0 };
+          return { stdout: "%7 12345\n", exitCode: 0 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         return { stdout: "sjawhar-legion-42\n", exitCode: 0 };
@@ -1409,7 +1419,7 @@ describe("ProcessManager", () => {
       "-t",
       "%7",
       "-F",
-      "#{pane_pid}",
+      "#{pane_id} #{pane_pid}",
     ]);
   });
 
@@ -2159,8 +2169,8 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes" && command.includes("#{pane_id}")) {
           return windows > 0 ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[3] === "list-panes" && command.includes("#{pane_pid}")) {
-          return windows > 0 ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        if (command[3] === "list-panes" && command.includes("#{pane_id} #{pane_pid}")) {
+          return windows > 0 ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2399,9 +2409,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2468,9 +2478,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2544,9 +2554,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2591,9 +2601,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2639,9 +2649,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "can't find pane: %0", exitCode: 1 };
@@ -2676,9 +2686,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2737,9 +2747,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2785,9 +2795,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2810,7 +2820,7 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
           return { stdout: "", exitCode: 1 };
         }
@@ -2838,9 +2848,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "lost server", exitCode: 1 };
@@ -2883,7 +2893,7 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
           return { stdout: "", exitCode: 1 };
         }
@@ -3681,9 +3691,7 @@ describe("ProcessManager", () => {
           };
         }
         if (command[3] === "list-panes") {
-          return controllerSpawned
-            ? { stdout: "12345\n", exitCode: 0 }
-            : { stdout: "", exitCode: 1 };
+          return controllerSpawned ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
@@ -3729,7 +3737,7 @@ describe("ProcessManager", () => {
           return { stdout: controllerLive ? "controller\n" : "", exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return controllerLive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return controllerLive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
@@ -3771,7 +3779,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
         if (command[3] === "new-window") return { stdout: "@43 %2 54321\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
       },
@@ -3828,7 +3836,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
         if (command[3] === "new-window") return { stdout: "@44 %3 65432\n", exitCode: 0 };
         if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
@@ -3886,7 +3894,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
         if (command[3] === "new-window") return { stdout: "@45 %4 76543\n", exitCode: 0 };
         if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
@@ -3932,7 +3940,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
         if (command[3] === "new-window") {
           windowCount += 1;
           return { stdout: `@5${windowCount} %${windowCount} 8765${windowCount}\n`, exitCode: 0 };
@@ -3995,7 +4003,7 @@ describe("ProcessManager", () => {
       run: async (command) => {
         commands.push(command);
         if (command[3] === "list-panes") {
-          return panesAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return panesAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[3] === "new-window") {
           windowCount += 1;
@@ -4064,7 +4072,7 @@ describe("ProcessManager", () => {
               sessionId: "ses-controller",
             };
           }
-          return { stdout: "12345\n", exitCode: 0 };
+          return livePanes(command);
         }
         if (command[3] === "new-window") return { stdout: "@70 %9 111111\n", exitCode: 0 };
         if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
@@ -4111,7 +4119,7 @@ describe("ProcessManager", () => {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
@@ -4180,7 +4188,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -4238,7 +4246,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           // A real kill-pane actually kills the pane -- the resurrect that follows must see it
@@ -4310,7 +4318,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -4371,7 +4379,7 @@ describe("ProcessManager", () => {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
@@ -4431,7 +4439,7 @@ describe("ProcessManager", () => {
           // Blocks the deadline's own post-expiry probe exactly once, so a `/process/ready`
           // landing in the middle of it can be observed by the re-check that follows.
           if (listPanesCalls === 1) await probeGate.promise;
-          return { stdout: "12345\n", exitCode: 0 };
+          return livePanes(command);
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -4574,7 +4582,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -4658,7 +4666,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -4723,7 +4731,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -4792,7 +4800,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -4951,9 +4959,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return killPaneSucceeded
-            ? { stdout: "", exitCode: 1 }
-            : { stdout: "12345\n", exitCode: 0 };
+          return killPaneSucceeded ? { stdout: "", exitCode: 1 } : livePanes(command);
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           if (killPaneShouldFail) {
@@ -5029,7 +5035,7 @@ describe("ProcessManager", () => {
       run: async (command) => {
         commands.push(command);
         if (command[3] === "list-panes") {
-          return paneAlive ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[3] === "new-window") {
           windowCount += 1;
@@ -5130,7 +5136,7 @@ describe("ProcessManager", () => {
           windowCount += 1;
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
-        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
@@ -5176,7 +5182,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[3] === "list-panes") return { stdout: "12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "tmux: unable to kill pane", exitCode: 1 };
         }
@@ -5217,9 +5223,7 @@ describe("ProcessManager", () => {
           };
         }
         if (command[3] === "list-panes") {
-          return controllerSpawned
-            ? { stdout: "12345\n", exitCode: 0 }
-            : { stdout: "", exitCode: 1 };
+          return controllerSpawned ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
@@ -5310,8 +5314,8 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes" && command.includes("#{pane_id}")) {
           return launched ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
         }
-        if (command[3] === "list-panes" && command.includes("#{pane_pid}")) {
-          return launched ? { stdout: "12345\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+        if (command[3] === "list-panes" && command.includes("#{pane_id} #{pane_pid}")) {
+          return launched ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -5881,9 +5885,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -6625,10 +6629,10 @@ describe("ProcessManager", () => {
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
           command.includes("%7") &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
           // The old pane's OMP child is still running despite the dead socket.
-          return { stdout: "22222\n", exitCode: 0 };
+          return { stdout: "%7 22222\n", exitCode: 0 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -8758,9 +8762,9 @@ describe("ProcessManager", () => {
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
           command.includes("%7") &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "22222\n", exitCode: 0 };
+          return { stdout: "%7 22222\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -9777,9 +9781,9 @@ describe("ProcessManager", () => {
         if (
           command[0] === "tmux" &&
           command[3] === "list-panes" &&
-          command.includes("#{pane_pid}")
+          command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "4242\n", exitCode: 0 };
+          return livePanes(command, 4242);
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
@@ -9836,7 +9840,7 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "list-panes" && command[5] === "%1") {
-          return { stdout: "12345\n", exitCode: 0 };
+          return { stdout: "%1 12345\n", exitCode: 0 };
         }
         if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@50 %2 12345\n", exitCode: 0 };
