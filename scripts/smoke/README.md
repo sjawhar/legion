@@ -132,13 +132,38 @@ bash scripts/smoke/checkpoints.sh arm-revival
 
 Then post the comment and run checkpoint 10. The command captures the daemon-log offset at the trigger boundary, so older same-run events cannot satisfy the assertion.
 
+### The design gate between checkpoints 3 and 4
+
+`up.sh` writes the rig's design-gate policy into `legion.yaml` from `SMOKE_DESIGN_GATE` and records
+it at `${SMOKE_DIR}/design-gate`; checkpoints 3 and 4 read that record and assert the matching
+path. `off` is the default: a smoke exercise runs unattended, the root architect is told in its
+system prompt that the gate is off and adds no approval step, and checkpoint 3 proves exactly that
+— the root's primary `spec.md` is posted, no gate is registered for the root, no approval request
+is open on the document, and a child issue exists. No `Approve` question is opened in either mode
+and there is no operator command for the gate.
+
+`SMOKE_DESIGN_GATE=root-issues` arms the gate for the human-approval exercise. Checkpoint 3 then
+proves the architect asked for approval: the daemon's gate names the root's primary `spec.md`
+document at its current version, and Dispatch shows that document with an open approval request
+(`approval.state` is `awaiting`). Then a human approves the document — the `Approve` control in the
+document's header on the Dispatch dashboard, or the approval question in the Inbox answered
+`Approve`. Checkpoint 4 proves the daemon recorded that approval (`approvedVersion` equals
+`latestVersion` on the gate) and a child was released. This is the human-controlled design gate.
+
+Document approval needs a Dispatch server that includes the server half of document reviews
+(the `approval` field on every artifact read). Run the `root-issues` exercise against a scratch
+Dispatch server built from this checkout — `packages/dispatch/e2e/run-server.sh` is the template;
+point it at the rig's NATS instead of disabling NATS so the outbox reaches the daemon. The shared
+devbox server may lag behind `main` and then never reports `approval`; checkpoint 3 fails naming
+the missing approval request rather than passing on a gate that can never be satisfied.
+
 
 | Checkpoint | Extra input when needed | Assertion |
 | --- | --- | --- |
 | 1 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue has progressed past `triage`; daemon state records a controller window/pane locator for a live tmux window. |
 | 2 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue is `in_progress`, is admitted, and has a recorded architect window/pane locator for a live tmux window. |
-| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact, its registered design-gate ask is daemon-approved (`designApproved: "gate-off"`; the rig runs with `gates.design: off`) and `resolved` on Dispatch, and a Dispatch child issue exists. |
-| 4 | `SMOKE_ROOT_ISSUE` optional | A child in a released lifecycle status is tracked in active admission or an active/queued tree. |
+| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact and a Dispatch child issue. Under the recorded `design-gate` `off` (default): no gate is registered for the root and no approval request is open on the spec. Under `root-issues`: the daemon's registered gate names that document at its current version and Dispatch shows an open approval request on it (`approval.state == "awaiting"`). |
+| 4 | `SMOKE_ROOT_ISSUE` optional | A child in a released lifecycle status is tracked in active admission or an active/queued tree; under `root-issues`, the daemon has also recorded the human's approval on the gate (`approvedVersion == latestVersion`). |
 | 5 | `SMOKE_PR` optional | A Legion branch has implementation identity and `Legion-Session:` commit attribution. |
 | 6 | `SMOKE_ARCHITECT_WINDOW`, `SMOKE_VERDICT_FRAGMENT`, `SMOKE_RAW_CHECK_FRAGMENT` | One architect verdict appears in the pane; raw check noise is absent. |
 | 7 | `SMOKE_BRANCH_PROTECTION=1`, `SMOKE_PR`, `SMOKE_RETRO_COMMIT`, `SMOKE_REVIEWER_LOGIN` | Reviewer `.legion` deletion precedes its approval; retro is durable; final PR diff has no `.legion` path; records the pre-merge base for checkpoint 8. |
