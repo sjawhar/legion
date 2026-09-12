@@ -709,7 +709,7 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     await expect(bobCard).toContainText("Answered by alice");
     await expect(bobCard).toContainText("Because it is precise.");
     const timestamps = bobCard.locator("time");
-    await expect(timestamps).toHaveCount(2);
+    await expect(timestamps).toHaveCount(3);
     for (const timestamp of await timestamps.all()) {
       await expect(timestamp).toHaveAttribute("datetime", /.+/);
     }

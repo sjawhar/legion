@@ -317,7 +317,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	ask.EditedAt = askTimestamp(editedAt)
+	ask.EditedAt = timestampPtr(&editedAt)
 	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -339,9 +339,24 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ask)
 }
 
-func askTimestamp(value time.Time) *string {
-	text := value.UTC().Format(time.RFC3339Nano)
+func timestampPtr(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	text := timestampValue(*value)
 	return &text
+}
+
+func timestampValue(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func askTimestamp(value time.Time) *string {
+	return timestampPtr(&value)
+}
+
+func askTimestampPtr(value *time.Time) *string {
+	return timestampPtr(value)
 }
 
 type askTransition struct {
@@ -632,7 +647,7 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 		if err := json.Unmarshal(editedBy, &edit.EditedBy); err != nil {
 			return nil, fmt.Errorf("decode ask edit editor: %w", err)
 		}
-		edit.At = *askTimestamp(at)
+		edit.At = timestampValue(at)
 		edits = append(edits, edit)
 	}
 	if err := rows.Err(); err != nil {
@@ -846,15 +861,8 @@ func scanAsk(row pgx.Row) (model.Ask, error) {
 		}
 		ask.Resolution = &value
 	}
-	ask.EditedAt = askTimestampPtr(editedAt)
+	ask.EditedAt = timestampPtr(editedAt)
 	return ask, nil
-}
-
-func askTimestampPtr(value *time.Time) *string {
-	if value == nil {
-		return nil
-	}
-	return askTimestamp(*value)
 }
 
 func selectedOptions(options []model.AskOption, selected []string) bool {

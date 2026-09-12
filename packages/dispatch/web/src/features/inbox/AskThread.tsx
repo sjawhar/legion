@@ -24,10 +24,6 @@ import { Timestamp } from "../refs/Timestamp";
 const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
   api.createComment(issueKey, input);
 
-function replyAuthorLabel(comment: Comment): string {
-  return actorLabel(comment.author);
-}
-
 function resolvedInfo(ask: Ask): AskResolution | null {
   if (ask.state !== "resolved") return null;
   if (ask.resolution === undefined) throw new Error("resolved ask is missing its resolution");
@@ -149,7 +145,7 @@ export function AskThread({
                 <MarkdownBody markdown={comment.body} />
               </div>
               <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
-                {replyAuthorLabel(comment)} · <Timestamp at={comment.created_at} />
+                {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
               </p>
             </li>
           ))}

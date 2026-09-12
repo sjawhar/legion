@@ -33,13 +33,7 @@ function isText(content: ArtifactVersionContent | undefined): content is Artifac
 // A blob (image/file) has no markdown to diff, so its "compare" is size and checksum, not a
 // text diff — this is what a document's From/To compare falls back to when either side lacks
 // text content.
-export function BlobVersionComparison({
-  after,
-  before,
-}: {
-  after: Version;
-  before: Version;
-}): ReactNode {
+function BlobVersionComparison({ after, before }: { after: Version; before: Version }): ReactNode {
   const identical = before.size === after.size && before.sha256 === after.sha256;
 
   return (
