@@ -98,7 +98,96 @@
     "base": "main",
     "branch": "legion/LEGION-29"
   },
+  "round2": {
+    "review": {
+      "id": 5187041653,
+      "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187041653",
+      "verdict": "CHANGES_REQUESTED",
+      "reviewedHead": "b2381958a39b1ad9b977d7938b3ab28d98471eb1",
+      "handoff": ".legion/review.json at 7d960e30 (kept as committed)"
+    },
+    "commits": [
+      {
+        "change": "lmwuxmxw",
+        "commit": "028cf958c480",
+        "title": "fix(pi-envoy): the regain hook runs detached from the heartbeat chain"
+      },
+      {
+        "change": "quurmqtw",
+        "commit": "7972a372ae0f",
+        "title": "fix(pi-envoy): only an identity-bearing Legion instance registers the regain hook"
+      }
+    ],
+    "threads": [
+      {
+        "id": 3996761324,
+        "blocking": true,
+        "file": "packages/pi-envoy/extensions/legion.ts",
+        "disposition": "fixed",
+        "commit": "7972a372ae0f",
+        "how": "onEnvoyRoleRegained is called only from claimController (after controllerReady succeeds, closure captures token/secret/sessionID; controllerRoleToken deleted) and bootstrapRoot (after the boot's process/ready succeeds; reads capability.secret live). The setup-time registration is gone, so a task subagent's re-bound instance never touches the bridge slot. envoy.ts:90 premise corrected. Regression test: 'a controller's regain hook survives a task subagent's in-process extension re-bind' — second legionExtension(createPi().pi) + subagent-transcript session_start between claim and loss; failed before (controller/ready count 1, 5 s timeout), passes after."
+      },
+      {
+        "id": 3996761326,
+        "blocking": true,
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "disposition": "fixed",
+        "commit": "028cf958c480",
+        "how": "reassertRole fires the hook as `void Promise.resolve().then(() => regained(role, reason)).catch(logger.warn 'envoy: role regain hook failed')` — detached from the heartbeat chain, sync throws covered, never rejects unhandled. Regression test: 'a regain hook that never settles does not block the next heartbeat tick's registration' — hook awaits an unresolved Promise.withResolvers; next tick still POSTs /v1/interests/subscribe; failed before (third registration never lands), passes after."
+      },
+      {
+        "id": 3996761327,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "disposition": "fixed",
+        "commit": "028cf958c480",
+        "how": "New `registrationFailed` flag set only when registerSession()/establishSession() rejects, reset on success; afterOutage reads it instead of heartbeatOutageNotified. Test: 'a failed role read does not make the next healthy heartbeat report a regain' (GET /v1/roles returns an unparseable body → warn once; next healthy tick fires no hook); failed before ('reregistered' fired), passes after."
+      },
+      {
+        "id": 3996761329,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "disposition": "fixed",
+        "commit": "028cf958c480",
+        "how": "`const id = sessionID` captured at entry beside `topic`; used for the holder comparison, the soft claim, the hand-back unsubscribe and logs; the post-claim guard is `claimedRoleTopic !== topic || sessionID !== id`. No test: the race needs a session rebind between getRole and setRole, which Legion sessions never do; guard-only change."
+      },
+      {
+        "id": 3996761332,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/legion.ts",
+        "disposition": "fixed",
+        "commit": "7972a372ae0f",
+        "how": "Both kinds go through rerunReadyAfterRegain → callReadyWithRetry (bounded 5xx/network retries; definitive 4xx propagates to the catch). Catch message now states the consequence: held daemon work stays undelivered until the next regain or boot."
+      },
+      {
+        "id": 3996761334,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "disposition": "fixed",
+        "commit": "028cf958c480",
+        "how": "Dropped the 'until now … a human re-ran envoy_role_set' clause from the reassertRole docblock."
+      },
+      {
+        "id": 3996761338,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/legion.test.ts",
+        "disposition": "fixed",
+        "commit": "7972a372ae0f",
+        "how": "Comment now reads: 'The listener no longer names this session: the next tick soft-claims and re-runs controller/ready.'"
+      }
+    ],
+    "declined": [],
+    "docs": "packages/pi-envoy/AGENTS.md bullet updated (7972a372ae0f): hook detached from the heartbeat chain, bounded retries, listener registered only from claimController/bootstrapRoot.",
+    "gates": {
+      "command": "cd packages/pi-envoy && bunx biome check extensions/ src/ && bunx tsc --noEmit && bun test",
+      "biome": "Checked 19 files. No fixes applied. exit 0",
+      "tsc": "exit 0",
+      "bunTest": "147 pass, 0 fail, 459 expect() calls across 6 files"
+    },
+    "testerNotes": "Behavioural re-test at the new head per docs/plans/2026-09-12-heartbeat-role-reassertion.md Part C. Additional grep for round 2: the controller pane still logs `[legion] re-ran controller/ready after role legion-<project>-controller was <reason>` after it has run at least one `task` subagent (the regression this round fixes); a hook failure now logs `envoy: role regain hook failed` from envoy.ts (logger.warn) and `[legion] controller/ready|process/ready after role <t> was <reason> failed; the daemon's held work stays undelivered until the next regain or boot` from legion.ts.",
+    "reviewerNotes": "Fix touches exactly the two hook sites plus the bridge comments and the heartbeat's flag bookkeeping; per review.json thermo.rerunNext a targeted re-read of 028cf958 and 7972a372 should suffice."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T13:48:36.430Z"
+  "completed": "2026-09-12T16:14:36.071Z"
 }
