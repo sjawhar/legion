@@ -76,12 +76,17 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
         generation: 1,
         launchFailures: 0,
         readyConfirmedAt: 1700000000000,
-        locator: { tmuxSession: "legion-acme", tmuxWindowId: "@1", tmuxPaneId: "%1" },
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-acme",
+          tmuxWindowId: "@1",
+          tmuxPaneId: "%1",
+        },
       },
     },
     admission: { cap: 2, active: ["WIDGETS-1"], queue: [] },
     gates: { "WIDGETS-1": { designAskId: "ask-1", designApproved: "ask-1" } },
-    controllerLocator: { tmuxSession: "legion-acme", tmuxWindowId: "@0" },
+    controllerLocator: { runtime: "tmux", tmuxSession: "legion-acme", tmuxWindowId: "@0" },
     roles: {
       "legion:acme:controller": { role: "controller", sessionId: "ses_controller" },
       "legion:acme:WIDGETS-1:implementer": {
@@ -91,7 +96,12 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
         sessionId: "ses_implementer",
         readyConfirmedAt: 1700000000000,
         launchFailures: 0,
-        locator: { tmuxSession: "legion-acme", tmuxWindowId: "@2", tmuxPaneId: "%2" },
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-acme",
+          tmuxWindowId: "@2",
+          tmuxPaneId: "%2",
+        },
       },
     },
     controllerPendingNotices: 0,
@@ -99,6 +109,26 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
   };
 
   expect(LegionDaemonApi.State.response.safeParse(redacted).success).toBeTrue();
+  expect(
+    LegionDaemonApi.State.response.safeParse({
+      ...redacted,
+      controllerLocator: undefined,
+      trees: {
+        ...redacted.trees,
+        "WIDGETS-1": {
+          ...redacted.trees["WIDGETS-1"],
+          locator: {
+            runtime: "kubernetes",
+            namespace: "legion",
+            podName: "legion-widgets-1-architect-g1",
+            podUid: "uid-1",
+            pvcName: "legion-widgets-1",
+            ompSessionFile: "/legion/sessions/architect/session.jsonl",
+          },
+        },
+      },
+    }).success
+  ).toBeTrue();
 
   for (const leak of [
     { ...redacted, controllerCapabilityHash: "deadbeef" },
@@ -116,6 +146,16 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
         "WIDGETS-1": {
           ...redacted.trees["WIDGETS-1"],
           locator: { ...redacted.trees["WIDGETS-1"].locator, socketPath: "/tmp/x.sock" },
+        },
+      },
+    },
+    {
+      ...redacted,
+      trees: {
+        ...redacted.trees,
+        "WIDGETS-1": {
+          ...redacted.trees["WIDGETS-1"],
+          locator: { tmuxSession: "legion-acme", tmuxWindowId: "@1", tmuxPaneId: "%1" },
         },
       },
     },

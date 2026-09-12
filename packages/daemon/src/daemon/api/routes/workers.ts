@@ -8,6 +8,7 @@ import {
 } from "@legion/contracts";
 import { writeStatus } from "../../dispatch-client";
 import type { IssueStatus, LegionState, WorkerRoleClaim } from "../../legion-state";
+import { sameProcess } from "../../runtime";
 import { equalSecretHash, secretHash, spawnCapabilityKey } from "../auth";
 import { type RouteContext, rootForIssue, treeContains } from "../context";
 import { appRoleForLegionRole } from "../github";
@@ -131,9 +132,9 @@ export async function handleWorkerStarted(
   }
   // Captured now, re-checked against the current claim after the slow lease await below: the
   // boot watchdog (or a reconnect probe) races this exact confirmation and may retire this
-  // generation's pane while the GitHub request is in flight.
+  // generation's process while the GitHub request is in flight.
   const capturedGeneration = claim.generation;
-  const capturedPaneId = claim.locator.tmuxPaneId;
+  const capturedLocator = { ...claim.locator };
   const resolved = ctx.auth.resolveWorkerClaim(ctx.deps.state, bootToken);
   if (!resolved || resolved.token !== token || (resolved.boot && resolved.boot.tree !== tree)) {
     throw new HttpError(403, "Invalid worker boot token");
@@ -186,7 +187,7 @@ export async function handleWorkerStarted(
       !("issue" in current) ||
       !current.locator ||
       current.generation !== capturedGeneration ||
-      current.locator.tmuxPaneId !== capturedPaneId
+      !sameProcess(current.locator, capturedLocator)
     ) {
       throw new HttpError(409, "Stale worker generation");
     }
@@ -273,8 +274,8 @@ export async function handleWorkerReady(
   // bootstrap cannot answer a negotiate_protocol request until this response returns, so the
   // shim connect and the pending-prompt delivery it enables must happen after we respond, not
   // before. A connect/prompt failure leaves pendingAssignment queued exactly as it is today —
-  // workerClient never caches a failed connect, so the next touch (a probe, a resume, another
-  // spawnWorker) retries it.
+  // `ProcessManager.clientFor` never caches a failed connect, so the next touch (a probe, a
+  // resume, another spawnWorker) retries it.
   Promise.resolve(ctx.deps.processManager.workerReady(issue, role, sessionId, generation)).catch(
     (error) => {
       console.error(

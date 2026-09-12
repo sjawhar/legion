@@ -19,7 +19,11 @@ import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
 import { GATE_OFF_APPROVAL, satisfyGateOff } from "./api/routes/issues";
-import { verifyLegionPluginLoaded, verifyOmpAgentsCapability } from "./boot-probes";
+import {
+  verifyLegionPluginContract,
+  verifyLegionPluginLoaded,
+  verifyOmpAgentsCapability,
+} from "./boot-probes";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
@@ -39,8 +43,14 @@ import { buildRoleEnv, TokenManager } from "./github-apps";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock";
 import { loadState, saveState } from "./legion-state";
 import { createNatsTransport, type NatsTransport } from "./nats-transport";
-import { daemonCredentialHelper, ProcessManager, type ProcessManagerDeps } from "./processes";
+import {
+  daemonCredentialHelper,
+  locatorsForIssue,
+  ProcessManager,
+  type ProcessManagerDeps,
+} from "./processes";
 import { runResync } from "./resync";
+import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
 import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
 import { connectWorkerRpc } from "./worker-rpc";
 import { startWorkerStreamListener, type WorkerStreamListener } from "./worker-stream-listener";
@@ -54,7 +64,7 @@ interface DaemonDependencies {
   acquireInstanceLock(stateDir: string): Promise<InstanceLock>;
   runner: CommandRunner;
   statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
-  readProcessCmdline?: ProcessManagerDeps["readProcessCmdline"];
+  readProcessCmdline?: TmuxRuntimeDeps["readProcessCmdline"];
   readPluginManifest(manifestPath: string): Promise<string>;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   dispatchClient: DispatchClient;
@@ -68,7 +78,7 @@ interface DaemonDependencies {
   setInterval(callback: () => void, delayMs: number): unknown;
   clearInterval(timer: unknown): void;
   onSignal(signal: NodeJS.Signals, listener: () => void): void;
-  connectWorkerRpc: ProcessManagerDeps["connectWorkerRpc"];
+  connectWorkerRpc: TmuxRuntimeDeps["connectWorkerRpc"];
   sleep?: ProcessManagerDeps["sleep"];
   exit(code: number): void;
   now(): number;
@@ -176,6 +186,11 @@ export async function startDaemon(
   config: DaemonConfig,
   options: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
+  // Refused before the instance lock or anything else is acquired. LEGION-24 replaces this with
+  // runtime selection; until then only the tmux runtime exists.
+  if (config.runtime === "kubernetes") {
+    throw new Error("runtime: kubernetes is not implemented yet");
+  }
   const owner = repoOwner(config.repo);
   const deps = { ...defaultDependencies(config, options.deps), ...options.deps };
   // At most one daemon runs per project: two sharing a durable JetStream
@@ -216,6 +231,7 @@ async function startDaemonLocked(
     runner,
     probeSleep
   );
+  await verifyLegionPluginContract(deps.readPluginManifest);
   await verifyLegionPluginLoaded(
     environment.ompInvocation,
     config.ompLaunchPrefix,
@@ -272,12 +288,30 @@ async function startDaemonLocked(
   const nats = await deps.createNatsTransport(config);
   let api: LegionApi;
 
+  // `state.project`, not `config.project`: every role token, secret-file name, and pane the
+  // manager reasons about is keyed by the persisted project (`ProcessManager` reads
+  // `deps.state.project` throughout), so the private server and the runtime's secret-file
+  // names must come from the same value — exactly what the manager derived before the runtime
+  // boundary existed.
+  const runtime = new TmuxRuntime({
+    tmux: { run: runner, socket: `legion-${state.project}` },
+    project: state.project,
+    stateDir: config.stateDir,
+    connectWorkerRpc: deps.connectWorkerRpc,
+    workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
+    now: deps.now,
+    sleep: deps.sleep,
+    readProcessCmdline: deps.readProcessCmdline,
+    issueLocators: (issue) => locatorsForIssue(state, issue),
+    persist: save,
+  });
   const processManager = new ProcessManager({
     state,
     saveState: save,
     config,
+    runtime,
     ompInvocation: environment.ompInvocation,
-    panePath: environment.paneEnv.PATH,
+    processPath: environment.paneEnv.PATH,
     credentialHelper: daemonCredentialHelper(),
     run: runner,
     natsPublish: (subject, data) => nats.publish(subject, data),
@@ -287,11 +321,9 @@ async function startDaemonLocked(
     mintWorkerBootToken: (tree, issue, role, generation, expectedSessionId) =>
       api.mintWorkerBootToken(tree, issue, role, generation, expectedSessionId),
     revokeSessionCapability: (sessionId) => api.revokeSessionCapability(sessionId),
-    connectWorkerRpc: deps.connectWorkerRpc,
     provisioningToken: async (owner) =>
       (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
-    readProcessCmdline: deps.readProcessCmdline,
     workerCatchup: { runner, tokenManager: deps.tokenManager, repo: config.repo },
     dispatchClient: deps.dispatchClient,
     now: deps.now,
@@ -442,20 +474,18 @@ async function startDaemonLocked(
   api = startLegionApi(
     {
       port: config.port,
-      hostname: "127.0.0.1",
+      hostname: config.bind,
       repo: config.repo,
       gates: config.gates,
     },
     apiDeps
   );
-  // Bound with the API and torn down with it. `hostname` is the literal the API itself uses on
-  // this branch; LEGION-21 (#962) introduces `config.bind`, and the merger swaps this to
-  // `config.bind` once that is on main. A bind failure is startup-fatal: stop the API server it
-  // would have partnered so nothing half-listens behind the instance lock's release.
+  // Bound with the API and torn down with it. A bind failure is startup-fatal: stop the API
+  // server it would have partnered so nothing half-listens behind the instance lock's release.
   let workerStream: WorkerStreamListener;
   try {
     workerStream = startWorkerStreamListener({
-      hostname: "127.0.0.1",
+      hostname: config.bind,
       port: config.workerStreamPort,
       rpcTimeoutMs: config.workerRpcTimeoutSeconds * 1000,
       resolveBootToken: api.resolveWorkerBootToken,
@@ -514,8 +544,8 @@ async function startDaemonLocked(
         });
       }
     }
-    void processManager.reconcileTmuxWindows().catch((error) => {
-      console.error(`[legion] tmux reconciliation failed:`, error);
+    void processManager.reconcileOrphans().catch((error) => {
+      console.error("[legion] orphan reconciliation failed:", error);
     });
     // A below-threshold launch failure rotates its head to the tail (see
     // `promoteQueuedWorker`) instead of blocking the queue, but nothing else retries a queue
@@ -611,8 +641,8 @@ async function startDaemonLocked(
   deps.onSignal("SIGTERM", stopForSignal);
   deps.onSignal("SIGINT", stopForSignal);
 
-  console.log(`legion daemon listening on 127.0.0.1:${api.server.port}`);
-  console.log(`legion worker stream listening on 127.0.0.1:${workerStream.port}`);
+  console.log(`legion daemon listening on ${config.bind}:${api.server.port}`);
+  console.log(`legion worker stream listening on ${config.bind}:${workerStream.port}`);
   return {
     server: api.server,
     workerStreamPort: workerStream.port,

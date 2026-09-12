@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import type { DaemonConfig } from "../config";
 import { type LegionState, newLegionState } from "../legion-state";
-import { ProcessManager, type ProcessManagerDeps } from "../processes";
+import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
+import { TmuxRuntime } from "../runtime-tmux";
 import { fakeDispatchClient } from "./ci-fixtures";
 
 const now = Date.parse("2026-08-26T00:00:00.000Z");
@@ -14,6 +15,9 @@ function daemonConfig(stateDir: string): DaemonConfig {
     project: "omp",
     legionId: "sjawhar/1",
     port: 13999,
+    runtime: "tmux",
+    daemonUrl: "http://127.0.0.1:13999",
+    bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "/opt/omp",
@@ -49,12 +53,12 @@ function manager(
 } {
   const commands: string[][] = [];
   const state = newLegionState("omp", 1);
-  const deps: ProcessManagerDeps = {
+  const deps: Omit<ProcessManagerDeps, "runtime"> = {
     state,
     saveState: async () => {},
     config: daemonConfig(stateDir),
     ompInvocation: "/opt/omp",
-    panePath: "/usr/bin",
+    processPath: "/usr/bin",
     credentialHelper: "!/opt/legion credential",
     run: async (command, options) => {
       commands.push(command);
@@ -65,9 +69,6 @@ function manager(
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
     mintWorkerBootToken: async () => "worker-boot-token",
-    connectWorkerRpc: async () => {
-      throw new Error("connectWorkerRpc is not exercised by this fixture");
-    },
     revokeSessionCapability: () => {},
     provisioningToken: async () => "installation-token",
     statPrompt: async () => {},
@@ -85,7 +86,19 @@ function manager(
     now: () => now,
     dispatchClient: fakeDispatchClient(),
   };
-  return { manager: new ProcessManager(deps), state, commands };
+  const runtime = new TmuxRuntime({
+    tmux: { run: deps.run, socket: `legion-${state.project}` },
+    project: state.project,
+    stateDir,
+    connectWorkerRpc: async () => {
+      throw new Error("connectWorkerRpc is not exercised by this fixture");
+    },
+    workerRpcTimeoutMs: () => deps.config.workerRpcTimeoutSeconds * 1000,
+    now: deps.now,
+    issueLocators: (issue) => locatorsForIssue(state, issue),
+    persist: deps.saveState,
+  });
+  return { manager: new ProcessManager({ ...deps, runtime }), state, commands };
 }
 
 it("marks each daemon-created tmux window with its Legion owner", async () => {
@@ -144,8 +157,8 @@ it("reconciles only stale windows owned by this daemon", async () => {
         exitCode: 0,
       };
     });
-    state.controllerLocator = { tmuxSession: "legion-omp", tmuxWindowId: "@42" };
-    await processes.reconcileTmuxWindows();
+    state.controllerLocator = { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@42" };
+    await processes.reconcileOrphans();
 
     expect(commands.filter((command) => command[3] === "kill-window")).toEqual([
       ["tmux", "-L", "legion-omp", "kill-window", "-t", "@101"],

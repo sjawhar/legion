@@ -47,7 +47,8 @@ async function markOwner(
     if (scope === "window") {
       // Every window is either recorded (marked, then locator-assigned by the caller) or
       // reaped: this one never got its marker, so nothing will ever recognize or clean it up
-      // later. Kill it now instead of leaving an orphan for `reconcileTmuxWindows` to find.
+      // later. Kill it now instead of leaving an orphan for the runtime's orphan sweep
+      // (`TmuxRuntime.reconcileOrphans`) to find.
       await server.run(argv(server, "kill-window", "-t", target));
     }
     throw new Error(

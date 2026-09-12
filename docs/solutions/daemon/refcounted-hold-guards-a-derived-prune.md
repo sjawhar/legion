@@ -52,7 +52,7 @@ identifier, count holders (`Map<string, number>`); membership is wrong.
 **Round 1 — the hold belongs to whoever writes the state.** The wrapper released when the
 *launch helper* returned, but the locator is stored by the *caller* (`spawnRoot`,
 `launchWorker`, `spawnController`) some awaits later. The fix moved ownership up:
-`holdPaneSecret(token)` is taken by the launch owner before anything is written and its
+`holdProcessSecret(token)` is taken by the launch owner before anything is written and its
 idempotent release runs only once the locator — or the failure rollback — is in state,
 immediately before the `persist()` that follows, so that persist's prune sees the file referenced
 or reaps it deliberately. `launchShimmedProcess` only writes (`writePaneSecret`).
@@ -78,10 +78,10 @@ is a defect, not a style choice.
   reads the newer token cannot assume its identity. Ruling accepted in round 2. **Rule:** when
   two placements are equally correct, keep the one the deterministic regression test can
   observe.
-- **Steady-state prune walks only the names this process wrote or inherited** (`paneSecretFiles`),
+- **Steady-state prune walks only the names this process wrote or inherited** (`processSecretFiles`),
   never `readdir` per save — a per-save listing added fs I/O to every `persist()` and made
   fake-`sleep` test fixtures race the launch chain. The one listing prune at boot (`index.ts`)
-  reaps crash leftovers **and seeds** `paneSecretFiles` with its survivors (round-1 S1), so an
+  reaps crash leftovers **and seeds** `processSecretFiles` with its survivors (round-1 S1), so an
   inherited file is still reaped the moment its locator clears — "a pane file lives exactly as
   long as its locator" holds across restarts.
 
@@ -100,5 +100,5 @@ is a defect, not a style choice.
 
 - `docs/solutions/testing/race-regression-tests-that-fail-before-the-fix.md` — how the C2 and
   R1 reproductions were made deterministic.
-- `packages/daemon/src/daemon/AGENTS.md` — the persisted contract (`holdPaneSecret`, boot prune
+- `packages/daemon/src/daemon/AGENTS.md` — the persisted contract (`holdProcessSecret`, boot prune
   seeding, `PANE_GONE_STDERR`).

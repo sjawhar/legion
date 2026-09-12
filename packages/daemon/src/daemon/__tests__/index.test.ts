@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, roleToken, roleTopic } from "@legion/contracts";
+import {
+  controllerToken,
+  LEGION_DAEMON_API_VERSION,
+  roleToken,
+  roleTopic,
+} from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
@@ -221,6 +226,9 @@ function config(stateDir: string): DaemonConfig {
     project: "acme1",
     legionId: "acme/1",
     port: 0,
+    runtime: "tmux",
+    daemonUrl: "http://127.0.0.1:0",
+    bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
@@ -252,6 +260,7 @@ function config(stateDir: string): DaemonConfig {
 const validLegionPluginManifest = JSON.stringify({
   version: "0.9.0",
   omp: { extensions: ["dist/envoy.js", "dist/legion.js"] },
+  legion: { daemonApiVersion: LEGION_DAEMON_API_VERSION },
 });
 
 const daemonEnvironment: DaemonEnvironment = {
@@ -372,6 +381,7 @@ describe("startDaemon", () => {
             return { stdout: "", stderr: "", exitCode: 0 };
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
+          readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -458,6 +468,7 @@ describe("startDaemon", () => {
             return { stdout: "", stderr: "", exitCode: 0 };
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
+          readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           envoyPublish: async (topic, payload) => {
             published.push({ topic, payload });
@@ -541,6 +552,7 @@ describe("startDaemon", () => {
       root: restoredIssue,
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@41",
         tmuxPaneId: "%1",
@@ -603,6 +615,7 @@ describe("startDaemon", () => {
             return { stdout: "", stderr: "", exitCode: 0 };
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
+          readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -1526,7 +1539,11 @@ describe("startDaemon", () => {
             resolveDaemonEnvironment: async () => daemonEnvironment,
             readPluginManifest: async (manifestPath) => {
               capturedManifestPath = manifestPath;
-              return JSON.stringify({ version: "0.8.5", omp: { extensions: ["dist/legion.js"] } });
+              return JSON.stringify({
+                version: "0.8.5",
+                omp: { extensions: ["dist/legion.js"] },
+                legion: { daemonApiVersion: LEGION_DAEMON_API_VERSION },
+              });
             },
             tokenManager: {
               getToken: async () => ({
@@ -1642,12 +1659,11 @@ describe("startDaemon", () => {
     }
   });
 
-  it("accepts an installed pi-legion-envoy that omp actually loads, without requiring a manifest read", async () => {
+  it("accepts an installed pi-legion-envoy that omp actually loads and speaks this daemon's API contract", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const nats = new FakeNats();
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
-    let manifestReadCount = 0;
 
     const daemon = await startDaemon(daemonConfig, {
       deps: {
@@ -1661,10 +1677,7 @@ describe("startDaemon", () => {
         }),
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
-        readPluginManifest: async () => {
-          manifestReadCount += 1;
-          return validLegionPluginManifest;
-        },
+        readPluginManifest: async () => validLegionPluginManifest,
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
@@ -1690,12 +1703,106 @@ describe("startDaemon", () => {
     try {
       const response = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/state`);
       expect(response.status).toBe(200);
-      // The load probe passing is the gate; the manifest read is only a
-      // best-effort version hint for the (unused, on this path) error message.
-      expect(manifestReadCount).toBe(0);
     } finally {
       await daemon.stop();
       await nats.close();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [
+      "declares no daemon API contract version",
+      JSON.stringify({
+        version: "1.3.0",
+        omp: { extensions: ["dist/envoy.js", "dist/legion.js"] },
+      }),
+      `[legion] pi-legion-envoy at ${path.join(getPluginsNodeModules(), "@sjawhar", "pi-legion-envoy", "package.json")} (package 1.3.0) speaks daemon API contract none; this daemon requires ${LEGION_DAEMON_API_VERSION}. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.`,
+    ],
+    [
+      "declares a different daemon API contract version",
+      JSON.stringify({
+        version: "9.0.0",
+        omp: { extensions: ["dist/envoy.js", "dist/legion.js"] },
+        legion: { daemonApiVersion: LEGION_DAEMON_API_VERSION + 1 },
+      }),
+      `[legion] pi-legion-envoy at ${path.join(getPluginsNodeModules(), "@sjawhar", "pi-legion-envoy", "package.json")} (package 9.0.0) speaks daemon API contract ${LEGION_DAEMON_API_VERSION + 1}; this daemon requires ${LEGION_DAEMON_API_VERSION}. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.`,
+    ],
+  ])("refuses to start when the installed pi-legion-envoy %s, before loading state or opening NATS", async (_case, manifest, message) => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    let loadedState = false;
+    let natsCreated = false;
+    let loadProbeRan = false;
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            runner: async (command) => {
+              if (command[0] === "sh" && command[2]?.includes("--no-extensions")) {
+                return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 0 };
+              }
+              if (command[0] === "sh") loadProbeRan = true;
+              return { stdout: "", stderr: "LEGION_PLUGIN_LOADED=yes\n", exitCode: 0 };
+            },
+            dispatchClient: fakeDispatchClient(),
+            resolveDaemonEnvironment: async () => daemonEnvironment,
+            readPluginManifest: async () => manifest,
+            tokenManager: {
+              getToken: async () => ({
+                token: "test-token",
+                expiresAt: "2099-01-01T00:00:00.000Z",
+                gitIdentity: {
+                  name: "legion-implementer[bot]",
+                  email: "1+legion-implementer[bot]@users.noreply.github.com",
+                },
+              }),
+            },
+            loadState: async () => {
+              loadedState = true;
+              return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+            },
+            createNatsTransport: async () => {
+              natsCreated = true;
+              throw new Error("NATS must not start after a failed plugin contract check");
+            },
+          },
+        })
+      ).rejects.toThrow(message);
+      expect(loadProbeRan).toBeFalse();
+      expect(loadedState).toBeFalse();
+      expect(natsCreated).toBeFalse();
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to start when the installed pi-legion-envoy manifest cannot be read", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            runner: async () => ({
+              stdout: "",
+              stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              exitCode: 0,
+            }),
+            dispatchClient: fakeDispatchClient(),
+            resolveDaemonEnvironment: async () => daemonEnvironment,
+            readPluginManifest: async () => {
+              throw new Error("ENOENT: no such file or directory");
+            },
+            createNatsTransport: async () => {
+              throw new Error("NATS must not start after a failed plugin contract check");
+            },
+          },
+        })
+      ).rejects.toThrow(
+        /pi-legion-envoy manifest at .* could not be read \(ENOENT: no such file or directory\); this daemon requires a plugin speaking daemon API contract 1\./
+      );
+    } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
@@ -1788,6 +1895,7 @@ describe("startDaemon", () => {
         exitCode: 0,
       }),
       resolveDaemonEnvironment: async () => daemonEnvironment,
+      readPluginManifest: async () => validLegionPluginManifest,
       statPrompt: async () => {},
       envoyPublish: async () => {},
       dispatchClient: fakeDispatchClient(),
@@ -1858,20 +1966,56 @@ describe("startDaemon", () => {
   it("refuses to start when worker_stream_port is bound, naming the setting, and releases the lock", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
+    // Occupies the address the listener will bind: `config.bind`, the same host the API uses.
     const occupied = Bun.listen<undefined>({
-      hostname: "127.0.0.1",
+      hostname: daemonConfig.bind,
       port: 0,
       socket: { data() {} },
     });
     try {
       await expect(
         startDaemon({ ...daemonConfig, workerStreamPort: occupied.port }, daemonDeps(daemonConfig))
-      ).rejects.toThrow(`worker_stream_port ${occupied.port} on 127.0.0.1 is unavailable`);
+      ).rejects.toThrow(
+        `worker_stream_port ${occupied.port} on ${daemonConfig.bind} is unavailable`
+      );
       // The instance lock and API port were released: a second start on a free stream port works.
       const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
       await daemon.stop();
     } finally {
       occupied.stop(true);
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to start when runtime is kubernetes, before acquiring the instance lock or anything else", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig: DaemonConfig = {
+      ...config(stateDir),
+      runtime: "kubernetes",
+      daemonUrl: "http://legion-daemon:13370",
+      bind: "0.0.0.0",
+    };
+    let lockAcquired = false;
+    let environmentResolved = false;
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            acquireInstanceLock: async () => {
+              lockAcquired = true;
+              throw new Error("the instance lock must not be acquired for an unsupported runtime");
+            },
+            resolveDaemonEnvironment: async () => {
+              environmentResolved = true;
+              return daemonEnvironment;
+            },
+            dispatchClient: fakeDispatchClient(),
+          },
+        })
+      ).rejects.toThrow("runtime: kubernetes is not implemented yet");
+      expect(lockAcquired).toBeFalse();
+      expect(environmentResolved).toBeFalse();
+    } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
   });

@@ -19,7 +19,7 @@ function stateWithRoot(): LegionState {
   state.trees[root] = {
     root,
     generation: 3,
-    locator: { tmuxSession: "legion-omp", tmuxWindowId: "@1" },
+    locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@1" },
     status: "queued",
     launchFailures: 0,
   };

@@ -11,6 +11,9 @@
       "dist/skills"
     ]
   },
+  "legion": {
+    "daemonApiVersion": 1
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/sjawhar/legion"

@@ -275,6 +275,7 @@ $(printf '%s\n' $omp_launch_prefix | sed 's/^/  - /')"
   cat >"${smoke_dir}/legion.yaml" <<EOF
 project: ${SMOKE_PROJECT}
 port: ${daemon_port}
+daemon_url: http://127.0.0.1:${daemon_port}
 envoy_url: http://127.0.0.1:${listener_port}
 nats_urls:
   - ${nats_url}

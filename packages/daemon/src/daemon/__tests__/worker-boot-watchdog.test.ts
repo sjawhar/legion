@@ -2,11 +2,11 @@
 // path a watch can exit through (a worker's socket closing, the observation interval timing out,
 // an explicit cancel, and a confirmed-dead retirement — see `cancelableSleep`'s own doc comment
 // for why an uncleared timer would otherwise accumulate without bound across a long-lived daemon
-// watching a persistently borderline-slow worker), the registration deadline, and the pane-pid
-// probe behind `probeAlive`.
+// watching a persistently borderline-slow worker), the registration deadline, and the
+// runtime-probe-then-socket fallback behind `probeAlive`.
 import { describe, expect, it } from "bun:test";
 import type { IssueKey, LegionRole } from "@legion/contracts";
-import type { WorkerLocator } from "../legion-state";
+import type { Locator } from "../runtime";
 import {
   type WatchedClaim,
   WorkerBootWatchdog,
@@ -18,7 +18,8 @@ const root = "sjawhar/legion#1" as IssueKey;
 const child = "sjawhar/legion#2" as IssueKey;
 const role: LegionRole = "implementer";
 const token = "legion-omp-sjawhar__legion-2-implementer";
-const locator: WorkerLocator = {
+const locator: Locator = {
+  runtime: "tmux",
   tmuxSession: "legion-omp",
   tmuxWindowId: "@42",
   tmuxPaneId: "%7",
@@ -85,9 +86,8 @@ function baseDeps(overrides: Partial<WorkerBootWatchdogDeps> = {}): WorkerBootWa
     registrationDeadlineIntervals: () => 1_000,
     workerRpcTimeoutMs: () => 5_000,
     now: () => Date.now(),
-    tmux: { socket: "legion-omp", run: async () => ({ stdout: "", exitCode: 1 }) },
-    isOmpPane: async () => false,
-    workerClient: async () => {
+    probe: async () => ({ status: "dead" }),
+    connect: async () => {
       throw new Error("no client configured for this test");
     },
     getClaim: (): WatchedClaim | undefined => ({ generation: 1 }),
@@ -104,7 +104,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
       const retired: string[] = [];
       const watchdog = new WorkerBootWatchdog(
         baseDeps({
-          workerClient: (() => {
+          connect: (() => {
             let calls = 0;
             return async () => {
               calls += 1;
@@ -115,7 +115,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           // Confirmed dead on the very next probe after the socket closes, so the watch
           // retires in one step rather than re-arming (isolating this test to the
           // closed-wins-the-race cleanup, not a second interval's own timers).
-          isOmpPane: async () => false,
+          probe: async () => ({ status: "dead" }),
           retireUnconfirmedBoot: async () => {
             retired.push(token);
           },
@@ -145,10 +145,10 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
       const watchdog = new WorkerBootWatchdog(
         baseDeps({
           // Never connects: the interval's own deadline is what ends `watchOneInterval`.
-          workerClient: async () => {
+          connect: async () => {
             throw new Error("shim not listening");
           },
-          isOmpPane: async () => false,
+          probe: async () => ({ status: "dead" }),
           retireUnconfirmedBoot: async () => {
             retired.push(token);
           },
@@ -170,7 +170,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
     try {
       const watchdog = new WorkerBootWatchdog(
         baseDeps({
-          workerClient: async () => {
+          connect: async () => {
             throw new Error("shim not listening");
           },
         })
@@ -196,21 +196,14 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
     try {
       const watchdog = new WorkerBootWatchdog(
         baseDeps({
-          workerClient: async () => {
+          connect: async () => {
             throw new Error("shim not listening");
           },
-          // Reports the pane alive on every probe: the watch re-arms indefinitely instead of
-          // ever retiring, so the only way this test settles is via the explicit cancel below
+          // Reports the process alive on every probe: the watch re-arms indefinitely instead
+          // of ever retiring, so the only way this test settles is via the explicit cancel below
           // — proving several full re-arm cycles worth of connect-retry timers were each
           // cleaned up along the way, not merely the last one.
-          isOmpPane: async () => true,
-          tmux: {
-            socket: "legion-omp",
-            run: async (cmd) => {
-              if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
-              return { stdout: "", exitCode: 0 };
-            },
-          },
+          probe: async () => ({ status: "alive", pid: 12345 }),
         })
       );
 
@@ -229,7 +222,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
 });
 
 describe("WorkerBootWatchdog registration deadline", () => {
-  it("retires a boot whose pane/socket stays alive but never registers, once it exceeds registrationDeadlineIntervals", async () => {
+  it("retires a boot whose process/socket stays alive but never registers, once it exceeds registrationDeadlineIntervals", async () => {
     const retirements: Array<{ token: string; generation: number | undefined }> = [];
     const watchdog = new WorkerBootWatchdog(
       baseDeps({
@@ -237,18 +230,11 @@ describe("WorkerBootWatchdog registration deadline", () => {
         registrationDeadlineIntervals: () => 3,
         sleep: async () => {},
         yield: async () => {},
-        // Alive on every single probe -- the pane/socket never actually goes away, and
+        // Alive on every single probe -- the process/socket never actually goes away, and
         // `/worker/started` never confirms either. Without the deadline this would re-arm
         // forever; with it, the watch must give up after exactly 3 consecutive alive intervals.
-        isOmpPane: async () => true,
-        tmux: {
-          socket: "legion-omp",
-          run: async (cmd) => {
-            if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
-            return { stdout: "", exitCode: 0 };
-          },
-        },
-        workerClient: async () => {
+        probe: async () => ({ status: "alive", pid: 12345 }),
+        connect: async () => {
           throw new Error("shim not listening");
         },
         retireUnconfirmedBoot: async (retireToken, _locator, generation) => {
@@ -272,18 +258,11 @@ describe("WorkerBootWatchdog registration deadline", () => {
         registrationDeadlineIntervals: () => 3,
         sleep: async () => {},
         yield: async () => {},
-        isOmpPane: async () => {
+        probe: async () => {
           probeCount += 1;
-          return true;
+          return { status: "alive", pid: 12345 };
         },
-        tmux: {
-          socket: "legion-omp",
-          run: async (cmd) => {
-            if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
-            return { stdout: "", exitCode: 0 };
-          },
-        },
-        workerClient: async () => {
+        connect: async () => {
           throw new Error("shim not listening");
         },
         retireUnconfirmedBoot: async () => {
@@ -303,31 +282,20 @@ describe("WorkerBootWatchdog registration deadline", () => {
   });
 });
 
-describe("WorkerBootWatchdog pid probe", () => {
-  it("probes the worker's own pane pid, not its window's first pane, so a sibling's live OMP never confirms a dead boot", async () => {
+describe("WorkerBootWatchdog liveness probe", () => {
+  it("retires a boot only after the runtime reports it dead and its socket refuses a connection", async () => {
     const events: string[] = [];
     const watchdog = new WorkerBootWatchdog(
       baseDeps({
         workerBootTimeoutSeconds: () => 0.01,
         sleep: async () => {},
         yield: async () => {},
-        tmux: {
-          socket: "legion-omp",
-          run: async (cmd) => {
-            if (cmd.includes("list-panes")) {
-              // The worker's whole window: the architect's pane first, then two split-in workers.
-              return { stdout: "%1531 2363427\n%1533 3003090\n%1534 446716\n", exitCode: 0 };
-            }
-            return { stdout: "", exitCode: 0 };
-          },
+        probe: async (probed) => {
+          events.push(`probe:${probed.runtime === "tmux" ? probed.tmuxPaneId : probed.podUid}`);
+          return { status: "dead" };
         },
-        // Only the architect's pane still runs OMP; the watched worker's own process is gone.
-        isOmpPane: async (pid) => {
-          events.push(`isOmpPane:${pid}`);
-          return pid === 2363427;
-        },
-        workerClient: async () => {
-          events.push("workerClient");
+        connect: async () => {
+          events.push("connect");
           throw new Error("shim not listening");
         },
         retireUnconfirmedBoot: async () => {
@@ -336,24 +304,12 @@ describe("WorkerBootWatchdog pid probe", () => {
       })
     );
 
-    watchdog.arm(
-      root,
-      child,
-      role,
-      token,
-      { ...locator, tmuxWindowId: "@1464", tmuxPaneId: "%1533" },
-      1
-    );
+    watchdog.arm(root, child, role, token, locator, 1);
     for (let i = 0; i < 200 && !events.includes("retire"); i += 1) await Promise.resolve();
 
-    // `probeAlive` asks about %1533's own pid — never the first row's 2363427, the architect's
-    // live OMP, which would confirm the boot — and, finding it dead, falls through to the socket
-    // probe (refused) and retires the boot.
-    expect(events.filter((e) => e.startsWith("isOmpPane:"))).toEqual(["isOmpPane:3003090"]);
-    expect(events.slice(events.indexOf("isOmpPane:3003090"))).toEqual([
-      "isOmpPane:3003090",
-      "workerClient",
-      "retire",
-    ]);
+    // `probeAlive` asks the runtime about the watched locator itself, then — finding it dead —
+    // falls through to the socket probe (refused) and retires the boot. The connect-retry loop's
+    // own attempts precede the probe; only the tail after it is ordered here.
+    expect(events.slice(events.indexOf("probe:%7"))).toEqual(["probe:%7", "connect", "retire"]);
   });
 });

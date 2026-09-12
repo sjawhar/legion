@@ -1,12 +1,10 @@
 import type { IssueKey, LegionRole } from "@legion/contracts";
-import type { WorkerLocator } from "./legion-state";
-import type { TmuxServer } from "./tmux";
-import * as tmux from "./tmux";
-import { probeWorkerSocket, type WorkerRpcClient } from "./worker-rpc";
+import { type Locator, type ProbeResult, probeWorker } from "./runtime";
+import type { WorkerRpcClient } from "./worker-rpc";
 
 /** The boot watchdog's own poll interval, both for its connect-retry loop and for
  * `cancelableSleep`'s waits. Distinct from (but numerically mirrors) `processes.ts`'s
- * `WORKER_RETIREMENT_POLL_INTERVAL_MS`, which bounds a different wait (a retiring pane's own
+ * `WORKER_RETIREMENT_POLL_INTERVAL_MS`, which bounds a different wait (a retiring process's own
  * exit grace period). */
 const BOOT_WATCHDOG_POLL_INTERVAL_MS = 100;
 
@@ -35,9 +33,11 @@ export interface WorkerBootWatchdogDeps {
    * `WorkerBootWatchdog`'s own doc comment. */
   registrationDeadlineIntervals(): number;
   now(): number;
-  tmux: TmuxServer;
-  isOmpPane(pid: number): Promise<boolean>;
-  workerClient(token: string, socketPath: string): Promise<WorkerRpcClient>;
+  /** `Runtime.probe` — is the watched locator's own process still there? */
+  probe(locator: Locator): Promise<ProbeResult>;
+  /** `ProcessManager.clientFor` — connects through the manager's per-token cache, so a
+   * connection this watchdog establishes is cached and wired like any other. */
+  connect(token: string, locator: Locator): Promise<WorkerRpcClient>;
   /** Overridable for tests; defaults to a real timer. */
   sleep?(ms: number): Promise<void>;
   /** Overridable for tests; defaults to a real macrotask boundary (`setTimeout(fn, 0)`). */
@@ -45,13 +45,13 @@ export interface WorkerBootWatchdogDeps {
   /** Re-reads the current claim for `token` — undefined if it no longer exists, is not a
    * worker claim, or has moved on since this watch was armed. */
   getClaim(token: string): WatchedClaim | undefined;
-  /** Handles a boot the watchdog has confirmed dead (pane gone *and* socket refusing a
-   * connection) or one that has exhausted its registration deadline (pane/socket alive on every
+  /** Handles a boot the watchdog has confirmed dead (process gone *and* socket refusing a
+   * connection) or one that has exhausted its registration deadline (process/socket alive on every
    * probe, but never actually confirmed): retires it, counts a launch failure, and retries or
    * escalates at the threshold. Owned by `ProcessManager` — see its own doc comment. */
   retireUnconfirmedBoot(
     token: string,
-    locator: WorkerLocator,
+    locator: Locator,
     generation: number | undefined,
     retry: { treeKey: IssueKey; issue: IssueKey; role: LegionRole }
   ): Promise<void>;
@@ -60,17 +60,17 @@ export interface WorkerBootWatchdogDeps {
 /**
  * Watches a freshly-launched worker's boot. `workerBootTimeoutSeconds` is an observation
  * interval, never a hard SLA: a real OMP startup routinely takes longer than that under host
- * load, and evicting a pane that is merely slow — rather than dead — would carry forward a
+ * load, and evicting a process that is merely slow — rather than dead — would carry forward a
  * launch failure (and eventually a spurious `worker-died`) for a worker that never actually
  * died. Each interval patiently retries connecting to the shim socket (in case it has not
  * opened it yet) and, once connected, races the client's `closed` promise against the rest of
  * the interval — the fast path for a socket that closes well before the interval elapses.
  * Whichever way the interval ends, if `/worker/ready` has not confirmed this exact generation,
- * the watchdog probes before acting (`probeAlive`): a pane that is both gone and refusing a
+ * the watchdog probes before acting (`probeAlive`): a process that is both gone and refusing a
  * connection is dead, handled immediately by `retireUnconfirmedBoot` (retire, count a launch
- * failure, retry or give up at the threshold). A live pane or a reachable socket re-arms the
+ * failure, retry or give up at the threshold). A live process or a reachable socket re-arms the
  * watch for another interval instead — but only up to `registrationDeadlineIntervals` consecutive
- * times: a pane that keeps answering forever without ever completing its ready path has not
+ * times: a process that keeps answering forever without ever completing its ready path has not
  * merely had a slow boot, it never actually completed one, so past that many intervals it is
  * treated exactly like a dead one (same `retireUnconfirmedBoot` call) rather than watched
  * indefinitely. Every wait races the watchdog's own cancellation, armed under `token` so a
@@ -163,23 +163,20 @@ export class WorkerBootWatchdog {
   }
 
   /**
-   * True if this watch should treat `locator` as still alive: either its tmux pane still holds
-   * a running OMP process, or its shim socket accepts a connection and negotiates the RPC
+   * True if this watch should treat `locator` as still alive: either the runtime still finds
+   * its process running, or its shim socket accepts a connection and negotiates the RPC
    * protocol — matching the reconnect contract everywhere else in `processes.ts` (connect
    * failure means dead; a connected socket whose follow-up `get_state` fails only means the
    * shim is busy, never a reason to treat it as dead). `get_state` here is advisory only, run
    * for its `runState`-seeding side effect; a rejection is caught and logged, never folded into
    * the liveness verdict itself. Used only to decide whether an unconfirmed boot that has
    * missed an observation interval is merely slow (never evicted for that alone) or genuinely
-   * dead (no pane, no socket).
+   * dead (no process, no socket).
    */
-  private async probeAlive(token: string, locator: WorkerLocator): Promise<boolean> {
-    const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
-    const pid = await tmux.panePid(this.deps.tmux, target);
-    if (pid !== undefined && (await this.deps.isOmpPane(pid))) return true;
-    const probe = await probeWorkerSocket(
-      (socketPath) => this.deps.workerClient(token, socketPath),
-      locator.socketPath,
+  private async probeAlive(token: string, locator: Locator): Promise<boolean> {
+    if ((await this.deps.probe(locator)).status === "alive") return true;
+    const probe = await probeWorker(
+      () => this.deps.connect(token, locator),
       this.deps.workerRpcTimeoutMs()
     );
     if (!probe.client) return false;
@@ -197,7 +194,7 @@ export class WorkerBootWatchdog {
     issue: IssueKey,
     role: LegionRole,
     token: string,
-    locator: WorkerLocator,
+    locator: Locator,
     generation: number
   ): void {
     if (this.disposed) return;
@@ -233,7 +230,7 @@ export class WorkerBootWatchdog {
       ) {
         attempts += 1;
         try {
-          client = await this.deps.workerClient(token, locator.socketPath);
+          client = await this.deps.connect(token, locator);
         } catch {
           await this.cancelableSleep(BOOT_WATCHDOG_POLL_INTERVAL_MS, controller.signal).promise;
         }
@@ -267,7 +264,7 @@ export class WorkerBootWatchdog {
           const deadline = this.deps.registrationDeadlineIntervals();
           if (aliveButUnconfirmedIntervals < deadline) {
             console.error(
-              `[legion] worker ${issue}/${role} has not completed its ready path within ${this.deps.workerBootTimeoutSeconds()}s but its pane/socket is still alive; re-arming the watch instead of evicting a slow boot (${aliveButUnconfirmedIntervals}/${deadline} intervals)`
+              `[legion] worker ${issue}/${role} has not completed its ready path within ${this.deps.workerBootTimeoutSeconds()}s but its process/socket is still alive; re-arming the watch instead of evicting a slow boot (${aliveButUnconfirmedIntervals}/${deadline} intervals)`
             );
             // A real macrotask boundary, never merely another microtask: a mocked `sleep`/`now`
             // that never advances real time (test fixtures routinely do this for speed) would

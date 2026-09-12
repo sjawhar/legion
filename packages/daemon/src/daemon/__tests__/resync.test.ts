@@ -1379,6 +1379,7 @@ describe("runResync", () => {
     const state = newLegionState("omp", 1);
     trackIssue(state);
     state.trees[issue].locator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@1",
       tmuxPaneId: "%1",
@@ -1403,6 +1404,7 @@ describe("runResync", () => {
     const state = newLegionState("omp", 1);
     trackIssue(state);
     state.trees[issue].locator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@1",
       tmuxPaneId: "%1",
@@ -1424,6 +1426,7 @@ describe("runResync", () => {
     trackIssue(state);
     state.trees[issue].status = "lingering";
     state.trees[issue].locator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@1",
       tmuxPaneId: "%1",

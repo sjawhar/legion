@@ -1,6 +1,18 @@
 import { z } from "zod";
 import { LEGION_ROLES } from "./legion-roles";
 
+/**
+ * The version of the daemon HTTP API contract below, as spoken by the installed
+ * `@sjawhar/pi-legion-envoy` plugin: the plugin's `package.json` carries the same number under
+ * `legion.daemonApiVersion`, and the daemon refuses to start unless the installed plugin's number
+ * equals this one (`verifyLegionPluginContract`, packages/daemon/src/daemon/index.ts). A plugin
+ * built before a shape change validates every daemon response against the older strict schemas
+ * and fails the controller/architect boot handshake silently, so the two sides are kept in
+ * lockstep the way `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change
+ * to a `LegionDaemonApi` request or response shape bumps this constant AND the plugin manifest.
+ */
+export const LEGION_DAEMON_API_VERSION = 1;
+
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
 const requiredUnknown = z.unknown().refine((value) => value !== undefined, {
@@ -34,13 +46,27 @@ const TREE_STATUSES = ["queued", "active", "lingering", "dead", "launch-failed",
 // `/legion/v1/state`'s redaction contract: every schema below is a `strictObject` so an
 // accidentally-forwarded field (a `*Hash`/`*Secret`/`*Token`/grant, or a raw `socketPath`) fails
 // `validateContractResponse`'s parse instead of silently reaching the wire — the controller and
-// any other reader of this endpoint get only what they need to triage, never a capability.
-const stateWindowLocator = z.strictObject({
+// any other reader of this endpoint get only what they need to triage, never a capability. A
+// locator is discriminated by the `runtime` that owns the process (the daemon's `Locator` union):
+// a tmux window/pane, or a Kubernetes pod.
+const stateTmuxLocator = z.strictObject({
+  runtime: z.literal("tmux"),
   tmuxSession: nonEmptyString,
   tmuxWindowId: nonEmptyString,
   tmuxPaneId: nonEmptyString.optional(),
 });
-const stateTreeLocator = stateWindowLocator.extend({ ompSessionFile: nonEmptyString.optional() });
+const stateK8sLocator = z.strictObject({
+  runtime: z.literal("kubernetes"),
+  namespace: nonEmptyString,
+  podName: nonEmptyString,
+  podUid: nonEmptyString,
+  pvcName: nonEmptyString,
+});
+const stateLocator = z.discriminatedUnion("runtime", [stateTmuxLocator, stateK8sLocator]);
+const stateTreeLocator = z.discriminatedUnion("runtime", [
+  stateTmuxLocator.extend({ ompSessionFile: nonEmptyString.optional() }),
+  stateK8sLocator.extend({ ompSessionFile: nonEmptyString.optional() }),
+]);
 const stateIssue = z.strictObject({
   key: nonEmptyString,
   title: z.string(),
@@ -71,14 +97,14 @@ const stateRole = z.strictObject({
   sessionId: nonEmptyString.optional(),
   readyConfirmedAt: z.number().optional(),
   launchFailures: z.number().int().nonnegative().optional(),
-  locator: stateWindowLocator.optional(),
+  locator: stateLocator.optional(),
 });
 
 export const LegionDaemonApi = {
   State: {
     // Redacted projection of durable `LegionState` for `GET /legion/v1/state` — never a
     // `*Hash`/`*Secret`/`*Token` field, a `spawnCapabilities`/grant record, or a `socketPath`
-    // (every locator here is one of the `stateWindowLocator`/`stateTreeLocator` shapes above).
+    // (every locator here is one of the `stateLocator`/`stateTreeLocator` shapes above).
     response: z.strictObject({
       project: nonEmptyString,
       version: z.number().int(),
@@ -90,7 +116,7 @@ export const LegionDaemonApi = {
         queue: z.array(nonEmptyString),
       }),
       gates: z.record(z.string(), stateGate),
-      controllerLocator: stateWindowLocator.optional(),
+      controllerLocator: stateLocator.optional(),
       roles: z.record(z.string(), stateRole),
       controllerPendingNotices: z.number().int().nonnegative(),
       pendingStatusWrites: z.array(nonEmptyString),
