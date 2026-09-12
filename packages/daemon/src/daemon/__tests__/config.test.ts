@@ -520,6 +520,92 @@ describe("daemon config", () => {
     ).toThrow("LEGION_WORKER_IDLE_RETIRE_SECONDS must be a non-negative integer");
   });
 
+  it("bounds worker_idle_retire_seconds at 2147483 from either source: the boundary is accepted, one more is a startup error naming the key, the bound, and 0 as the disable value", () => {
+    const cliOverrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+    // 2147483 * 1000 = 2_147_483_000 ms fits a signed 32-bit timer delay; 2147484 * 1000 does not,
+    // and the runtime would clamp it to 1 ms -- retiring every finished worker the instant it
+    // went idle. The bound must sit exactly at the last whole second that fits.
+    expect(
+      resolveDaemonConfig({
+        configFile: loadConfigFromFile(
+          [
+            "project: acme/7",
+            "envoy_url: http://listener:9020",
+            "dispatch_project: ACME",
+            "nats_urls:",
+            "  - nats://one:4222",
+            "repos:",
+            "  - acme/widgets",
+            "worker_idle_retire_seconds: 2147483",
+            "gates:",
+            "  design: off",
+          ].join("\n"),
+          "/tmp/legion-config"
+        ),
+      }).config.workerIdleRetireSeconds
+    ).toBe(2_147_483);
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: "2147483" },
+        cliOverrides,
+      }).config.workerIdleRetireSeconds
+    ).toBe(2_147_483);
+    expect(() =>
+      loadConfigFromFile(
+        "project: acme/7\nworker_idle_retire_seconds: 2147484\n",
+        "/tmp/legion-config"
+      )
+    ).toThrow(
+      "worker_idle_retire_seconds must be at most 2147483 (the largest whole number of seconds whose millisecond delay fits a 32-bit timer); use 0 to disable idle retirement"
+    );
+    expect(() =>
+      loadConfigFromFile(
+        "project: acme/7\nworker_idle_retire_seconds: 31536000\n",
+        "/tmp/legion-config"
+      )
+    ).toThrow("worker_idle_retire_seconds must be at most 2147483");
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: "2147484" },
+        cliOverrides,
+      })
+    ).toThrow(
+      "LEGION_WORKER_IDLE_RETIRE_SECONDS must be at most 2147483 (the largest whole number of seconds whose millisecond delay fits a 32-bit timer); use 0 to disable idle retirement"
+    );
+    expect(() =>
+      resolveDaemonConfig({
+        env: requiredEnv,
+        cliOverrides: { ...cliOverrides, workerIdleRetireSeconds: 2_147_484 },
+      })
+    ).toThrow("workerIdleRetireSeconds must be at most 2147483");
+  });
+
+  it("treats only the literal 0 as the disable value: a blank, -0, padded, or non-canonical worker_idle_retire_seconds is a startup error naming the key", () => {
+    // `Number("  ")` and `Number("-0")` are both zero and `Number("05")`/`Number("+5")` are five, so
+    // a parser built on `Number()` alone would let a mistyped variable silently disable the timer
+    // (or silently succeed). An unset or empty variable stays "unset" exactly as
+    // `parseEnvPositiveInteger` treats it; everything else must be the canonical decimal spelling.
+    for (const value of [" ", "-0", "05", "+5", " 5", "5 ", "0x10", "1e3"]) {
+      expect(() =>
+        resolveDaemonConfig({ env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: value } })
+      ).toThrow("LEGION_WORKER_IDLE_RETIRE_SECONDS must be a non-negative integer");
+    }
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: "" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      }).config.workerIdleRetireSeconds
+    ).toBe(600);
+    // The YAML loader hands `-0` through as a negative zero; it must not read as "disabled" either.
+    expect(() =>
+      loadConfigFromFile("project: acme/7\nworker_idle_retire_seconds: -0\n", "/tmp/legion-config")
+    ).toThrow("worker_idle_retire_seconds must be a non-negative integer");
+  });
+
   it("resolves workerStreamPort: YAML beats env, env beats the port + 1 default", () => {
     const cliOverrides = {
       githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },

@@ -88,11 +88,12 @@ async function temporaryDir(): Promise<string> {
   return directory;
 }
 
-/** A `deps.sleep` whose waits never resolve on their own: each call is recorded with its `ms`, and the test
- * fires the oldest wait of a given length when it decides the clock has advanced — so "armed but not yet
- * expired" is observable, and expiry is a deliberate step rather than a race against real time.
- * `stopTimeout`'s `cancel` is a no-op under an injected sleep, so a superseded wait stays recorded; firing
- * it must be a no-op in the code under test (that is one of the things these tests prove). */
+/** A `deps.sleep` whose waits never resolve on their own: each call is recorded with its `ms`, and
+ * `fire(ms)` resolves the oldest pending wait of exactly that length when the test decides the clock
+ * has advanced — so "armed but not yet expired" is observable, and expiry is a deliberate step rather
+ * than a race against real time. `stopTimeout`'s `cancel` is a no-op under an injected sleep, so a
+ * wait the code under test has superseded (a re-armed clock) or cancelled (`dispose()`) stays in
+ * `pending` and can still be fired — which is how a test delivers a stale clock's expiry on purpose. */
 function manualSleep() {
   const pending: Array<{ ms: number; resolve: () => void }> = [];
   return {
@@ -8906,6 +8907,54 @@ describe("ProcessManager", () => {
     expect(worker.shutdownCalls).toEqual([worker.token]);
   });
 
+  it("ignores a superseded clock's expiry: after idle -> running -> idle, firing the older wait does nothing and firing the newer one retires", async () => {
+    // Under real timers `createCancellableSleep.cancel()` RESOLVES the sleep it cancels, so a
+    // re-armed clock's predecessor fires at once; only the entry-identity check in armIdleRetire's
+    // expiry keeps that stale fire from retiring a worker that just went idle. This pins it.
+    const worker = await idleWorkerFixture({ role: "implementer" });
+    const seededLocator = structuredClone(worker.claim().locator);
+    worker.client.emitRunState("running");
+    worker.client.emitRunState("idle");
+    // Two clocks recorded: the superseded one (never consumed) and the live re-arm.
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(2);
+
+    // Oldest first: the superseded clock expires.
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.revokedSessions).toEqual([]);
+    expect(worker.connectAttempts()).toBe(1);
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
+
+    // The live clock expires: exactly one retirement.
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoopUntil(() => worker.claim().locator === undefined);
+    await flushEventLoop(50);
+
+    expect(worker.shutdownCalls).toEqual([worker.token]);
+    expect(worker.claim().resumeSessionFile).toBe(worker.sessionFile);
+    expect(worker.publications).toEqual([]);
+  });
+
+  it("ignores an armed clock's expiry after dispose(): nothing is stopped and no clock is re-armed", async () => {
+    const worker = await idleWorkerFixture({ role: "implementer" });
+    const seededLocator = structuredClone(worker.claim().locator);
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
+
+    worker.manager.dispose();
+    // dispose() cannot un-record the wait under an injected sleep; the fire still reaches the code.
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.revokedSessions).toEqual([]);
+    expect(worker.connectAttempts()).toBe(1);
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(0);
+  });
+
   it("never retires an idle worker whose role is the issue's active phase", async () => {
     const worker = await idleWorkerFixture({
       role: "implementer",
@@ -8942,8 +8991,8 @@ describe("ProcessManager", () => {
   });
 
   it("re-arms the clock when expiry declines because the role is the active phase, and retires within one further window once phases[issue] moves to another role", async () => {
-    // The rig's ordering: a reviewer finished its turn while still phases[issue].phase; its clock
-    // expired as a correct no-op; the planner was then resumed and /worker/started re-wrote
+    // Scenario: a reviewer finished its turn while still phases[issue].phase; its clock expired as
+    // a correct no-op; the planner was then resumed and /worker/started re-wrote
     // phases[issue] = planner. Being already idle, the reviewer never transitions to idle again —
     // nothing but the expiry itself can arm its next clock.
     const worker = await idleWorkerFixture({
