@@ -15,6 +15,8 @@ module: legion
 related_issues:
   - "LEGION-9"
   - "sjawhar/legion#945"
+  - "LEGION-29"
+  - "sjawhar/legion#970"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
   - "legion start --check-config > validates github_apps.<role>.private_key_command fails only inside a Legion pane"
@@ -66,19 +68,34 @@ Two observations for whoever fixes the hook: the count is per session, not per t
 5.2.37), inside a function, `builtin export "$@"` with an expanded `NAME=value` word returned 0 without binding the
 variable — a plain assignment followed by `builtin export NAME` did. Cause not investigated.
 
-## 2. The pane's `DISPATCH_URL` fails one pre-existing CLI test
+**LEGION-29 evidence points the other way on attribution.** Its implementer and tester both saw the same
+`Unable to redeem LEGION_GRANT (403)` with 2–4 `export LEGION_GRANT='…'` blocks per call, and the tester's
+`notesForReviewer` traced the duplicates to the *model's own command text* — the assistant re-emitting the
+previous call's injected prelude verbatim — not to the extension: the same command issued once through eval's
+`tool.bash` redeemed first time. Whether LEGION-9's 1 → 10 growth had the same cause is not established by either
+record. Either way the workaround is the same, and simpler than the trap above when you can see your own
+command: never replay a prelude line, and if a call already carries several, pin the *first* block's uuid inline
+on the command that needs it (`LEGION_GRANT=<first-uuid> legion gh -- …`) — grants live 60 s and are not single-use,
+so the first one is still valid for the whole call.
 
-Every Legion pane carries `DISPATCH_URL` (and `DISPATCH_TOKEN_FILE`) but not `DISPATCH_TOKEN`.
-`src/cli/__tests__/index.test.ts` › `legion start --check-config > validates github_apps.<role>.private_key_command
-without executing it` reads `process.env` rather than an isolated env, so `resolveDaemonConfig` refuses and the test
-fails in every pane while staying green in CI. Run the daemon suite as
+## 2. The pane's `DISPATCH_*` and `LEGION_*` leak into test suites that read `process.env`
 
-```bash
-env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test
-```
+Every Legion pane carries `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` (but not `DISPATCH_TOKEN`) plus its own
+`LEGION_TREE`/`LEGION_ROLE`/`LEGION_ISSUE`/`LEGION_GENERATION`/`LEGION_BOOT_TOKEN_FILE`. Any suite whose fixtures
+read `process.env` instead of an isolated map fails inside a pane while staying green in CI.
 
-and say so in the handoff (the `env -u` is the rig's, not the change's). The fix belongs to that test (inject env into
-`cmdCheckConfig` or clear `DISPATCH_*` in the test), re-filed separately.
+- `packages/daemon`: `src/cli/__tests__/index.test.ts` › `legion start --check-config > validates
+  github_apps.<role>.private_key_command without executing it` — `resolveDaemonConfig` refuses on the inherited
+  `DISPATCH_URL`. Still open: run `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test` and say so in the handoff.
+- `packages/pi-envoy` (fixed on `legion/LEGION-29`, #970): `envoy.test.ts` cleared `DISPATCH_TOKEN` but not
+  `DISPATCH_TOKEN_FILE`, which `resolveDispatchConfig` reads *ahead* of the token (see
+  [secret-file-pointer-precedence](../integration-patterns/secret-file-pointer-precedence.md)), so three
+  Dispatch-tool tests registered real tools against a stub zod; `legion.test.ts` inherited the pane's tree/role/issue
+  markers, so nine tests died on `Legion session has both controller and tree launch markers`. Both suites now
+  clear the whole variable family in `beforeEach` (the existing `environmentKeys` list in `legion.test.ts`;
+  `DISPATCH_TOKEN_FILE` added beside `DISPATCH_URL`/`DISPATCH_TOKEN` in `envoy.test.ts`) and restore it in
+  `afterEach`. Rule: clear the variable *family the resolver consumes*, in its precedence order — clearing the
+  familiar name and leaving the file-pointer alive disables nothing.
 
 ## 3. `jj split` leaves the bookmark on the empty working copy
 
