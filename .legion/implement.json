@@ -541,5 +541,65 @@
       ],
       "flakeNote": "At 457d96d7 the Legion Envoy and Contracts job `dispatch` failed on packages/dispatch/e2e/doc.e2e.ts:105 (two users see each other's text within a second); main's own push run 34713483269 failed on the identical test three minutes later, and the job passed at the next head of both; re-run once per the skill's flake rule."
     }
+  },
+  "fifthPass": {
+    "completedAt": "2026-09-12T21:50:52.215492+00:00",
+    "review": "reviewer round 3 at head 665f4b1b (session 01a09624-3c98-7000-b194-fc1294ffbd20): COMMENT, no blocker; four should-fixes R3-S1..S4 and seven batched items R3-N1..N7, landed before the cleanup head per the architect. Tester round 4 at 665f4b1b: PASS on every criterion incl. the live sandbox merge.",
+    "reviewedHead": "665f4b1be75516dabd285578d2b9c85256e8f129",
+    "startedFrom": "e588e4e6c005f87907f1fef843920a0bc4ba6c0c (665f4b1b + reviewer round-3 review.json 97d55ebf + tester round-4 test.json e588e4e6)",
+    "newHead": "44cf72ad00feeb6149f6a7453eac5c09f7bf4c7f (GitHub's headRefOid after the push; the handoff commit that records this section is the final head)",
+    "legionDirectory": "NOT deleted in this pass by the architect's direction: the tester verifies this head first; a separate pass pushes the deletion.",
+    "rebaseStatus": "main@origin moved from fd4fce51 to 9f7f1df6 (#976 action asks, #978 cli config from injected env, #982 dispatch server URL, release bumps). LEGION-21 #962 and LEGION-12 #974 both still OPEN. GitHub reports #961 MERGEABLE at 44cf72ad against the moved main (three overlapping files \u2014 packages/daemon/src/cli/index.ts, its test, packages/pi-envoy/AGENTS.md \u2014 merge cleanly), so per the controller skill's own rule no rebase was made; the #974 and #962 recipes under testerNotes stay relevant.",
+    "findingsToCommits": [
+      {
+        "thread": 3997564739,
+        "finding": "S1 bridge routing key lags its own rebind; holds only under envoy-first dispatch",
+        "commit": "3ba40d929e58",
+        "what": "instance key = activeSessionContext?.sessionManager.getSessionId() ?? sessionID; stale one-slot comments fixed; test runs the heartbeat-after-/new-after-subagent case for both dispatch orders via createPi({bindEnvoy:false}); listener stub with per-session interest registry + soft-claim arbitration; resetLegionRoleClaimBridgeForTests seam cleared in afterEach (stale instances from earlier tests captured claims). Under the old key the legion-first case fails (5 s timeout, no regain posted)."
+      },
+      {
+        "thread": 3997564742,
+        "finding": "S2 exception 1 reads rulesets only; classic protection \u2192 false holds",
+        "commit": "12c11a51cab1",
+        "what": "both reads must be []: rules/branches/<base> AND branches/<base> .protection.required_status_checks.contexts. The admin endpoint branches/<base>/protection/required_status_checks answers 403 'Resource not accessible by integration' under the implement App on both repos (verified live), so it is not used. Live answers quoted: sjawhar/legion rulesets [lint,typecheck,test] / classic []; legion-smoke rulesets 403 free-plan / classic []."
+      },
+      {
+        "thread": 3997564745,
+        "finding": "S3 buckets skipping/cancel and exit 8 undefined; 403 sentence too narrow",
+        "commit": "12c11a51cab1",
+        "what": "pass+skipping green (6 skipping rows live on #974), pending pending, fail+cancel never merge (flake covers both). Exit codes verified live: with --json exit 0 whenever rows exist (pending row \u2192 0 on #961; fail+pending \u2192 0 on #962); exit 1 only for the two no-rows messages; exit 8 is text mode only (observed: text mode exit 8 with the same pending row). 403 matched by message containing 'make this repository public to enable this feature' (Pro observed, Team documented)."
+      },
+      {
+        "thread": 3997564749,
+        "finding": "S4 regain-step comment describes the pre-fix bridge",
+        "commit": "3ba40d929e58",
+        "what": "test split into three; session_tree handler for the same-id case; !cd//move moved-transcript case added; comment states the true mechanism; intervals[0] ticked explicitly with length asserted."
+      },
+      {
+        "thread": 3997564752,
+        "finding": "N1..N7",
+        "commits": {
+          "N1 N2 N3 N7": "3ba40d929e58",
+          "N4 N5": "44cf72ad00fe",
+          "N6": "12c11a51cab1"
+        },
+        "what": "N1 captured session id (fallback unreachable; listener re-registered per claim, last-wins \u2014 N2 clause). N3 field kept, event named: !cd/<move> \u2192 SessionManager.moveTo relocates the transcript under the same id with no session event; plus /legion-claim-controller in the daemon pane (LEGION_CONTROLLER marker) now reports the pane's own transcript so the once-only re-post after a manual override is gone; hand-started takeover still reports none (tests model the hand-started session without the marker). N4 hold comment rewritten. N5 expect(mints).toBe(1) dropped. N6 docs-only read from pr view --json files (jq filter quoted). N7 notice is two sentences."
+      }
+    ],
+    "testerRound4Items": {
+      "a": "daemon AGENTS.md upgrade note: after deploying a skill change, /new the controller pane or kill it so the resumed session re-reads the skill (commit 44cf72ad).",
+      "b": "nothing else. F2 (controller minting a grant from its secret file when the hook's grant was shadowed) is LEGION-12's; not sanctioned or blocked in the skill."
+    },
+    "deviations": "none \u2014 every should-fix and batched item landed.",
+    "threadReplies": "Five replies posted with this session's footer: 3997759872, 3997759932, 3997759988, 3997760033, 3997760081.",
+    "verificationCommandsRun": [
+      "packages/daemon: bunx biome check --error-on-warnings src/ (clean); bunx tsc --noEmit (0); env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test \u2192 880 pass, 5 skip, 0 fail (885 across 56 files)",
+      "packages/contracts: tsc 0; biome clean; bun test \u2192 98 pass",
+      "packages/pi-envoy: tsc 0; biome lint clean; bun test \u2192 158 pass, 0 fail (155 before this pass; +3 net: the one switch test became three plus the two-order loop)",
+      "grep -rn pr-queue skills packages docs --exclude-dir=plans \u2192 empty",
+      "constraint A: jj diff main@origin..@ -- skills/legion-worker/SKILL.md \u2192 exactly one hunk @@ -260,10 +260,14 @@",
+      "no Go changed",
+      "live GitHub under the pane's gh: rules/branches/main and branches/main on sjawhar/legion and sjawhar/legion-smoke; branches/main/protection[/required_status_checks] 403 on both; pr checks --json exit codes on #961 (pending\u21920), #962 (fail+pending\u21920), text mode #961 \u2192 exit 8; skipping buckets on #974"
+    ]
   }
 }
