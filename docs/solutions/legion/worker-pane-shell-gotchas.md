@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports, the pane's DISPATCH_URL in the daemon test suite, jj split's bookmark placement, and the box's hanging git credential helper"
+title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports, the pane's DISPATCH_URL in the daemon test suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, and a bash-bridge outage"
 category: legion
 tags:
   - legion
@@ -17,20 +17,26 @@ related_issues:
   - "sjawhar/legion#945"
   - "LEGION-22"
   - "sjawhar/legion#967"
+  - "LEGION-18"
+  - "sjawhar/legion#953"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
   - "legion start --check-config > validates github_apps.<role>.private_key_command fails only inside a Legion pane"
   - "Refusing to move bookmark backwards or sideways: legion/<KEY> after jj split"
   - "rig daemon's first jj git clone killed at the 30 s runner timeout; launchFailures 1; tree queued"
   - "legion handoff write: Handoff data field schemaVersion is not allowed"
+  - "legion handoff complete: Unable to report phase completion (403): Invalid or expired grant"
+  - "[handoff] Warning: phase recorded; no architect was live to receive the summary"
+  - "envoy_publish: no holder for role legion-<project>-<KEY>-architect"
+  - "bash tool: Unable to connect. Is the computer able to access the url?"
 ---
 
 # Worker-Pane Shell Gotchas
 
 Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1–3 are from
 LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 and the §1 alternative are
-from LEGION-22. None is part of any issue's scope; §1 is re-filed to the controller as a rig bug. Until it is fixed,
-this is the workaround.
+from LEGION-22; 7–8 and the §1 per-call workaround are from LEGION-18. None is part of any issue's scope; §1 is
+filed as LEGION-12 and §7 as LEGION-29. Until they are fixed, these are the workarounds.
 
 ## 1. Stacked `export LEGION_GRANT=…` lines: only the first per call redeems
 
@@ -70,6 +76,18 @@ side effects: `printf 'protocol=https\nhost=github.com\n' | LEGION_GRANT=<g> leg
 Two observations for whoever fixes the hook: the count is per session, not per tool; and in this shell (bash
 5.2.37), inside a function, `builtin export "$@"` with an expanded `NAME=value` word returned 0 without binding the
 variable — a plain assignment followed by `builtin export NAME` did. Cause not investigated.
+
+**Simpler per-call workaround (LEGION-18):** an injected grant that was never redeemed stays valid for minutes. When
+a call 403s, read the *first* `export LEGION_GRANT='…'` line the tool prepended to that call and name it explicitly on
+the next one — `LEGION_GRANT=<that-uuid> legion gh -- …`, `LEGION_GRANT=<that-uuid> jj -R "$LEGION_WORKSPACE" git push …`,
+`LEGION_GRANT=<that-uuid> legion handoff complete …`. An explicit assignment on the command line outranks every
+prepended `export`. This worked on every retry across three LEGION-18 rounds (pushes, thread replies, thread resolves,
+`pr edit`, `pr checks --watch`, `handoff complete`).
+
+**Do not paste the preamble yourself.** The hook prepends its block to whatever command text you send. If your own
+text contains a copy of an earlier call's block (easy when re-running a previous command verbatim), that stale copy
+is the last `export` and wins — the same 403 with only one *injected* grant in sight. Command text starts at
+`cd -- "$LEGION_WORKSPACE" && …`.
 
 **Alternative (LEGION-22): probe the grants instead of locking on the first.** Grants are reusable for their whole
 60 s TTL (`GRANT_TTL_MS` in `api.ts`; `resolveGrant` checks expiry only), so a shell can record every grant the hook
@@ -152,3 +170,36 @@ shared private tmux server): message the other worker before `up.sh` and run `do
 Re-writing a phase handoff from the existing `.legion/<phase>.json` (e.g. adding a `round2` key) fails with
 `Handoff data field schemaVersion is not allowed`: the ledger adds `schemaVersion`, `phase`, and `completed` itself.
 Strip them first — `jq 'del(.schemaVersion, .phase, .completed)'` — and pass the rest as `--data`.
+
+## 7. Your role topic has no Envoy holder
+
+After the daemon or the Envoy listener restarts (LEGION-29: a listener restart drops every role claim), `envoy_role_get`
+can return `no holder` for both your own role and the tree's architect. Two consequences:
+
+- `legion handoff complete` prints `[handoff] Warning: phase recorded; no architect was live to receive the summary` and
+  exits 0. The completion **is** recorded: the daemon captured and cleared the phase, PATCHed the issue's Dispatch
+  status (`legion state` showed `LEGION-18` at `testing` right after), and parked the summary for the architect's
+  catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not re-run it; do not write a second handoff.
+- `envoy_publish` to `notifications.role.legion-<project>-<KEY>-architect` fails with `no holder for role …`. Fall back
+  to the architect's session id: `legion state` → `roles["legion-<project>-<KEY>-architect"].sessionId`, then
+  `envoy_send(session_id=<that id>, message=…)`. Direct session delivery does not depend on the role claim. The
+  architect reached this implementer the same way, and asked for the final-push summary by `envoy_send` as well.
+
+## 8. The bash tool bridge drops out mid-phase
+
+For several minutes during LEGION-18 every `bash` call returned `Unable to connect. Is the computer able to access
+the url?`. The `eval` Python kernel kept working but is spawned **without** the pane environment (no `LEGION_*`,
+no `JJ_CONFIG`, no `GH_CONFIG_DIR`). Recover it from the OMP process, which is the kernel's parent:
+
+```python
+import os, subprocess
+raw = open(f"/proc/{os.getppid()}/environ", "rb").read().split(b"\0")
+env = dict(kv.decode().split("=", 1) for kv in raw if b"=" in kv)
+ws = env["LEGION_WORKSPACE"]
+subprocess.run(["jj", "-R", ws, "split", "-m", "…", "<path>"], cwd=ws, env=env, check=True)
+```
+
+With that `env`, file edits and `jj split` commits behave exactly as from the pane: `JJ_CONFIG` is present, so every
+commit still carries the `Omp-Session:` trailer and the role's bot author (verified on #953's four text commits, all
+made this way). What the kernel cannot do is redeem a grant — `legion gh`, `jj git push`, and `legion handoff complete`
+need the per-call `LEGION_GRANT` the bash hook injects — so queue those until the bridge returns.
