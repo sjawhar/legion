@@ -18,6 +18,7 @@ import {
   loadState as legionStateLoadState,
   saveState as legionStateSaveState,
   newLegionState,
+  type WorkerRoleClaim,
 } from "../legion-state";
 import {
   addressingFragment,
@@ -87,6 +88,124 @@ async function temporaryDir(): Promise<string> {
   return directory;
 }
 
+/** A `deps.sleep` whose waits never resolve on their own: each call is recorded with its `ms`, and the test
+ * fires the oldest wait of a given length when it decides the clock has advanced — so "armed but not yet
+ * expired" is observable, and expiry is a deliberate step rather than a race against real time.
+ * `stopTimeout`'s `cancel` is a no-op under an injected sleep, so a superseded wait stays recorded; firing
+ * it must be a no-op in the code under test (that is one of the things these tests prove). */
+function manualSleep() {
+  const pending: Array<{ ms: number; resolve: () => void }> = [];
+  return {
+    pending,
+    sleep: (ms: number) =>
+      new Promise<void>((resolve) => {
+        pending.push({ ms, resolve });
+      }),
+    /** Resolves the oldest pending wait of exactly `ms`; false if none is pending. */
+    fire(ms: number): boolean {
+      const index = pending.findIndex((entry) => entry.ms === ms);
+      if (index === -1) return false;
+      const [entry] = pending.splice(index, 1);
+      entry?.resolve();
+      return true;
+    },
+  };
+}
+
+/** A ready-confirmed idle phase worker cached in the manager exactly as a daemon restart's
+ * `reconnectWorkers` leaves it: the claim's locator names an `ompSessionFile` that exists on disk, the fake
+ * client's `getState` seeded it idle (firing `onIdle`, which arms the idle-retire clock), and every LATER
+ * `connectWorkerRpc` call — the dead-worker path's one reconnect probe after a retirement — is refused like a
+ * socket whose shim has exited. `shutdownCalls` records every graceful `shutdown` frame sent to the client. */
+async function idleWorkerFixture(options: {
+  role: LegionRole;
+  issue?: IssueKey;
+  workerIdleRetireSeconds?: number;
+  claim?: Partial<WorkerRoleClaim>;
+  phases?: LegionState["phases"];
+}) {
+  const stateDir = await temporaryDir();
+  await mkdir(path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42"), {
+    recursive: true,
+  });
+  const sessionFile = path.join(stateDir, `${options.role}-session.jsonl`);
+  await writeFile(sessionFile, "{}", "utf8");
+  const state = newLegionState("omp", 1);
+  tree(state);
+  state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+  const issue = options.issue ?? root;
+  if (issue !== root) {
+    state.issues[root].children = [issue];
+    state.issues[issue] = {
+      key: issue,
+      title: "Child",
+      parent: root,
+      children: [],
+      status: "in_progress",
+    };
+  }
+  const token = roleToken("omp", issue, options.role);
+  state.roles[token] = {
+    issue,
+    role: options.role,
+    sessionId: `ses_${options.role}`,
+    generation: 1,
+    readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+    locator: {
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@42",
+      tmuxPaneId: "%7",
+      socketPath: `/state/workers/${options.role}.sock`,
+      ompSessionFile: sessionFile,
+    },
+    ...options.claim,
+  };
+  if (options.phases) Object.assign(state.phases, options.phases);
+  const client = fakeWorkerRpcClient();
+  // Models the real client's getState(): a false isStreaming is an idle transition (see the
+  // "does not count an idle worker (isStreaming: false)" test).
+  client.getStateImpl = async () => {
+    client.emitRunState("idle");
+    return { data: { isStreaming: false } };
+  };
+  const shutdownCalls: string[] = [];
+  const shutdown = client.shutdown.bind(client);
+  client.shutdown = () => {
+    shutdownCalls.push(token);
+    shutdown();
+  };
+  let connectAttempts = 0;
+  const clock = manualSleep();
+  const harness = manager(state, {
+    config: config(stateDir, { workerIdleRetireSeconds: options.workerIdleRetireSeconds ?? 600 }),
+    sleep: clock.sleep,
+    connectWorkerRpc: async () => {
+      connectAttempts += 1;
+      if (connectAttempts > 1) throw new Error("dead shim socket");
+      return client;
+    },
+  });
+  await harness.manager.reconnectWorkers();
+  const claim = () => {
+    const current = harness.state.roles[token];
+    if (!current || !("issue" in current)) throw new Error(`worker claim ${token} disappeared`);
+    return current;
+  };
+  return {
+    ...harness,
+    stateDir,
+    sessionFile,
+    issue,
+    token,
+    client,
+    claim,
+    shutdownCalls,
+    clock,
+    connectAttempts: () => connectAttempts,
+  };
+}
+
 function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): DaemonConfig {
   return {
     project: "omp",
@@ -113,6 +232,10 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    // Disabled by default here: several tests inject an instantly-resolving deps.sleep, under which a live
+    // clock would fire on the first idle transition and retire fixtures those tests expect to stay
+    // resident. The idle-retire tests opt in explicitly.
+    workerIdleRetireSeconds: 0,
     workerStreamPort: 13371,
     gates: { design: "root-issues" },
     githubApps: {},
@@ -8669,6 +8792,203 @@ describe("ProcessManager", () => {
     expect(
       commands.some((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toBeTrue();
+  });
+
+  it("does not count a retired claim (locator cleared, resumeSessionFile kept) toward the running-worker cap", async () => {
+    const { processes, state, commands, stateDir } = await workerCapFixture(1);
+    await mkdir(path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42"), {
+      recursive: true,
+    });
+    // Exactly the shape an idle retirement (or markWorkerDeadLocked) leaves behind.
+    state.roles[roleToken("omp", root, "implementer")] = {
+      issue: root,
+      role: "implementer",
+      sessionId: "ses_implementer",
+      generation: 1,
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      resumeSessionFile: path.join(stateDir, "implementer-session.jsonl"),
+    };
+
+    const result = await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    expect(result).toEqual({ status: "spawned", roleToken: roleToken("omp", root, "tester") });
+    expect(
+      commands.some((command) => command[0] === "tmux" && command[3] === "new-window")
+    ).toBeTrue();
+    expect(state.workerAdmission.queue).toEqual([]);
+  });
+
+  it.each<[string, LegionState["phases"][IssueKey]]>([
+    ["absent", undefined],
+    [
+      "completed",
+      {
+        phase: "implementer",
+        sessionId: "ses_implementer",
+        completed: { summary: "done", at: "2026-08-24T00:00:00.000Z" },
+      },
+    ],
+    ["naming another role", { phase: "tester", sessionId: "ses_tester" }],
+  ])("retires a confirmed idle worker past the idle window when phases[issue] is %s: one graceful stop, locator cleared, claim kept with its session file, no failure counted, no worker-died", async (_shape, phase) => {
+    const worker = await idleWorkerFixture({
+      role: "implementer",
+      phases: phase ? { [root]: phase } : undefined,
+    });
+    expect(worker.client.runState).toBe("idle");
+    // Armed by the idle transition reconnectWorkers' get_state seeded.
+    expect(worker.clock.pending.some((wait) => wait.ms === 600_000)).toBeTrue();
+    expect(worker.shutdownCalls).toEqual([]);
+
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoopUntil(() => worker.claim().locator === undefined);
+    // Let the socket-close handler's reconnect probe and its queued markWorkerDead settle too.
+    await flushEventLoop(50);
+
+    expect(worker.shutdownCalls).toEqual([worker.token]);
+    expect(
+      worker.commands.filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
+    ).toEqual([]);
+    expect(worker.claim()).toMatchObject({
+      issue: root,
+      role: "implementer",
+      sessionId: "ses_implementer",
+      generation: 1,
+      resumeSessionFile: worker.sessionFile,
+    });
+    expect(worker.claim().locator).toBeUndefined();
+    expect(worker.claim().launchFailures).toBeUndefined();
+    expect(worker.claim().promptFailures).toBeUndefined();
+    // The stop's own socket close ran the dead-worker path: exactly one reconnect probe (the
+    // fixture's second connect, refused like an exited shim), then markWorkerDeadLocked's
+    // locator-identity re-check found the locator already cleared and did nothing further — one
+    // revoke, no publish of any kind.
+    expect(worker.connectAttempts()).toBe(2);
+    expect(worker.revokedSessions).toEqual(["ses_implementer"]);
+    expect(worker.publications).toEqual([]);
+  });
+
+  it("leaves a confirmed idle worker untouched while its idle window is still running", async () => {
+    const worker = await idleWorkerFixture({ role: "implementer" });
+    const seededLocator = structuredClone(worker.claim().locator);
+
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.revokedSessions).toEqual([]);
+    // Armed and waiting: one clock, not yet fired.
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
+  });
+
+  it("leaves a worker re-prompted inside the idle window untouched, and its next idle transition arms a fresh clock that does retire it", async () => {
+    const worker = await idleWorkerFixture({ role: "implementer" });
+    const seededLocator = structuredClone(worker.claim().locator);
+    // What `prompt()` does synchronously before the request is even sent.
+    worker.client.emitRunState("running");
+
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.revokedSessions).toEqual([]);
+    expect(worker.connectAttempts()).toBe(1);
+
+    // The turn ends: a fresh clock is armed, and this one is live — the first arm's map entry does
+    // not block it.
+    worker.client.emitRunState("idle");
+    expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoopUntil(() => worker.claim().locator === undefined);
+
+    expect(worker.shutdownCalls).toEqual([worker.token]);
+  });
+
+  it("never retires an idle worker whose role is the issue's active phase", async () => {
+    const worker = await idleWorkerFixture({
+      role: "implementer",
+      phases: { [root]: { phase: "implementer", sessionId: "ses_implementer" } },
+    });
+    const seededLocator = structuredClone(worker.claim().locator);
+
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.revokedSessions).toEqual([]);
+    expect(worker.connectAttempts()).toBe(1);
+  });
+
+  it("never retires an idle worker holding a queued pendingAssignment", async () => {
+    // Deliberately NOT pushed onto state.workerAdmission.queue: the promotion trigger has nothing
+    // to drain, so this isolates the pendingAssignment guard itself.
+    const worker = await idleWorkerFixture({
+      role: "implementer",
+      claim: { pendingAssignment: "verify again" },
+    });
+    const seededLocator = structuredClone(worker.claim().locator);
+
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.claim().pendingAssignment).toBe("verify again");
+    expect(worker.revokedSessions).toEqual([]);
+    expect(worker.connectAttempts()).toBe(1);
+  });
+
+  it("never retires an idle sub-architect, however long its idle window has run", async () => {
+    const worker = await idleWorkerFixture({ issue: child, role: "architect" });
+    const seededLocator = structuredClone(worker.claim().locator);
+
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoop(20);
+
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toEqual(seededLocator);
+    expect(worker.revokedSessions).toEqual([]);
+    expect(worker.connectAttempts()).toBe(1);
+  });
+
+  it("never arms the idle-retire clock when worker_idle_retire_seconds is 0, while the idle trigger still fires for queue promotion", async () => {
+    const worker = await idleWorkerFixture({ role: "implementer", workerIdleRetireSeconds: 0 });
+
+    expect(worker.clock.pending).toEqual([]);
+    // The composed idle callback lost nothing: the trigger fired once for the queue re-check.
+    expect(worker.client.idleFireCount).toBe(1);
+
+    await flushEventLoop(20);
+    expect(worker.shutdownCalls).toEqual([]);
+    expect(worker.claim().locator).toBeDefined();
+  });
+
+  it("resumes a retired worker with --resume on its next spawn_worker, exactly like a dead-pane recovery", async () => {
+    const worker = await idleWorkerFixture({ role: "implementer" });
+    expect(worker.clock.fire(600_000)).toBeTrue();
+    await flushEventLoopUntil(() => worker.claim().locator === undefined);
+    await flushEventLoop(50);
+    expect(worker.claim().resumeSessionFile).toBe(worker.sessionFile);
+
+    const result = await worker.manager.spawnWorker(
+      root,
+      root,
+      "implementer",
+      "Run the legion-retro skill now."
+    );
+
+    expect(result).toEqual({ status: "spawned", roleToken: worker.token });
+    const launch = worker.commands.find(
+      (command) =>
+        command[0] === "tmux" && (command[3] === "new-window" || command[3] === "split-window")
+    );
+    if (!launch) throw new Error("retired worker's resume did not open a pane");
+    expect(launch.at(-1)).toContain(`--resume=${worker.sessionFile}`);
+    expect(worker.claim()).toMatchObject({ generation: 2, expectedSessionId: "ses_implementer" });
+    expect(worker.claim().locator?.ompSessionFile).toBe(worker.sessionFile);
+    expect(worker.claim().resumeSessionFile).toBeUndefined();
+    expect(worker.claim().launchFailures).toBe(0);
   });
 
   it("closes and does not cache a worker socket whose negotiation fails, so a later call reconnects", async () => {
