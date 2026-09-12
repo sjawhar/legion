@@ -250,7 +250,7 @@ function manager(
     provisioningToken: async () => "daemon-installation-token",
     statPrompt: async () => {},
     ompInvocation: "/opt/oh-my-pi/18.0.3/omp",
-    panePath: "/full/bin:/usr/bin",
+    processPath: "/full/bin:/usr/bin",
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
       repo: "sjawhar/legion",
@@ -1452,11 +1452,11 @@ describe("ProcessManager", () => {
   it("passes the packaged role prompt path to OMP for root and controller windows, without an --extension flag", async () => {
     const stateDir = await temporaryDir();
     const ompInvocation = "/opt/oh-my-pi/18.0.3/omp";
-    const panePath = "/full/bin:/usr/bin";
+    const processPath = "/full/bin:/usr/bin";
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
       config: config(stateDir),
       ompInvocation,
-      panePath,
+      processPath,
       run: async (command) => {
         commands.push(command);
         if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
@@ -1478,7 +1478,7 @@ describe("ProcessManager", () => {
       `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       `cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
     ]);
-    expect(windows.map((command) => command.includes(`PATH=${panePath}`))).toEqual([true, true]);
+    expect(windows.map((command) => command.includes(`PATH=${processPath}`))).toEqual([true, true]);
   });
 
   it("prepends the configured omp_launch_prefix before the OMP invocation for root and controller windows", async () => {

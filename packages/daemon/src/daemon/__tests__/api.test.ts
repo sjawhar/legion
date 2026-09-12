@@ -1413,7 +1413,7 @@ describe("Legion HTTP API", () => {
     });
     expect(grant.status).toBe(200);
 
-    // Simulates what `ProcessManager.closeTree`/`retireWorkerLocator`/`removeTreeWindow`
+    // Simulates what `ProcessManager.closeTree`/`retireWorkerLocator`/`removeTreeProcess`
     // actually call the instant a session's process is observed dead or torn down (see
     // `revokeRoleClaim`) - `deleteCapability` must not merely stop future grant mints, it must
     // also invalidate every grant this session already minted, since `resolveGrant` only ever

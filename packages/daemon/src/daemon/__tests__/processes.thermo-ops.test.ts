@@ -58,7 +58,7 @@ function manager(
     saveState: async () => {},
     config: daemonConfig(stateDir),
     ompInvocation: "/opt/omp",
-    panePath: "/usr/bin",
+    processPath: "/usr/bin",
     credentialHelper: "!/opt/legion credential",
     run: async (command, options) => {
       commands.push(command);

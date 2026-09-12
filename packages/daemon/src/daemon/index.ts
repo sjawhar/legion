@@ -311,7 +311,7 @@ async function startDaemonLocked(
     config,
     runtime,
     ompInvocation: environment.ompInvocation,
-    panePath: environment.paneEnv.PATH,
+    processPath: environment.paneEnv.PATH,
     credentialHelper: daemonCredentialHelper(),
     run: runner,
     natsPublish: (subject, data) => nats.publish(subject, data),

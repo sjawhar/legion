@@ -217,7 +217,7 @@ function processManagerDeps(
     config: cfg,
     runtime,
     ompInvocation: cfg.ompInvocation,
-    panePath: process.env.PATH ?? "",
+    processPath: process.env.PATH ?? "",
     credentialHelper: "!true",
     run: runner,
     natsPublish: () => {},

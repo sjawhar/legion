@@ -71,7 +71,8 @@ export interface ProcessManagerDeps {
   saveState(): Promise<void>;
   config: DaemonConfig;
   ompInvocation: string;
-  panePath: string;
+  /** The `PATH` every spawned process receives (the daemon's resolved tool environment). */
+  processPath: string;
   credentialHelper: string;
   run(
     cmd: string[],
@@ -260,7 +261,7 @@ export class ProcessManager {
   /** `<state_dir>/secrets/dispatch-token`, written by `index.ts` at startup whenever
    * `config.dispatchToken` is set; exported to every process as `DISPATCH_TOKEN_FILE`. */
   private readonly dispatchTokenFile: string | undefined;
-  /** Role tokens with a launch in flight, and how many (`holdPaneSecret`): a launch has taken the
+  /** Role tokens with a launch in flight, and how many (`holdProcessSecret`): a launch has taken the
    * hold but not yet stored its locator in state. `liveSecretFiles` treats them as live so a
    * persist racing the launch (another role's save, an older generation of the same root
    * settling) cannot reap a file the process is about to read. */
@@ -268,7 +269,7 @@ export class ProcessManager {
   /** Names of every process secret file the runtime has written on this manager's behalf (added
    * immediately before each `runtime.spawn`), plus the survivors of the boot-time listing prune:
    * the population the steady-state prune in `persist()` walks — no directory listing per save. */
-  private readonly paneSecretFiles = new Set<string>();
+  private readonly processSecretFiles = new Set<string>();
 
   /**
    * The stop hierarchy every graceful-shutdown path funnels through, from lowest level up:
@@ -1211,9 +1212,9 @@ export class ProcessManager {
     const priorReadyConfirmedAt = tree.readyConfirmedAt;
     tree.generation += 1;
     // Held for the whole launch, released immediately before each persist below once the
-    // outcome is in state — see `holdPaneSecret`. Two generations of one root can be in flight
+    // outcome is in state — see `holdProcessSecret`. Two generations of one root can be in flight
     // at once; each holds its own count.
-    const releaseSecret = this.holdPaneSecret(
+    const releaseSecret = this.holdProcessSecret(
       roleToken(this.deps.state.project, issue, "architect")
     );
     try {
@@ -1977,7 +1978,7 @@ export class ProcessManager {
       LEGION_CREDENTIAL_HELPER: this.deps.credentialHelper,
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
-      PATH: this.deps.panePath,
+      PATH: this.deps.processPath,
       DISPATCH_URL: this.deps.config.dispatchUrl,
       DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
     };
@@ -2009,7 +2010,7 @@ export class ProcessManager {
     // Tracked before the runtime writes it: a name whose write then fails is a harmless no-op
     // `rm --force` at the next prune. The caller (`spawnRoot`) holds the file exempt from pruning
     // for the whole launch.
-    this.paneSecretFiles.add(architectToken);
+    this.processSecretFiles.add(architectToken);
     const locator = await this.runtime.spawn("root", {
       issue: tree.root,
       role: "architect",
@@ -2257,8 +2258,8 @@ export class ProcessManager {
     }
     // Held for the whole launch, released once the fresh claim (and its locator) is in state —
     // or the launch has given up — immediately before the persist that follows. See
-    // `holdPaneSecret`.
-    const releaseSecret = this.holdPaneSecret(token);
+    // `holdProcessSecret`.
+    const releaseSecret = this.holdProcessSecret(token);
     try {
       const workspace = await this.provisionWorkspace(issue);
       const promptPath = path.join(EXTENSION_PACKAGE, "roles", `${role}.md`);
@@ -2285,7 +2286,7 @@ export class ProcessManager {
         ENVOY_URL: this.deps.config.envoyUrl,
         GIT_CONFIG_COUNT: "0",
         GIT_TERMINAL_PROMPT: "0",
-        PATH: this.deps.panePath,
+        PATH: this.deps.processPath,
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
@@ -2299,7 +2300,7 @@ export class ProcessManager {
       const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
-      this.paneSecretFiles.add(token);
+      this.processSecretFiles.add(token);
       const locator = await this.runtime.spawn("worker", {
         issue,
         role,
@@ -2438,11 +2439,11 @@ export class ProcessManager {
     await this.writeOmpConfig(controllerDir);
     const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
     const token = controllerToken(this.deps.state.project);
-    // Held until the locator is in state (or the launch failed) — see `holdPaneSecret`.
-    const releaseSecret = this.holdPaneSecret(token);
+    // Held until the locator is in state (or the launch failed) — see `holdProcessSecret`.
+    const releaseSecret = this.holdProcessSecret(token);
     try {
       // Tracked before the runtime writes it — see `spawnTree`.
-      this.paneSecretFiles.add(token);
+      this.processSecretFiles.add(token);
       const env = {
         LEGION_CONTROLLER: "1",
         LEGION_ROLE: "controller",
@@ -2450,7 +2451,7 @@ export class ProcessManager {
         LEGION_PROJECT: this.deps.state.project,
         ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
         ENVOY_URL: this.deps.config.envoyUrl,
-        PATH: this.deps.panePath,
+        PATH: this.deps.processPath,
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
@@ -2492,7 +2493,7 @@ export class ProcessManager {
   /** Revokes a claim's session capability (a no-op if it never had one — never spawned, or
    * already revoked) the instant its process is retired or torn down, so a stale process can
    * never keep minting grants once the daemon has stopped trusting it. The single chokepoint
-   * every path that retires or deletes a role's claim goes through: `removeTreeWindow` (the
+   * every path that retires or deletes a role's claim goes through: `removeTreeProcess` (the
    * root architect), `retireWorkerLocator` (a worker, via `markWorkerDeadLocked` and every
    * other retirement), and `closeTree` (root and every worker, on tree shutdown). */
   private revokeRoleClaim(claim: WorkerRoleClaim | undefined): void {
@@ -2506,7 +2507,7 @@ export class ProcessManager {
    * `resurrectDeadTree` — the probe already confirmed this process dead, so a failed kill of an
    * already-dead process is a stray cleanup problem, never a reason to refuse resurrecting the
    * tree onto a fresh one. */
-  private async removeTreeWindow(tree: TreeState): Promise<void> {
+  private async removeTreeProcess(tree: TreeState): Promise<void> {
     const architectToken = roleToken(this.deps.state.project, tree.root, "architect");
     const architectClaim = this.deps.state.roles[architectToken];
     this.revokeRoleClaim(architectClaim && "issue" in architectClaim ? architectClaim : undefined);
@@ -2631,7 +2632,7 @@ export class ProcessManager {
     if ((await this.probe(treeKey)) === "alive") return;
     const tree = this.requireTree(treeKey);
     const resumeSessionFile = tree.locator?.ompSessionFile;
-    await this.removeTreeWindow(tree);
+    await this.removeTreeProcess(tree);
     tree.status = "dead";
     await this.spawnRoot(treeKey, true, resumeSessionFile);
   }
@@ -2673,7 +2674,7 @@ export class ProcessManager {
    * generation while the older one is still blocked in the runtime, see `spawnTree`), and the
    * older one settling must never expose the file the newer process is about to read. The
    * returned release is idempotent. */
-  private holdPaneSecret(token: string): () => void {
+  private holdProcessSecret(token: string): () => void {
     this.launchingSecrets.set(token, (this.launchingSecrets.get(token) ?? 0) + 1);
     let released = false;
     return () => {
@@ -2704,7 +2705,7 @@ export class ProcessManager {
   /** The boot-time half of secret-file hygiene (`index.ts`): lists `<state_dir>/secrets` and
    * removes everything no live locator references — files a previous daemon process left behind
    * between clearing a locator and its save's prune. The survivors (every process's file a
-   * reconnected locator still references) join `paneSecretFiles`, so the steady-state prune reaps
+   * reconnected locator still references) join `processSecretFiles`, so the steady-state prune reaps
    * them the moment that locator clears, exactly like a file written on this manager's behalf —
    * a process's secret file lives as long as its locator, across daemon restarts too.
    * Best-effort and never throws. */
@@ -2712,29 +2713,29 @@ export class ProcessManager {
     try {
       const { kept } = await pruneSecretFiles(this.deps.config.stateDir, this.liveSecretFiles());
       for (const name of kept) {
-        if (name !== DISPATCH_TOKEN_SECRET) this.paneSecretFiles.add(name);
+        if (name !== DISPATCH_TOKEN_SECRET) this.processSecretFiles.add(name);
       }
     } catch (error) {
-      console.error("[legion] failed to prune pane secret files:", error);
+      console.error("[legion] failed to prune process secret files:", error);
     }
   }
 
   /** The steady-state half, run by every `persist()`: removes exactly the files this process
-   * wrote (`paneSecretFiles`) that no live locator references any more — no directory listing,
+   * wrote (`processSecretFiles`) that no live locator references any more — no directory listing,
    * so a save that clears no locator costs no extra I/O. A file whose removal fails stays tracked
    * and is retried on the next persist; the failure is logged, never thrown, because hygiene must
    * never turn a successful save into a failed one. */
   private async pruneWrittenSecretFiles(): Promise<void> {
     const live = this.liveSecretFiles();
-    const stale = [...this.paneSecretFiles].filter((name) => !live.has(name));
+    const stale = [...this.processSecretFiles].filter((name) => !live.has(name));
     if (stale.length === 0) return;
     await Promise.all(
       stale.map(async (name) => {
         try {
           await rm(secretFilePath(this.deps.config.stateDir, name), { force: true });
-          this.paneSecretFiles.delete(name);
+          this.processSecretFiles.delete(name);
         } catch (error) {
-          console.error(`[legion] failed to remove pane secret file ${name}:`, error);
+          console.error(`[legion] failed to remove process secret file ${name}:`, error);
         }
       })
     );

@@ -106,7 +106,7 @@ locator references it — the steady-state prune walks only the names this proce
 inherited (no directory listing per save); the one listing prune `index.ts` runs at boot reaps
 anything a crash left behind and seeds the steady-state set with its survivors, so an inherited
 file is reaped the moment its locator clears. A launch in flight holds its file exempt from
-pruning (`holdPaneSecret`, a refcount: two generations of one root can be launching at once) from
+pruning (`holdProcessSecret`, a refcount: two generations of one root can be launching at once) from
 before the write until its locator is in state. A boot token doubles as the pane's recovery token
 after a daemon restart, so its file lives exactly as long as the pane's locator. Consumers
 (`@legion/envoy-client` `resolveDispatchConfig`, the pi-envoy extension, `legion status`) resolve
