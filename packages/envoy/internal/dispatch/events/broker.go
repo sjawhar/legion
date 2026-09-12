@@ -106,6 +106,14 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 // Notify reports whether an event should wake agents and receive routed delivery.
 // The issue topic, event log, and SSE carry every event regardless of this value.
 func (b *Broker) Notify(e model.Event) bool {
+	if e.Type == "message.delivery" || e.Type == "message.answered" {
+		return false
+	}
+	if e.Type == "message.created" {
+		if message, ok := e.Payload.(model.MessageEventPayload); ok && message.Target != nil {
+			return false
+		}
+	}
 	if e.Type == "child.status" {
 		return true
 	}

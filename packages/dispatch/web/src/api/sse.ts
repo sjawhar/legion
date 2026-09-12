@@ -37,6 +37,8 @@ const knownEventTypes: Record<EventType, true> = {
   "suggestion.accepted": true,
   "suggestion.rejected": true,
   "message.created": true,
+  "message.delivery": true,
+  "message.answered": true,
   "child.status": true,
   "subscription.removed": true,
 };
@@ -188,7 +190,11 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     return keys;
   }
 
-  if (event.type === "message.created") {
+  if (
+    event.type === "message.created" ||
+    event.type === "message.delivery" ||
+    event.type === "message.answered"
+  ) {
     keys.push(["messages", event.issue_key], ["artifact"]);
     return keys;
   }

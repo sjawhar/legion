@@ -23,9 +23,11 @@ function message(
       author: actor,
       body,
       created_at: "2026-09-09T00:00:00Z",
+      deliveries: [],
       id: `message-${id}`,
+      in_reply_to: null,
       issue_key: "CORE-1",
-      reply_to: null,
+      target: null,
     },
     seq: id,
     type: "message.created",
@@ -127,16 +129,28 @@ test("observes message rows only while the Conversation panel is visible", async
   try {
     api.getIssueEvents = async () => [message(1)];
     api.listAgents = async () => [];
+    queryClient.setQueryData(["agents"], []);
+    queryClient.setQueryData(["events", "CORE-1"], {
+      pageParams: [null],
+      pages: [[message(1)]],
+    });
     const view = render(tab({ "CORE-1": issueState() }, false, queryClient));
     unmount = view.unmount;
 
-    await screen.findByText("A message");
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-    expect(observations).toHaveLength(0);
+    if (view.container.querySelector('[data-event-seq="1"]') === null) {
+      throw new Error("expected the cached message turn");
+    }
+    expect(observations.filter((element) => view.container.contains(element))).toHaveLength(0);
 
     view.rerender(tab({ "CORE-1": issueState() }, true, queryClient));
-    await waitFor(() => expect(observations).toHaveLength(1));
-    expect(observations[0]?.getAttribute("data-event-seq")).toBe("1");
+    await waitFor(() =>
+      expect(observations.filter((element) => view.container.contains(element))).toHaveLength(1)
+    );
+    expect(
+      observations
+        .filter((element) => view.container.contains(element))[0]
+        ?.getAttribute("data-event-seq")
+    ).toBe("1");
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -216,6 +230,7 @@ test("a scroll event measures the reader position in O(1) rect reads", async () 
   try {
     api.getIssueEvents = async () => events;
     api.listAgents = async () => [];
+    queryClient.setQueryData(["agents"], []);
     queryClient.setQueryData<UserState>(["user-state"], { "CORE-1": issueState() });
     queryClient.setQueryData(["events", "CORE-1"], { pageParams: [null], pages: [events] });
 
@@ -301,6 +316,65 @@ test("agent authors render the registry title and fall back to a short id", asyn
     const turns = await screen.findByRole("list", { name: "Conversation turns" });
     await within(turns).findByText("Planner");
     expect(within(turns).getByText("session:fedcba98…")).toBeTruthy();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+test("hides targeted-message retries on a closed issue", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const question: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: { id: "alice", kind: "user" },
+        body: "Can this ship?",
+        created_at: "2026-09-12T00:00:00Z",
+        deliveries: [],
+        id: "message-1",
+        in_reply_to: null,
+        issue_key: "CORE-1",
+        target: "session:s1",
+      },
+      seq: 1,
+      type: "message.created",
+    };
+    const failedDelivery: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:01:00Z",
+      id: 2,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        attempt: 1,
+        delivery: "btw",
+        error: "no live session s1",
+        message_id: "message-1",
+        session_id: "s1",
+        state: "failed",
+        title: "planner",
+      },
+      seq: 2,
+      type: "message.delivery",
+    };
+    api.getIssueEvents = async () => [question, failedDelivery];
+    api.listAgents = async () => [];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient, true)).unmount;
+    await screen.findByText("Failed: no live session s1");
+
+    expect(screen.queryByRole("button", { name: "Ask BTW again" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send normally" })).toBeNull();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -460,7 +534,7 @@ test("Jump to latest keeps the reader at the newest turn", async () => {
   }
 });
 
-test("lists live sessions in the message recipient selector", async () => {
+test("lists live sessions in the message recipient picker", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
   const queryClient = newQueryClient();
@@ -490,17 +564,22 @@ test("lists live sessions in the message recipient selector", async () => {
     ];
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
 
-    const selector = (await screen.findByRole("combobox", {
-      name: "Recipient",
-    })) as HTMLSelectElement;
-    expect(selector.value).toBe("");
-    expect(screen.getByRole("option", { name: "No recipient" })).toBeTruthy();
-    const planner = (await screen.findByRole("option", {
-      name: "Planner (e2e)",
-    })) as HTMLOptionElement;
-    expect(planner.value).toBe("planner-session");
-    const reviewer = screen.getByRole("option", { name: "Reviewer (e2e)" }) as HTMLOptionElement;
-    expect(reviewer.value).toBe("reviewer-session");
+    const trigger = await screen.findByRole("button", { name: "Choose recipient" });
+    await act(async () => {
+      fireEvent.click(trigger);
+    });
+    const picker = await screen.findByRole("dialog", { name: "Recipient picker" });
+    const planner = await within(picker).findByRole("button", {
+      name: /Planner \(e2e\) \/w\/planner/,
+    });
+    expect(planner).toBeTruthy();
+    expect(
+      within(picker).getByRole("button", { name: /Reviewer \(e2e\) \/w\/reviewer/ })
+    ).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(planner);
+    });
+    expect(trigger.textContent).toContain("To: Planner (e2e)");
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;

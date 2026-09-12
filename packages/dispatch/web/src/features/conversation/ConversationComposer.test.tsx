@@ -10,9 +10,11 @@ const createdMessage: Message = {
   author: { id: "alice", kind: "user" },
   body: "sent",
   created_at: "2026-09-10T00:00:00Z",
+  deliveries: [],
   id: "message-1",
+  in_reply_to: null,
   issue_key: "CORE-1",
-  reply_to: null,
+  target: null,
 };
 
 function renderComposer(recipientSlot?: ReactNode) {

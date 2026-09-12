@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -127,6 +130,60 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 	if got := strings.Join(response.Sender.Roles, ","); got != "maintainer,reviewer" {
 		t.Fatalf("sender roles = %q, want maintainer,reviewer", got)
 	}
+}
+
+// TestDispatchClientSendUsesListenerWireContract keeps Dispatch's client and the
+// listener's real send handler on the same JSON boundary. In particular, payload
+// is an opaque JSON string on this HTTP API, rather than an embedded JSON value.
+func TestDispatchClientSendUsesListenerWireContract(t *testing.T) {
+	publisher := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: publisher, registry: registry, sessions: sessions})
+
+	var wire string
+	handler := sendHandler(&state)
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("capture Dispatch send: %v", err)
+		}
+		wire = string(body)
+		r.Body = io.NopCloser(strings.NewReader(wire))
+		handler.ServeHTTP(w, r)
+	}))
+	defer listener.Close()
+	payloadBytes, err := os.ReadFile("../../../contracts/fixtures/dispatch-targeted-delivery.json")
+	if err != nil {
+		t.Fatalf("read targeted delivery fixture: %v", err)
+	}
+	payload := string(payloadBytes)
+
+	result, err := dispatchenvoy.New(listener.URL).Send(context.Background(), dispatchenvoy.SendInput{
+		TargetSession:  "ses_target",
+		Message:        "Can this ship?",
+		Payload:        json.RawMessage(payload),
+		IdempotencyKey: "message-1:1",
+		ExpectsReply:   "required",
+	})
+	if err != nil {
+		t.Fatalf("Dispatch send through listener: %v", err)
+	}
+	if result.Recipient != "ses_target" || result.EnvelopeID == "" {
+		t.Fatalf("send result = %#v, want listener envelope for ses_target", result)
+	}
+	var request struct {
+		Payload      string  `json:"payload"`
+		Urgency      *string `json:"urgency"`
+		ExpectsReply string  `json:"expects_reply"`
+	}
+	if err := json.Unmarshal([]byte(wire), &request); err != nil {
+		t.Fatalf("decode captured Dispatch wire request: %v", err)
+	}
+	if request.Payload != payload || request.Urgency != nil || request.ExpectsReply != "required" {
+		t.Fatalf("captured Dispatch wire request = %s", wire)
+	}
+	t.Logf("targeted Dispatch send wire: %s", wire)
 }
 
 func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
@@ -1009,5 +1066,47 @@ func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
 		if rr.Code != http.StatusOK || envelope.PayloadSummary != "First paragraph." || envelope.Payload == "" {
 			t.Fatalf("%s response = %d %+v", tc.path, rr.Code, envelope)
 		}
+	}
+}
+func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{registry: registry, sessions: sessions})
+	handler := subscribeHandler(&state, "test-machine", logging.New("test"))
+
+	for _, body := range []string{
+		`{"session_id":"ses_capable","topics":[],"self_subscribed":true,"capabilities":["aside","btw"]}`,
+		`{"session_id":"ses_legacy","topics":[],"self_subscribed":true}`,
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(
+			recorder,
+			httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)),
+		)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("subscribe: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+
+	list := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("list sessions: status=%d body=%s", list.Code, list.Body.String())
+	}
+	var payload []struct {
+		SessionID    string   `json:"session_id"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(list.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode sessions: %v", err)
+	}
+	if len(payload) != 2 {
+		t.Fatalf("sessions = %#v, want two", payload)
+	}
+	if payload[0].SessionID != "ses_capable" || strings.Join(payload[0].Capabilities, ",") != "aside,btw" {
+		t.Fatalf("capable session = %#v, want advertised capabilities", payload[0])
+	}
+	if payload[1].SessionID != "ses_legacy" || len(payload[1].Capabilities) != 0 {
+		t.Fatalf("legacy session = %#v, want empty capabilities", payload[1])
 	}
 }

@@ -152,7 +152,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
     .toMatchObject({ title: "First decision revised" });
   await alicePage.getByLabel("Status").selectOption("testing");
   await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ status: "testing" });
-  await alicePage.getByText("No route — messages stay on the issue").click();
+  await alicePage.getByText("Messages default to no route").click();
   await alicePage.getByLabel("Route").fill("role:legion-controller-core");
   await alicePage.getByRole("button", { name: "Save route" }).click();
   await expect
@@ -160,7 +160,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
     .toMatchObject({
       route: "role:legion-controller-core",
     });
-  await alicePage.getByText("Messages also reach role:legion-controller-core").click();
+  await alicePage.getByText("Messages default to role:legion-controller-core").click();
   const routeInput = alicePage.getByLabel("Route");
   await routeInput.fill("");
   // The field must still read "" when the earlier PATCH's response has been applied;

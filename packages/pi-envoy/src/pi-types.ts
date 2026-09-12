@@ -208,8 +208,12 @@ export interface PiApi {
     message:
       | { readonly customType: string; readonly content: string; readonly display: boolean }
       | { readonly type: string },
-    options?: { readonly deliverAs: "steer"; readonly triggerTurn: boolean }
+    options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
   ) => void;
+  readonly askEphemeral?: (input: {
+    readonly prompt: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<{ readonly replyText: string }>;
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
   readonly getActiveTools: () => readonly string[];

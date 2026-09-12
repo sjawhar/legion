@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { dispatchIssueSubject, type Envelope } from "@legion/contracts";
 import { decode } from "@toon-format/toon";
 import { renderInbound, replyWith, senderLabel } from "../delivery";
 
 const reader = "01a01111-2222-7333-4444-555555555555";
 const actor = { kind: "session", id: "session-1" };
+
+const targetedDispatchPayload = readFileSync(
+  new URL("../../../contracts/fixtures/dispatch-targeted-delivery.json", import.meta.url),
+  "utf8"
+);
 
 function envelope(overrides: Partial<Envelope> = {}): Envelope {
   return {
@@ -129,6 +135,37 @@ describe("renderInbound dispatch events", () => {
           answer: { selected: ["JSON"], text: "Use JSON HTTP." },
         },
       },
+    });
+  });
+
+  test("renders a targeted Dispatch message with its reply path", () => {
+    const rendered = renderInbound(
+      JSON.stringify(
+        envelope({
+          source: "dispatch",
+          payload: targetedDispatchPayload,
+        })
+      ),
+      reader
+    );
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+
+    expect(decoded.envoy.dispatch).toMatchObject({
+      owner: "CORE-1",
+      issue_key: "CORE-1",
+      type: "message.created",
+      actor: { kind: "user", id: "alice" },
+      payload: { body: "Can this ship?" },
+    });
+    expect(decoded.envoy.reply_with).toBe(
+      'dispatch_message(issue="CORE-1", in_reply_to="message-1", body="...")'
+    );
+    expect(rendered.delivery).toEqual({
+      attempt: 1,
+      mode: "btw",
+      messageID: "message-1",
+      issueKey: "CORE-1",
+      body: "Can this ship?",
     });
   });
 
@@ -444,7 +481,7 @@ describe("renderInbound dispatch events", () => {
             issue_key: "DSP-1",
             author: { kind: "user", id: "alice" },
             body: "Sounds good.",
-            reply_to: rootID,
+            in_reply_to: rootID,
             reply_body: "Ship the build tonight.",
             created_at: "2026-09-09T00:00:00Z",
           },
@@ -573,7 +610,7 @@ describe("renderInbound dispatch events", () => {
           issue_key: "DSP-1",
           author: actor,
           body: "Sounds good.",
-          reply_to: "message-1",
+          in_reply_to: "message-1",
           reply_body: "The build is green.",
           created_at: "2026-09-09T00:00:00Z",
         },
@@ -581,7 +618,7 @@ describe("renderInbound dispatch events", () => {
           id: "message-2",
           author: actor,
           body: "Sounds good.",
-          reply_to: "message-1",
+          in_reply_to: "message-1",
           reply_body: "The build is green.",
         },
       },

@@ -17,6 +17,8 @@ import type {
   Event,
   Issue,
   IssueReferences,
+  Message,
+  MessageDelivery,
   Project,
   UpdateIssueInput,
   UserIssueState,
@@ -328,6 +330,22 @@ export function createMessage(
     "POST",
     input,
     options
+  );
+}
+
+export function replyToMessageDelivery(
+  messageID: string,
+  input: { attempt: number; body?: string; error?: string },
+  actor: Actor
+): Promise<Message | MessageDelivery> {
+  return request<Message | MessageDelivery>(
+    `/api/v1/messages/${encodeURIComponent(messageID)}/reply`,
+    "POST",
+    input,
+    {
+      actor,
+      as: "agent",
+    }
   );
 }
 

@@ -23,9 +23,11 @@ function message(id: number, at: string, actor: Actor = session, body = `m${id}`
       author: actor,
       body,
       created_at: at,
+      deliveries: [],
       id: `message-${id}`,
+      in_reply_to: null,
       issue_key: "CORE-1",
-      reply_to: null,
+      target: null,
     },
   } as Event;
 }
@@ -64,6 +66,75 @@ const baseAsk: Ask = {
 
 const build = (events: Event[], lastReadSeq = 0) =>
   buildConversationItems({ events, lastReadSeq, today: "2026-09-10" });
+
+test("coalesces a targeted message, its delivery attempts, and an answer into one card", () => {
+  const asked = {
+    actor: bob,
+    created_at: "2026-09-10T09:00:00Z",
+    id: 1,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      author: bob,
+      body: "Can this ship?",
+      created_at: "2026-09-10T09:00:00Z",
+      deliveries: [],
+      id: "message-1",
+      in_reply_to: null,
+      issue_key: "CORE-1",
+      target: "session:planner",
+    },
+    seq: 1,
+    type: "message.created" as const,
+  };
+  const delivered = {
+    actor: bob,
+    created_at: "2026-09-10T09:00:01Z",
+    id: 2,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      attempt: 1,
+      delivery: "btw" as const,
+      message_id: "message-1",
+      session_id: "planner",
+      state: "sent" as const,
+      title: "Planner",
+    },
+    seq: 2,
+    type: "message.delivery" as const,
+  };
+  const answered = {
+    actor: session,
+    created_at: "2026-09-10T09:00:02Z",
+    id: 3,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      author: session,
+      body: "Yes.",
+      created_at: "2026-09-10T09:00:02Z",
+      deliveries: [],
+      id: "message-2",
+      in_reply_to: "message-1",
+      issue_key: "CORE-1",
+      target: null,
+    },
+    seq: 3,
+    type: "message.answered" as const,
+  };
+  const item = build([asked, delivered, answered] as Event[]).find(
+    (candidate) => candidate.kind === "targeted-message"
+  );
+
+  if (item === undefined || item.kind !== "targeted-message") {
+    throw new Error("targeted message card was not built");
+  }
+  expect(item.event.payload.body).toBe("Can this ship?");
+  expect(item.deliveries).toEqual([delivered]);
+  expect(item.answer).toEqual(answered);
+  expect(item.lastSeq).toBe(3);
+});
 
 test("an ask edit updates its existing card and remains a question-edit activity line", () => {
   const edited: Extract<Event, { type: "ask.edited" }> = {

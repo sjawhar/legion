@@ -286,13 +286,13 @@ function askId(args: ToolArguments): string {
   return reference.id;
 }
 
-function messageReplyTo(args: ToolArguments): string | undefined {
-  const replyTo = optionalString(args, "reply_to");
-  if (replyTo === undefined || !replyTo.startsWith("dispatch://")) return replyTo;
-  const reference = parseDispatchRef(replyTo);
+function messageInReplyTo(args: ToolArguments): string | undefined {
+  const inReplyTo = optionalString(args, "in_reply_to");
+  if (inReplyTo === undefined || !inReplyTo.startsWith("dispatch://")) return inReplyTo;
+  const reference = parseDispatchRef(inReplyTo);
   if (reference?.kind !== "message") {
     throw new Error(
-      "reply_to must be a bare message id or a dispatch://.../message/<id> reference"
+      "in_reply_to must be a bare message id or a dispatch://.../message/<id> reference"
     );
   }
   return reference.id;
@@ -891,10 +891,10 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_message": {
-      const replyTo = messageReplyTo(args);
+      const inReplyTo = messageInReplyTo(args);
       const message = await client.message(issue(), {
         body: stringArg(args, "body"),
-        ...(replyTo === undefined ? {} : { reply_to: replyTo }),
+        ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
         actor,
       });
       const messageRef = `dispatch://${message.issue_key}/message/${message.id}`;

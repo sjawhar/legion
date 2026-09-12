@@ -8,7 +8,7 @@ production build from `web/dist`.
 
 - `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar / main content / margin shell. The sidebar holds Inbox, Pinned issues, Projects, and Settings; it never loads the full issue list. The issue main column has Spec, Conversation, Children, and Artifacts tabs; a bare issue route opens the primary Spec document. The project routes `/projects/:key` and `/projects/:key/documents` show a project's grouped, filterable issues and its documents. `/projects/:key/documents/:slug` renders an unlinked project document, including its versions and Referenced by list. The margin holds historical Comments and Pinned for issues; project documents use an artifact owner, so their margin has Comments only, anchors and replies use artifact collaboration routes, and it has no message composer. The Artifacts tab is a compact, filterable list of the issue's artifacts (kind, version count, last updated, and a download link for the latest version), sorted primary-first then most recently updated, with the issue's reference closure collapsed behind a disclosure; each artifact's own page (`/issues/:key/artifacts/:slug`) carries its version history, a From/To version compare, and its inbound references. The three-column layout begins at the `xl` breakpoint (1280px), where the margin is a sticky, full-viewport-height column with its own scrollbar; compact and tablet widths use the navigation drawer and margin bottom sheet, whose review toggle exposes the open-ask count.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
-- `web/src/features/conversation/` owns the issue's Conversation tab: messages, issue-level comments, and coalesced ask cards from `GET /issues/{key}/events`, with agent titles from `GET /api/v1/agents`. Turns render newest first, with the message composer and its recipient selector sticky above the list and `Load older` below it; a sent or incoming turn appears directly under the composer, an own send always follows even when scrolled into history, and a reader browsing older turns keeps their viewport position as new turns arrive above them.
+- `web/src/features/conversation/` owns the issue's Conversation tab: messages, issue-level comments, and coalesced ask and targeted-message cards from `GET /issues/{key}/events`, with live agent titles and capabilities from `GET /api/v1/agents`. The sticky Message composer preselects the issue route when present, otherwise opens a **To** picker with roles before sessions; it offers **BTW**, **Aside**, and **Steer**, disabling unadvertised modes. Targeted cards coalesce delivery attempts and replies, show failure text, and preserve **Ask BTW again** / **Send normally** until an answer arrives; all recipient and retry controls remain touch-sized. Turns render newest first, with `Load older` below them; a sent or incoming turn appears directly under the composer, an own send always follows even when scrolled into history, and a reader browsing older turns keeps their viewport position as new turns arrive above them.
 - The issue header's Subscribed agents section (`features/issue/SubscribedAgents.tsx`) and the equivalent block on a project document page list sessions from `GET .../subscribers`, live status merged from Envoy, and a human `Unsubscribe` action that notifies the removed session.
 - `features/issue/IssueLabels.tsx` edits issue-header labels with project-label suggestions; `IssueList.tsx` filters project issues by every selected label through URL-backed, repeatable `?label=` parameters.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
@@ -140,9 +140,11 @@ layouts intentionally omit the remote cursor plugin because its edge widget disr
 post-update text selection; Yjs document transport and local editing remain active.
 
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
-`FAKE_ENVOY_PORT` (default `9021`) and wires through `ENVOY_URL`; tests seed
-live sessions with `setLiveSessions` and persisted subscriptions with
-`setInterests`, both from `e2e/agents.ts`.
+`FAKE_ENVOY_PORT` (default `9021`) and wires through `ENVOY_URL`. Tests seed
+live sessions and their capabilities with `setLiveSessions`, change one
+session's liveness or scripted 200/404 send response with `setSessionLive` /
+`setSessionSendStatus`, and inspect targeted sends with `getSentMessages`;
+persisted subscriptions use `setInterests`, all from `e2e/agents.ts`.
 
 `e2e/seed.ts` truncates the test database before each scenario. For a deployed
 server, set `PLAYWRIGHT_DATABASE_URL` for the same database and
@@ -151,7 +153,8 @@ server, set `PLAYWRIGHT_DATABASE_URL` for the same database and
 ## Phone acceptance
 
 The `iphone` Playwright project uses Chromium with the iPhone 13 viewport,
-touch input, and user agent. It verifies the responsive drawer, bottom-sheet
-margin, and compact Inbox layout. It does not replace the manual phone check:
-run the server on a tailnet-reachable address, open it from a phone, open the
-review panel, and answer an open ask in Needs you.
+touch input, and user agent. It verifies the responsive drawer, the margin
+and recipient-picker bottom sheets, touch-sized controls, and compact Inbox
+layout. It does not replace the manual phone check: run the server on a
+tailnet-reachable address, open it from a phone, open the review panel, and
+answer an open ask in Needs you.

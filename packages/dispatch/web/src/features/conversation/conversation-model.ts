@@ -3,7 +3,10 @@ import { describeAskResolution } from "../refs/actor";
 
 export const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
-export type MessageEvent = Extract<Event, { type: "message.created" }>;
+export type MessageEvent = Extract<Event, { type: "message.created" | "message.answered" }>;
+export type TargetedMessageEvent = Extract<Event, { type: "message.created" }>;
+export type MessageDeliveryEvent = Extract<Event, { type: "message.delivery" }>;
+export type MessageAnsweredEvent = Extract<Event, { type: "message.answered" }>;
 export type CommentEvent = Extract<Event, { type: "comment.created" }>;
 export type AskEvent = Extract<
   Event,
@@ -21,6 +24,12 @@ interface Turn {
 
 export type ConversationItem =
   | (Turn & { kind: "message"; event: MessageEvent; continued: boolean })
+  | (Turn & {
+      kind: "targeted-message";
+      event: TargetedMessageEvent;
+      deliveries: MessageDeliveryEvent[];
+      answer?: MessageAnsweredEvent;
+    })
   | (Turn & { kind: "comment"; event: CommentEvent; continued: boolean })
   | (Turn & { kind: "ask"; ask: Ask })
   | (Turn & { kind: "activity"; event: Event; description: string })
@@ -124,6 +133,10 @@ export function activityDescription(event: Event): string {
       return `answered “${event.payload.question}”`;
     case "message.created":
       return "sent a message";
+    case "message.delivery":
+      return "delivered a message";
+    case "message.answered":
+      return "answered a message";
     case "child.status":
       return `moved ${event.payload.child_key} from ${event.payload.from} to ${event.payload.to}`;
     case "subscription.removed":
@@ -138,7 +151,9 @@ export function buildConversationItems({
 }: ConversationInput): ConversationItem[] {
   const ordered = [...events].sort((left, right) => left.seq - right.seq);
   type AskItem = Extract<ConversationItem, { kind: "ask" }>;
+  type TargetedMessageItem = Extract<ConversationItem, { kind: "targeted-message" }>;
   const askItems = new Map<string, AskItem>();
+  const targetedMessages = new Map<string, TargetedMessageItem>();
   const turns: Exclude<ConversationItem, { kind: "day-divider" | "unread-divider" }>[] = [];
 
   for (const event of ordered) {
@@ -162,7 +177,38 @@ export function buildConversationItems({
         existing.ask = event.payload;
         existing.lastSeq = event.seq;
       }
-      if (event.type !== "ask.edited") {
+      if (event.type !== "ask.edited") continue;
+    }
+
+    if (event.type === "message.created" && event.payload.target !== null) {
+      const item: TargetedMessageItem = {
+        kind: "targeted-message",
+        id: `message:${event.payload.id}`,
+        event,
+        deliveries: [],
+        author: event.actor,
+        at: event.created_at,
+        seq: event.seq,
+        lastSeq: event.seq,
+        pinEventId: event.id,
+      };
+      targetedMessages.set(event.payload.id, item);
+      turns.push(item);
+      continue;
+    }
+    if (event.type === "message.delivery") {
+      const item = targetedMessages.get(event.payload.message_id);
+      if (item !== undefined) {
+        item.deliveries.push(event);
+        item.lastSeq = event.seq;
+        continue;
+      }
+    }
+    if (event.type === "message.answered" && event.payload.in_reply_to !== null) {
+      const item = targetedMessages.get(event.payload.in_reply_to);
+      if (item !== undefined) {
+        item.answer = event;
+        item.lastSeq = event.seq;
         continue;
       }
     }
@@ -174,7 +220,7 @@ export function buildConversationItems({
       pinEventId: event.id,
       author: event.actor,
     };
-    if (event.type === "message.created") {
+    if (event.type === "message.created" || event.type === "message.answered") {
       turns.push({
         ...base,
         kind: "message",
@@ -208,11 +254,6 @@ export function buildConversationItems({
   let unreadPlaced = !(anyRead && anyUnread);
   let previous: { author: Actor; atMs: number } | undefined;
 
-  // Turns are assembled oldest-first above so ask coalescing and grouping see events in
-  // chronological order, then walked newest-first here to produce the display list: day
-  // dividers head their day, the unread divider sits between the newest unread turns (above)
-  // and read turns (below), and a run of same-author turns hides the avatar on every turn but
-  // the newest.
   for (const turn of [...turns].reverse()) {
     const day = dateKey(turn.at);
     if (day !== currentDay) {
@@ -238,7 +279,7 @@ export function buildConversationItems({
         previous.author.id === turn.author.id &&
         previous.atMs - atMs < GROUP_WINDOW_MS;
       previous = { author: turn.author, atMs };
-    } else if (turn.kind === "ask") {
+    } else if (turn.kind !== "activity") {
       previous = undefined;
     }
     items.push(turn);

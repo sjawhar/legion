@@ -220,7 +220,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err := publishDestination(ctx, deps, event.ID, item, delivered); err != nil {
 		return err
 	}
-	if event.Notify {
+	if event.Notify && !(event.Type == "message.created" && payloadString(event.Payload, "target") != "") {
 		if err := publishRoute(ctx, deps, event.ID, item, delivered, route); err != nil {
 			return err
 		}
@@ -258,16 +258,16 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		return nil
 	}
 
-	var askID, replyTo, commentID, messageReplyTo string
+	var askID, inReplyTo, commentID, messageInReplyTo string
 	switch event.Type {
 	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
 		askID = payloadString(event.Payload, "ask_id")
-		replyTo = payloadString(event.Payload, "reply_to")
+		inReplyTo = payloadString(event.Payload, "reply_to")
 		commentID = payloadString(event.Payload, "id")
 	case "ask.resolved":
 		askID = payloadString(event.Payload, "id")
-	case "message.created":
-		messageReplyTo = payloadString(event.Payload, "reply_to")
+	case "message.created", "message.answered":
+		messageInReplyTo = payloadString(event.Payload, "in_reply_to")
 	case "subscription.removed":
 		// The target is the unsubscribed session itself, carried directly in the
 		// payload — there is no thread or ask to walk to find it.
@@ -283,14 +283,14 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			return err
 		}
 	}
-	if replyTo != "" {
+	if inReplyTo != "" {
 		// The root is what humans reply under; the parent (reply_to's own target) is
 		// usually the same comment today since a reply must target a thread root, but
 		// walking to the true root keeps this correct if nesting is ever allowed.
-		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, replyTo)); err != nil {
+		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, inReplyTo)); err != nil {
 			return err
 		}
-		if err := considerLoaded(loadCommentAuthor(ctx, deps, replyTo)); err != nil {
+		if err := considerLoaded(loadCommentAuthor(ctx, deps, inReplyTo)); err != nil {
 			return err
 		}
 	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
@@ -298,8 +298,8 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			return err
 		}
 	}
-	if messageReplyTo != "" {
-		if err := considerLoaded(loadMessageAuthor(ctx, deps, messageReplyTo)); err != nil {
+	if messageInReplyTo != "" {
+		if err := considerLoaded(loadMessageAuthor(ctx, deps, messageInReplyTo)); err != nil {
 			return err
 		}
 	}
@@ -469,11 +469,11 @@ func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 			item.InReplyTo = askID
 		}
 	}
-	if event.Type == "message.created" {
-		// A message replying to another message correlates the same way, so the agent's
-		// TOON renders "re: <preview>" via MessageEventPayload.ReplyBody.
-		if replyTo := payloadString(event.Payload, "reply_to"); replyTo != "" {
-			item.InReplyTo = replyTo
+	if event.Type == "message.created" || event.Type == "message.answered" {
+		// A message reply correlates to the original message so the recipient's
+		// TOON can surface its preview instead of an opaque UUID.
+		if inReplyTo := payloadString(event.Payload, "in_reply_to"); inReplyTo != "" {
+			item.InReplyTo = inReplyTo
 		}
 	}
 	if strings.HasPrefix(event.Type, "ask.") {

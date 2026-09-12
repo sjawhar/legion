@@ -209,7 +209,7 @@ test("a message reply renders its quoted parent link and deep links scroll to th
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Message reply thread" });
   const root = await createMessage(issue.key, { body: "Ship the build tonight" }, agent);
-  await createMessage(issue.key, { body: "Sounds good, thanks!", reply_to: root.id }, bob);
+  await createMessage(issue.key, { body: "Sounds good, thanks!", in_reply_to: root.id }, bob);
 
   const alice = await asUser(browser, "alice");
   try {
@@ -378,14 +378,15 @@ test("Conversation divides unread turns by day, sends with Enter, and jumps to n
     expect(unreadIndex).toBeGreaterThan(thirdIndex);
     expect(unreadIndex).toBeLessThan(secondIndex);
 
-    const recipient = page.getByRole("combobox", { name: "Recipient" });
-    await expect(recipient).toHaveValue("");
+    const recipient = page.getByRole("button", { name: "Choose recipient" });
+    await expect(recipient).toHaveText("To: Choose recipient");
     if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect(recipient.locator("option")).toHaveText([
-        "No recipient",
-        "Planner (e2e)",
-        "Reviewer (e2e)",
-      ]);
+      await recipient.click();
+      const picker = page.getByRole("dialog", { name: "Recipient picker" });
+      await expect(picker.getByRole("button", { name: /Planner \(e2e\)/ })).toBeVisible();
+      await expect(picker.getByRole("button", { name: /Reviewer \(e2e\)/ })).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(picker).toHaveCount(0);
     }
 
     const message = page.getByRole("textbox", { name: "Message" });
@@ -421,8 +422,9 @@ test("Conversation divides unread turns by day, sends with Enter, and jumps to n
     const firstTurn = turn(page, "First yesterday");
     const before = (await firstTurn.boundingBox())?.y;
     await createMessage(issue.key, { body: "Tail arrives" }, bob);
-    await createMessage(issue.key, { body: "Another tail arrives" }, bob);
     const jump = page.getByTestId("jump-to-latest");
+    await expect(jump).toHaveText("Jump to latest · 1 new");
+    await createMessage(issue.key, { body: "Another tail arrives" }, bob);
     await expect(jump).toHaveText("Jump to latest · 2 new");
     await expect.poll(async () => (await firstTurn.boundingBox())?.y).toBe(before);
     await jump.click();

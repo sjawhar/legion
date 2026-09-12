@@ -461,12 +461,10 @@ function IssueHeader({
             className={`min-w-40 flex-1 truncate rounded px-2 py-1 text-left text-sm outline-none focus-visible:ring-2 ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
             disabled={isClosed}
             onClick={() => setRouteEditing(true)}
-            title={drafts.route === "" ? undefined : `Messages also reach ${drafts.route}`}
+            title={drafts.route === "" ? undefined : `Messages default to ${drafts.route}`}
             type="button"
           >
-            {drafts.route === ""
-              ? "No route — messages stay on the issue"
-              : `Messages also reach ${drafts.route}`}
+            {`Messages default to ${drafts.route === "" ? "no route" : drafts.route}`}
           </button>
         )}
         <button
@@ -759,6 +757,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             focusItemId={conversationFocusItemId}
             isClosed={isClosed}
             issueKey={issueKey}
+            route={issue.data.route}
             state={state.data}
             visible={activeTab === "conversation"}
           />

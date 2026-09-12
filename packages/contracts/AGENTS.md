@@ -30,7 +30,8 @@ the native Dispatch tool suite:
   `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_comment`,
   `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`,
   `dispatch_artifact`, `dispatch_read`, and `dispatch_search`. It defines their names, descriptions,
-  and field shapes; host adapters consume `dispatchToolSpecs` directly.
+  and field shapes; `dispatch_message.in_reply_to` is the same-issue message-reply correlation used
+  for a targeted agent's answer. Host adapters consume `dispatchToolSpecs` directly.
 - `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters); project-document arguments accept the document's artifact id, slug, or filename.
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
   host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the
@@ -39,5 +40,9 @@ the native Dispatch tool suite:
 - If the envelope or subject shape changes, update its schema and regenerate the
   applicable Go output.
 - Prefer backward-compatible additions when extending the envelope.
+- Dispatch `Message` contracts preserve optional `target` and `in_reply_to`, plus a `deliveries`
+  array (empty when no attempts exist). `message.delivery` and `message.answered` event payloads
+  carry the attempt status and correlated reply that the Conversation card coalesces; add a
+  delivery mode in the contract before any server or adapter accepts it.
 - Keep examples synchronized with the real receiver output (Slack team IDs,
   GitHub owner/repo segments, and native Dispatch keys).

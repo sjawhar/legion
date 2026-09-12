@@ -9,7 +9,12 @@ import {
   zodSchemaApi,
 } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
-import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
+import {
+  inboundTimestamp,
+  renderInbound,
+  senderLabel,
+  type DispatchDelivery,
+} from "@legion/envoy-client/delivery";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import {
@@ -163,6 +168,30 @@ export default function envoyExtension(pi: PiApi): void {
     return connection;
   };
 
+  const postDispatchReply = async (
+    delivery: DispatchDelivery,
+    result: { readonly body?: string; readonly error?: string }
+  ): Promise<void> => {
+    if (!dispatchConfig.enabled || dispatchConfig.url === null || dispatchConfig.token === null) {
+      throw new Error("Dispatch reply endpoint is not configured");
+    }
+    const response = await fetch(`${dispatchConfig.url}/api/v1/messages/${delivery.messageID}/reply`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${dispatchConfig.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        actor: { kind: "session", id: sessionID },
+        attempt: delivery.attempt,
+        ...result,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
+    }
+  };
+
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
     // A human unsubscribed one of our topics: drop it locally too, the same
@@ -188,12 +217,39 @@ export default function envoyExtension(pi: PiApi): void {
         if (inbox.length > 50) inbox.pop();
       }
       try {
-        pi.sendMessage(
-          { customType: "envoy-message", content: rendered.content, display: true },
-          { deliverAs: "steer", triggerTurn: true }
-        );
+        if (rendered.rejectedDelivery !== undefined) {
+          console.warn(
+            `[envoy] rejecting malformed Dispatch targeted delivery ${rendered.rejectedDelivery.messageID}`
+          );
+          await postDispatchReply(rendered.rejectedDelivery, {
+            error: "Invalid Dispatch targeted delivery frame",
+          });
+        } else if (rendered.malformedDelivery === true) {
+          console.warn("[envoy] dropping malformed Dispatch targeted delivery without a reply address");
+        } else if (rendered.delivery?.mode === "btw") {
+          if (pi.askEphemeral === undefined) {
+            await postDispatchReply(rendered.delivery, {
+              error: "This OMP host does not support BTW delivery",
+            });
+          } else {
+            try {
+              const reply = await pi.askEphemeral({ prompt: rendered.delivery.body });
+              await postDispatchReply(rendered.delivery, { body: reply.replyText });
+            } catch (error) {
+              await postDispatchReply(rendered.delivery, { error: messageFor(error) });
+            }
+          }
+        } else {
+          pi.sendMessage(
+            { customType: "envoy-message", content: rendered.content, display: true },
+            {
+              deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
+              triggerTurn: true,
+            }
+          );
+        }
       } catch (error) {
-        console.warn(`[envoy] failed to inject envelope ${envelope?.event_id ?? "unknown"}`, error);
+        console.warn(`[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`, error);
         throw error;
       }
       if (dedupeKey !== undefined) {
@@ -308,6 +364,7 @@ export default function envoyExtension(pi: PiApi): void {
       // Read at every registration: the heartbeat re-registers, which picks up
       // titles assigned after session_start and later renames.
       title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
+      capabilities: typeof pi.askEphemeral === "function" ? ["aside", "btw"] : ["aside"],
       driving: false,
       selfSubscribed: true,
     });

@@ -12,6 +12,7 @@ import {
   DispatchEventSchema,
   EnvelopeSchema,
   IssueEventPayloadSchema as IssuePayloadSchema,
+  MessageDeliveryEventPayloadSchema as MessageDeliveryPayloadSchema,
   MessageEventPayloadSchema as MessagePayloadSchema,
   SubscriptionRemovedEventPayloadSchema as SubscriptionRemovedPayloadSchema,
 } from "@legion/contracts";
@@ -65,6 +66,51 @@ const TolerantInboundEnvelopeSchema = z
   .passthrough();
 
 export type InboundEnvelope = z.infer<typeof InboundEnvelopeSchema>;
+export type DispatchDelivery = {
+  readonly attempt: number;
+  readonly mode: "btw" | "aside" | "steer";
+  readonly messageID: string;
+  readonly issueKey: string;
+  readonly body: string;
+};
+
+const DispatchDeliveryRequestSchema = z.object({
+  attempt: z.number().int().positive(),
+  mode: z.enum(["btw", "aside", "steer"]),
+});
+
+const DispatchTargetedMessagePayloadSchema = z.object({
+  id: z.string(),
+  issue_key: z.string(),
+  author: z.object({ kind: z.string(), id: z.string() }),
+  body: z.string(),
+  target: z.string(),
+  in_reply_to: z.string().nullable(),
+  deliveries: z.array(z.unknown()),
+  created_at: z.string(),
+});
+
+const DispatchTargetedFrameSchema = z
+  .object({
+    event: DispatchEventSchema,
+    delivery: DispatchDeliveryRequestSchema,
+  })
+  .refine(
+    ({ event }) =>
+      event.type === "message.created" &&
+      DispatchTargetedMessagePayloadSchema.safeParse(event.payload).success,
+    { message: "targeted delivery requires a message.created event" }
+  );
+
+const RecoverableDispatchDeliveryFailureSchema = z.object({
+  event: z
+    .object({
+      issue_key: z.string(),
+      payload: z.object({ id: z.string(), body: z.string().optional() }).passthrough(),
+    })
+    .passthrough(),
+  delivery: DispatchDeliveryRequestSchema,
+});
 
 export type DeliveryEnvelope = Pick<
   InboundEnvelope,
@@ -75,6 +121,9 @@ export type RenderInboundResult = {
   readonly skip: boolean;
   readonly content: string;
   readonly envelope?: InboundEnvelope;
+  readonly delivery?: DispatchDelivery;
+  readonly rejectedDelivery?: DispatchDelivery;
+  readonly malformedDelivery?: true;
 };
 
 export function senderLabel(envelope: DeliveryEnvelope): string {
@@ -115,9 +164,10 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "suggestion.accepted": CommentPayloadSchema,
   "suggestion.rejected": CommentPayloadSchema,
   "message.created": MessagePayloadSchema,
+  "message.delivery": MessageDeliveryPayloadSchema,
+  "message.answered": MessagePayloadSchema,
   "child.status": ChildStatusPayloadSchema,
 };
-
 function dispatchOwner(event: DispatchEvent, topic: string | undefined): string {
   if (event.issue_key !== null) return event.issue_key;
   if (topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) === true) {
@@ -162,8 +212,16 @@ function dispatchMessageReplyPreview(event: DispatchEvent): string | undefined {
 // kept (`raw`) so no data is dropped and nothing renders as a hand-built text
 // template.
 type DispatchFrame =
-  | { readonly event: DispatchEvent; readonly notify: unknown }
-  | { readonly raw: unknown };
+  | { readonly event: DispatchEvent; readonly notify: unknown; readonly delivery: unknown }
+  | {
+      readonly raw: unknown;
+      readonly rejectedDelivery?: DispatchDelivery;
+      readonly malformedDelivery?: true;
+    };
+
+function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null;
+}
 
 function parseDispatchFrame(rawPayload: string): DispatchFrame {
   let value: unknown;
@@ -172,12 +230,43 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
   } catch {
     return { raw: rawPayload };
   }
+
+  const targeted = DispatchTargetedFrameSchema.safeParse(value);
+  if (targeted.success) {
+    const wireFrame = value as { readonly event: DispatchEvent & { readonly notify?: unknown } };
+    return {
+      event: targeted.data.event,
+      notify: wireFrame.event.notify,
+      delivery: targeted.data.delivery,
+    };
+  }
+  if (isObject(value) && "delivery" in value) {
+    const recoverable = RecoverableDispatchDeliveryFailureSchema.safeParse(value);
+    if (recoverable.success) {
+      return {
+        raw: value,
+        rejectedDelivery: {
+          attempt: recoverable.data.delivery.attempt,
+          mode: recoverable.data.delivery.mode,
+          messageID: recoverable.data.event.payload.id,
+          issueKey: recoverable.data.event.issue_key,
+          body: recoverable.data.event.payload.body ?? "",
+        },
+        malformedDelivery: true,
+      };
+    }
+    return { raw: value, malformedDelivery: true };
+  }
+
   const parsed = DispatchEventSchema.safeParse(value);
   if (!parsed.success) return { raw: value };
   const wireEvent = value as DispatchEvent & { readonly notify?: unknown };
-  return { event: parsed.data, notify: wireEvent.notify };
+  return {
+    event: parsed.data,
+    notify: wireEvent.notify,
+    delivery: undefined,
+  };
 }
-
 export function inboundTimestamp(milliseconds: number | undefined): string {
   if (milliseconds === undefined) return "unknown";
   const date = new Date(Math.floor(milliseconds / 1_000) * 1_000);
@@ -221,6 +310,10 @@ export function renderInbound(
   }
   let dispatchEvent: unknown;
   let dispatchIssue: string | undefined;
+  let dispatchReply: string | undefined;
+  let delivery: DispatchDelivery | undefined;
+  let rejectedDelivery: DispatchDelivery | undefined;
+  let malformedDelivery = false;
   let askQuestion: string | undefined;
   let messageReplyPreview: string | undefined;
   const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
@@ -258,6 +351,20 @@ export function renderInbound(
         }
         askQuestion = dispatchAskQuestion(frame.event);
         messageReplyPreview = dispatchMessageReplyPreview(frame.event);
+        if (frame.event.type === "message.created" && frame.event.issue_key !== null) {
+          const message = MessagePayloadSchema.safeParse(frame.event.payload);
+          const requested = DispatchDeliveryRequestSchema.safeParse(frame.delivery);
+          if (message.success && requested.success && message.data.id !== undefined) {
+            delivery = {
+              attempt: requested.data.attempt,
+              mode: requested.data.mode,
+              messageID: message.data.id,
+              issueKey: frame.event.issue_key,
+              body: message.data.body ?? envelope.payload_summary ?? "",
+            };
+            dispatchReply = `dispatch_message(issue="${frame.event.issue_key}", in_reply_to="${message.data.id}", body="...")`;
+          }
+        }
         dispatchEvent = {
           owner: dispatchOwner(frame.event, subject ?? envelope.topic),
           ...(frame.event.issue_key === null
@@ -281,6 +388,8 @@ export function renderInbound(
         };
       } else {
         dispatchEvent = frame.raw;
+        rejectedDelivery = frame.rejectedDelivery;
+        malformedDelivery = frame.malformedDelivery === true;
       }
     }
   }
@@ -322,7 +431,7 @@ export function renderInbound(
     }
   }
   const role = envelope.sender?.roles?.[0];
-  const reply = replyWith(envelope);
+  const reply = dispatchReply ?? replyWith(envelope);
   const sourceIssue =
     parseIssues.includes("source") || KNOWN_SOURCES[envelope.source] !== undefined
       ? undefined
@@ -367,5 +476,12 @@ export function renderInbound(
     ...(unrecognised === undefined ? {} : { unrecognised }),
   };
 
-  return { skip: false, content: encode({ envoy: rendered }), envelope };
+  return {
+    skip: false,
+    content: encode({ envoy: rendered }),
+    envelope,
+    ...(delivery === undefined ? {} : { delivery }),
+    ...(rejectedDelivery === undefined ? {} : { rejectedDelivery }),
+    ...(malformedDelivery ? { malformedDelivery: true as const } : {}),
+  };
 }

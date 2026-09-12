@@ -4,14 +4,16 @@ Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 
 ## Overview
 
-This package owns Pi-specific tool registration, direct NATS subscriptions, steering delivery,
-and self-subscription registration for every session. HTTP transport, tool metadata, and subject
-construction come from the Envoy core packages. `@legion/envoy-client/delivery` is the sole
-inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. Role
-claims are routed by the listener:
-this extension receives a receipt-backed request on its direct agent subject instead of subscribing
-to a role subject itself. The agent pump replies after it accepts the envelope, so the listener can
-turn a claimed-but-deaf holder into a `delivery_failed` exception after two seconds.
+This package owns Pi-specific tool registration, direct NATS subscriptions, targeted Dispatch
+delivery, and self-subscription registration for every session. HTTP transport, tool metadata, and
+subject construction come from the Envoy core packages. `@legion/envoy-client/delivery` is the sole
+inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
+Dispatch **BTW** frame runs `pi.askEphemeral` and posts its body or error to the correlated delivery
+attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective delivery mode. Role claims
+are routed by the listener: this extension receives a receipt-backed request on its direct agent
+subject instead of subscribing to a role subject itself. The agent pump replies after it accepts the
+envelope, so the listener can turn a claimed-but-deaf holder into a `delivery_failed` exception after
+two seconds.
 
 ## Native Dispatch tools
 
@@ -54,13 +56,13 @@ subscriber ignores it.
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the thirteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, pass the live session id/title to `executeDispatchTool`, and subscribe from a successful result's `details.topic`. |
 | Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon appends each as `--append-system-prompt` |
-| Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/README.md` | Claims a role and receives a message from a real, installed-plugin `omp` TUI session against a live Envoy; see `scripts/README.md` for the runbook |
+| Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 
 ## Critical conventions
 
 - Register every schema through the injected `pi.zod`. Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). The shared Dispatch contract exposes field shapes and cross-field validation through `dispatchToolSchema`; pass it `zodSchemaApi(pi.zod)`. `envoy.test.ts` proves every registered field came from the injected instance. |
-- Keep direct NATS subscription lifecycle and Pi steering delivery adapter-local. Inbound messages deliver as `steer` so they interrupt an in-flight turn; `triggerTurn` still wakes idle sessions.
+- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw"]` when `pi.askEphemeral` exists and `["aside"]` otherwise; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address.
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
-- `scripts/smoke-delivery.sh` is a manual, real end-to-end smoke against the installed plugin; never wire it into CI without live Envoy/NATS and a configured model provider.
+- `scripts/smoke-delivery.sh` and `scripts/smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider.
