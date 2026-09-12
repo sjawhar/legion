@@ -2615,13 +2615,20 @@ export class ProcessManager {
   }
 
   /** Probes the controller's recorded locator for liveness through the runtime, clearing the
-   * locator on any verdict other than alive (a dead controller's record must never keep
-   * `ensureController` from spawning a fresh one). */
+   * locator on a dead verdict (a dead controller's record must never keep `ensureController`
+   * from spawning a fresh one). An `unknown` verdict is refused exactly as `probe` refuses it
+   * for a tree — never treated as dead, which would delete the record of a possibly-live
+   * controller and spawn a second one beside it. */
   private async controllerAlive(): Promise<boolean> {
     const locator = this.deps.state.controllerLocator;
     if (!locator) return false;
     const result = await this.runtime.probe(locator);
-    if (result.status !== "alive") {
+    if (result.status === "unknown") {
+      throw new Error(
+        "Runtime probe reported an unknown status for the controller; ProcessManager has no unknown-status policy"
+      );
+    }
+    if (result.status === "dead") {
       delete this.deps.state.controllerLocator;
       return false;
     }

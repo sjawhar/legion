@@ -5640,6 +5640,29 @@ describe("ProcessManager", () => {
     expect(commands.filter((command) => command[0] === "tmux")).toEqual([]);
   });
 
+  it("refuses a runtime's unknown verdict on the controller instead of treating it as dead", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const controllerLocator: Locator = {
+      runtime: "kubernetes",
+      namespace: "fake",
+      podName: "controller-1",
+      podUid: "uid-controller",
+      pvcName: "fake-pvc",
+    };
+    state.controllerLocator = controllerLocator;
+    const runtime = new FakeRuntime();
+    runtime.probe = async () => ({ status: "unknown" });
+    const { manager: processes } = manager(state, { config: config(stateDir), runtime });
+
+    await expect(processes.ensureController()).rejects.toThrow(
+      "Runtime probe reported an unknown status for the controller; ProcessManager has no unknown-status policy"
+    );
+    // The record of a possibly-live controller survives; nothing was spawned beside it.
+    expect(state.controllerLocator).toBe(controllerLocator);
+    expect(runtime.spawned).toEqual([]);
+  });
+
   it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
