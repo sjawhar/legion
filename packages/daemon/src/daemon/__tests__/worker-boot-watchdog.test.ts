@@ -2,9 +2,9 @@
 // path a watch can exit through (a worker's socket closing, the observation interval timing out,
 // an explicit cancel, and a confirmed-dead retirement — see `cancelableSleep`'s own doc comment
 // for why an uncleared timer would otherwise accumulate without bound across a long-lived daemon
-// watching a persistently borderline-slow worker), the registration deadline, and the pane-pid
-// probe behind `probeAlive`.
-import { describe, expect, it } from "bun:test";
+// watching a persistently borderline-slow worker), the registration deadline, and the
+// pane-identity branch of `probeAlive`.
+import { describe, expect, it, vi } from "bun:test";
 import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { WorkerLocator } from "../legion-state";
 import {
@@ -85,8 +85,7 @@ function baseDeps(overrides: Partial<WorkerBootWatchdogDeps> = {}): WorkerBootWa
     registrationDeadlineIntervals: () => 1_000,
     workerRpcTimeoutMs: () => 5_000,
     now: () => Date.now(),
-    tmux: { socket: "legion-omp", run: async () => ({ stdout: "", exitCode: 1 }) },
-    isOmpPane: async () => false,
+    paneProcessVerified: async () => false,
     workerClient: async () => {
       throw new Error("no client configured for this test");
     },
@@ -115,7 +114,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           // Confirmed dead on the very next probe after the socket closes, so the watch
           // retires in one step rather than re-arming (isolating this test to the
           // closed-wins-the-race cleanup, not a second interval's own timers).
-          isOmpPane: async () => false,
+          paneProcessVerified: async () => false,
           retireUnconfirmedBoot: async () => {
             retired.push(token);
           },
@@ -148,7 +147,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           workerClient: async () => {
             throw new Error("shim not listening");
           },
-          isOmpPane: async () => false,
+          paneProcessVerified: async () => false,
           retireUnconfirmedBoot: async () => {
             retired.push(token);
           },
@@ -203,14 +202,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           // ever retiring, so the only way this test settles is via the explicit cancel below
           // — proving several full re-arm cycles worth of connect-retry timers were each
           // cleaned up along the way, not merely the last one.
-          isOmpPane: async () => true,
-          tmux: {
-            socket: "legion-omp",
-            run: async (cmd) => {
-              if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
-              return { stdout: "", exitCode: 0 };
-            },
-          },
+          paneProcessVerified: async () => true,
         })
       );
 
@@ -240,14 +232,7 @@ describe("WorkerBootWatchdog registration deadline", () => {
         // Alive on every single probe -- the pane/socket never actually goes away, and
         // `/worker/started` never confirms either. Without the deadline this would re-arm
         // forever; with it, the watch must give up after exactly 3 consecutive alive intervals.
-        isOmpPane: async () => true,
-        tmux: {
-          socket: "legion-omp",
-          run: async (cmd) => {
-            if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
-            return { stdout: "", exitCode: 0 };
-          },
-        },
+        paneProcessVerified: async () => true,
         workerClient: async () => {
           throw new Error("shim not listening");
         },
@@ -272,16 +257,9 @@ describe("WorkerBootWatchdog registration deadline", () => {
         registrationDeadlineIntervals: () => 3,
         sleep: async () => {},
         yield: async () => {},
-        isOmpPane: async () => {
+        paneProcessVerified: async () => {
           probeCount += 1;
           return true;
-        },
-        tmux: {
-          socket: "legion-omp",
-          run: async (cmd) => {
-            if (cmd.includes("list-panes")) return { stdout: "%7 12345\n", exitCode: 0 };
-            return { stdout: "", exitCode: 0 };
-          },
         },
         workerClient: async () => {
           throw new Error("shim not listening");
@@ -303,57 +281,59 @@ describe("WorkerBootWatchdog registration deadline", () => {
   });
 });
 
-describe("WorkerBootWatchdog pid probe", () => {
-  it("probes the worker's own pane pid, not its window's first pane, so a sibling's live OMP never confirms a dead boot", async () => {
-    const events: string[] = [];
+describe("WorkerBootWatchdog pane identity", () => {
+  it("decides the pane branch by paneProcessVerified(locator) -- never the pane id alone -- consulting it before the socket, and retires when both fail", async () => {
+    const calls: string[] = [];
+    const armed = { ...locator, panePid: 4242, paneStartTicks: 1234567 };
     const watchdog = new WorkerBootWatchdog(
       baseDeps({
         workerBootTimeoutSeconds: () => 0.01,
         sleep: async () => {},
         yield: async () => {},
-        tmux: {
-          socket: "legion-omp",
-          run: async (cmd) => {
-            if (cmd.includes("list-panes")) {
-              // The worker's whole window: the architect's pane first, then two split-in workers.
-              return { stdout: "%1531 2363427\n%1533 3003090\n%1534 446716\n", exitCode: 0 };
-            }
-            return { stdout: "", exitCode: 0 };
-          },
-        },
-        // Only the architect's pane still runs OMP; the watched worker's own process is gone.
-        isOmpPane: async (pid) => {
-          events.push(`isOmpPane:${pid}`);
-          return pid === 2363427;
+        paneProcessVerified: async (probed) => {
+          calls.push(`pane:${probed.tmuxPaneId}:${probed.panePid}:${probed.paneStartTicks}`);
+          return false;
         },
         workerClient: async () => {
-          events.push("workerClient");
-          throw new Error("shim not listening");
+          calls.push("socket");
+          throw new Error("ECONNREFUSED");
         },
         retireUnconfirmedBoot: async () => {
-          events.push("retire");
+          calls.push("retire");
         },
       })
     );
+    watchdog.arm(root, child, role, token, armed, 1);
+    for (let i = 0; i < 200 && !calls.includes("retire"); i += 1) await Promise.resolve();
+    // The interval's connect-retry loop calls workerClient repeatedly first; the decision at the
+    // interval's end is pane -> socket -> retire.
+    expect(calls.slice(-3)).toEqual(["pane:%7:4242:1234567", "socket", "retire"]);
+  });
 
-    watchdog.arm(
-      root,
-      child,
-      role,
-      token,
-      { ...locator, tmuxWindowId: "@1464", tmuxPaneId: "%1533" },
-      1
+  it("retires an unconfirmed boot whose pane fails identity (a reissued pane id running another OMP) instead of re-arming, once its socket refuses", async () => {
+    const retired: string[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const watchdog = new WorkerBootWatchdog(
+      baseDeps({
+        workerBootTimeoutSeconds: () => 0.01,
+        sleep: async () => {},
+        yield: async () => {},
+        paneProcessVerified: async () => false,
+        workerClient: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+        retireUnconfirmedBoot: async (t) => {
+          retired.push(t);
+        },
+      })
     );
-    for (let i = 0; i < 200 && !events.includes("retire"); i += 1) await Promise.resolve();
-
-    // `probeAlive` asks about %1533's own pid — never the first row's 2363427, the architect's
-    // live OMP, which would confirm the boot — and, finding it dead, falls through to the socket
-    // probe (refused) and retires the boot.
-    expect(events.filter((e) => e.startsWith("isOmpPane:"))).toEqual(["isOmpPane:3003090"]);
-    expect(events.slice(events.indexOf("isOmpPane:3003090"))).toEqual([
-      "isOmpPane:3003090",
-      "workerClient",
-      "retire",
-    ]);
+    try {
+      watchdog.arm(root, child, role, token, locator, 1);
+      for (let i = 0; i < 200 && retired.length === 0; i += 1) await Promise.resolve();
+      expect(retired).toEqual([token]);
+      expect(errors.mock.calls.flat().join("\n")).not.toMatch(/re-arming the watch/);
+    } finally {
+      errors.mockRestore();
+    }
   });
 });

@@ -71,6 +71,9 @@ function manager(
     revokeSessionCapability: () => {},
     provisioningToken: async () => "installation-token",
     statPrompt: async () => {},
+    // No real process exists behind the fake tmux's pids, but every launched pane records one.
+    readProcessStat: async (pid) =>
+      `${pid} (sh) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 4242 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n`,
     workerCatchup: {
       repo: "sjawhar/legion",
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),

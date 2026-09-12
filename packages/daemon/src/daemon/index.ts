@@ -55,6 +55,7 @@ interface DaemonDependencies {
   runner: CommandRunner;
   statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
   readProcessCmdline?: ProcessManagerDeps["readProcessCmdline"];
+  readProcessStat?: ProcessManagerDeps["readProcessStat"];
   readPluginManifest(manifestPath: string): Promise<string>;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   dispatchClient: DispatchClient;
@@ -292,6 +293,7 @@ async function startDaemonLocked(
       (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
     readProcessCmdline: deps.readProcessCmdline,
+    readProcessStat: deps.readProcessStat,
     workerCatchup: { runner, tokenManager: deps.tokenManager, repo: config.repo },
     dispatchClient: deps.dispatchClient,
     now: deps.now,
