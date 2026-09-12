@@ -3,9 +3,9 @@
   "passed": 7,
   "failed": 0,
   "failures": [],
-  "headSha": "7d13d3bf0809f90ca5e599a8de3815466b00c2fd",
+  "headSha": "3ff0bbf46315fd7d4e762430d3bd001ce478b1a3",
   "pr": "https://github.com/sjawhar/legion/pull/981",
-  "ci": "pr-checks-result at 7d13d3bf: pr-title/lint/typecheck/test all SUCCESS (runs 34718619968, 34718854809, 34718864556), read via `legion gh -- pr view 981 --json statusCheckRollup`",
+  "ci": "pr-checks-result at 3ff0bbf4: pr-title/lint/typecheck/test all SUCCESS (runs 34720564124, 34720630218), read via `legion gh -- pr view 981 --json statusCheckRollup`",
   "acceptance": [
     {
       "line": 1,
@@ -16,9 +16,9 @@
         "legion-state.test.ts: 'persists and reloads panePid/paneStartTicks on tree, worker, and controller locators'; 'migrates v23 state to v24 unchanged, leaving a pre-identity locator without panePid/paneStartTicks and backing up the v23 bytes'"
       ],
       "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts packages/daemon/src/daemon/__tests__/proc-stat.test.ts --reporter=junit --reporter-outfile=/tmp/legion27-test/junit.xml",
-      "output": "216 pass, 3 skip, 0 fail (219 across 3 files). JUnit: all three it.each cases PASS; legacy-locator test PASS.",
+      "output": "216 pass / 3 skip / 0 fail at 7d13d3bf; re-run at 3ff0bbf4: all three it.each cases PASS, legacy-locator test PASS (processes+watchdog 213 pass / 3 skip / 0 fail).",
       "result": "pass",
-      "notes": "Each case discriminates on behaviour (probe would report alive without the pid/ticks check). The log assertion for case 2 (`/pid 12345/`) is satisfied by the 'recorded pid 12345' half alone and does not pin the observed start ticks; behavioural assertions (dead, --resume, no kill-pane, fresh identity) carry the case."
+      "notes": "Each case discriminates on behaviour and, since 3ff0bbf4, on the observed identity in the log as well (`observed` regex per case)."
     },
     {
       "line": 2,
@@ -29,9 +29,9 @@
         "processes.test.ts: 'resurrects a root once, without killing the pane, when its registration deadline elapses on a pane id since reissued to another OMP process'"
       ],
       "command": "same JUnit run as line 1; isolation: bun test processes.test.ts -t \"reconnectRoots' re-armed deadline treats a restart-surviving\" (x72)",
-      "output": "All three PASS in the file run (3 full-file runs: 204 pass / 3 skip / 0 fail each). In isolation the reconnectRoots half failed 2 of the first 6 runs on `expect(tmuxFake.windowCount()).toBe(1)` and passed 72/72 afterwards (12 plain, 15 under two concurrent processes.test.ts runs, 25 under load, 20 with 3 s idle gaps).",
+      "output": "All three PASS in the file run. reconnectRoots half: 30/30 isolated at 3ff0bbf4.",
       "result": "pass",
-      "notes": "The stale claim is retired by the pre-existing socket-first reconnect probe (spec Design: reconnectWorkers keeps probing the shim socket); what this change adds, and what the test discriminates, is that the retire's kill gate refuses to kill the live sibling's pane (before this change `kill-pane -t %7` would have landed on the live implementer). The isolated flake is the tick-bounded `flushEventLoopUntil(..., 20_000)` wait (about 23 ms of setImmediate ticks) racing real fs I/O in spawnRoot -- the same pattern as its pre-existing sibling 'reconnectRoots re-arms the registration deadline for an active tree with a locator that never confirmed before a restart' (line ~5095), not a product defect."
+      "notes": "The stale claim is retired by the pre-existing socket-first reconnect probe; what this change adds is that the retire's kill gate refuses to kill the live sibling's pane. The isolated flake seen at 7d13d3bf is gone at 3ff0bbf4: both reissued-pane deadline tests await the resurrection's own persist (30/30 isolated each)."
     },
     {
       "line": 3,
@@ -59,14 +59,14 @@
       "criterion": "No daemon-issued kill-pane ever lands on a pane whose process is not the one the locator recorded; a stop against a locator whose pane id now reports a different pid issues no kill-pane, treats the pane as gone, clears the locator.",
       "tests": [
         "processes.test.ts: 'never kills a pane whose process is not the one the locator recorded on tree close: treats it as already gone, clears the claim, and logs both identities' (kill-pane commands toEqual([]); claim undefined; tree closed; log has %1, pid 777, 'recorded pid 12345 start 4242')",
-        "processes.test.ts: 'ensureController gracefully stops, never kills, a controller locator whose pane id was reissued to another OMP process, then spawns a fresh controller'",
+        "processes.test.ts: 'never kills a controller pane whose id was reissued to another OMP process when its recorded process is unreachable: the identity gate treats it as already gone, logs both identities, and a fresh controller spawns' (refusing socket -> the gate alone blocks kill-pane -t %1) and its graceful sibling 'asks the recorded controller process to shut down over its own socket before replacing a locator whose pane id was reissued, spawning a fresh controller once it closes'",
         "real-shutdown-e2e.test.ts (LEGION_E2E=1): 'never kills a real pane whose recorded identity is not the process running in it: the stuck worker's claim clears, the tree closes, and the pane survives'",
         "Driver A above: `not killing pane %1 ... treating it as already gone` with zero kill-pane on real tmux during root resurrection (removeTreeWindow -> stopProcessSerialized)"
       ],
       "command": "same JUnit run as line 1; LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test packages/daemon/src/daemon/__tests__/real-shutdown-e2e.test.ts",
       "output": "Both processes.test.ts tests PASS; real-shutdown-e2e.test.ts 4 pass / 0 fail.",
       "result": "pass",
-      "notes": "In the controller test the stale socket is answered by fakeWorkerRpcClient whose shutdown() closes the socket, so stopProcess returns on the graceful branch before the kill gate: that test's 'never kills' is proven by graceful shutdown, not by the identity gate. The gate itself is exercised with a refusing socket by the tree-close test, the it.each resurrection tests, and the real-tmux e2e negative control."
+      "notes": "At 3ff0bbf4 the controller path is covered on both branches: the identity gate (refusing socket) and the graceful shutdown. The gate is also exercised with refusing sockets by the tree-close test, the it.each resurrection tests, Driver A on real tmux, and the real-tmux e2e negative control."
     },
     {
       "line": 6,
@@ -96,12 +96,12 @@
     }
   ],
   "packageChecks": {
-    "command": "cd packages/daemon && bunx biome check --error-on-warnings src/ && bunx tsc --noEmit && bun test",
-    "biome": "Checked 145 files in 330ms. No fixes applied. exit 0",
+    "command": "cd packages/daemon && bunx biome check --error-on-warnings src/ && bunx tsc --noEmit && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test",
+    "biome": "Checked 145 files in 287ms. No fixes applied. exit 0",
     "tsc": "exit 0 (no output)",
-    "bunTest": "892 pass, 6 skip, 0 fail; Ran 898 tests across 57 files. [26.27s] (skips: 3 LEGION_TMUX_LIVE + 3 LEGION_E2E gated)",
-    "bunTestCiEnv": "LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 898 pass, 0 fail, 0 skip (57 files) [32.96s]",
-    "flakes": "No unrelated-file flake seen in either whole-package run (instance-lock.test.ts green both times), so no rerun was needed."
+    "bunTestCiEnv": "LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 899 pass, 0 fail, 0 skip; Ran 899 tests across 57 files. [31.99s] (+1 vs 7d13d3bf: the controller reissued-pane case is now two tests)",
+    "processesAndWatchdog": "bun test processes.test.ts worker-boot-watchdog.test.ts -> 213 pass, 3 skip (LEGION_TMUX_LIVE-gated), 0 fail; Ran 216 tests across 2 files. [2.46s]",
+    "flakes": "None observed in this round."
   },
   "audit": {
     "droppedAssertions": [
@@ -119,15 +119,56 @@
     "launchTimeUnreadableStat": "Covered for both roles: 'fails a root launch through the ordinary launch-failure rollback when the pane's process is already gone before its identity can be recorded' (rejects /exited before its process identity could be recorded/; tree rolled back to queued, launchFailures 1, admission queue [root]) and 'fails a worker launch through the ordinary launch-failure path ...' (claim.launchFailures 1, locator undefined). No controller-launch variant (spec Errors row 5 does not name one)."
   },
   "observations": [
-    "Isolated-run flake in the new T2b test (reconnectRoots' re-armed deadline ... reissued): 2 failures in the first 6 isolated runs on windowCount toBe(1), then 72/72 green; full-file runs 3/3 green and the whole package green twice. Root cause is the shared tick-bounded wait pattern (20,000 setImmediate ticks is about 23 ms; spawnRoot does real fs writes), inherited from the sibling test it mirrors -- a fixture-wide robustness issue, not a defect in this change.",
-    "Dropped-but-still-true assertion `trees[root].status toBe('closed')` in the in-flight-launch closeTree test should be restored (verified true 3/3).",
-    "The controller reissued-pane test proves graceful shutdown + respawn; its 'never kills' clause is satisfied by the graceful branch (fake client closes on shutdown), not by the identity gate. Making that fake socket refuse would also exercise the gate on the controller path; the gate is otherwise proven by the tree-close test and Driver A.",
-    "The it.each case 'the same pid came back with a different start time' asserts /pid 12345/ which the 'recorded pid 12345' half satisfies; asserting the observed 'started at 999999' would make the log check discriminating too.",
-    "reconcileTmuxWindows' `knownPanes` still includes stale pane ids of locators that failed identity but have not yet cleared (plan concern #4, pre-existing narrowing hazard) -- unchanged here.",
-    "Throwaway drivers (/tmp/legion27-test/identity-driver.ts, /tmp/legion27-test/resync-recreate-driver.ts) were not committed; both throwaway tmux servers were killed and `tmux -L <name> ls` confirms no server running. The working copy's `.omp/config.yml` (workspace provisioning) was left untouched."
+    "All five findings from the 7d13d3bf audit are addressed at 3ff0bbf4 (see correctiveRound.items); no test or src change was made by the tester.",
+    "The `expect(log).not.toMatch(/re-arming the watch/)` in worker-boot-watchdog.test.ts and the `re-arming the watch` wait condition in the reconnectWorkers sibling test still couple to the pre-existing watchdog log text; both were noted last round as weightless-after-rename, neither is a criterion gap (`retired toEqual([token])` and the locator/launchFailures assertions carry those tests).",
+    "reconcileTmuxWindows' `knownPanes` still includes stale pane ids of locators that failed identity but have not yet cleared (plan concern #4, pre-existing narrowing hazard) -- unchanged, out of scope.",
+    "Throwaway drivers (/tmp/legion27-test/*.ts) were not committed; the two throwaway tmux servers from the first round were killed and none was opened this round (no live-tmux driver was needed to re-verify test-only changes; the LEGION_TMUX_LIVE/LEGION_E2E suites ran on their own throwaway sockets). `.omp/config.yml` in the working copy left untouched."
   ],
-  "documentationFeedback": "All three changed AGENTS.md sentences read true against processes.ts and worker-boot-watchdog.ts. One unchanged clause in the watchdog bullet ('Only a boot whose pane is gone *and* whose socket refuses a connection is retired') now also covers a present-but-reissued pane; fine as is given the new parenthetical, but 'gone' could say 'gone or not the recorded process'.",
+  "documentationFeedback": "All changed AGENTS.md sentences read true against processes.ts and worker-boot-watchdog.ts, including the corrected watchdog retirement clause.",
+  "previousHeadSha": "7d13d3bf0809f90ca5e599a8de3815466b00c2fd",
+  "correctiveRound": {
+    "head": "3ff0bbf46315fd7d4e762430d3bd001ce478b1a3",
+    "commit": "test(daemon): identity-gate controller case, deterministic reissued-pane deadline waits, restored closed assertion",
+    "scopeCheck": "jj diff -r 'b2b4116b..3ff0bbf4' --stat: .legion/implement.json (+2/-1), packages/daemon/src/daemon/AGENTS.md (+1/-1), packages/daemon/src/daemon/__tests__/processes.test.ts (+123/-37). `jj diff --summary | grep packages/daemon/src | grep -v __tests__ | grep -v AGENTS.md` -> empty: no src change.",
+    "items": [
+      {
+        "item": 1,
+        "finding": "trees[root].status toBe('closed') restored in the in-flight-launch closeTree test",
+        "diff": "processes.test.ts:7813 `expect(managedState.trees[root]?.status).toBe(\"closed\");` re-added directly after the TreeClosingError assertion.",
+        "execution": "bun test processes.test.ts -t 'retires the pane instead of writing a claim when closeTree closes the tree while a launch is still in flight' -> PASS (JUnit).",
+        "result": "confirmed"
+      },
+      {
+        "item": 2,
+        "finding": "both reissued-pane deadline tests await the resurrection's own persist via a resolver, not a tick-bounded wait",
+        "diff": "`reissuablePanes(state, resurrectedGeneration, commands, sessionExists)` now returns `resurrected` (Promise.withResolvers) and a `saveState` that resolves it when `trees[root]` is generation N, status active, and its locator's panePid equals the pid the fake tmux handed that pane. Both tests pass `saveState: tmuxFake.saveState` and replace `flushEventLoopUntil(() => windowCount() >= N, 20_000)` with `await tmuxFake.resurrected`. grep of lines 10118-10260: 0 occurrences of flushEventLoopUntil, 2 of `await tmuxFake.resurrected`.",
+        "execution": "30x isolated `bun test processes.test.ts -t \"reconnectRoots' re-armed deadline treats a restart-surviving locator whose pane id was reissued as dead\"` -> 30/30 pass, 0 fail. 30x isolated for the spawnRoot sibling `resurrects a root once, without killing the pane, when its registration deadline elapses on a pane id since reissued` -> 30/30 pass, 0 fail. (Previous round: 2 failures in the first 6 isolated runs of the reconnectRoots test.)",
+        "result": "confirmed"
+      },
+      {
+        "item": 3,
+        "finding": "controller reissued-pane case split: identity-gate case with a refusing socket, graceful sibling kept",
+        "diff": "New `reissuedControllerFixture(connectWorkerRpc)` (locator %1 recorded pid 12345, list-panes reports %1 777, new-window -> @44 %3 3333). Gate case `never kills a controller pane whose id was reissued to another OMP process when its recorded process is unreachable: the identity gate treats it as already gone, logs both identities, and a fresh controller spawns` passes a connectWorkerRpc that throws ECONNREFUSED and asserts no kill-pane, `new-window controller`, fresh locator @44/%3/3333/4242, log /pid 777/ and /recorded pid 12345 start 4242/. Graceful sibling `asks the recorded controller process to shut down over its own socket before replacing a locator whose pane id was reissued, spawning a fresh controller once it closes` keeps the fakeWorkerRpcClient shutdown spy and `shutdowns toEqual([socketPath])`.",
+        "execution": "Both PASS (JUnit). Throwaway control (/tmp/legion27-test/controller-gate-control.ts, not committed) reproducing the gate fixture against the real ProcessManager: kill-pane commands = [], log carries `not killing pane %1 for legion-omp-controller, treating it as already gone: pane %1 now runs pid 777 (recorded pid 12345 start 4242)` -- the stopProcess identity gate is what declined the kill, the graceful branch never ran. Positive control already in the suite: `ensureController retires a stuck controller pane and spawns a fresh one once its registration deadline elapses with no role claim` uses the same refusing socket with list-panes reporting the recorded pid 12345 and asserts kill-pane IS issued; observed pid is the only difference.",
+        "result": "confirmed"
+      },
+      {
+        "item": 4,
+        "finding": "the start-mismatch it.each case asserts the observed 999999 start ticks",
+        "diff": "`reissuedPaneCases` rows gain `observed: RegExp`: /pid 777/ (pid case), /pid 12345 .*999999/ (start-mismatch case), /pid 12345 .*\\/proc/ (unreadable-stat case); the assertion is now `expect(log).toMatch(reissued.observed)` beside the unchanged /recorded pid 12345 start 4242/. describePaneVerdict's start-mismatch line is `pane %0 runs pid 12345 started at 999999 (recorded pid 12345 start 4242)`, so the regex is satisfied only by the observed half.",
+        "execution": "All three it.each cases PASS (JUnit).",
+        "result": "confirmed"
+      },
+      {
+        "item": 5,
+        "finding": "AGENTS.md watchdog sentence no longer uses 'gone' alone for a present-but-mismatched pane",
+        "diff": "packages/daemon/src/daemon/AGENTS.md l.59: `Only a boot whose pane is gone -- or present but no longer running the process its locator recorded -- *and* whose socket refuses a connection is retired, ...`. Reads true against WorkerBootWatchdog.probeAlive (paneProcessVerified, then socket probe) and retireUnconfirmedBoot.",
+        "execution": "n/a (doc); read against worker-boot-watchdog.ts probeAlive.",
+        "result": "confirmed"
+      }
+    ]
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-12T21:30:29.052Z"
+  "completed": "2026-09-12T21:46:19.868Z"
 }
