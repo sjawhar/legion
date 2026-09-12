@@ -9,6 +9,8 @@ application state in Postgres.
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. |
+| `DISPATCH_SERVER_URL` | Public browser origin. When set, overrides `dispatch.serverUrl` from merged `envoy.json`. |
+| `NATS_URLS` | Comma-separated NATS URLs. When set, overrides `natsUrls` from merged `envoy.json`. |
 | `DISPATCH_AGENT_TOKEN` | Shared bearer fallback for devbox agents. Personal tokens minted in Settings are the normal agent credential. |
 | `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection. Test/e2e only — leave unset in every real deployment. |
@@ -21,9 +23,13 @@ stored mapping, then falls back to `DISPATCH_DEFAULT_PROJECT` when configured.
 An unmapped external repository without a default project is rejected. An issue
 created through the default also gets a `repo:owner/name` label.
 
-`dispatch.serverUrl` in the merged `envoy.json` identifies Dispatch's public
-base URL. The server recognizes native issue, artifact, ask, and comment links
-under that URL when it stores post references.
+`DISPATCH_SERVER_URL`, when set, overrides `dispatch.serverUrl` in merged
+`envoy.json`. It must be an absolute `http` or `https` URL with no path.
+`NATS_URLS`, when set, overrides `natsUrls` with its comma-separated values.
+
+`DISPATCH_SERVER_URL` IS the GitHub OAuth callback origin. It must equal the
+URL humans type into their browser, and the GitHub App must list
+`<DISPATCH_SERVER_URL>/auth/callback` as its callback URL.
 
 Agents normally authenticate with a personal `dsp_` token minted in Settings,
 sent as `Authorization: Bearer <token>`. `DISPATCH_AGENT_TOKEN` remains the

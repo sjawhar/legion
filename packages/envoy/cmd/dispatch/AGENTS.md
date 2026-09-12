@@ -20,13 +20,17 @@ authoritative, and external issues fall back to `DISPATCH_DEFAULT_PROJECT` when
 configured. An unmapped repository without a default is rejected; issues that
 use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
 database and SSE paths available and makes `/healthz` report `nats: null`.
-Otherwise Dispatch reads
-`natsUrls` from shared `envoy.json`, connects through `bus.Connect`, and runs
-the outbox. Host adapters can override their configured Dispatch base URL
-with `DISPATCH_URL`; the server reads `dispatch.serverUrl` from shared
-`envoy.json`. `DISPATCH_TEST_HOOKS=1` mounts `POST /api/v1/events/_test/disconnect`
-(closes every open SSE connection, as if the server had restarted) — unset in
-every real deployment; e2e's `run-server.sh` sets it so the web client's
+Otherwise Dispatch loads config in this precedence order: user `envoy.json`,
+repository `envoy.json`, then environment overrides. A present `NATS_URLS`
+overrides merged `natsUrls` before `bus.Connect` and the outbox start. A present
+`DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an
+absolute `http` or `https` URL with no path, and is the exact browser origin
+used for GitHub OAuth. It must equal the URL humans type into the browser, with
+`<DISPATCH_SERVER_URL>/auth/callback` registered on the GitHub App. Host
+adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
+`DISPATCH_TEST_HOOKS=1` mounts `POST /api/v1/events/_test/disconnect` (closes
+every open SSE connection, as if the server had restarted) — unset in every real
+deployment; e2e's `run-server.sh` sets it so the web client's
 reconnect-from-lastId path can be exercised without seeding thousands of
 events to trip the SSE replay cap.
 

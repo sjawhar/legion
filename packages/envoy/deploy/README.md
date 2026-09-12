@@ -26,6 +26,7 @@ already encrypted; nothing else on the host can reach that address:
 
 ```
 DISPATCH_LISTEN_HOST=100.x.y.z        # tailscale ip -4
+DISPATCH_SERVER_URL=http://sami-agents:8766 # the exact browser URL and OAuth callback origin
 DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
 ```
 
@@ -61,6 +62,27 @@ docker compose -f compose/dispatch.compose.yml pull
 docker compose -f compose/dispatch.compose.yml up -d
 ```
 
+## Auto-deployer
+
+`scripts/autodeploy.sh` polls `main`, selects the newest published Dispatch
+image among its last 30 commits, creates a `pg_dump`, then pulls and starts
+only the `dispatch` service. It retains the ten newest pre-deploy dumps. Its
+defaults target the devbox; set `REPO`, `COMPOSE_PROJECT`, or `BACKUPS` to run
+against another checkout, Compose project, or dump directory.
+
+Run it continuously in its supervised host service, or use one pass for a
+smoke check:
+
+```bash
+cd packages/envoy/deploy
+scripts/autodeploy.sh --once
+```
+After health succeeds, the deployer reads `DISPATCH_SERVER_URL` from
+`compose/.env` and checks that `/auth/start` emits exactly
+`$DISPATCH_SERVER_URL/auth/callback`. It persists the new `ENVOY_IMAGE_TAG`
+only after both checks; a failed deployment restores the previous tag and
+restarts only `dispatch`.
+
 ## Listener configuration
 
 | Var | Required | Notes |
@@ -93,15 +115,16 @@ scripts/up-dispatch.sh
 curl "http://$(tailscale ip -4):8766/healthz"
 ```
 
-The mounted `~/.config/opencode/envoy.json` supplies `natsUrls` and
-`dispatch.serverUrl`. Set `DISPATCH_NATS_DISABLED=1` when no NATS connection is
-available. Host adapters use the same file or the `DISPATCH_URL` and
-`DISPATCH_TOKEN` environment variables.
+The Dispatch service reads its public browser origin and NATS URLs from
+`compose/.env`; it does not mount an agent's `envoy.json`. Set
+`DISPATCH_NATS_DISABLED=1` when no NATS connection is available.
 
 | Var | Required | Notes |
 | --- | --- | --- |
 | `DISPATCH_PG_PASSWORD` | yes | Password for the Compose-managed Postgres database. |
 | `DISPATCH_PG_PORT` | no | Host-network Postgres port, shared by the Dispatch server and backup worker; defaults to `55432`. |
+| `DISPATCH_SERVER_URL` | yes | Public browser origin and GitHub OAuth callback origin. It must be the URL humans type into their browser; the GitHub App must list `<DISPATCH_SERVER_URL>/auth/callback`. |
+| `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
 | `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. |
 | `DISPATCH_ALLOWED_LOGINS` | human identity | Cookie identity requires it at startup; header identity accepts only included logins. |
 | `DISPATCH_BACKUP_BUCKET` | yes | Private S3 bucket receiving daily PostgreSQL dumps. |
@@ -113,7 +136,7 @@ available. Host adapters use the same file or the `DISPATCH_URL` and
 | `DISPATCH_IDENTITY_HEADER_TRUSTED` | conditional | Set to `1` when header identity and GitHub OAuth credentials share a deployment. |
 | `DISPATCH_REPO_PROJECTS` | no | Optional boot seed for repository-to-project settings (`owner/repo=KEY,...`). Existing dashboard settings are not overwritten. |
 | `DISPATCH_DEFAULT_PROJECT` | no | Native Dispatch project for external repositories without a stored mapping. |
-| `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS; otherwise `natsUrls` in `envoy.json` is required. |
+| `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS. |
 | `ENVOY_URL` | no | Envoy listener base URL for live agent titles; defaults to `http://127.0.0.1:9020` (set it when `ENVOY_LISTENER_PORT` changes). |
 | `ENVOY_TOKEN` | conditional | Matching Listener API bearer token when `ENVOY_API_TOKEN` protects the listener. |
 | `DISPATCH_URL` | no | Host-adapter override for the Dispatch base URL; use with `DISPATCH_TOKEN`. |
