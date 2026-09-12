@@ -93,5 +93,72 @@
       },
       "handoffHead": "the commit recording this handoff sits on top of c498c8fb; code head stays c498c8fb"
     }
-  ]
+  ],
+  "hardeningRound": {
+    "round": 2,
+    "trigger": "reviewer APPROVED PR #962 at c498c8fb with 0 blocking items; architect assigned its 8 non-blocking observations as a hardening round (spec now v5: acceptance 1 and 4 tightened, 3 errors added)",
+    "head": "85a842437180d6ec800b516bb2238fff544be445",
+    "rebasedOnto": "7add4d03 (main unchanged since the previous head; `jj rebase -d main@origin` -> 'Skipped rebase of 24 commits that were already in place')",
+    "migration": "LEGION-16 PR #961 checked at 10:5x UTC: still OPEN (head 95974ff0), so the migration stays migrateV23State / state version 24 - NOT renumbered",
+    "commits": [
+      {
+        "id": "eb0d6688",
+        "group": "G1",
+        "summary": "docs(daemon): comments describe the runtime boundary, not the symbols it replaced - every stale mention of reconcileTmuxWindows/launchShimmedProcess/stopClient/workerClient/WorkerLocator/writePaneSecret/prepareSocket in processes.ts, processes.test.ts, api/routes/workers.ts, api.test.ts rewritten to current behaviour; the 'strictly-required WorkerLocator.tmuxPaneId' claim (processes.test.ts:2548-2551) now says what the test proves"
+      },
+      {
+        "id": "0db94ed9",
+        "group": "G2",
+        "summary": "refactor(daemon): runtime-neutral member names - panePath->processPath, paneSecretFiles->processSecretFiles, holdPaneSecret->holdProcessSecret, removeTreeWindow->removeTreeProcess (no LSP server configured for this project; ast_edit structural rename + text sweep of every reference across processes.ts, index.ts, tests, AGENTS.md, docs/solutions). Remaining pane/window words in processes.ts are prose about tmux -e argv / time windows, no identifiers"
+      },
+      {
+        "id": "0570752b",
+        "group": "G3",
+        "summary": "test(daemon): runtime.contract.test.ts gains the regex gate over processes.ts (/tmuxPaneId|tmuxWindowId|tmuxSession|socketPath|podName|podUid|TmuxLocator|K8sLocator|runtime-tmux/) and an identifier-level pane|window vocabulary assertion; processes.test.ts gains 'runs a root's whole lifecycle over a non-tmux Runtime' (FakeRuntime injected via a new manager() runtime override: spawnRoot -> probe alive -> confirmRootReady -> closeTree -> reconcileOrphans, asserting kubernetes-shaped locators end to end and zero tmux commands from the manager)"
+      },
+      {
+        "id": "64f952e3",
+        "group": "G4",
+        "summary": "test(daemon): dropped the manifestReadCount call-count pin from index.test.ts; the three refusal cases prove the contract gate"
+      },
+      {
+        "id": "d511710a",
+        "group": "G5",
+        "summary": "fix(daemon): WorkerRoleClaimSchema superRefine - a tmux worker claim locator must carry tmuxPaneId and socketPath (`Invalid Legion state: worker claim <issue>/<role> has a tmux locator without <field>`); tree and controller locators keep both optional. legion-state.test.ts: rejection case per field + tree-locator-may-lack-both; the real dogfood v23 copy (30 worker claims, 47 locators) still migrates and loads; a hand-edited copy missing one socketPath is rejected naming LEGION-16/planner"
+      },
+      {
+        "id": "6c0679dd",
+        "group": "G6",
+        "summary": "fix(daemon): controllerAlive throws `Runtime probe reported an unknown status for the controller; ProcessManager has no unknown-status policy` on an unknown verdict (same shape as probe), deleting controllerLocator only on dead; processes.test.ts case drives ensureController with a FakeRuntime returning unknown and asserts the locator survives and nothing was spawned"
+      },
+      {
+        "id": "034bf2b2",
+        "group": "G7",
+        "summary": "feat(daemon): under runtime tmux, resolveDaemonConfig rejects any daemon_url other than http://127.0.0.1:<port> with `daemon_url must be http://127.0.0.1:<port> when runtime is tmux (got <value>; an inherited LEGION_DAEMON_URL from an outer Legion pane?)` (env and yaml sources, explicit equal value accepted; kubernetes keeps a free URL and yaml-beats-env precedence). config.test.ts rewritten accordingly; DaemonConfig.daemonUrl doc and both AGENTS.md sentences updated to 'refuses an inherited value'; scripts/smoke/up.sh's daemon_url: http://127.0.0.1:${daemon_port} stays valid (proved with --check-config on the rig's own legion.yaml)"
+      },
+      {
+        "id": "85a84243",
+        "group": "G8",
+        "summary": "refactor(daemon): ProcessManager.issueInnerCommand (stat prompt / resume argument / inner command) shared by spawnTree and launchWorker; TmuxRuntime.preparePane (socket, secret file, env pairs, shim command) shared by spawnIssueProcess and spawnController - pinned-argv tests unchanged, so argv is byte-identical"
+      }
+    ],
+    "verification": {
+      "biome": "packages/daemon/src packages/contracts/src packages/pi-envoy/src: Checked 169 files, No fixes applied",
+      "tsc": "daemon 0, contracts 0, pi-envoy 0",
+      "grepGate": "processes.ts: 0 matches for the eleven forbidden symbols, 0 for /locator\\.runtime|runtime ===/ (also enforced by runtime.contract.test.ts)",
+      "daemonSuite": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 886 pass, 0 fail, 54 files (was 880 before hardening; +6 tests)",
+      "contractsAndPiEnvoy": "bun test packages/contracts packages/pi-envoy/src/legion/daemon-api-version.test.ts -> 91 pass, 0 fail",
+      "tmuxServers": "before/after the live suite, the only answering tmux servers are `default` and `legion-sjawharlegion` (dogfood); `tmux -L legion-omp list-windows` -> no server running; timestamped legion-* entries are dead socket files, not servers",
+      "daemonUrlGuardRealCli": "legion start --check-config against a yaml with port 19370 + daemon_url http://127.0.0.1:19371 -> `error: daemon_url must be http://127.0.0.1:19370 when runtime is tmux (got http://127.0.0.1:19371; an inherited LEGION_DAEMON_URL from an outer Legion pane?)` rc=1; same yaml without daemon_url but LEGION_DAEMON_URL=http://127.0.0.1:13370 (this pane's real value) -> same refusal naming :13370, rc=1; the rig's own /tmp/legion21-smoke/rig/legion.yaml (daemon_url: http://127.0.0.1:19370) -> `Config OK: project=sjawhar24`",
+      "workerClaimRefineRealState": "copy of the dogfood v23 state.json (47 locators, 30 worker claims) migrates and loads; the same copy with one worker claim's socketPath deleted -> `Invalid Legion state: worker claim LEGION-16/planner has a tmux locator without socketPath`",
+      "ci": {
+        "head": "85a842437180d6ec800b516bb2238fff544be445",
+        "tests": "https://github.com/sjawhar/legion/actions/runs/34691605905 - success (first attempt)",
+        "envoyContracts": "https://github.com/sjawhar/legion/actions/runs/34691605898 - success (first attempt)",
+        "confirmedVia": "legion gh -- run list --branch legion/LEGION-21 filtered to headSha 85a84243: both completed success at 11:58 UTC"
+      }
+    },
+    "spec": "dispatch://LEGION-21/spec version 5 (acceptance 1 and 4 tightened, acceptance 5 errors 4 added) - this round satisfies the tightened wording: contract regex gate, FakeRuntime lifecycle test, controllerAlive unknown throw, daemon_url tmux guard",
+    "notForThisRound": "`.legion/` deletion is the reviewer-directed step of the next round, not this one (architect ruling)"
+  }
 }
