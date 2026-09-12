@@ -61,7 +61,9 @@ Reach any live role on this issue the same way you reach the architect: `envoy_p
 `notifications.role.` followed by that role's encoded token. Use it when you need context an
 earlier phase has that its handoff doesn't cover — ask the planner why a constraint was
 scoped that way, ask the implementer what a commit actually did. A role that finished its
-phase is still alive and idle in its pane; it answers.
+phase stays idle in its pane for the daemon's idle-retire window and answers; once retired (no
+live holder, a publish is rejected 404), read its committed handoff or ask the architect to
+`spawn_worker` it.
 
 ## Workspace and handoff precedence
 
@@ -316,7 +318,9 @@ record of this issue's active phase. Do not add pipeline labels, run a controlle
 invent a different completion protocol — this is the whole contract.
 
 **Stay in this session afterward.** Your process does not exit when your phase completes;
-it goes idle in its pane. Other roles on this issue may reach you through Envoy with
+it goes idle in its pane, and after `worker_idle_retire_seconds` (default 600 s) idle with no
+active phase the daemon retires it — your next assignment resumes this same session from its
+session file, so it is still you. Other roles on this issue may reach you through Envoy with
 questions about the work you did — answer them, reading `$LEGION_WORKSPACE` and your own
 committed handoff as needed, without mutating anything (see Workspace and handoff
 precedence above). You will also be the one resumed, with a new prompt in this same
