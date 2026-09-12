@@ -733,6 +733,73 @@ describe("Legion OMP extension", () => {
       },
     ]);
   });
+  test("a controller that regains its role re-runs controller/ready so held notices drain", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const token = "legion-omp-controller";
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    let listenerHoldsClaim = true;
+    const secondReady = Promise.withResolvers<void>();
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+      if (url.pathname === "/legion/v1/controller/ready") {
+        if (requests.filter((request) => request.path === url.pathname).length === 2) {
+          secondReady.resolve();
+        }
+        return Response.json({});
+      }
+      if (url.pathname === `/v1/roles/${token}`) {
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${token}` }, { status: 404 });
+        }
+        return Response.json({ role: token, holder: "ses_controller", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") listenerHoldsClaim = true;
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("controller handlers were not registered");
+    const intervals: (() => void)[] = [];
+    await sessionStart(
+      {},
+      { ...sessionContext("ses_controller"), setInterval: (callback) => intervals.push(callback) }
+    );
+    const ready = {
+      path: "/legion/v1/controller/ready",
+      body: { secret: "controller-secret", sessionId: "ses_controller" },
+    };
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+
+    // A steady tick: the listener still names this session, so nothing is claimed or re-run.
+    intervals[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+    expect(requests.filter((request) => request.path === "/v1/roles/set")).toHaveLength(1);
+
+    // The listener lost the claim (tonight's incident): the next tick reclaims and drains.
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await secondReady.promise;
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(
+      requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
+    ).toEqual([
+      { session_id: "ses_controller", role: token },
+      { session_id: "ses_controller", role: token, soft: true },
+    ]);
+  });
   test("takes over the controller role through the daemon-ready handshake", async () => {
     const requests: { readonly method: string; readonly path: string; readonly body: unknown }[] =
       [];

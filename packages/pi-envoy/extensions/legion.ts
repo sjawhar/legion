@@ -29,7 +29,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "../src/pi-types";
-import { claimEnvoyRole } from "./envoy";
+import { claimEnvoyRole, onEnvoyRoleRegained } from "./envoy";
 
 interface LegionCapability {
   readonly kind: "root-architect" | "phase-worker";
@@ -198,6 +198,7 @@ export default function legionExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
+  let controllerRoleToken: string | undefined;
   let controlConnection: NatsConnection | undefined;
   let controlSubscription: Subscription | undefined;
   const controlCodec = StringCodec();
@@ -252,13 +253,11 @@ export default function legionExtension(pi: PiApi): void {
     const secret = controllerCapability ?? requiredControllerCapability(process.env);
     controllerCapability = secret;
     const { project } = await daemon.state();
-    await claimEnvoyRole(
-      sessionID,
-      controllerToken(project),
-      "setInterval" in context ? context : undefined
-    );
+    const token = controllerToken(project);
+    await claimEnvoyRole(sessionID, token, "setInterval" in context ? context : undefined);
     await daemon.controllerReady({ secret, sessionId: sessionID });
     controllerSessionID = sessionID;
+    controllerRoleToken = token;
   };
 
   const reclaimArchitect = async (): Promise<void> => {
@@ -500,6 +499,39 @@ export default function legionExtension(pi: PiApi): void {
       throw error;
     }
   };
+
+  // The Envoy heartbeat re-established this session as `role`'s live holder after the listener
+  // had lost sight of it (`reassertRole` in envoy.ts). Whatever the daemon published to the role
+  // meanwhile got a 404 "no holder", and recovery differs by kind:
+  //  - controller: the daemon queued each notice in `controllerPendingNotices` and only
+  //    `/controller/ready` drains them (and forces a resync) -- the same call the boot handshake
+  //    and `/legion-claim-controller` make, so re-run it (index.ts `onControllerReady`).
+  //  - root architect: the daemon's no-holder recovery (`onUndeliverable` -> `resumeWorker`) is
+  //    a no-op for the root's claim (no worker locator to resume), so nothing replays the missed
+  //    wake; `/process/ready` re-emits the overseer catch-up (`onTreeReady`), so re-run it. A
+  //    stale generation 409s, which `callReadyWithRetry` propagates without retrying.
+  //  - phase worker (sub-architect included): `resumeWorker` -> `spawnWorker` already prompts or
+  //    queues a state-derived catch-up on the live worker's own socket, and `/worker/ready` is a
+  //    no-op once the boot is confirmed. Nothing to do.
+  // Never throws: a failed ready call is logged, and the next regain or boot retries it.
+  onEnvoyRoleRegained(async (role, reason) => {
+    try {
+      if (
+        controllerSessionID !== undefined &&
+        controllerCapability !== undefined &&
+        role === controllerRoleToken
+      ) {
+        await createLegionDaemonClient(
+          requiredEnvironment(process.env, "LEGION_DAEMON_URL")
+        ).controllerReady({ secret: controllerCapability, sessionId: controllerSessionID });
+        console.error(`[legion] re-ran controller/ready after role ${role} was ${reason}`);
+      }
+    } catch (error) {
+      console.error(
+        `[legion] ready call after role ${role} was ${reason} failed; the next regain or boot retries it: ${messageFor(error)}`
+      );
+    }
+  });
 
   pi.on("session_start", async (_event, context) => {
     // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
