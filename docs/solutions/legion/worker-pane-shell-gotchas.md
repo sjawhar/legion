@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports and their 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, and a daemon outage blocking every bash call"
+title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports and their 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, and a pane OMP_SESSION_ID that is not yours"
 category: legion
 tags:
   - legion
@@ -9,6 +9,7 @@ tags:
   - jj
   - bun-test
   - rig
+  - session-identity
 date: 2026-09-12
 status: active
 module: legion
@@ -38,6 +39,7 @@ symptoms:
   - "envoy_publish: no holder for role legion-<project>-<KEY>-architect"
   - "bash tool: Unable to connect. Is the computer able to access the url?"
   - "Unable to connect. Is the computer able to access the url? on every bash tool call, whatever the command"
+  - "The Legion PR footer names a session id three days older than the worker; printenv OMP_SESSION_ID disagrees with envoy_whoami"
 ---
 
 # Worker-Pane Shell Gotchas
@@ -227,9 +229,13 @@ After the daemon or the Envoy listener restarts (LEGION-29: a listener restart d
 can return `no holder` for both your own role and the tree's architect. Two consequences:
 
 - `legion handoff complete` prints `[handoff] Warning: phase recorded; no architect was live to receive the summary` and
-  exits 0. The completion **is** recorded: the daemon captured and cleared the phase, PATCHed the issue's Dispatch
+  exits 0. The completion **is** recorded: the daemon cleared the active phase for routing, PATCHed the issue's Dispatch
   status (`legion state` showed `LEGION-18` at `testing` right after), and parked the summary for the architect's
-  catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not re-run it; do not write a second handoff.
+  catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not write a second handoff file. Do re-run the same
+  `legion handoff complete` once the architect holds its role again — a repeat completion by the same worker is the
+  designed recovery (200, published, record cleared); a repeat while the role is still unheld just 202s again. What
+  the architect can and cannot do about it is in
+  [phase-complete-stranded-on-no-holder](phase-complete-stranded-on-no-holder.md).
 - `envoy_publish` to `notifications.role.legion-<project>-<KEY>-architect` fails with `no holder for role …`. Fall back
   to the architect's session id: `legion state` → `roles["legion-<project>-<KEY>-architect"].sessionId`, then
   `envoy_send(session_id=<that id>, message=…)`. Direct session delivery does not depend on the role claim. The
@@ -279,3 +285,17 @@ What still works, and what to do:
 - **Never restart, signal, or write to the daemon yourself.** It runs under a supervisor from
   `/home/ubuntu/legion-ws-RunDaemon` and comes back on its own; it runs `main`, not your branch, so its restarts are
   never evidence about your change.
+
+## 10. `$OMP_SESSION_ID` in your pane is not your session
+
+The Legion PR footer (`<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->`) needs this session's live id.
+`printenv OMP_SESSION_ID` in a worker pane returns an id inherited from whatever OMP session started the daemon: the
+daemon's private tmux server is forked from the daemon's own environment, every pane inherits it, and the daemon's
+strip list (`PANE_SECRET_ENV_KEYS` in `packages/daemon/src/daemon/environment.ts`) covers secrets only. On LEGION-13
+the pane's value decoded (UUIDv7, first 48 bits are epoch millis) to 2026-09-09T01:51Z, three days before the worker
+was spawned; the implementer's two review-thread replies went out with that id in their footer and had to be edited.
+
+Get the id from `envoy_whoami` (`session_id`) or from `legion state` → `roles["legion-<project>-<KEY>-<role>"].sessionId`;
+the two agree, and both are the id the daemon registered at `/worker/started`. Never from the environment, and — per
+[session-id-remint-stale-transcript-identity](../envoy/session-id-remint-stale-transcript-identity.md) — never from a
+`whoami` result earlier in your own transcript either.
