@@ -834,6 +834,37 @@ describe("legion state", () => {
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
   });
 
+  it("rejects a tmux worker claim whose locator lacks its socket or pane id, naming the claim and the field, while a tree locator may lack both", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-worker-strict-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const testerToken = roleToken(initialState.project, issue, "tester");
+    current.roles[testerToken] = {
+      issue,
+      role: "tester",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%3",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    // `stateWithTree()`'s own tree locator has neither pane id nor socket: still valid.
+    await saveState(file, current);
+    expect(await loadState(file, initialState)).toEqual(current);
+
+    for (const field of ["socketPath", "tmuxPaneId"]) {
+      const raw = JSON.parse(JSON.stringify(current));
+      delete raw.roles[testerToken].locator[field];
+      await writeFile(file, JSON.stringify(raw), "utf8");
+      await expect(loadState(file, initialState)).rejects.toThrow(
+        `Invalid Legion state: worker claim ${issue}/tester has a tmux locator without ${field}`
+      );
+    }
+  });
+
   it("rejects a v24 locator that carries no runtime discriminant", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-untagged-"));
     const file = path.join(tempDir, "state.json");

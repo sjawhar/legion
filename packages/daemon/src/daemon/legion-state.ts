@@ -294,7 +294,23 @@ const WorkerRoleClaimSchema = z
     resumeSessionFile: z.string().optional(),
     expectedSessionId: z.string().optional(),
   })
-  .strict();
+  .strict()
+  // A worker's tmux locator always carries its pane id and shim socket (the tmux runtime records
+  // both on every spawn); one without them is a corrupt record that must fail here, at load, not
+  // later at `connect`/`stop`. Tree and controller locators keep both optional: a root recorded
+  // before the pane-id field existed is a real, backfillable state (`TmuxRuntime.probe`).
+  .superRefine((claim, context) => {
+    if (claim.locator?.runtime !== "tmux") return;
+    for (const field of ["tmuxPaneId", "socketPath"] as const) {
+      if (claim.locator[field] === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["locator", field],
+          message: `worker claim ${claim.issue}/${claim.role} has a tmux locator without ${field}`,
+        });
+      }
+    }
+  });
 const ControllerRoleClaimSchema = z
   .object({
     role: z.literal("controller"),
