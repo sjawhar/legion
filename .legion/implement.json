@@ -380,5 +380,61 @@
     "pullRequestHold": "Sami's hold on new pull requests (relayed 13:17Z) respected: no new PR opened; every fix pushed to the existing legion/LEGION-16 branch of PR #961. The reviewer's .legion/review.json commit 2a109026 rode along on the push.",
     "threadReplies": "Fourteen replies posted, one per thread, plain English, none resolved (the reviewer resolves on re-review): reply ids 3996849553, 3996849620, 3996849679, 3996849734, 3996850083, 3996850132, 3996850173, 3996850225, 3996850272, 3996850554, 3996850626, 3996850660, 3996850707, 3996850739.",
     "completedAt": "2026-09-12T16:32:31.457460Z"
+  },
+  "thirdPass": {
+    "testedHead": "70114855",
+    "fixCommit": "ef45db4e93c2cb60a94769b427d0087ba4c86718",
+    "rebaseStatus": "LEGION-21's #962 and LEGION-18's #953 both still OPEN and unmerged at 17:58Z (legion gh -- pr view); main@origin 05e3e7e5 (chore: release pi-envoy v1.6.0) has not touched anything under this branch's files; no rebase.",
+    "f1": {
+      "cause": "The controller's `state.roles[controllerToken]` claim, written by `/controller/ready`, was never deleted by anything (only worker paths delete claims; identical on main). `retireAndRespawnStuckController` returns at `if (this.deps.state.roles[token]) return;` and `ensureController`'s alive branch cancels the deadline on the same test, so after a daemon's first controller registration every later incarnation's deadline saw a claim (the predecessor's) and did nothing: a resumed pane that died during boot was recovered only by the next resync probe (~2.5 min on the rig), and a resumed pane that hung alive would never have been recovered.",
+      "fixShape": "(a) — `spawnController` deletes the previous incarnation's `state.roles[controllerToken]` claim alongside `delete controllerLocator`, after the resume decision has succeeded and before `mintControllerCapability`. The new pane puts the claim back through `/controller/ready`, the only path that writes it, so the guard keeps its meaning ('the current pane registered').",
+      "whyNotB": "(b) would compare the claim against a generation or session the deadline was armed for; the controller has neither a generation field nor a persisted expected session id, so (b) adds state to LegionState (another migration) for a comparison (a) makes unnecessary. (a) is one line and mirrors how `removeTreeWindow`/`retireWorkerLocator` already drop a claim when they retire a pane.",
+      "claimConsumersChecked": "Readers of the controller claim: `ensureController`'s alive branch and the deadline guard (the two this fixes), `index.ts` boot-time `controllerPendingNotices` drain (skips when no claim; `/controller/ready`'s `onControllerReady` drains them on the new pane's claim, so nothing is lost), `api/state.ts` redaction (projection only), and `/controller/ready` (the writer). Secret-file liveness (`liveSecretFiles`/`pruneSecretFiles`/`persist`) keys the controller's secret file off `controllerLocator`, never the claim, and `holdPaneSecret` covers the window between the locator delete and the fresh locator write — unchanged and still consistent with the route.",
+      "takeoverInteraction": "A `/legion-claim-controller` session's claim is also deleted when the daemon pane is respawned; before this fix the new pane's `/controller/ready` overwrote that claim anyway (and the Envoy role claim is last-claim-wins), so a respawn superseding a takeover is not new behaviour.",
+      "tests": "Two added to processes.test.ts beside the corrective-pass pair, both seeded with a registered first incarnation (`state.roles[controllerToken] = {role:\"controller\", sessionId:\"ses-incarnation-1\"}`) and its dead pane: (1) `resurrects a resumed controller whose pane died before re-claiming once the registration deadline fires, ignoring the previous incarnation's claim` — the resume of incarnation 2 leaves no claim, incarnation 2 dies during boot, the deadline fires, incarnation 3 is spawned with `--resume=<file>` and no kill-pane; (2) `kills a resumed controller pane that stays alive without re-claiming once the registration deadline fires, then resumes the same transcript` — incarnation 2 stays alive unclaimed, the deadline kills exactly pane %2, incarnation 3 is spawned with `--resume=<file>`. Both failed before the fix (stale claim survived; nothing killed) and pass after.",
+      "docs": "The daemon AGENTS.md controller bullet now states the claim deletion, that `/controller/ready` is the only writer, and that the deadline sentence holds 'whichever incarnation the pane is'."
+    },
+    "f2": "Not addressed here, per the architect: the bash-hook grant-stacking bug (LEGION-12's class) also hits the controller TUI; evidence is with LEGION-12's architect. No workaround added to the skill or extension.",
+    "verificationCommandsRun": [
+      {
+        "command": "cd packages/daemon && bunx biome check --error-on-warnings src/",
+        "outcome": "Checked 135 files. No fixes applied."
+      },
+      {
+        "command": "cd packages/daemon && bunx tsc --noEmit",
+        "outcome": "exit 0"
+      },
+      {
+        "command": "cd packages/daemon && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test --test-name-pattern controller",
+        "outcome": "52 pass, 0 fail"
+      },
+      {
+        "command": "cd packages/daemon && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
+        "outcome": "824 pass, 5 skip, 0 fail across 53 files"
+      },
+      {
+        "command": "cd packages/contracts && bunx tsc --noEmit && bun test",
+        "outcome": "exit 0; 93 pass, 0 fail"
+      },
+      {
+        "command": "cd packages/pi-envoy && bunx tsc --noEmit && bunx biome lint extensions/ src/ && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
+        "outcome": "exit 0; Checked 19 files; 139 pass, 0 fail"
+      },
+      {
+        "command": "grep -rn pr-queue skills packages docs --exclude-dir=plans",
+        "outcome": "prints nothing (exit 1)"
+      },
+      {
+        "command": "jj diff --git --from main@origin -- skills/legion-worker/SKILL.md",
+        "outcome": "one hunk -225,10 +225,14: the merger bullet only (constraint A)"
+      },
+      {
+        "command": "go test",
+        "outcome": "not re-run: this pass touches no Go; the corrective pass's full run (every package ok, exit 0) stands"
+      }
+    ],
+    "pullRequestHold": "No new pull request opened; pushed to the existing legion/LEGION-16 branch of PR #961.",
+    "testerNote": "Both F1 scenarios should now hold on the rig without editing state.json: kill a registered controller pane, let the daemon resume it, then either kill the respawn during boot (expect `resurrecting the controller … by resuming OMP session <file>` at the 60 s deadline with `--resume=<file>`) or let it hang alive without claiming (expect kill-pane at the deadline, then the same resume, and the claim back under the same session id once the resumed OMP posts /controller/ready).",
+    "completedAt": "2026-09-12T18:06:49.516496Z"
   }
 }
