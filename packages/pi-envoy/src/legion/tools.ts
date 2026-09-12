@@ -39,7 +39,7 @@ function isLifecycleStatus(value: string): value is (typeof LIFECYCLE_STATUSES)[
 // below enforces, per op, which fields are actually accepted.
 const LEGION_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
   set_status: ["issue", "status"],
-  register_gate: ["issue", "askId"],
+  register_gate: ["issue", "artifactId", "version"],
   release_wave: ["issues"],
   escalate: ["kind", "context"],
   spawn_worker: ["issue", "role", "task"],
@@ -51,7 +51,8 @@ function legionToolSchema(pi: PiApi): unknown {
     op: z.enum(["set_status", "register_gate", "release_wave", "escalate", "spawn_worker"]),
     issue: z.string().optional(),
     status: z.enum(LIFECYCLE_STATUSES).optional(),
-    askId: z.string().optional(),
+    artifactId: z.string().optional(),
+    version: z.number().optional(),
     kind: z.enum(["re-file", "capacity", "cross-tree"]).optional(),
     context: z.unknown().optional(),
     issues: z.array(z.string()).optional(),
@@ -72,6 +73,8 @@ export function createLegionTool(deps: {
     label: "legion",
     description:
       "Perform a Legion lifecycle write through the Legion daemon. " +
+      "register_gate records the root spec document a human must approve: pass the `artifact` " +
+      "and `version` values dispatch_request_approval returned as `artifactId` and `version`. " +
       'spawn_worker\'s response "status" means: "spawned" — a fresh pane just opened and is ' +
       'running now; "resumed" — an existing worker was prompted directly over its live socket, ' +
       "or (if its boot has not confirmed yet) its task was recorded to deliver once that boot " +
@@ -115,15 +118,21 @@ export function createLegionTool(deps: {
             });
             return jsonSuccess({});
           }
-          case "register_gate":
+          case "register_gate": {
+            const version = parameters.version;
+            if (typeof version !== "number" || !Number.isSafeInteger(version) || version <= 0) {
+              throw new Error("register_gate requires a positive integer version");
+            }
             await daemon.gatesRegister({
               tree: architect.tree,
               sessionId,
               secret: architect.secret,
               issue: stringInput("issue"),
-              askId: stringInput("askId"),
+              artifactId: stringInput("artifactId"),
+              version,
             });
             return jsonSuccess({});
+          }
           case "release_wave": {
             const issues = parameters.issues;
             if (

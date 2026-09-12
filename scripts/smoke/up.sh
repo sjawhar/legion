@@ -68,6 +68,21 @@ resolve_webhook_mode() {
   esac
 }
 
+# The rig's design-gate policy. The default, `off`, keeps a smoke exercise unattended: the root
+# architect is told in its system prompt that the gate is off and adds no approval step, so no
+# question waits in anyone's inbox. `root-issues` arms the gate for the human-approval exercise:
+# between checkpoints 3 and 4 a person approves the root's spec document in Dispatch.
+resolve_design_gate() {
+  case "${SMOKE_DESIGN_GATE:-off}" in
+    off | root-issues)
+      printf '%s\n' "${SMOKE_DESIGN_GATE:-off}"
+      ;;
+    *)
+      fail "SMOKE_DESIGN_GATE must be off or root-issues"
+      ;;
+  esac
+}
+
 normalize_github_webhook_secret() {
   local original_secret="$GITHUB_WEBHOOK_SECRET"
 
@@ -291,7 +306,7 @@ state_dir: ${smoke_dir}/daemon
 omp_invocation: mise x ${omp_pin} -- omp
 ${omp_launch_prefix_yaml}
 gates:
-  design: off
+  design: ${design_gate}
 github_apps:
   implement:
     app_id: "${LEGION_IMPLEMENT_APP_ID}"
@@ -306,8 +321,9 @@ EOF
 # at `${smoke_dir}/root-issue` -- the daemon discovers it as a parentless issue, and
 # checkpoints.sh's `smoke_root_issue` reads this exact file to name the right root instead of
 # guessing "the first parentless issue" in a project other concurrent rigs also share. The rig's
-# daemon runs with `gates.design: off` (write_daemon_config): a smoke exercise must run end to
-# end with nobody answering a design-gate ask, and the daemon closes the one the architect opens.
+# daemon runs with the design-gate policy `resolve_design_gate` chose (`off` unless
+# SMOKE_DESIGN_GATE says otherwise): under `off` the root architect adds no approval step, so a
+# smoke exercise runs end to end with nobody asked to approve anything.
 # Idempotent across a rerun against the same SMOKE_DIR: a rig that already
 # recorded a root issue reuses it rather than creating a second one.
 ensure_root_issue() {
@@ -494,6 +510,7 @@ main() {
   require_command awk
   require_command setsid
   local webhook_mode
+  local design_gate
 
   require_env SMOKE_REPO
   require_env SMOKE_PROJECT
@@ -510,10 +527,12 @@ main() {
   [[ "$SMOKE_REPO" =~ ^[^/]+/[^/]+$ ]] || fail "SMOKE_REPO must be <owner>/<repo>"
   [[ "$SMOKE_PROJECT" =~ ^[^/]+/[0-9]+$ ]] || fail "SMOKE_PROJECT must be <owner>/<number>"
   webhook_mode="$(resolve_webhook_mode)"
+  design_gate="$(resolve_design_gate)"
 
   mkdir -p "$smoke_dir" "${smoke_dir}/daemon" \
     "${smoke_dir}/xdg-data" "${smoke_dir}/xdg-state/legion" "$gh_config_dir"
   printf '%s\n' "$webhook_mode" >"${smoke_dir}/webhook-mode"
+  printf '%s\n' "$design_gate" >"${smoke_dir}/design-gate"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config

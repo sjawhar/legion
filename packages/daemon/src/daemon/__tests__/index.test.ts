@@ -416,7 +416,7 @@ describe("startDaemon", () => {
     }
   });
 
-  it("with gates.design off, boot approves every registered gate a human never answered, wakes its architect, and closes its ask", async () => {
+  it("with gates.design off, boot approves every registered gate a human never approved at its current version and wakes its architect", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = { ...config(stateDir), gates: { design: "off" as const } };
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
@@ -424,9 +424,12 @@ describe("startDaemon", () => {
       state.issues[key] = { key, title: key, status: "in_progress", children: [] };
       state.trees[key] = { root: key, generation: 1, status: "active", launchFailures: 0 };
     }
-    state.gates["WIDGETS-1"] = { designAskId: "ask-unanswered" };
-    state.gates["WIDGETS-2"] = { designAskId: "ask-human", designApproved: "ask-human" };
-    state.gates["WIDGETS-3"] = {};
+    // Registered, never approved: the gate-off fixup approves it at its latest version.
+    state.gates["WIDGETS-1"] = { artifactId: "art-1", latestVersion: 4 };
+    // Approved by a human at the current version: already open, untouched.
+    state.gates["WIDGETS-2"] = { artifactId: "art-2", latestVersion: 2, approvedVersion: 2 };
+    // Approved at 1 but edited since (latest 3): closed, so the fixup re-opens it at 3.
+    state.gates["WIDGETS-3"] = { artifactId: "art-3", latestVersion: 3, approvedVersion: 1 };
     state.issues["WIDGETS-4"] = { key: "WIDGETS-4", title: "closed", status: "done", children: [] };
     state.trees["WIDGETS-4"] = {
       root: "WIDGETS-4",
@@ -434,10 +437,9 @@ describe("startDaemon", () => {
       status: "closed",
       launchFailures: 0,
     };
-    state.gates["WIDGETS-4"] = { designAskId: "ask-on-closed-tree" };
+    state.gates["WIDGETS-4"] = { artifactId: "art-4", latestVersion: 1 };
     let saved = 0;
     const published: Array<{ topic: string; payload: string }> = [];
-    const resolvedAsks: string[] = [];
     let daemon: daemonIndex.DaemonHandle | undefined;
     try {
       daemon = await startDaemon(daemonConfig, {
@@ -462,11 +464,7 @@ describe("startDaemon", () => {
           envoyPublish: async (topic, payload) => {
             published.push({ topic, payload });
           },
-          dispatchClient: fakeDispatchClient({
-            resolveAsk: async (id) => {
-              resolvedAsks.push(id);
-            },
-          }),
+          dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => ({
               token: "test-token",
@@ -487,25 +485,33 @@ describe("startDaemon", () => {
         },
       });
       expect(state.gates["WIDGETS-1"]).toEqual({
-        designAskId: "ask-unanswered",
-        designApproved: "gate-off",
+        artifactId: "art-1",
+        latestVersion: 4,
+        approvedVersion: 4,
       });
       expect(state.gates["WIDGETS-2"]).toEqual({
-        designAskId: "ask-human",
-        designApproved: "ask-human",
+        artifactId: "art-2",
+        latestVersion: 2,
+        approvedVersion: 2,
       });
-      expect(state.gates["WIDGETS-3"]).toEqual({});
-      expect(state.gates["WIDGETS-4"]).toEqual({ designAskId: "ask-on-closed-tree" });
+      expect(state.gates["WIDGETS-3"]).toEqual({
+        artifactId: "art-3",
+        latestVersion: 3,
+        approvedVersion: 3,
+      });
+      // A closed tree has no architect waiting: its gate is left as it was.
+      expect(state.gates["WIDGETS-4"]).toEqual({ artifactId: "art-4", latestVersion: 1 });
       expect(saved).toBeGreaterThan(0);
       expect(published.filter((p) => p.payload.includes("design-approved"))).toEqual([
         {
           topic: roleTopic(roleToken(daemonConfig.project, "WIDGETS-1", "architect")),
           payload: JSON.stringify({ type: "design-approved" }),
         },
+        {
+          topic: roleTopic(roleToken(daemonConfig.project, "WIDGETS-3", "architect")),
+          payload: JSON.stringify({ type: "design-approved" }),
+        },
       ]);
-      // Only the gate the daemon itself approved: a human-answered ask is already closed on
-      // Dispatch, a closed tree has nobody waiting, and an unregistered gate has no ask.
-      expect(resolvedAsks).toEqual(["ask-unanswered"]);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });

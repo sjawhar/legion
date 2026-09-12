@@ -7,7 +7,6 @@ import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { secretHash, spawnCapabilityKey } from "../api/auth";
 import { EnvoyPublishError } from "../api/http";
-import { DispatchHttpError } from "../dispatch-client";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
 import { fakeDispatchClient } from "./ci-fixtures";
@@ -653,7 +652,7 @@ describe("Legion HTTP API", () => {
       tmuxPaneId: "%0",
       socketPath: "/tmp/legion/controller.sock",
     };
-    state.gates[root] = { designAskId: "ask-1", designApproved: "ask-1" };
+    state.gates[root] = { artifactId: "art-1", latestVersion: 3, approvedVersion: 3 };
     state.pendingStatusWrites[child] = { status: "in_progress", statusAtRecord: "todo" };
     state.controllerPendingNotices.push({ payloadJson: '{"type":"escalate"}', eventId: "evt-1" });
     state.roles[controllerToken(state.project)] = {
@@ -714,7 +713,9 @@ describe("Legion HTTP API", () => {
       },
     });
     expect(body.admission).toEqual({ cap: 2, active: [], queue: [] });
-    expect(body.gates).toEqual({ [root]: { designAskId: "ask-1", designApproved: "ask-1" } });
+    expect(body.gates).toEqual({
+      [root]: { artifactId: "art-1", latestVersion: 3, approvedVersion: 3 },
+    });
     expect(body.controllerLocator).toEqual({
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
@@ -1035,7 +1036,7 @@ describe("Legion HTTP API", () => {
     ).toBe(400);
   });
 
-  it("registers a design-gate ask id only for an architect's own tree, keeping any recorded approval", async () => {
+  it("registers the design gate's spec document and version only for an architect's own tree, keeping a recorded approval of the same document", async () => {
     await start();
     const rootIssue = state.issues[root];
     if (!rootIssue) throw new Error("Root issue is missing from test state");
@@ -1063,7 +1064,8 @@ describe("Legion HTTP API", () => {
     const outOfTree = await json("/legion/v1/gates/register", {
       tree: root,
       issue: foreign,
-      askId: "ask-out-of-tree",
+      artifactId: "art-out-of-tree",
+      version: 1,
       ...architect,
     });
     expect(outOfTree.response.status).toBe(403);
@@ -1072,36 +1074,85 @@ describe("Legion HTTP API", () => {
     const registered = await json("/legion/v1/gates/register", {
       tree: root,
       issue: child,
-      askId: "ask-1",
+      artifactId: "art-1",
+      version: 3,
       ...architect,
     });
     expect(registered.response.status).toBe(200);
-    expect(state.gates[child]).toEqual({ designAskId: "ask-1" });
+    expect(state.gates[child]).toEqual({ artifactId: "art-1", latestVersion: 3 });
 
-    state.gates[child] = { designAskId: "ask-1", designApproved: "ask-1" };
+    // The same document at a later version keeps the approval already recorded (the gate is
+    // now closed until that version is approved) and only raises latestVersion.
+    state.gates[child] = { artifactId: "art-1", latestVersion: 3, approvedVersion: 3 };
     const reRegistered = await json("/legion/v1/gates/register", {
       tree: root,
       issue: child,
-      askId: "ask-2",
+      artifactId: "art-1",
+      version: 5,
       ...architect,
     });
     expect(reRegistered.response.status).toBe(200);
-    expect(state.gates[child]).toEqual({ designAskId: "ask-2", designApproved: "ask-1" });
+    expect(state.gates[child]).toEqual({
+      artifactId: "art-1",
+      latestVersion: 5,
+      approvedVersion: 3,
+    });
+
+    // A different document replaces the gate wholesale: an approval pins one document's version.
+    const replaced = await json("/legion/v1/gates/register", {
+      tree: root,
+      issue: child,
+      artifactId: "art-2",
+      version: 1,
+      ...architect,
+    });
+    expect(replaced.response.status).toBe(200);
+    expect(state.gates[child]).toEqual({ artifactId: "art-2", latestVersion: 1 });
   });
 
-  it("with gates.design off, registering a gate approves it at once, wakes the architect, and closes the ask on Dispatch", async () => {
+  it("rejects a gate registration that names an ask id or omits the version with a 400 naming the field", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const architect = { sessionId: "ses_root", secret: started.body.secret };
+
+    const askId = await json<{ error: string }>("/legion/v1/gates/register", {
+      tree: root,
+      issue: root,
+      askId: "ask-1",
+      ...architect,
+    });
+    expect(askId.response.status).toBe(400);
+    expect(askId.body.error).toContain("askId");
+    expect(askId.body.error).toContain("artifactId");
+
+    const missingVersion = await json<{ error: string }>("/legion/v1/gates/register", {
+      tree: root,
+      issue: root,
+      artifactId: "art-1",
+      ...architect,
+    });
+    expect(missingVersion.response.status).toBe(400);
+    expect(missingVersion.body.error).toContain("version");
+    expect(state.gates[root]).toBeUndefined();
+  });
+
+  it("with gates.design off, registering a gate approves it at once and wakes the architect", async () => {
     const published: Array<{ topic: string; payload: string }> = [];
-    const resolved: Array<{ id: string; reason: string }> = [];
     await start({
       gates: { design: "off" },
       envoyPublish: async (topic, payload) => {
         published.push({ topic, payload });
       },
-      dispatchClient: fakeDispatchClient({
-        resolveAsk: async (id, reason) => {
-          resolved.push({ id, reason });
-        },
-      }),
     });
     const bootToken = await api?.mintBootToken(root, 3);
     if (!bootToken) throw new Error("root boot token was not minted");
@@ -1120,77 +1171,38 @@ describe("Legion HTTP API", () => {
     const registered = await json("/legion/v1/gates/register", {
       tree: root,
       issue: root,
-      askId: "ask-1",
+      artifactId: "art-1",
+      version: 2,
       ...architect,
     });
     expect(registered.response.status).toBe(200);
-    expect(state.gates[root]).toEqual({ designAskId: "ask-1", designApproved: "gate-off" });
+    expect(state.gates[root]).toEqual({
+      artifactId: "art-1",
+      latestVersion: 2,
+      approvedVersion: 2,
+    });
     expect(published).toEqual([
       {
         topic: roleTopic(roleToken(state.project, root, "architect")),
         payload: JSON.stringify({ type: "design-approved" }),
       },
     ]);
-    expect(resolved).toEqual([
-      { id: "ask-1", reason: expect.stringContaining("gates.design: off") },
-    ]);
-    // The reason is written for the human who would otherwise have been asked.
-    expect(resolved[0]?.reason).toMatch(/no human answer is needed/);
 
-    // Re-registering an already-approved gate records the new ask id, wakes nobody twice, and
-    // leaves the new ask alone: the approval was never in question, and nothing else closes it.
+    // Re-registering the same document at its approved version is already open: wakes nobody twice.
     const again = await json("/legion/v1/gates/register", {
       tree: root,
       issue: root,
-      askId: "ask-2",
+      artifactId: "art-1",
+      version: 2,
       ...architect,
     });
     expect(again.response.status).toBe(200);
-    expect(state.gates[root]).toEqual({ designAskId: "ask-2", designApproved: "gate-off" });
+    expect(state.gates[root]).toEqual({
+      artifactId: "art-1",
+      latestVersion: 2,
+      approvedVersion: 2,
+    });
     expect(published).toHaveLength(1);
-    expect(resolved).toHaveLength(1);
-  });
-
-  it("with gates.design off, a Dispatch failure closing the ask never fails the register", async () => {
-    const errors: string[] = [];
-    const consoleError = console.error;
-    console.error = (message: unknown) => {
-      errors.push(String(message));
-    };
-    try {
-      await start({
-        gates: { design: "off" },
-        envoyPublish: async () => {},
-        dispatchClient: fakeDispatchClient({
-          resolveAsk: async () => {
-            throw new DispatchHttpError(502, "dispatch is down");
-          },
-        }),
-      });
-      const bootToken = await api?.mintBootToken(root, 3);
-      if (!bootToken) throw new Error("root boot token was not minted");
-      const started = await json<{ secret: string }>("/legion/v1/process/started", {
-        tree: root,
-        generation: 3,
-        rootSessionId: "ses_root",
-        bootToken,
-        agentId: "root-agent",
-        ompSessionFile: "/tmp/root.json",
-      });
-      const registered = await json("/legion/v1/gates/register", {
-        tree: root,
-        issue: root,
-        askId: "ask-1",
-        sessionId: "ses_root",
-        secret: started.body.secret,
-      });
-      expect(registered.response.status).toBe(200);
-      expect(state.gates[root]).toEqual({ designAskId: "ask-1", designApproved: "gate-off" });
-      expect(errors).toEqual([expect.stringContaining("ask-1")]);
-      expect(errors[0]).toContain("dispatch is down");
-    } finally {
-      console.error = consoleError;
-    }
   });
 
   it("persists a minted controller capability before controller spawn can proceed", async () => {

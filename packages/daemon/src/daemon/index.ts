@@ -18,11 +18,11 @@ import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
-import { GATE_OFF_APPROVAL, satisfyGateOff } from "./api/routes/issues";
+import { publishDesignApproved } from "./api/routes/issues";
 import { verifyLegionPluginLoaded, verifyOmpAgentsCapability } from "./boot-probes";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
-import { createDispatchClient, type DispatchClient } from "./dispatch-client";
+import { createDispatchClient, type DispatchClient, specArtifactResolver } from "./dispatch-client";
 import {
   createDaemonRunner,
   type DaemonEnvironment,
@@ -37,7 +37,7 @@ import {
 } from "./events";
 import { buildRoleEnv, TokenManager } from "./github-apps";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock";
-import { loadState, saveState } from "./legion-state";
+import { designGateOpen, loadState, saveState } from "./legion-state";
 import { createNatsTransport, type NatsTransport } from "./nats-transport";
 import { daemonCredentialHelper, ProcessManager, type ProcessManagerDeps } from "./processes";
 import { runResync } from "./resync";
@@ -228,6 +228,7 @@ async function startDaemonLocked(
   const state = await deps.loadState(stateFile, {
     project: config.project,
     cap: config.admissionCap,
+    resolveSpecArtifact: specArtifactResolver(deps.dispatchClient),
   });
   let saving: Promise<void> | undefined;
   const save = () => {
@@ -246,26 +247,25 @@ async function startDaemonLocked(
     return write;
   };
   // A gate registered while `gates.design` was `root-issues` (or by a daemon predating the
-  // gate-off handling) is a human ask nobody may ever answer once the operator turns the gate off.
-  // Satisfy it here exactly as `handleGatesRegister` would have — marker, wake, and the ask closed
-  // on Dispatch — so an architect still parked on it (its pane outlives a daemon restart)
-  // proceeds, a resumed one's catch-up shows `designApproved`, and the question leaves the human's
-  // inbox. Only gates of active trees: a closed or lingering tree has no architect waiting, and a
-  // reopen re-registers its gate through the route anyway. Idempotent: only gates with no approval
-  // change.
+  // gate-off handling) is a document approval nobody may ever give once the operator turns the
+  // gate off. Satisfy it here exactly as `handleGatesRegister` would have — approve at the
+  // document's latest version plus wake — so an architect still parked on it (its pane outlives a
+  // daemon restart) proceeds, and a resumed one's catch-up shows the gate open. Only gates of
+  // active trees: a closed or lingering tree has no architect waiting, and a reopen re-registers
+  // its gate through the route anyway. Idempotent: only gates that are not open change.
   if (config.gates.design === "off") {
-    const approved: Array<{ issue: IssueKey; askId: string }> = [];
+    const approved: IssueKey[] = [];
     for (const [issue, gate] of Object.entries(state.gates)) {
-      if (gate.designAskId === undefined || gate.designApproved !== undefined) continue;
+      if (designGateOpen(gate)) continue;
       const tree = rootForIssue(state, issue);
       if (!tree || state.trees[tree]?.status !== "active") continue;
-      gate.designApproved = GATE_OFF_APPROVAL;
-      approved.push({ issue, askId: gate.designAskId });
+      gate.approvedVersion = gate.latestVersion;
+      approved.push(issue);
     }
     if (approved.length > 0) {
       await save();
-      for (const { issue, askId } of approved) {
-        await satisfyGateOff(state, issue, askId, deps);
+      for (const issue of approved) {
+        await publishDesignApproved(state, issue, deps.envoyPublish);
       }
     }
   }

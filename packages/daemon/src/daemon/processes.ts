@@ -164,6 +164,17 @@ export function addressingFragment(
   );
 }
 
+/** The one sentence a root architect's second `--append-system-prompt` fragment carries after
+ * the addressing sentence: whether this project arms the design gate (`config.gates.design`). The
+ * daemon's reply to `/process/started` carries the same value, but the extension never shows it to
+ * the model, so this is the only way the architect learns whether to request spec approval at all.
+ * Root architects only — the root approval covers the tree and a child spec is never gated. */
+export function designGateFragment(design: "root-issues" | "off"): string {
+  return design === "off"
+    ? "Design gate policy: `gates.design: off` — this project does not arm the design gate; do not request spec approval, register a gate, or wait for `design-approved`."
+    : "Design gate policy: `gates.design: root-issues` — this project arms the root design gate; follow the legion-architect skill's approval sequence before any Legion-role spawn.";
+}
+
 function shellPath(value: string): string {
   return /[^A-Za-z0-9_./:-]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
 }
@@ -2068,12 +2079,12 @@ export class ProcessManager {
       DISPATCH_URL: this.deps.config.dispatchUrl,
       DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
     });
-    const addressingPrompt = addressingFragment(
+    const addressingPrompt = `${addressingFragment(
       this.deps.state.project,
       tree.root,
       tree.root,
       "architect"
-    );
+    )} ${designGateFragment(this.deps.config.gates.design)}`;
     // Cleared before the pane opens, not after `launchShimmedProcess` resolves: the pane is a
     // real tmux/OMP process outside this event loop, so a fast root's own `/process/started` +
     // `/process/ready` can land before this continuation even runs again (interleaved with the

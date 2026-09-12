@@ -44,10 +44,6 @@ dispatch_issue() {
   dispatch_request "issues/$1"
 }
 
-dispatch_asks() {
-  dispatch_request "issues/$1/asks?state=all"
-}
-
 dispatch_artifacts() {
   dispatch_request "issues/$1/artifacts"
 }
@@ -63,6 +59,18 @@ stored_webhook_mode() {
     printf '%s\n' "$(<"$mode_file")"
   else
     printf '%s\n' "${SMOKE_WEBHOOK_MODE:-forward}"
+  fi
+}
+
+# The design-gate policy `up.sh` wrote into the rig's `legion.yaml` and recorded beside it. `off`
+# (the default) means the root architect was told to add no approval step; `root-issues` means a
+# human approves the root's spec document between checkpoints 3 and 4.
+stored_design_gate() {
+  local gate_file="${smoke_dir}/design-gate"
+  if [[ -r "$gate_file" ]]; then
+    printf '%s\n' "$(<"$gate_file")"
+  else
+    printf '%s\n' "${SMOKE_DESIGN_GATE:-off}"
   fi
 }
 
@@ -225,44 +233,93 @@ checkpoint_two() {
   printf 'CHECKPOINT 2 OK: Dispatch reports %s in_progress; architect locator is live\n' "$root"
 }
 
-# The rig runs with `gates.design: off` (up.sh): the daemon approves the gate the moment the
-# architect registers it and closes the ask on Dispatch, so a smoke exercise never waits on a
-# human. This checkpoint proves that whole path — the gate is registered and daemon-approved, and
-# the ask the architect opened is `resolved` rather than sitting open in someone's inbox.
+# The daemon's design gate is a human's approval of the root spec document at a version. What this
+# checkpoint proves depends on the policy the rig recorded (`stored_design_gate`):
+# - `root-issues`: before the human acts, the architect must have registered the document
+#   (`gates[root].artifactId`) at its current version (`latestVersion`) and Dispatch must show an
+#   open approval request on it (`approval.state == "awaiting"`, from `dispatch_request_approval`).
+# - `off`: the architect was told in its system prompt that the gate is off, so it must have
+#   registered no gate and requested no approval — nothing waits in anyone's inbox.
+# Either way the spec is posted as the root's primary `spec.md` and a child issue exists. No
+# `Approve` ask is involved in either mode.
 checkpoint_three() {
   local root
+  local design_gate
   local daemon_state
-  local design_ask_id
-  local asks
+  local gate_artifact
+  local gate_version
   local artifacts
   local children
 
   root="$(dispatch_root_key)"
+  design_gate="$(stored_design_gate)"
   daemon_state="$(state)"
-  design_ask_id="$(jq -er --arg root "$root" '.gates[$root].designAskId' <<<"$daemon_state")" ||
-    fail "${root} has no registered design-gate ask"
-  jq -e --arg root "$root" '.gates[$root].designApproved == "gate-off"' >/dev/null <<<"$daemon_state" ||
-    fail "${root} design gate is registered but the daemon did not approve it (gates.design is not off?)"
-  asks="$(dispatch_asks "$root")"
-  jq -e --arg ask "$design_ask_id" '
-    any(.[]; .id == $ask and .state == "resolved" and any(.options[]?; .label == "Approve"))
-  ' >/dev/null <<<"$asks" || fail "${root} design-gate ask ${design_ask_id} is not resolved on Dispatch"
   artifacts="$(dispatch_artifacts "$root")"
   jq -e '
     any(.[]; .name == "spec.md" and .primary == true and (.versions | type == "array" and length > 0))
   ' >/dev/null <<<"$artifacts" || fail "${root} lacks a posted primary spec.md artifact"
+  case "$design_gate" in
+    root-issues)
+      gate_artifact="$(jq -er --arg root "$root" '.gates[$root].artifactId' <<<"$daemon_state")" ||
+        fail "${root} has no registered design gate"
+      gate_version="$(jq -er --arg root "$root" '.gates[$root].latestVersion' <<<"$daemon_state")" ||
+        fail "${root}'s registered design gate records no latestVersion"
+      jq -e --arg id "$gate_artifact" '
+        any(.[]; .id == $id and .name == "spec.md" and .primary == true)
+      ' >/dev/null <<<"$artifacts" ||
+        fail "${root}'s registered design gate ${gate_artifact} is not its posted primary spec.md artifact"
+      jq -e --arg id "$gate_artifact" --argjson version "$gate_version" '
+        any(.[]; .id == $id and ([.versions[].number] | max) == $version)
+      ' >/dev/null <<<"$artifacts" ||
+        fail "${root}'s registered design gate is not at the spec document's current version ${gate_version}"
+      jq -e --arg id "$gate_artifact" '
+        any(.[]; .id == $id and .approval.state == "awaiting")
+      ' >/dev/null <<<"$artifacts" ||
+        fail "${root} has no open approval request on its registered spec document (approval.state must be awaiting; a Dispatch server without document approval never reports one)"
+      ;;
+    off)
+      jq -e --arg root "$root" '.gates | has($root) | not' >/dev/null <<<"$daemon_state" ||
+        fail "${root} registered a design gate although the rig runs with gates.design: off (the architect ignored its Design gate policy line)"
+      jq -e '
+        any(.[]; .name == "spec.md" and .primary == true and (.approval.state // "draft") == "awaiting") | not
+      ' >/dev/null <<<"$artifacts" ||
+        fail "${root} has an open approval request on its spec document although the rig runs with gates.design: off (a question is waiting in a human's inbox)"
+      ;;
+    *)
+      fail "recorded design-gate policy '${design_gate}' is neither off nor root-issues"
+      ;;
+  esac
   children="$(dispatch_children "$root")"
   jq -e --arg root "$root" 'any(.[]; .parent == $root)' >/dev/null <<<"$children" ||
     fail "${root} has no Dispatch child issue"
-  printf 'CHECKPOINT 3 OK: posted spec artifact, daemon-approved design gate (ask resolved), and child issue observed\n'
+  case "$design_gate" in
+    root-issues)
+      printf 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and child issue observed\n'
+      ;;
+    off)
+      printf 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and child issue observed\n'
+      ;;
+  esac
 }
 
+# Under `root-issues`, between checkpoints 3 and 4 a human approves the root spec document (the
+# document header's Approve, or the approval ask with Approve), and the daemon records that
+# approval on the gate (`approvedVersion == latestVersion`) before it lets the architect release
+# anything. Under `off` there is no gate to check; only the release itself is observed.
 checkpoint_four() {
   local root
+  local design_gate
   local daemon_state
 
   root="$(dispatch_root_key)"
+  design_gate="$(stored_design_gate)"
   daemon_state="$(state)"
+  if [[ "$design_gate" == root-issues ]]; then
+    jq -e --arg root "$root" '
+      .gates[$root] | (.approvedVersion != null) and (.approvedVersion == .latestVersion)
+    ' >/dev/null <<<"$daemon_state" ||
+      fail "daemon has not recorded the spec approval for ${root} (gates[${root}].approvedVersion must equal latestVersion)"
+  fi
   jq -e --arg root "$root" '
     [
       .issues[$root].children[]? as $child |
@@ -276,7 +333,11 @@ checkpoint_four() {
       )
     ] | length > 0
   ' >/dev/null <<<"$daemon_state" || fail "no child is released into admission or an active tree"
-  printf 'CHECKPOINT 4 OK: a released child is tracked by admission or tree state\n'
+  if [[ "$design_gate" == root-issues ]]; then
+    printf 'CHECKPOINT 4 OK: spec approval recorded on the gate; a released child is tracked by admission or tree state\n'
+  else
+    printf 'CHECKPOINT 4 OK: a released child is tracked by admission or tree state\n'
+  fi
 }
 
 checkpoint_five() {

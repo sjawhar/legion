@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
-import { type IssueStatus, type LegionState, newLegionState, type PrState } from "../legion-state";
+import {
+  designGateOpen,
+  type IssueStatus,
+  type LegionState,
+  newLegionState,
+  type PrState,
+} from "../legion-state";
 import {
   type DispatchIssueEvent,
   type Effect,
@@ -12,7 +18,6 @@ import {
   settleCiVerdict,
   uncertifyCiVerdict,
 } from "../reducers";
-import askAnswered from "./fixtures/dispatch/ask-answered.json";
 import childStatus from "./fixtures/dispatch/child-status.json";
 import issueClosed from "./fixtures/dispatch/issue-closed.json";
 import issueCreatedChild from "./fixtures/dispatch/issue-created-child.json";
@@ -24,6 +29,9 @@ import issueUpdatedNeedsReview from "./fixtures/dispatch/issue-updated-needs-rev
 import issueUpdatedRetro from "./fixtures/dispatch/issue-updated-retro.json";
 import issueUpdatedTesting from "./fixtures/dispatch/issue-updated-testing.json";
 import issueUpdatedTodo from "./fixtures/dispatch/issue-updated-todo.json";
+import artifactApproved from "./fixtures/dispatch/legsmoke-3-artifact.approved.json";
+import artifactChangesRequested from "./fixtures/dispatch/legsmoke-3-artifact.changes_requested.json";
+import artifactVersion from "./fixtures/dispatch/legsmoke-3-artifact.version.json";
 import humanApproved from "./fixtures/dispatch/legsmoke-3-ask.answered-approve.json";
 import humanTodo from "./fixtures/dispatch/legsmoke-3-issue.updated-human-todo.json";
 
@@ -206,11 +214,31 @@ function effects(
   return reduceGithubEvent(state, topic, input, config);
 }
 
+/** The spec document every `legsmoke-3-artifact.*.json` fixture names (`payload.artifact_id`). */
+const SPEC_ARTIFACT = "5025ec5b-0000-4000-8000-000000000001";
+
+/** LEGSMOKE-3 as a gated root: node, active tree, a claimed architect, and the design gate on the
+ * fixtures' spec document at `latestVersion` 12, approved there too when `approved` is set. */
+function gatedState(approved = false): { state: LegionState; issue: IssueKey; architect: string } {
+  const state = newLegionState("omp", 4);
+  const issue = "LEGSMOKE-3" as IssueKey;
+  state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+  state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
+  const architect = claim(state, issue, "architect");
+  state.gates[issue] = {
+    artifactId: SPEC_ARTIFACT,
+    latestVersion: 12,
+    ...(approved ? { approvedVersion: 12 } : {}),
+  };
+  return { state, issue, architect };
+}
+
 /** Every Dispatch fixture that mutates state or emits an effect on its first application, paired
  * with the state it needs to do so — one entry per fixture file under `fixtures/dispatch/`,
- * excluding `ask-opened.json` (an event type `reduceDispatchEvent` does not switch on, so it is a
- * true no-op: no mutation, no effect, no seq stamp). Used below to assert the at-most-once
- * contract holds for every one of them, not just the two hand-picked in the tests above. */
+ * excluding `legsmoke-3-ask.answered-approve.json` (an event type `reduceDispatchEvent` no longer
+ * switches on, so it is a true no-op: no mutation, no effect, no seq stamp). Used below to assert
+ * the at-most-once contract holds for every one of them, not just the ones hand-picked in the
+ * tests above. */
 const REPLAY_ONCE_CASES: ReadonlyArray<{
   readonly name: string;
   readonly setup: () => LegionState;
@@ -311,30 +339,19 @@ const REPLAY_ONCE_CASES: ReadonlyArray<{
     event: () => dispatch(childStatus as unknown as DispatchFixture),
   },
   {
-    name: "ask.answered approves the registered design gate (legsmoke-3-ask.answered-approve.json)",
-    setup: () => {
-      const state = newLegionState("omp", 4);
-      const issue = "LEGSMOKE-3" as IssueKey;
-      state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
-      state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
-      claim(state, issue, "architect");
-      state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
-      return state;
-    },
-    event: () => dispatch(humanApproved as unknown as DispatchFixture),
+    name: "artifact.approved opens the registered design gate",
+    setup: () => gatedState().state,
+    event: () => dispatch(artifactApproved as unknown as DispatchFixture),
   },
   {
-    name: "ask.answered approves the registered design gate (ask-answered.json)",
-    setup: () => {
-      const state = newLegionState("omp", 4);
-      const issue = "LEGSMOKE-3" as IssueKey;
-      state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
-      state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
-      claim(state, issue, "architect");
-      state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
-      return state;
-    },
-    event: () => dispatch(askAnswered as unknown as DispatchFixture),
+    name: "artifact.changes_requested retracts the approval",
+    setup: () => gatedState(true).state,
+    event: () => dispatch(artifactChangesRequested as unknown as DispatchFixture),
+  },
+  {
+    name: "artifact.version raises the gate's latest version",
+    setup: () => gatedState(true).state,
+    event: () => dispatch(artifactVersion as unknown as DispatchFixture),
   },
 ];
 
@@ -463,82 +480,163 @@ describe("reduceDispatchEvent", () => {
     ]);
   });
 
-  it("approves only the registered design ask and records its ask id", () => {
-    const state = newLegionState("omp", 4);
-    const issue = "LEGSMOKE-3" as IssueKey;
-    state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
-    state.trees[issue] = {
-      root: issue,
-      generation: 1,
-      status: "active",
-      launchFailures: 0,
-    };
-    const architect = claim(state, issue, "architect");
-    state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+  it("artifact.approved at the current spec version records it and wakes the architect (acceptance 1)", () => {
+    const { state, issue, architect } = gatedState();
 
     expect(
-      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
+      reduceDispatchEvent(state, dispatch(artifactApproved as unknown as DispatchFixture), config)
     ).toEqual([{ kind: "publish", role: architect, payload: { type: "design-approved" } }]);
-    expect(state.gates[issue].designApproved).toBe("36e95e78-81d5-4da3-ae7b-789a16640bd9");
+    expect(state.gates[issue]).toEqual({
+      artifactId: SPEC_ARTIFACT,
+      latestVersion: 12,
+      approvedVersion: 12,
+    });
+    expect(state.issues[issue].lastAppliedSeq).toBe(5);
+  });
 
-    state.gates[issue] = { designAskId: "registered-ask" };
-    const unrelatedAsk = dispatch(askAnswered as unknown as DispatchFixture);
-    if (
-      typeof unrelatedAsk.payload !== "object" ||
-      unrelatedAsk.payload === null ||
-      Array.isArray(unrelatedAsk.payload)
-    ) {
-      throw new Error("ask.answered fixture payload must be an object");
-    }
-    // A higher seq than the approval's own (4), so this is fenced out by askId mismatch inside
-    // reduceAskAnswered, not by the outer at-most-once seq fence — the seq fence alone would
-    // also produce `[]` here (the raw fixture's own seq, 3, is lower than the approval's), which
-    // would silently pass this assertion for the wrong reason.
+  it("artifact.changes_requested retracts the approval and wakes the architect with the reason (acceptance 2)", () => {
+    const { state, issue, architect } = gatedState(true);
+
+    expect(
+      reduceDispatchEvent(
+        state,
+        dispatch(artifactChangesRequested as unknown as DispatchFixture),
+        config
+      )
+    ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: {
+          type: "design-changes-requested",
+          version: 12,
+          reason: "Split the migration into its own PR",
+          author: "sjawhar",
+        },
+      },
+    ]);
+    expect(state.gates[issue]).toEqual({ artifactId: SPEC_ARTIFACT, latestVersion: 12 });
+    expect(designGateOpen(state.gates[issue])).toBe(false);
+  });
+
+  it("a new spec version closes the gate silently; approval at that version reopens it (acceptance 3)", () => {
+    const { state, issue, architect } = gatedState(true);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(artifactVersion as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    expect(state.gates[issue]).toEqual({
+      artifactId: SPEC_ARTIFACT,
+      latestVersion: 13,
+      approvedVersion: 12,
+    });
+    expect(designGateOpen(state.gates[issue])).toBe(false);
+
+    const approvedFixture = artifactApproved as unknown as DispatchFixture;
+    const approvedAt13: DispatchIssueEvent = {
+      ...dispatch(approvedFixture),
+      seq: 8,
+      eventId: "dispatch-244",
+      payload: { ...(approvedFixture.payload as Record<string, unknown>), version: 13 },
+    };
+    expect(reduceDispatchEvent(state, approvedAt13, config)).toEqual([
+      { kind: "publish", role: architect, payload: { type: "design-approved" } },
+    ]);
+    expect(state.gates[issue]).toEqual({
+      artifactId: SPEC_ARTIFACT,
+      latestVersion: 13,
+      approvedVersion: 13,
+    });
+    expect(designGateOpen(state.gates[issue])).toBe(true);
+  });
+
+  it("approving a document no gate references changes no gate (acceptance 4)", () => {
+    const { state, issue } = gatedState();
+    const before = structuredClone(state.gates[issue]);
+    const approvedFixture = artifactApproved as unknown as DispatchFixture;
+
     expect(
       reduceDispatchEvent(
         state,
         {
-          ...unrelatedAsk,
-          key: issue,
-          seq: 100,
-          payload: { ...unrelatedAsk.payload, id: "unrelated-ask" },
+          ...dispatch(approvedFixture),
+          payload: {
+            ...(approvedFixture.payload as Record<string, unknown>),
+            artifact_id: "5025ec5b-0000-4000-8000-000000000099",
+          },
         },
         config
       )
     ).toEqual([]);
-    expect(state.gates[issue].designApproved).toBeUndefined();
+    expect(state.gates[issue]).toEqual(before);
+    // Recognized type: the seq is stamped even though no gate matched.
+    expect(state.issues[issue].lastAppliedSeq).toBe(5);
+
+    const ungated = newLegionState("omp", 4);
+    ungated.issues[issue] = issueNode(issue, "T20 fixture — ask host");
+    expect(reduceDispatchEvent(ungated, dispatch(approvedFixture), config)).toEqual([]);
+    expect(ungated.gates).toEqual({});
   });
 
-  it("never re-approves or re-emits design-approved once the gate is already approved, even at a newer seq", () => {
-    const state = newLegionState("omp", 4);
-    const issue = "LEGSMOKE-3" as IssueKey;
-    state.issues[issue] = issueNode(issue, "T20 fixture — ask host");
-    state.trees[issue] = {
-      root: issue,
-      generation: 1,
-      status: "active",
-      launchFailures: 0,
-    };
-    const architect = claim(state, issue, "architect");
-    state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+  it("an approval below the spec's latest version is recorded but leaves the gate closed (Errors row)", () => {
+    const { state, issue } = gatedState();
+    const approvedFixture = artifactApproved as unknown as DispatchFixture;
 
-    expect(
-      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
-    ).toEqual([{ kind: "publish", role: architect, payload: { type: "design-approved" } }]);
-    expect(state.gates[issue].designApproved).toBe("36e95e78-81d5-4da3-ae7b-789a16640bd9");
-
-    // Same ask, same answer, a strictly newer seq than the approval it already applied: the
-    // outer at-most-once fence alone would let this through (100 > lastAppliedSeq), so only the
-    // dedicated `gate.designApproved !== undefined` guard inside reduceAskAnswered stops the
-    // re-approval and the duplicate design-approved wake.
     expect(
       reduceDispatchEvent(
         state,
-        { ...dispatch(humanApproved as unknown as DispatchFixture), seq: 100 },
+        {
+          ...dispatch(approvedFixture),
+          payload: { ...(approvedFixture.payload as Record<string, unknown>), version: 11 },
+        },
         config
       )
     ).toEqual([]);
-    expect(state.gates[issue].designApproved).toBe("36e95e78-81d5-4da3-ae7b-789a16640bd9");
+    expect(state.gates[issue]).toEqual({
+      artifactId: SPEC_ARTIFACT,
+      latestVersion: 12,
+      approvedVersion: 11,
+    });
+    expect(designGateOpen(state.gates[issue])).toBe(false);
+  });
+
+  it("never re-emits design-approved for an approval already recorded, even at a newer seq", () => {
+    const { state, issue, architect } = gatedState();
+
+    expect(
+      reduceDispatchEvent(state, dispatch(artifactApproved as unknown as DispatchFixture), config)
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "design-approved" } }]);
+    const afterApproval = structuredClone(state);
+
+    // Same approval, a strictly newer seq than the one it already applied: the outer
+    // at-most-once fence alone would let this through (100 > lastAppliedSeq), so only the
+    // `approvedVersion === version` guard inside reduceArtifactApproved stops the duplicate wake.
+    expect(
+      reduceDispatchEvent(
+        state,
+        { ...dispatch(artifactApproved as unknown as DispatchFixture), seq: 100 },
+        config
+      )
+    ).toEqual([]);
+    expect(state).toEqual({
+      ...afterApproval,
+      issues: {
+        ...afterApproval.issues,
+        [issue]: { ...afterApproval.issues[issue], lastAppliedSeq: 100 },
+      },
+    });
+  });
+
+  it("ask.answered no longer touches the design gate", () => {
+    const { state, issue } = gatedState();
+    const before = structuredClone(state);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
+    ).toEqual([]);
+    // An unrecognized type: no mutation and no seq stamp either.
+    expect(state).toEqual(before);
+    expect(state.issues[issue].lastAppliedSeq).toBeUndefined();
   });
 
   it("ignores GitHub issue webhooks without changing Dispatch lifecycle state", () => {
@@ -625,15 +723,15 @@ describe("reduceDispatchEvent", () => {
     expect(state.issues[root]).toEqual({ ...before, lastAppliedSeq: 1 });
   });
 
-  it("ignores ask.answered against a gate with no corresponding issue node", () => {
+  it("ignores artifact.approved against a gate with no corresponding issue node", () => {
     const state = newLegionState("omp", 4);
     const issue = "LEGSMOKE-3" as IssueKey;
     // A schema-valid but dangling gate record: registered without the issue node ever existing.
-    state.gates[issue] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+    state.gates[issue] = { artifactId: SPEC_ARTIFACT, latestVersion: 12 };
     const before = structuredClone(state.gates[issue]);
 
     expect(
-      reduceDispatchEvent(state, dispatch(humanApproved as unknown as DispatchFixture), config)
+      reduceDispatchEvent(state, dispatch(artifactApproved as unknown as DispatchFixture), config)
     ).toEqual([]);
     expect(state.gates[issue]).toEqual(before);
     expect(state.issues[issue]).toBeUndefined();
@@ -1385,12 +1483,12 @@ describe("routeActive", () => {
     const state = rootState();
     attachChild(state);
     state.phases[child] = { phase: "bogus", sessionId: "x" };
-    state.gates[child] = { designAskId: "36e95e78-81d5-4da3-ae7b-789a16640bd9" };
+    state.gates[child] = { artifactId: SPEC_ARTIFACT, latestVersion: 12 };
 
     expect(() =>
       reduceDispatchEvent(
         state,
-        { ...dispatch(humanApproved as unknown as DispatchFixture), key: child },
+        { ...dispatch(artifactApproved as unknown as DispatchFixture), key: child },
         config
       )
     ).toThrow(child);

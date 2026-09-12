@@ -15,7 +15,14 @@ trap 'rm -rf "$temporary_dir"' EXIT
 
 mkdir -p "$fake_bin" "$smoke_dir" "${smoke_dir}/daemon"
 printf 'none\n' >"${smoke_dir}/webhook-mode"
-printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":{"LEGSMOKE-1":{"designAskId":"ask-design","designApproved":"gate-off"}}}' >"${smoke_dir}/daemon/state.json"
+# The daemon state every checkpoint reads. `write_state` takes the `gates` record so the
+# design-gate runs below can vary it; the default carries no gate, matching the rig's default
+# `gates.design: off` (recorded in `design-gate` exactly as `up.sh` records it).
+write_state() {
+  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
+}
+write_state '{}'
+printf 'off\n' >"${smoke_dir}/design-gate"
 # LEGSMOKE-1 is this rig's own root; LEGSMOKE-99 is a second parentless issue with no relation to
 # it at all, standing in for a concurrent rig's own root sharing the same LEGSMOKE project. The
 # recorded root-issue file below must make every checkpoint below target LEGSMOKE-1 regardless --
@@ -28,11 +35,12 @@ cat >"${fake_bin}/curl" <<'EOF'
 request="$*"
 printf '%s\n' "$request" >>"$CURL_LOG"
 case "$request" in
-  *"/api/v1/issues/LEGSMOKE-1/asks?state=all"*)
-    printf '%s' '[{"id":"ask-design","state":"resolved","options":[{"label":"Approve"}]}]'
-    ;;
   *"/api/v1/issues/LEGSMOKE-1/artifacts"*)
-    printf '%s' '[{"name":"spec.md","primary":true,"versions":[{"number":1}]}]'
+    if [[ -n "${ARTIFACTS_FILE:-}" ]]; then
+      cat "$ARTIFACTS_FILE"
+    else
+      printf '%s' '[{"id":"art-spec","name":"spec.md","primary":true,"versions":[{"number":1}],"approval":{"state":"draft","latest_version":1}}]'
+    fi
     ;;
   *"/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1"*)
     printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"todo"}]'
@@ -131,32 +139,64 @@ PATH="${fake_bin}:${PATH}" \
 }
 grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1' "$curl_log"
 
-PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  bash "$checkpoints_script" 3 >"$output_file" 2>&1
-[[ "$(<"$output_file")" == *'CHECKPOINT 3 OK'* ]] || {
-  cat "$output_file" >&2
-  exit 1
+run_checkpoint() {
+  PATH="${fake_bin}:${PATH}" \
+    SMOKE_DIR="$smoke_dir" \
+    SMOKE_REPO="example-org/legion-smoke" \
+    SMOKE_PROJECT="example-org/24" \
+    DISPATCH_URL="http://dispatch.test" \
+    DISPATCH_TOKEN="test-dispatch-token" \
+    bash "$checkpoints_script" "$@" >"$output_file" 2>&1
 }
-grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1/asks?state=all' "$curl_log"
+expect_output() {
+  [[ "$(<"$output_file")" == *"$1"* ]] || {
+    printf 'expected output to contain: %s\n' "$1" >&2
+    cat "$output_file" >&2
+    exit 1
+  }
+}
+
+# Default rig (`gates.design: off`): the architect registered no gate and requested no approval;
+# checkpoints 3 and 4 pass on the spec, the child, and the release alone.
+run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off)'
 grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1/artifacts' "$curl_log"
 grep -Fq 'http://dispatch.test/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1' "$curl_log"
-
-PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  bash "$checkpoints_script" 4 >"$output_file" 2>&1
-[[ "$(<"$output_file")" == *'CHECKPOINT 4 OK'* ]] || {
-  cat "$output_file" >&2
+! grep -Fq '/asks?state=' "$curl_log" || {
+  printf 'checkpoint 3 still reads asks; the design gate is a document approval\n' >&2
   exit 1
 }
+run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: a released child is tracked by admission or tree state'
+printf 'PASS: checkpoints 3 and 4 pass under gates.design: off with no gate and no approval request\n'
+
+# Under `off`, a registered gate means the architect ignored its policy line: fail naming it.
+write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
+run_checkpoint 3 && { printf 'checkpoint 3 passed with a gate registered under gates.design: off\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 3 FAILED: LEGSMOKE-1 registered a design gate although the rig runs with gates.design: off'
+printf 'PASS: checkpoint 3 fails under gates.design: off when a gate was registered anyway\n'
+
+# `root-issues`: the human-approval exercise. Before the human acts the gate is registered at the
+# spec's current version and the document awaits approval; afterwards the daemon records it.
+printf 'root-issues\n' >"${smoke_dir}/design-gate"
+awaiting_artifacts="${temporary_dir}/artifacts-awaiting.json"
+printf '%s' '[{"id":"art-spec","name":"spec.md","primary":true,"versions":[{"number":1}],"approval":{"state":"awaiting","latest_version":1,"requested_by":{"kind":"session","id":"arch"},"ask_id":"ask-design"}}]' >"$awaiting_artifacts"
+ARTIFACTS_FILE="$awaiting_artifacts" run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and child issue observed'
+# A Dispatch server without document approval (or a spec nobody requested approval of) reports no
+# open request: the checkpoint must fail naming the missing request, never pass on a gate that can
+# never be satisfied.
+run_checkpoint 3 && { printf 'checkpoint 3 passed without an open approval request on the spec document\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 3 FAILED: LEGSMOKE-1 has no open approval request on its registered spec document'
+printf 'PASS: checkpoint 3 under root-issues requires an open approval request on the registered spec document\n'
+run_checkpoint 4 && { printf 'checkpoint 4 passed before the daemon recorded the approval\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 4 FAILED: daemon has not recorded the spec approval for LEGSMOKE-1'
+write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
+run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a released child is tracked by admission or tree state'
+printf 'PASS: checkpoint 4 under root-issues requires the recorded approval at the current spec version\n'
+printf 'off\n' >"${smoke_dir}/design-gate"
+write_state '{}'
 
 if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \

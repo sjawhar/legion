@@ -4,9 +4,11 @@ import {
   type DispatchClient,
   DispatchHttpError,
   retryPendingWrite,
+  specArtifactResolver,
   writeStatus,
 } from "../dispatch-client";
 import { newLegionState } from "../legion-state";
+import { fakeDispatchClient } from "./ci-fixtures";
 
 function fakeFetch(handler: (url: string, init: RequestInit) => Response): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -195,5 +197,51 @@ describe("writeStatus / retryPendingWrite serialization", () => {
 
     expect(applied).toEqual(["testing", "needs_review"]);
     expect(state.pendingStatusWrites["LEGION-7"]).toBeUndefined();
+  });
+});
+
+describe("specArtifactResolver", () => {
+  function clientWithIssue(details: Record<string, unknown>): DispatchClient {
+    return fakeDispatchClient({ getIssue: async () => details as never });
+  }
+
+  it("returns the primary artifact's id and highest version, chosen by primary_artifact_id, not array position", async () => {
+    const resolve = specArtifactResolver(
+      clientWithIssue({
+        key: "LEGION-7",
+        primary_artifact_id: "art-spec",
+        artifacts: [
+          { id: "art-notes", name: "notes.md", versions: [{ number: 40 }, { number: 41 }] },
+          {
+            id: "art-spec",
+            name: "spec.md",
+            versions: [{ number: 3 }, { number: 1 }, { number: 2 }],
+          },
+        ],
+      })
+    );
+
+    expect(await resolve("LEGION-7")).toEqual({ artifactId: "art-spec", latestVersion: 3 });
+  });
+
+  it("throws naming the issue when the primary artifact is absent or has no versions", async () => {
+    await expect(
+      specArtifactResolver(
+        clientWithIssue({
+          key: "LEGION-7",
+          primary_artifact_id: "art-gone",
+          artifacts: [{ id: "art-notes", name: "notes.md", versions: [{ number: 1 }] }],
+        })
+      )("LEGION-7")
+    ).rejects.toThrow("LEGION-7 has no primary artifact art-gone");
+    await expect(
+      specArtifactResolver(
+        clientWithIssue({
+          key: "LEGION-7",
+          primary_artifact_id: "art-spec",
+          artifacts: [{ id: "art-spec", name: "spec.md", versions: [] }],
+        })
+      )("LEGION-7")
+    ).rejects.toThrow("LEGION-7's spec document art-spec has no versions");
   });
 });

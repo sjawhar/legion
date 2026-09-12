@@ -1,0 +1,23 @@
+{
+  "id": 242,
+  "issue_key": "LEGSMOKE-3",
+  "seq": 6,
+  "type": "artifact.changes_requested",
+  "actor": {
+    "kind": "user",
+    "id": "sjawhar"
+  },
+  "notify": true,
+  "created_at": "2026-09-12T02:31:00Z",
+  "payload": {
+    "artifact_id": "5025ec5b-0000-4000-8000-000000000001",
+    "name": "spec.md",
+    "version": 12,
+    "actor": {
+      "kind": "user",
+      "id": "sjawhar"
+    },
+    "reason": "Split the migration into its own PR",
+    "ask_id": null
+  }
+}
