@@ -1,0 +1,79 @@
+{
+  "verdict": "changes_requested",
+  "critical": 2,
+  "important": 1,
+  "minor": 5,
+  "reviewedHeadSha": "3ff0bbf46315fd7d4e762430d3bd001ce478b1a3",
+  "prHeadSha": "8fbcbb8156e5b0d6e8e890cdacf597bbbf19fe74",
+  "pr": "https://github.com/sjawhar/legion/pull/981",
+  "review": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188293250",
+  "verified": {
+    "ci": "PR head 8fbcbb81: pr-title/lint/typecheck/test all SUCCESS (run 34720907961), read via `legion gh -- pr view 981 --json statusCheckRollup`; the body's run 34720564124 at 3ff0bbf4 also green.",
+    "threads": "0 unresolved / 0 resolved before this review (GraphQL reviewThreads totalCount 0); this review opened 4.",
+    "e2e": "Real-tmux driver at 7d13d3bf accepted: the two commits since are test-only plus one AGENTS.md sentence (jj diff b2b4116b..3ff0bbf4 --stat).",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 3ff0bbf4 (task agents ThermoDeep, ThermoQuality). Deep: two upgrade-transition correctness findings (B1, B2 below), independently reproduced in /tmp/legion27-repro. Quality: no blocking findings; cleanup list folded into the fast-follow section."
+  },
+  "keyFindings": [
+    {
+      "severity": "blocking",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 2262,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3997829564",
+      "description": "B1. probedWindowId -> rewriteIssueWindowId now fires for a LIVE window whose recorded panes merely lack identity (every legacy locator on the deployed daemon): the legacy root's resync-tick resurrect, or a plain spawn_worker on a live legacy tree, opens a fresh window and repoints the live legacy workers' (and on the spawn_worker path the live legacy root's) tmuxWindowId to it while their panes stay in the old window. The old window is then in no locator; listUnknownOwnedWindows lists it and after TMUX_RECONCILIATION_GRACE_MS (120 s) reconcileTmuxWindows runs kill-window on processes the daemon still counts as live. Reproduced with processes.test.ts's own manager() fixture (throwaway, not committed): impl locator after resurrect {tmuxWindowId:'@43', tmuxPaneId:'%3'}; kills [['tmux','-L','legion-omp','kill-window','-t','@42']]; same for spawnWorker(root, root, 'tester') (root locator -> @43/%0, kill-window @42). Invariant to restore: a window still holding a pane of a claim the daemon treats as live stays in knownWindows. Options: (a) stop rewriting persisted locators' window ids and let probedWindowId return the first recorded window in which any pane verifies; (b) repoint only locators whose verdict proves the pane is not theirs (pane-gone/pid-mismatch/start-mismatch), never no-identity. Regression test required."
+    },
+    {
+      "severity": "blocking",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 1744,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3997829566",
+      "description": "B2. closeTreeLocked (1147-1151) derives skipGraceful from probe(), and probe reports a no-identity locator dead without touching tmux; so closeTree on a live legacy root sends no shutdown frame over its own role-scoped socket, the kill gate refuses on no-identity, the locator is deleted and the tree marked closed while the root keeps running with a revoked capability until the sweep kill-windows it (no session_shutdown, no /process/exit). Pre-change the probe found the pane alive and the close was graceful. Deterministic for every tree already lingering at upgrade (the resync probe visits only active trees) and reachable for any active tree closed before its first resync tick. Fix: skip the graceful branch only on a pane-gone verdict (e.g. skipGraceful: !verdict.verified && verdict.reason === 'pane-gone'); the socket path is identity-independent and is exactly what controllerAlive now uses. Regression test: closeTree on a legacy live root sends the shutdown frame."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 2941,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3997829569",
+      "description": "Non-blocking: stopProcess runs the graceful branch before the identity gate, and the stale-locator guards feeding retireWorkerLocator (markWorkerDeadLocked 810, retireUnconfirmedBoot 995, closeTreeLocked's delete guard 1201) compare tmuxPaneId alone. Pre-existing and low-probability (same-token relaunch reissued the same %N racing a socket-close retire), but every locator now carries panePid/paneStartTicks; compare those in the guards. Land here if cheap, else name in Fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts",
+      "line": 313,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3997829573",
+      "description": "Test name claims a reissued-pane contract that a paneProcessVerified: () => false stub cannot discriminate from pane-gone (same inputs/outcome as the test at :140); its extra assertion is a negative log-wording match. Delete; acceptance 7 is carried by the ProcessManager-level test in processes.test.ts."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/tmux.ts",
+      "line": 187,
+      "description": "Fast-follow: tmux.panePid's window-id branch (rows[0]) and its doc sentence are dead now that verifyPaneProcess is the only caller and always passes a pane id; tmux.test.ts:30 pins the dead branch; docs/solutions/daemon/tmux-list-panes-target-is-its-window.md:69-71 and docs/solutions/testing/argv-format-change-is-a-fixture-population-sweep.md:78-81 still justify behaviour by the removed firstPaneId backfill / windowAlive."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 1745,
+      "description": "Fast-follow: one identity-mismatch event logs three times (probe, resurrectDeadTree's re-probe, stopProcess's gate); pick one owner. removeTreeWindow's doc (2775-2780) no longer describes the case where the gate refuses the kill."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "line": 10390,
+      "description": "Fast-follow: expect(log).toMatch(/%1/) in the tree-close gate test matches any %1 in stderr; the `// Errors row 3` comment names a Dispatch spec table the repo does not contain."
+    }
+  ],
+  "checkedAndSound": [
+    "verifyPaneProcess ordering (no-identity short-circuit, pane-gone, pid, start ticks, isOmpPane); every liveness probe (probe, controllerAlive, watchdog paneProcessVerified), every daemon-issued kill-pane (stopProcess) and window reuse (probedWindowId) route through it; no remaining pane-id-only liveness decision in the diff.",
+    "recordedPaneIdentity inside launchShimmedProcess's per-issue serialize lane (issueWindows never holds an identity-less pane; a queued second spawn verifies a fully-recorded pane) and in spawnController; launch-time unreadable stat rides the existing launch-failure paths (root + worker tests present and discriminating).",
+    "issueWindows staleness: an entry is re-verified before reuse, dropped on failure, overwritten on a fresh open; a closed tree's stale entry costs one list-panes and never causes reuse.",
+    "stat-unreadable at probe time is never alive anywhere; a malformed stat line throws (by design).",
+    "Controller: identity gate with a refusing socket and the graceful sibling both present and discriminating (reissuedControllerFixture).",
+    "Test sweep: no kill-pane-absence or locator-clearing assertion weakened; 'retires the pane instead of writing a claim...' strengthened to name the tester's pane; PANE_GONE_STDERR still exercised; legacy identity-less locator test, launch-time unreadable-stat tests (root and worker), real-tmux e2e negative control (start ticks off by one -> no kill, pane survives) all present.",
+    "legion-state.ts: v23->v24 pure bump mirrors migrateV22State; zod optionals on all three locator schemas (.strict() kept); controller Pick extended; .v23.bak and round-trip tests present.",
+    "proc-stat.ts: last-`)` split, field index 22-3, digit/safe-integer guards, /proc/self/stat test.",
+    "AGENTS.md: the three changed sentences read true against the code; B2 makes the unchanged 'gracefully stops every process recorded for the tree' clause false for a legacy root until fixed."
+  ],
+  "nextRound": "Review the fix head for B1 and B2 (with regression tests), re-check the three non-blocking/fast-follow dispositions in the PR body, then COMMENT while .legion/ is present and APPROVE the head that differs from the reviewed one by the .legion/ deletion alone.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T22:20:45.725Z"
+}
