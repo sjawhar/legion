@@ -47,7 +47,7 @@ subscriber ignores it.
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the thirteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, pass the live session id/title to `executeDispatchTool`, and subscribe from a successful result's `details.topic`. |
-| Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon appends each as `--append-system-prompt` |
+| Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon appends each as `--append-system-prompt`, followed by the addressing fragment (roots and phase workers) and, when the deployment's `legion.yaml` sets `instructions`, `<state_dir>/deployment-instructions.md` as the last fragment |
 | Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/README.md` | Claims a role and receives a message from a real, installed-plugin `omp` TUI session against a live Envoy; see `scripts/README.md` for the runbook |
 
 ## Critical conventions

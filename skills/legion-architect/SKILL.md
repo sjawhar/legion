@@ -39,6 +39,13 @@ is not yet runnable on `main`.
   create and continue to own. Re-file a genuinely independent child through the
   controller rather than treating it as an abandoned dependency.
 
+## Deployment instructions
+
+Deployment instructions, when present, are the operator's standing rules for this repository —
+required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
+the merge credential. They override this skill's defaults where they conflict; they never
+override a Sami ruling quoted here.
+
 ## 1. Decompose or adopt
 
 Inspect the root issue, acceptance criteria, existing children, and current handoffs.
