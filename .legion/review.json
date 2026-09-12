@@ -8,15 +8,16 @@
   },
   "verdict": "APPROVE",
   "review": {
-    "id": 5186267139,
-    "url": "https://github.com/sjawhar/legion/pull/962#pullrequestreview-5186267139",
+    "id": 5186420236,
+    "url": "https://github.com/sjawhar/legion/pull/962#pullrequestreview-5186420236",
     "state": "APPROVED",
-    "submittedAt": "2026-09-12T11:18:15Z"
+    "submittedAt": "2026-09-12T12:32:18Z"
   },
   "reviewedSha": {
-    "prHead": "fba7a78d3b5ff36d52c8210d67ec22e45d92ee4a",
-    "code": "c498c8fb196a5acb7f2b1fcdf09f5663bf05882b",
-    "note": "7eacb0f7 and fba7a78d add only .legion/*.json on top of c498c8fb; merge base main 7add4d03"
+    "prHead": "27fb3cc85724edbfee7bd93ec35f50354d3570ab",
+    "code": "85a842437180d6ec800b516bb2238fff544be445",
+    "base": "7add4d03087e (main, unchanged)",
+    "note": "7141adf6 and 27fb3cc8 add only .legion/*.json on top of 85a84243"
   },
   "blockingItems": [],
   "blockingItemCount": 0,
@@ -56,7 +57,70 @@
   },
   "next": "Architect sends the implementer back to push the .legion/ deletion; reviewer re-reviews that head by name. Reviewer pushed nothing (no contents permission; architect's order); this handoff commit rides along on the implementer's next push.",
   "artifacts": "/tmp/legion21-review/{processes.old.ts,processes.diff,other.diff,tests.diff,review-body.md,pr-body.orig.md,pr-body.new.md}; thermo transcripts history://ThermoDeep, history://ThermoQuality",
+  "round2": {
+    "round": 2,
+    "trigger": "post-review hardening round (implement.json hardeningRound G1-G8) against spec v5; architect asked for a delta review of c498c8fb..85a84243 with the fba7a78d APPROVE as the fidelity baseline",
+    "verdict": "APPROVE",
+    "review": {
+      "id": 5186420236,
+      "url": "https://github.com/sjawhar/legion/pull/962#pullrequestreview-5186420236",
+      "state": "APPROVED",
+      "submittedAt": "2026-09-12T12:32:18Z"
+    },
+    "reviewedSha": {
+      "prHead": "27fb3cc85724edbfee7bd93ec35f50354d3570ab",
+      "code": "85a842437180d6ec800b516bb2238fff544be445",
+      "base": "7add4d03087e (main, unchanged)",
+      "note": "7141adf6 and 27fb3cc8 add only .legion/*.json on top of 85a84243"
+    },
+    "blockingItems": [],
+    "blockingItemCount": 0,
+    "verifiedOnGitHub": {
+      "codeHeadRollup": "85a84243 SUCCESS: Tests 34691605905 + 34692458644, Legion Envoy and Contracts 34691605898; legion/tester SUCCESS",
+      "prHeadRollup": "27fb3cc8 at review time: Tests 34693579123 + 34693644709 SUCCESS (34693966080 in progress); Legion Envoy and Contracts 34693579116 attempt 1 FAILED on `dispatch` only (packages/dispatch/e2e/search.e2e.ts:196 iphone Playwright `Conversation` region not visible in 5s; 157 passed, 8 skipped) — packages/dispatch untouched by this PR, same job green at 85a84243, delta is .legion/test.json; reviewer reran the failed job (`legion gh -- run rerun 34693579116 --failed`, attempt 2 in progress at 12:34Z); legion/tester SUCCESS",
+      "threads": "0",
+      "legion16": "#961 OPEN, mergedAt null, head 95974ff0 at 12:2xZ -> state stays version 24 / migrateV23State"
+    },
+    "deltaScope": "20 files: packages/daemon (processes.ts, runtime-tmux.ts, config.ts, legion-state.ts, index.ts, tmux.ts comment, api/routes/workers.ts comment, AGENTS.md, 9 tests), docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md, .legion/*; cli/worker-shim.ts and worker-rpc.ts byte-identical to main; worker-stream-listener.ts absent on this branch; contracts and pi-envoy untouched",
+    "groups": {
+      "G1": "PASS - stale comments rewritten to current behaviour; worker-rpc.ts untouched; #967's diff confirmed to drop `ProcessManager.workerClient` from worker-rpc.ts:398 (lands on rebase)",
+      "G2": "PASS - processPath/processSecretFiles/holdProcessSecret/removeTreeProcess; own sweep over packages/, scripts/, AGENTS.md, docs/: only hits inside packages/ are the gate's forbidden-symbol list; daemon AGENTS.md clean; two docs/ hits ruled historical records (below)",
+      "G3": "PASS - identifier gate run by hand against processes.ts@c498c8fb (285 identifiers, flags exactly panePath/paneSecretFiles/removeTreeWindow/holdPaneSecret) and @85a84243 (286, none): real assertion; field regex false on both; FakeRuntime lifecycle case asserts behaviour observable through the Runtime interface (spec contents, probe alive, skipGraceful:false graceful close because probe said alive, tree closed + locator cleared, empty known set, zero tmux argv) - not wiring",
+      "G4": "PASS - manifestReadCount deleted, 200 assertion kept, title states behaviour",
+      "G5": "PASS - superRefine on WorkerRoleClaimSchema, message `worker claim <issue>/<role> has a tmux locator without <field>`; RoleClaimSchema is z.union so ZodEffects member legal and refine message surfaces directly (tester's observed message confirms); tree/controller schemas unchanged; migration fixture carries both fields; pre-refactor WorkerLocatorSchema required both so no real v23 claim can be rejected (tester: 47 locators load)",
+      "G6": "PASS - unknown -> throw `Runtime probe reported an unknown status for the controller; ProcessManager has no unknown-status policy`; delete only on dead; test drives ensureController with FakeRuntime probe=unknown, locator survives by reference, nothing spawned",
+      "G7": "PASS - config.ts guard after normalizeBaseUrl: message names daemon_url, resolved, expected, inherited LEGION_DAEMON_URL; env/yaml/other-host cases asserted with exact message; equal value from yaml (incl. trailing slash) and env accepted; kubernetes free URL + yaml-beats-env kept; DaemonConfig doc + AGENTS.md config.ts row + DaemonConfig bullet say refuses; up.sh port/daemon_url equal by construction",
+      "G8": "PASS - issueInnerCommand keeps stat -> resume -> string; preparePane keeps prepareSocket -> shim command -> writeSecretFile -> pairs; no pinned-argv expectation changed; tester's normalized round-2 vs round-3 trace byte-identical for all four spawn kinds"
+    },
+    "fidelity": "only behavioural changes in the delta are spec-v5-directed loud refusals (daemon_url tmux guard at config time, worker-claim locator refine at load, controllerAlive unknown throw), each unreachable for a well-formed tmux deployment; tmux argv/ordering unchanged",
+    "outsideScope": [
+      "secret-file lifetime in manager vs delivery in runtime (`<stateDir>/secrets/<token>` implicit convention) -> LEGION-24 decides when it defines Kubernetes-Secret delivery",
+      "probeWorker wrapper over probeWorkerSocket's dead socketPath parameter -> worker-rpc.ts is LEGION-22's file",
+      "docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md:58 and docs/plans/2026-09-11-dispatch-token-file-delivery.md name launchShimmedProcess/writePaneSecret/WorkerLocator as they were: dated learnings/plan records (repo AGENTS.md accepts historical content there); mechanism described still holds; ruled no change, not a G2 target"
+    ],
+    "prBody": {
+      "thermoLineUpdated": "set for 27fb3cc8 (the implementer's body rewrite had reset it to 'pending reviewer')"
+    },
+    "next": "implementer rebases onto main once #967 lands (index.ts worker-stream-listener 127.0.0.1 literals -> config.bind), then pushes the .legion/ deletion; reviewer approves each head by name. This handoff commit rides on the implementer's next push (reviewer cannot push).",
+    "artifacts": "/tmp/legion21-review/r2/{src-core.diff,src-other.diff,tests.diff,processes.c498.ts,processes.85a8.ts,gate.ts,review-body.md,pr-body.orig.md,pr-body.new.md}"
+  },
+  "round1": {
+    "verdict": "APPROVE",
+    "review": {
+      "id": 5186267139,
+      "url": "https://github.com/sjawhar/legion/pull/962#pullrequestreview-5186267139",
+      "state": "APPROVED",
+      "submittedAt": "2026-09-12T11:18:15Z"
+    },
+    "reviewedSha": {
+      "prHead": "fba7a78d3b5ff36d52c8210d67ec22e45d92ee4a",
+      "code": "c498c8fb196a5acb7f2b1fcdf09f5663bf05882b",
+      "note": "7eacb0f7 and fba7a78d add only .legion/*.json on top of c498c8fb; merge base main 7add4d03"
+    },
+    "blockingItemCount": 0,
+    "note": "round-1 detail preserved in the top-level fields (judgements, thermo, nonBlocking); every nonBlocking item there was assigned as hardening G1-G8 and is closed by round 2"
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T11:19:41.745Z"
+  "completed": "2026-09-12T12:34:51.691Z"
 }
