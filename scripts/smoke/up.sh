@@ -42,7 +42,7 @@ require_env() {
 # gating from the recorded mode.
 webhook_ingress_block_reason() {
   printf '%s\n' \
-    'SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoint 13 remains usable'
+    'SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode'
 }
 
 resolve_webhook_mode() {
@@ -76,9 +76,11 @@ resolve_webhook_mode() {
 # pinned release crashes on its first prompt with "send did not invoke the agent"; until a tagged
 # release carries that fix the rig runs the same rpc-fix build production does, or whatever
 # LEGION_OMP_PATH names. Never falls back to the pin: that reproduces the crash later, in the
-# controller, instead of stopping here in preflight. Bumping `omp_pin` retires the default.
+# controller, instead of stopping here in preflight. This function never consults `omp_pin`, so
+# bumping it alone changes nothing here: retiring the default means bumping `omp_pin` AND deleting
+# the default branch below, leaving only the LEGION_OMP_PATH override.
 resolve_omp_path() {
-  local default_path="${XDG_STATE_HOME:-$HOME/.local/state}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"
+  local default_path
 
   if [[ -n "${LEGION_OMP_PATH:-}" ]]; then
     # The daemon's environment.ts rejects a relative LEGION_OMP_PATH at startup; stop here instead.
@@ -87,8 +89,10 @@ resolve_omp_path() {
     printf '%s\n' "$LEGION_OMP_PATH"
     return
   fi
+  # Evaluated only here so a valid LEGION_OMP_PATH never trips `set -u` on an unset HOME.
+  default_path="${XDG_STATE_HOME:-$HOME/.local/state}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"
   [[ -f "$default_path" && -x "$default_path" ]] ||
-    fail "no OMP build with the rpc-extension fix: ${default_path} is missing or not executable; export LEGION_OMP_PATH=<absolute executable omp> or bump omp_pin once a tagged oh-my-pi release carries fix/rpc-extension-send-rejection (0e57a6ca)"
+    fail "no OMP build with the rpc-extension fix: ${default_path} is missing or not executable; export LEGION_OMP_PATH=<absolute executable omp>, or, once a tagged oh-my-pi release carries fix/rpc-extension-send-rejection (0e57a6ca), bump omp_pin and remove resolve_omp_path's default branch so only the LEGION_OMP_PATH override remains"
   printf '%s\n' "$default_path"
 }
 
