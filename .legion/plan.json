@@ -1,0 +1,915 @@
+{
+  "issue": "LEGION-10",
+  "title": "The smoke rig cannot start on this machine: four fixes under scripts/smoke/",
+  "spec": {
+    "ref": "dispatch://LEGION-10/spec",
+    "version": 11,
+    "designApproved": "2026-09-12 by sjawhar; Design/Errors/Testing/Rejected are settled — do not re-open"
+  },
+  "baseline": "7db2cd83 (main: chore: release cli v1.1.2) — every line anchor below is against this head",
+  "plannedBy": {
+    "role": "planner",
+    "date": "2026-09-12",
+    "roleTopic": "notifications.role.legion-sjawharlegion-legion-10-planner"
+  },
+  "summary": "Seven ordered tasks for one implementer, one PR against sjawhar/legion on branch legion/LEGION-10, every changed file under scripts/smoke/. Tasks 1-6 each end in a passing harness case and one `jj commit <paths>`; Task 7 runs the whole gate, pushes, opens the PR. Then the tester runs testerE2E on this box and fills the PR's E2E section.",
+  "scope": {
+    "pr": "one PR, base main, head legion/LEGION-10, body carries `Dispatch: LEGION-10`",
+    "filesChanged": [
+      "scripts/smoke/up.sh",
+      "scripts/smoke/up.test.sh",
+      "scripts/smoke/checkpoints.sh",
+      "scripts/smoke/checkpoints.test.sh",
+      "scripts/smoke/README.md",
+      "scripts/smoke/down.test.sh"
+    ],
+    "untouched": [
+      "the gates: block in write_daemon_config (fixed in #941; only its harness guard lands here)",
+      "omp_pin's value",
+      "down.sh, envoy-bridge.ts, envoy-bridge.test.ts",
+      "anything under packages/ (github-apps.ts identity lookup, LEGION-6 socket/token work, resync admission behaviour)",
+      "no new checkpoint",
+      "no docs/plans file — acceptance 6 forbids files outside scripts/smoke/, so this plan.json is the plan"
+    ]
+  },
+  "prerequisites": [
+    "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" status (legion-worker skill binding)",
+    "bun install --frozen-lockfile at the workspace root (done 2026-09-12 in this workspace; Task 1's `bun run packages/daemon/src/cli/index.ts` needs node_modules)",
+    "bash 5, jq, sed (GNU: the `s/…/…\\n…/` newline replacement in Task 1 relies on it), bun 1.3.x — all present on this box",
+    "Run each harness with the pane's LEGION_OMP_PATH left alone: every resolve_omp_path case controls the variable itself (subshell `unset`/assignment), so no shell hygiene is required for up.test.sh; the tester's real up.sh run must `unset LEGION_OMP_PATH` (testerE2E.prerequisites)."
+  ],
+  "globalConstraints": [
+    "Every changed file under scripts/smoke/; bash -n clean; up.test.sh, checkpoints.test.sh, down.test.sh pass (Acceptance 6).",
+    "The gates: block in write_daemon_config is left exactly as it is (`gates:\\n  design: root-issues`).",
+    "omp_pin stays github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 and legion.yaml keeps `omp_invocation: mise x ${omp_pin} -- omp`.",
+    "resolve_omp_path never falls back to the pin (Rejected); LEGION_OMP_PATH is exported only in the daemon's start_process env block.",
+    "The curl --fail / fail path of ensure_root_issue is unchanged; only the payload gains force: true.",
+    "checkpoints 8 and 13 keep their current gating; no checkpoint ever reports FAILED for something none mode cannot reach.",
+    "Same wording everywhere: see sharedText.",
+    "Commit with `jj -R \"$LEGION_WORKSPACE\" commit -m <msg> <paths>` (paths listed per task) so the working copy's `.omp/config.yml` never enters a commit; never `jj abandon`, never `jj edit @-`, never `jj op restore` (worker skill)."
+  ],
+  "sharedText": {
+    "note": "Every task quotes these verbatim so up.sh stdout, checkpoints.sh, the tests, and the README say the same thing.",
+    "defaultOmpPath": "${XDG_STATE_HOME:-$HOME/.local/state}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix",
+    "upShNoneModeReason": {
+      "where": "up.sh webhook_ingress_block_reason; asserted verbatim by up.test.sh",
+      "text": "SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoint 13 remains usable"
+    },
+    "checkpointsDispatchIngressReason": {
+      "where": "new dispatch_ingress_block_reason in checkpoints.sh; checkpoints.test.sh asserts the substring 'requires Dispatch issue-event ingress'",
+      "text": "SMOKE_WEBHOOK_MODE=none: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy"
+    },
+    "checkpointsGitHubIngressReason": {
+      "where": "existing webhook_ingress_block_reason in checkpoints.sh — unchanged",
+      "text": "SMOKE_WEBHOOK_MODE=none: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward"
+    },
+    "ompPathSetButInvalid": {
+      "where": "resolve_omp_path fail message",
+      "text": "LEGION_OMP_PATH is not an absolute executable file: ${LEGION_OMP_PATH}"
+    },
+    "ompDefaultMissing": {
+      "where": "resolve_omp_path fail message; names the default path and both remedies",
+      "text": "no OMP build with the rpc-extension fix: ${default_path} is missing or not executable; export LEGION_OMP_PATH=<absolute executable omp> or bump omp_pin once a tagged oh-my-pi release carries fix/rpc-extension-send-rejection (0e57a6ca)"
+    },
+    "ompSelectedStdoutLine": {
+      "where": "up.sh main, printed right after resolve_omp_path",
+      "text": "GREEN OMP build: <path>"
+    }
+  },
+  "verifiedFacts": [
+    "up.test.sh sources `sed '$d' up.sh` (line 21-23): every up.sh function is unit-callable; fail() exits, so failing calls run in `( )` subshells (pattern at 140-147). Its final section (255-358) stubs require_command/assert_port_free/ensure_nats/start_process/wait_for_json/assert_webhook_round_trip/wait_for_envoy_bridge and runs main() for real, capturing the root-issue POST body in $actor_body_file.",
+    "checkpoints.test.sh drives `bash checkpoints.sh <n>` end-to-end with fake curl/tmux/gh on PATH and a fixture state.json; it records the mode by writing ${smoke_dir}/webhook-mode and asserts every tmux call hit the private socket (325-342).",
+    "cmdCheckConfig → `Config OK: project=<slug>` exit 0 on the generated yaml with DISPATCH_URL/DISPATCH_TOKEN/DISPATCH_MCP_URL scrubbed; DISPATCH_URL-in-env-without-token fails the check (reproduced); `merge: human` under gates → exit 1 + `gates.merge is not a Legion setting…` on stderr (reproduced).",
+    "Dispatch issue create honours `force` (issues.go:140,195-208); the LEGION-6 tester needed a hand-built force:true body (/tmp/legion6-smoke/create.json).",
+    "environment.ts: LEGION_OMP_PATH (absolute, executable) short-circuits `mise where` (151-163; configuredPath 49-56 requires absolute); the production controller on this box runs /home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix (readlink /proc/<pid>/exe), which is exactly the plan's default path and is executable here.",
+    "resync.ts healStatusDrift skips keys absent from state.issues (223-224); reportRootAnomalies iterates state.issues (249). up.sh 573-576 documents the same.",
+    "The daemon's only ready-time log line is `[legion] resync complete: …` (index.ts:501) from onControllerReady's forced resync; /controller/ready persists roles[legion-<slug>-controller] = {role, sessionId} (routes/controller.ts:17-21).",
+    "README line 65 contains a literal U+2026 truncation (bytes 342 200 246); original text recovered from e6731ea2b929.",
+    "down.test.sh does not exercise terminate_process_group_file webhook-forward or remove_webhook_forwarder today.",
+    "CI (.github/workflows/pr-and-main.yaml) does not run the shell harnesses; implementer and tester run them by hand (spec Testing row 6)."
+  ],
+  "refinementsToSpec": [
+    {
+      "id": 1,
+      "what": "resolve_omp_path also rejects a relative LEGION_OMP_PATH (fail message 'is not an absolute executable file')",
+      "why": "environment.ts configuredPath (49-56) throws `LEGION_OMP_PATH must be an absolute executable path` at daemon startup; without this check the failure moves from preflight (spec: 'stops before starting anything') to a daemon that has already been launched. One extra assertion in Task 3's unit block.",
+      "risk": "none — strictly earlier failure for an input the daemon would refuse anyway"
+    },
+    {
+      "id": 2,
+      "what": "Task 6 adds a forward-mode teardown case to down.test.sh (process group killed, .pid/.start/.hook removed, `gh api -X DELETE` issued)",
+      "why": "Acceptance 5 says forward teardown 'is proven by down.test.sh alone', but down.test.sh exercises neither forward-mode path today (only the envoy-bridge pid and tmux ownership). Without this case the PR's forward statement is hollow. Spec Design table lists no down.test.sh change; acceptance 6 permits any scripts/smoke/ file.",
+      "risk": "architect may strike it; if struck, the PR must instead say forward teardown is untested"
+    },
+    {
+      "id": 3,
+      "what": "Task 5 restores README line 65's truncated forward-mode sentence (literal `…` in the file since 49efece57f3f) with the pre-truncation text",
+      "why": "The sentence lives in the exact paragraph acceptance 4 rewrites, and the orphaned code block at 69-71 is its missing lead-in.",
+      "risk": "prose only"
+    },
+    {
+      "id": 4,
+      "what": "checkpoints.test.sh records `envoy` (not `none`) for the checkpoint 1-4 OK cases and for the bare-dir root-issue case",
+      "why": "Mechanical consequence of the spec's own checkpoints.sh change: those cases would otherwise become false failures / be pre-empted by the new block.",
+      "risk": "none"
+    },
+    {
+      "id": 5,
+      "what": "checkpoints.test.sh's none-mode case loops over 1 2 3 4 12 (not just 1) and asserts zero Dispatch requests were made",
+      "why": "Same code path, one loop; guards the case arm against a typo and locks 'blocked before any network call' and 'blocked before SMOKE_QUEUED_ISSUE is required' for 12.",
+      "risk": "none"
+    }
+  ],
+  "observationsForArchitect": [
+    "forward mode also has no Dispatch issue-event ingress (gh webhook forward carries GitHub events only; only the envoy bridge relays notifications.dispatch.issue.>), so checkpoints 1-4 and 12 are unreachable in forward mode too. The spec scopes the block to none mode and says 'envoy is the mode for 1-4 and 12', which is accurate; the plan does not gate forward mode. Flagging only so the README wording never implies forward reaches 1-4.",
+    "The daemon writes no dedicated 'controller ready' log line (routes/controller.ts:11-28 has no console call). The tester's daemon-log evidence for acceptance 3 is the forced-resync `[legion] resync complete:` line /controller/ready triggers plus the persisted role claim in state.json; the plan spells that out so the PR does not overclaim.",
+    "The workspace's working copy holds an empty `.omp/config.yml` added by provisioning; every commit command in this plan names its paths so it never lands in the PR (acceptance 6)."
+  ],
+  "tasks": [
+    {
+      "id": 1,
+      "title": "up.test.sh runs the real daemon loader against the generated legion.yaml (cases A and B)",
+      "spec": "Acceptance 1; Design row scripts/smoke/up.test.sh; Errors rows 'daemon rejects the generated file' / 'daemon accepts merge: human'",
+      "files": {
+        "modify": [
+          "scripts/smoke/up.test.sh (insert after line 219, the 'PASS: unset SMOKE_OMP_LAUNCH_PREFIX defaults to the secrets wrapper prefix' line)"
+        ]
+      },
+      "verifiedBeforePlanning": [
+        "cmdCheckConfig (packages/daemon/src/cli/index.ts:213-219) calls loadStartConfig(..., { resolveSecrets: false }) and prints `Config OK: project=<slug>`; resolveDaemonConfig reads process.env.",
+        "Ran it against the current write_daemon_config output with DISPATCH_URL/DISPATCH_TOKEN/DISPATCH_MCP_URL scrubbed: stdout `Config OK: project=acme1`, exit 0.",
+        "Env hazard, reproduced: DISPATCH_URL set in the environment with no DISPATCH_TOKEN → `dispatch_url is set but DISPATCH_TOKEN is not; the dispatch tools would not register`, exit 1 (config.ts:697-701 reads env.DISPATCH_URL even when the yaml has no dispatch_url). The generated yaml sets dispatch_project but no dispatch_url, so scrubbing those three variables is the minimal env the case must control.",
+        "Case B reproduced: the same yaml with `  merge: human` after `  design: root-issues` → exit 1, stderr contains `gates.merge is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes` (config.ts:500-503, parseGates).",
+        "bun run needs the repo's node_modules: `bun install --frozen-lockfile` at the workspace root (already run in this workspace on 2026-09-12; a fresh checkout must run it first — up.test.sh already depends on `bun -e` for the HMAC, so bun itself is an existing requirement)."
+      ],
+      "steps": [
+        {
+          "step": "Red: temporarily add a `  merge: human` line after `  design: root-issues` inside write_daemon_config's heredoc (up.sh:291), run `bash scripts/smoke/up.test.sh` after adding the case below, watch case A fail with the loader's gates.merge error, then revert that line. (Case B's red state is 'a loader that accepts gates.merge' — not producible here; its fixture guard `grep -Fxq '  merge: human'` protects the fixture itself.)"
+        },
+        {
+          "step": "Insert after up.test.sh line 219:",
+          "code": [
+            "# Acceptance 1 (LEGION-10): the real daemon loader accepts the file write_daemon_config emits.",
+            "# `--check-config` never resolves secrets (config.ts `resolveSecrets: false`) and the generated",
+            "# file sets no dispatch_url -- but resolveDaemonConfig also reads DISPATCH_URL from the",
+            "# environment and then demands DISPATCH_TOKEN, so scrub both (and the retired alias) to keep the",
+            "# case independent of whatever shell runs this harness.",
+            "readonly daemon_cli=\"${project_root}/packages/daemon/src/cli/index.ts\"",
+            "SMOKE_PROJECT=\"acme/1\" write_daemon_config",
+            "if ! env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_MCP_URL \\",
+            "  bun run \"$daemon_cli\" start acme/1 --config \"${SMOKE_DIR}/legion.yaml\" --check-config >\"$assertion_file\" 2>&1; then",
+            "  printf 'expected the daemon loader to accept the generated config; output:\\n%s\\n' \"$(<\"$assertion_file\")\" >&2",
+            "  exit 1",
+            "fi",
+            "[[ \"$(<\"$assertion_file\")\" == *'Config OK'* ]] || {",
+            "  printf 'expected \"Config OK\" from --check-config; output:\\n%s\\n' \"$(<\"$assertion_file\")\" >&2",
+            "  exit 1",
+            "}",
+            "printf 'PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)\\n'",
+            "",
+            "# The pre-#941 gates block: `merge: human` under `gates:` is exactly what the loader must refuse.",
+            "sed 's/^  design: root-issues$/  design: root-issues\\n  merge: human/' \"${SMOKE_DIR}/legion.yaml\" >\"${SMOKE_DIR}/legion-gates-merge.yaml\"",
+            "grep -Fxq '  merge: human' \"${SMOKE_DIR}/legion-gates-merge.yaml\" || {",
+            "  printf 'fixture error: the gates.merge line was not inserted\\n' >&2",
+            "  exit 1",
+            "}",
+            "if env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_MCP_URL \\",
+            "  bun run \"$daemon_cli\" start acme/1 --config \"${SMOKE_DIR}/legion-gates-merge.yaml\" --check-config >\"$assertion_file\" 2>\"$warning_file\"; then",
+            "  printf 'expected loader to reject gates.merge\\n' >&2",
+            "  exit 1",
+            "fi",
+            "[[ \"$(<\"$warning_file\")\" == *'gates.merge is not a Legion setting'* ]] || {",
+            "  printf 'expected \"gates.merge is not a Legion setting\" on stderr; stderr:\\n%s\\n' \"$(<\"$warning_file\")\" >&2",
+            "  exit 1",
+            "}",
+            "printf 'PASS: the real daemon loader rejects the pre-#941 gates.merge block\\n'"
+          ]
+        },
+        {
+          "step": "Green: `bash scripts/smoke/up.test.sh` prints both new PASS lines and every pre-existing PASS line."
+        }
+      ],
+      "locks": [
+        "up.test.sh: 'PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)'",
+        "up.test.sh: 'PASS: the real daemon loader rejects the pre-#941 gates.merge block'"
+      ],
+      "commit": {
+        "message": "test(smoke): up.test.sh runs the real daemon loader against the generated legion.yaml",
+        "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" commit -m '<message>' scripts/smoke/up.test.sh"
+      }
+    },
+    {
+      "id": 2,
+      "title": "ensure_root_issue asks Dispatch for an intentional near-duplicate (force: true)",
+      "spec": "Acceptance 2; Design row up.sh ensure_root_issue; Requirements rows 1-2; Rejected 'random title suffix'",
+      "files": {
+        "modify": [
+          "scripts/smoke/up.sh ensure_root_issue (lines 308-328; the jq payload is line 322)",
+          "scripts/smoke/up.test.sh final section (insert after the actor assertion block ending at line 356)"
+        ]
+      },
+      "verifiedBeforePlanning": [
+        "Dispatch POST /api/v1/issues: `Force bool json:\"force\"` (packages/envoy/internal/dispatch/api/issues.go:140); the near-duplicate scan runs only when `input.External == \"\" && !input.Force` and answers 409 `POSSIBLE_DUPLICATE` (issues.go:195-208).",
+        "Defect reproduced by the LEGION-6 tester on this box: /tmp/legion6-smoke/create.json is a hand-built root-issue body carrying `\"force\": true` — the rig's own ensure_root_issue could not create the issue in LEGSMOKE.",
+        "up.test.sh's final section (lines 255-358) runs main() with a fake curl that captures the `-d` body of the /api/v1/issues POST into $actor_body_file (lines 266-297); the earlier ensure_root_issue case (221-253) uses the first fake curl, which records only --data-binary, so the force assertion belongs in the final section."
+      ],
+      "steps": [
+        {
+          "step": "Red: add the up.test.sh assertion below first; `bash scripts/smoke/up.test.sh` fails at it with the captured body printed (no force key)."
+        },
+        {
+          "step": "up.sh: insert this comment immediately above `  response=\"$(curl --fail --silent --show-error \\` (line 319):",
+          "code": [
+            "  # `force: true`: Dispatch's near-duplicate check (POST /api/v1/issues -> 409 POSSIBLE_DUPLICATE)",
+            "  # matches on the fixed prefix of this title even though it ends in a timestamp, and LEGSMOKE",
+            "  # keeps every earlier run's root. A disposable near-duplicate per run is exactly the rig's",
+            "  # intent, so it asks for one; any other non-2xx still fails `curl --fail` below."
+          ]
+        },
+        {
+          "step": "up.sh line 322: change the jq filter object from `{project: $project, title: $title, actor: {...}}` to",
+          "code": [
+            "    -d \"$(jq -nc --arg project \"$smoke_dispatch_project\" --arg title \"$title\" --arg actor \"$smoke_actor_id\" '{project: $project, title: $title, force: true, actor: {kind: \"session\", id: $actor, origin: {session_title: \"Legion smoke rig\"}}}')\" \\"
+          ],
+          "note": "Nothing else in the function changes: `|| fail \"could not create Dispatch root issue in ...\"` and the `.key` extraction stay exactly as they are (Errors table rows 1-2)."
+        },
+        {
+          "step": "up.test.sh: insert after line 356 (the closing `}` of the `jq -e '.actor.kind == \"session\" ...'` assertion) and before the 'PASS: root-issue creation request carries a session actor' line:",
+          "code": [
+            "jq -e '.force == true' >/dev/null \"$actor_body_file\" || {",
+            "  printf 'expected the root-issue creation body to carry force: true (Dispatch near-duplicate bypass); body:\\n%s\\n' \"$(<\"$actor_body_file\")\" >&2",
+            "  exit 1",
+            "}",
+            "printf 'PASS: root-issue creation request forces past the Dispatch near-duplicate check\\n'"
+          ]
+        },
+        {
+          "step": "Green: `bash scripts/smoke/up.test.sh` — the new PASS line prints; the earlier 'records a created Dispatch root issue and reuses it' case still passes (its fake curl ignores the body)."
+        }
+      ],
+      "locks": [
+        "up.test.sh: 'PASS: root-issue creation request forces past the Dispatch near-duplicate check'"
+      ],
+      "commit": {
+        "message": "fix(smoke): force root-issue creation past Dispatch's near-duplicate check",
+        "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" commit -m '<message>' scripts/smoke/up.sh scripts/smoke/up.test.sh"
+      }
+    },
+    {
+      "id": 3,
+      "title": "up.sh resolve_omp_path: pick the rpc-fix OMP build in preflight, export it to the daemon only, fail closed",
+      "spec": "Acceptance 3; Design row up.sh resolve_omp_path + the end-to-end chain paragraph; Errors rows 3-4; Rejected 'bump to newest release' / 'fall back to the pin'",
+      "files": {
+        "modify": [
+          "scripts/smoke/up.sh line 14 (readonly omp_pin — comment only; the pin value does not change)",
+          "scripts/smoke/up.sh: new function after resolve_webhook_mode (after line 66)",
+          "scripts/smoke/up.sh main(): line 491 (`local webhook_mode`), after line 507 (`webhook_mode=\"$(resolve_webhook_mode)\"`), and the daemon start_process env block at lines 553-562",
+          "scripts/smoke/up.test.sh: new unit block after line 153; final section: start_process stub (306-309), before `if ! main` (324), after the RIG READY assertion (332)"
+        ]
+      },
+      "verifiedBeforePlanning": [
+        "environment.ts resolveOmpInvocation (151-183): `configuredPath(env, \"omp\")` reads LEGION_OMP_PATH first and returns it if executable, skipping `mise where` entirely; configuredPath (49-56) throws `LEGION_OMP_PATH must be an absolute executable path` for a relative value — hence the absolute-path check in preflight (a refinement; see refinementsToSpec).",
+        "config.ts requires only a non-empty omp_invocation at config time; environment.ts requires the `mise x <tool> -- omp` form only when LEGION_OMP_PATH is unset (miseToolFromInvocation, 147-149; error 166-170). Keeping `omp_invocation: mise x ${omp_pin} -- omp` in legion.yaml is therefore correct and required.",
+        "The default build exists and is executable on this box: /home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix (179083392 bytes, 2026-09-11 04:34; `--version` → omp/18.1.15). The production daemon's controller (pid found via pgrep) has /proc/<pid>/exe == that path and argv `... --mode rpc --append-system-prompt ...`, so the /proc/<pid>/exe evidence technique in the tester script is proven.",
+        "up.sh does not export XDG_STATE_HOME for itself (it sets XDG_STATE_HOME only inside the daemon's env block, line 561), so resolve_omp_path sees the operator's XDG_STATE_HOME — the default path is computed inside the function on each call so up.test.sh can redirect it per case.",
+        "up.test.sh sources up.sh minus its last line (`sed '$d'`, line 21) so resolve_omp_path is callable directly; fail() exits, so every failing case runs in a subshell `( ... )` exactly like the resolve_webhook_mode cases at 140-147.",
+        "In the final section, require_command/assert_port_free/ensure_nats/start_process/wait_for_json are stubbed (303-312) and main() runs for real with SMOKE_WEBHOOK_MODE=envoy; adding resolve_omp_path to main() means that section must export a real executable LEGION_OMP_PATH (the fake omp) or main() will now fail closed — that is the intended behaviour and the negative run below locks it."
+      ],
+      "steps": [
+        {
+          "step": "Red: add the unit block and the final-section assertions below first; `bash scripts/smoke/up.test.sh` fails with `resolve_omp_path: command not found`."
+        },
+        {
+          "step": "up.sh line 14: replace the single `readonly omp_pin=...` line with",
+          "code": [
+            "# Predates oh-my-pi fix/rpc-extension-send-rejection (0e57a6ca); see resolve_omp_path for the",
+            "# build the daemon actually runs until a tagged release carries it.",
+            "readonly omp_pin=\"github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934\""
+          ]
+        },
+        {
+          "step": "up.sh: insert after line 66 (the closing `}` of resolve_webhook_mode):",
+          "code": [
+            "# Picks the OMP build every daemon-spawned pane runs (controller, roots, workers). `omp_pin`",
+            "# predates oh-my-pi fix/rpc-extension-send-rejection (0e57a6ca), so a headless controller on the",
+            "# pinned release crashes on its first prompt with \"send did not invoke the agent\"; until a tagged",
+            "# release carries that fix the rig runs the same rpc-fix build production does, or whatever",
+            "# LEGION_OMP_PATH names. Never falls back to the pin: that reproduces the crash later, in the",
+            "# controller, instead of stopping here in preflight. Bumping `omp_pin` retires the default.",
+            "resolve_omp_path() {",
+            "  local default_path=\"${XDG_STATE_HOME:-$HOME/.local/state}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix\"",
+            "",
+            "  if [[ -n \"${LEGION_OMP_PATH:-}\" ]]; then",
+            "    # The daemon's environment.ts rejects a relative LEGION_OMP_PATH at startup; stop here instead.",
+            "    [[ \"$LEGION_OMP_PATH\" == /* && -f \"$LEGION_OMP_PATH\" && -x \"$LEGION_OMP_PATH\" ]] ||",
+            "      fail \"LEGION_OMP_PATH is not an absolute executable file: ${LEGION_OMP_PATH}\"",
+            "    printf '%s\\n' \"$LEGION_OMP_PATH\"",
+            "    return",
+            "  fi",
+            "  [[ -f \"$default_path\" && -x \"$default_path\" ]] ||",
+            "    fail \"no OMP build with the rpc-extension fix: ${default_path} is missing or not executable; export LEGION_OMP_PATH=<absolute executable omp> or bump omp_pin once a tagged oh-my-pi release carries fix/rpc-extension-send-rejection (0e57a6ca)\"",
+            "  printf '%s\\n' \"$default_path\"",
+            "}"
+          ]
+        },
+        {
+          "step": "up.sh main(): line 491 becomes two locals:",
+          "code": [
+            "  local webhook_mode",
+            "  local omp_path"
+          ]
+        },
+        {
+          "step": "up.sh main(): insert after line 507 (`webhook_mode=\"$(resolve_webhook_mode)\"`) — still before the mkdir at 509, write_daemon_config, the go build, and ensure_nats, so a failure here has started nothing:",
+          "code": [
+            "  omp_path=\"$(resolve_omp_path)\"",
+            "  printf 'GREEN OMP build: %s\\n' \"$omp_path\""
+          ]
+        },
+        {
+          "step": "up.sh main(): the daemon start (lines 553-562) gains a comment above it and one env pair after `LEGION_DAEMON_PORT=\"$daemon_port\" \\`:",
+          "code": [
+            "  # LEGION_OMP_PATH is exported for the daemon only: legion.yaml keeps `omp_invocation: mise x",
+            "  # <pin> -- omp` (the loader requires that form) and environment.ts honours LEGION_OMP_PATH over",
+            "  # it, so every pane the daemon spawns runs the build resolve_omp_path selected.",
+            "  start_process daemon env \\",
+            "    ENVOY_NATS_URL=\"$nats_url\" \\",
+            "    ENVOY_URL=\"http://127.0.0.1:${listener_port}\" \\",
+            "    LEGION_DAEMON_PORT=\"$daemon_port\" \\",
+            "    LEGION_OMP_PATH=\"$omp_path\" \\",
+            "    DISPATCH_URL=\"$DISPATCH_URL\" \\",
+            "    DISPATCH_TOKEN=\"$DISPATCH_TOKEN\" \\",
+            "    LEGION_STATE_DIR=\"${smoke_dir}/daemon\" \\",
+            "    XDG_DATA_HOME=\"${smoke_dir}/xdg-data\" \\",
+            "    XDG_STATE_HOME=\"${smoke_dir}/xdg-state\" \\",
+            "    bun run \"${repo_root}/packages/daemon/src/cli/index.ts\" start \"$SMOKE_PROJECT\" --config \"${smoke_dir}/legion.yaml\""
+          ],
+          "note": "write_daemon_config (line 288) is untouched: `omp_invocation: mise x ${omp_pin} -- omp` stays."
+        },
+        {
+          "step": "up.test.sh: insert after line 153 (`printf 'PASS: selects webhook ingress mode without silently falling back\\n'`) — the four spec cases plus the relative-path guard:",
+          "code": [
+            "fake_omp=\"${fake_bin}/omp\"",
+            "printf '#!/usr/bin/env bash\\nexit 0\\n' >\"$fake_omp\"",
+            "chmod +x \"$fake_omp\"",
+            "[[ \"$(LEGION_OMP_PATH=\"$fake_omp\" resolve_omp_path)\" == \"$fake_omp\" ]] || {",
+            "  printf 'expected an explicit executable LEGION_OMP_PATH to pass through unchanged\\n' >&2",
+            "  exit 1",
+            "}",
+            "if (LEGION_OMP_PATH=\"${fake_bin}/missing-omp\" resolve_omp_path) >\"$assertion_file\" 2>&1; then",
+            "  printf 'expected a missing LEGION_OMP_PATH to fail\\n' >&2",
+            "  exit 1",
+            "fi",
+            "[[ \"$(<\"$assertion_file\")\" == *\"LEGION_OMP_PATH is not an absolute executable file: ${fake_bin}/missing-omp\"* ]] || {",
+            "  cat \"$assertion_file\" >&2",
+            "  exit 1",
+            "}",
+            "if (LEGION_OMP_PATH=\"relative/omp\" resolve_omp_path) >\"$assertion_file\" 2>&1; then",
+            "  printf 'expected a relative LEGION_OMP_PATH to fail (the daemon requires an absolute path)\\n' >&2",
+            "  exit 1",
+            "fi",
+            "[[ \"$(<\"$assertion_file\")\" == *'LEGION_OMP_PATH is not an absolute executable file: relative/omp'* ]] || {",
+            "  cat \"$assertion_file\" >&2",
+            "  exit 1",
+            "}",
+            "fake_state_home=\"${fake_bin}/xdg-state\"",
+            "default_omp=\"${fake_state_home}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix\"",
+            "mkdir -p \"$(dirname \"$default_omp\")\"",
+            "printf '#!/usr/bin/env bash\\nexit 0\\n' >\"$default_omp\"",
+            "chmod +x \"$default_omp\"",
+            "[[ \"$(unset LEGION_OMP_PATH; XDG_STATE_HOME=\"$fake_state_home\" resolve_omp_path)\" == \"$default_omp\" ]] || {",
+            "  printf 'expected an unset LEGION_OMP_PATH to resolve to the production rpc-fix build under XDG_STATE_HOME\\n' >&2",
+            "  exit 1",
+            "}",
+            "if (unset LEGION_OMP_PATH; XDG_STATE_HOME=\"${fake_bin}/no-state\" resolve_omp_path) >\"$assertion_file\" 2>&1; then",
+            "  printf 'expected preflight to fail when neither LEGION_OMP_PATH nor the default build exists\\n' >&2",
+            "  exit 1",
+            "fi",
+            "[[ \"$(<\"$assertion_file\")\" == *\"${fake_bin}/no-state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix\"* &&",
+            "  \"$(<\"$assertion_file\")\" == *'export LEGION_OMP_PATH='* &&",
+            "  \"$(<\"$assertion_file\")\" == *'bump omp_pin'* &&",
+            "  \"$(<\"$assertion_file\")\" == *'fix/rpc-extension-send-rejection'* ]] || {",
+            "  cat \"$assertion_file\" >&2",
+            "  exit 1",
+            "}",
+            "",
+            "printf 'PASS: resolves the OMP build from LEGION_OMP_PATH or the production rpc-fix default, failing closed otherwise\\n'"
+          ],
+          "note": "`$(unset LEGION_OMP_PATH; ...)` runs in the command-substitution subshell, so the harness's own LEGION_OMP_PATH (a Legion worker pane exports one) is untouched."
+        },
+        {
+          "step": "up.test.sh final section: replace the start_process stub (lines 306-309) so each stubbed process records its full argv:",
+          "code": [
+            "start_process() {",
+            "  printf 'start_process:%s\\n' \"$1\" >>\"$order_log\"",
+            "  printf '%s\\n' \"${@:2}\" >\"${SMOKE_DIR}/start_process.${1}.argv\"",
+            "  : >\"${SMOKE_DIR}/${1}.log\"",
+            "}"
+          ]
+        },
+        {
+          "step": "up.test.sh final section: insert immediately before `if ! main >\"$main_output_file\" 2>&1; then` (line 324) — the negative preflight run, then the export the successful run needs:",
+          "code": [
+            "# Preflight fails closed before anything starts: a missing LEGION_OMP_PATH stops main() before",
+            "# ensure_nats or any start_process call is reached (the stubs above log every such call).",
+            ": >\"$order_log\"",
+            "if (LEGION_OMP_PATH=\"${fake_bin}/missing-omp\" main) >\"$assertion_file\" 2>&1; then",
+            "  printf 'expected main() to fail on a missing LEGION_OMP_PATH\\n' >&2",
+            "  exit 1",
+            "fi",
+            "[[ \"$(<\"$assertion_file\")\" == *\"LEGION_OMP_PATH is not an absolute executable file: ${fake_bin}/missing-omp\"* ]] || {",
+            "  cat \"$assertion_file\" >&2",
+            "  exit 1",
+            "}",
+            "[[ ! -s \"$order_log\" ]] || {",
+            "  printf 'expected no process to start when OMP preflight fails; order log:\\n%s\\n' \"$(<\"$order_log\")\" >&2",
+            "  exit 1",
+            "}",
+            "printf 'PASS: a missing OMP build stops up.sh in preflight before any process starts\\n'",
+            "",
+            "export LEGION_OMP_PATH=\"$fake_omp\""
+          ]
+        },
+        {
+          "step": "up.test.sh final section: insert after the `RIG READY` assertion block (after line 332):",
+          "code": [
+            "[[ \"$(<\"$main_output_file\")\" == *\"GREEN OMP build: ${fake_omp}\"* ]] || {",
+            "  printf 'expected up.sh to print the selected OMP build; output:\\n%s\\n' \"$(<\"$main_output_file\")\" >&2",
+            "  exit 1",
+            "}",
+            "grep -Fxq \"LEGION_OMP_PATH=${fake_omp}\" \"${SMOKE_DIR}/start_process.daemon.argv\" || {",
+            "  printf 'expected the daemon start_process env block to carry LEGION_OMP_PATH; argv:\\n%s\\n' \"$(<\"${SMOKE_DIR}/start_process.daemon.argv\")\" >&2",
+            "  exit 1",
+            "}",
+            "if grep -q '^LEGION_OMP_PATH=' \"${SMOKE_DIR}/start_process.listener.argv\"; then",
+            "  printf 'LEGION_OMP_PATH belongs in the daemon env block only, not the listener one\\n' >&2",
+            "  exit 1",
+            "fi",
+            "grep -Fxq 'omp_invocation: mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp' \"${SMOKE_DIR}/legion.yaml\" || {",
+            "  printf 'expected legion.yaml to keep the mise x <pin> -- omp invocation\\n' >&2",
+            "  exit 1",
+            "}",
+            "printf 'PASS: exports the resolved OMP build as LEGION_OMP_PATH for the daemon only and keeps omp_invocation pinned\\n'"
+          ]
+        },
+        {
+          "step": "Green: `bash scripts/smoke/up.test.sh` prints the three new PASS lines; `bash -n scripts/smoke/up.sh`."
+        },
+        {
+          "step": "Smoke (implementer, no rig): `cd \"$LEGION_WORKSPACE\" && (unset LEGION_OMP_PATH; source <(sed '$d' scripts/smoke/up.sh); resolve_omp_path)` prints the real default path on this box; `(LEGION_OMP_PATH=/nonexistent; ...; resolve_omp_path)` fails naming it."
+        }
+      ],
+      "locks": [
+        "up.test.sh: 'PASS: resolves the OMP build from LEGION_OMP_PATH or the production rpc-fix default, failing closed otherwise' (the four spec branches + relative path)",
+        "up.test.sh: 'PASS: a missing OMP build stops up.sh in preflight before any process starts'",
+        "up.test.sh: 'PASS: exports the resolved OMP build as LEGION_OMP_PATH for the daemon only and keeps omp_invocation pinned' (also the printed `GREEN OMP build:` line)"
+      ],
+      "commit": {
+        "message": "fix(smoke): up.sh resolves the rpc-fix OMP build in preflight and fails closed without one",
+        "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" commit -m '<message>' scripts/smoke/up.sh scripts/smoke/up.test.sh"
+      },
+      "plannerSmoke": "2026-09-12: the exact resolve_omp_path text above was extracted from this plan into a throwaway script and run with `bash file.sh`: explicit executable → passes through; explicit missing → `error: LEGION_OMP_PATH is not an absolute executable file: <path>` rc 1; relative → same message rc 1; unset + XDG_STATE_HOME pointing at a fake tree → the fake default path rc 0; unset + empty XDG_STATE_HOME → the both-remedies message rc 1; unset + unset XDG_STATE_HOME on this box → /home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix rc 0."
+    },
+    {
+      "id": 4,
+      "title": "none mode: up.sh reason text, checkpoints.sh blocks 1-4 and 12 with a Dispatch-ingress reason, both harnesses updated",
+      "spec": "Acceptance 4; Design rows up.sh webhook_ingress_block_reason + checkpoints.sh + checkpoints.test.sh; Errors row 'checkpoints.sh asked for 1,2,3,4,12 in none mode'; Requirement 'never a false red'; Rejected 'resync admits unknown issues' / 'fake the created event'",
+      "files": {
+        "modify": [
+          "scripts/smoke/up.sh webhook_ingress_block_reason (lines 37-40)",
+          "scripts/smoke/up.test.sh line 148-151 (verbatim reason assertion)",
+          "scripts/smoke/checkpoints.sh: new function after webhook_ingress_block_reason (after line 72); the none-mode case arm at lines 515-522",
+          "scripts/smoke/checkpoints.test.sh: line 17 (recorded mode), new none-mode block before line 161, PASS text at 191, line 196 (bare-dir mode)"
+        ]
+      },
+      "verifiedBeforePlanning": [
+        "resync.ts healStatusDrift (219-239): `const node = deps.state.issues[summary.key]; if (!node || node.status === summary.status) continue;` — a Dispatch issue the daemon never ingested is skipped every cycle; reportRootAnomalies (246-299) iterates state.issues only. Nothing in resync admits an unknown key.",
+        "up.sh 573-576 already says so: 'The daemon only admits issues whose events it has ingested; resync skips unknown keys' — the reason text below restates that in operator terms.",
+        "In none mode nothing carries Dispatch issue events into the rig NATS: the listener receives only the local signed ping, the envoy bridge (the only relay of `notifications.dispatch.issue.>`, README line 67 and up.sh 565-572) starts only in envoy mode, and `gh webhook forward` (forward mode) carries GitHub events only. The LEGION-6 tester's rig ran in envoy mode for this reason (/tmp/legion6-smoke/rig/webhook-mode = envoy).",
+        "checkpoint_one asserts `.issues | has($issue)` and a Dispatch status past triage (checkpoints.sh 187-194); checkpoint_two asserts admission and a tree locator; three/four read gates and children; twelve reads admission — all unreachable without the root in state.issues. checkpoint_thirteen reads only the controller/tree/role pane ids and /proc (454-490) and passes with just the controller pane; checkpoint_eight is gated by SMOKE_BRANCH_PROTECTION only (530-535) and is unchanged.",
+        "checkpoints.test.sh records `none` at line 17 and then expects checkpoints 1, 2, 3, 4 OK (lines 72-159): after this task those cases must run under `envoy` or they would be false failures; line 196 (bare smoke dir, checkpoint 1 expected to fail on the missing root-issue file) likewise records `none` and must record `envoy`, or the mode block would pre-empt the root-issue check the case exists to prove."
+      ],
+      "steps": [
+        {
+          "step": "Red: update the up.test.sh assertion (148-151) and add the checkpoints.test.sh block first; both harnesses fail (old reason text; checkpoint 1 runs to OK instead of exit 3)."
+        },
+        {
+          "step": "up.sh lines 37-40 become:",
+          "code": [
+            "# In none mode the rig has no event feed at all: the daemon admits an issue only once it has",
+            "# ingested that issue's Dispatch events (resync skips keys it never saw), and nothing carries a",
+            "# Dispatch issue event or a GitHub webhook into the rig NATS. checkpoints.sh applies the same",
+            "# gating from the recorded mode.",
+            "webhook_ingress_block_reason() {",
+            "  printf '%s\\n' \\",
+            "    'SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoint 13 remains usable'",
+            "}"
+          ]
+        },
+        {
+          "step": "up.test.sh lines 148-151: the expected string becomes the new reason verbatim:",
+          "code": [
+            "[[ \"$(webhook_ingress_block_reason)\" == \"SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoint 13 remains usable\" ]] || {",
+            "  printf 'expected the none-mode block reason to name the missing Dispatch issue-event feed and envoy for checkpoints 1-4 and 12\\n' >&2",
+            "  exit 1",
+            "}"
+          ],
+          "note": "Keep whatever the existing `|| { ... }` body at 149-150 says if it already prints and exits; only the compared string must change."
+        },
+        {
+          "step": "checkpoints.sh: insert after line 72 (the closing `}` of webhook_ingress_block_reason):",
+          "code": [
+            "# Checkpoints 1-4 and 12 read daemon state the root issue only reaches once the daemon has",
+            "# ingested its Dispatch issue events (`state.issues`; resync.ts healStatusDrift and",
+            "# reportRootAnomalies skip keys it never saw). In none mode nothing carries those events into the",
+            "# rig NATS -- up.sh creates the root issue over HTTP and the daemon never admits it -- so these",
+            "# are blocked, never reported as a false FAILED.",
+            "dispatch_ingress_block_reason() {",
+            "  printf '%s\\n' \\",
+            "    'SMOKE_WEBHOOK_MODE=none: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy'",
+            "}"
+          ]
+        },
+        {
+          "step": "checkpoints.sh lines 515-522: the none arm gains the Dispatch-fed checkpoints (8 and 13 stay ungated):",
+          "code": [
+            "case \"$(stored_webhook_mode)\" in",
+            "  none)",
+            "    case \"$checkpoint\" in",
+            "      1 | 2 | 3 | 4 | 12)",
+            "        blocked \"$(dispatch_ingress_block_reason)\"",
+            "        ;;",
+            "      5 | 6 | 7 | 9 | 10 | 11)",
+            "        blocked \"$(webhook_ingress_block_reason)\"",
+            "        ;;",
+            "    esac",
+            "    ;;",
+            "  forward | envoy)",
+            "    ;;",
+            "  *)",
+            "    fail \"recorded SMOKE_WEBHOOK_MODE must be forward, envoy, or none\"",
+            "    ;;",
+            "esac"
+          ]
+        },
+        {
+          "step": "checkpoints.test.sh line 17 becomes (comment + envoy):",
+          "code": [
+            "# Checkpoints 1-4 need Dispatch issue-event ingress, so their fixture-backed OK cases run with",
+            "# envoy recorded; the none-mode block further down proves the mode gating itself.",
+            "printf 'envoy\\n' >\"${smoke_dir}/webhook-mode\""
+          ]
+        },
+        {
+          "step": "checkpoints.test.sh: insert before line 161 (the `if PATH=... bash \"$checkpoints_script\" 5` none-mode block):",
+          "code": [
+            "# none mode: no Dispatch issue event reaches the rig NATS, so 1-4 and 12 are blocked with the",
+            "# Dispatch-ingress reason before any Dispatch request is made (12 before it even asks for",
+            "# SMOKE_QUEUED_ISSUE); 5-7 and 9-11 keep the GitHub-ingress reason below; 13 is not gated by mode.",
+            "printf 'none\\n' >\"${smoke_dir}/webhook-mode\"",
+            "curl_calls_before=\"$(wc -l <\"$curl_log\")\"",
+            "for blocked_checkpoint in 1 2 3 4 12; do",
+            "  if PATH=\"${fake_bin}:${PATH}\" \\",
+            "    SMOKE_DIR=\"$smoke_dir\" \\",
+            "    SMOKE_REPO=\"example-org/legion-smoke\" \\",
+            "    SMOKE_PROJECT=\"example-org/24\" \\",
+            "    DISPATCH_URL=\"http://dispatch.test\" \\",
+            "    DISPATCH_TOKEN=\"test-dispatch-token\" \\",
+            "    bash \"$checkpoints_script\" \"$blocked_checkpoint\" >\"$output_file\" 2>&1; then",
+            "    printf 'expected none mode to block checkpoint %s\\n' \"$blocked_checkpoint\" >&2",
+            "    exit 1",
+            "  else",
+            "    status=$?",
+            "  fi",
+            "  [[ \"$status\" == 3 && \"$(<\"$output_file\")\" == *\"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: \"*'requires Dispatch issue-event ingress'* ]] || {",
+            "    printf 'expected exit 3 and the Dispatch-ingress reason for checkpoint %s; got %s:\\n%s\\n' \"$blocked_checkpoint\" \"$status\" \"$(<\"$output_file\")\" >&2",
+            "    exit 1",
+            "  }",
+            "done",
+            "[[ \"$(wc -l <\"$curl_log\")\" == \"$curl_calls_before\" ]] || {",
+            "  printf 'expected a mode-blocked checkpoint to make no Dispatch request\\n' >&2",
+            "  exit 1",
+            "}",
+            "if ! PATH=\"${fake_bin}:${PATH}\" SMOKE_DIR=\"$smoke_dir\" SMOKE_REPO=\"example-org/legion-smoke\" \\",
+            "  SMOKE_PROJECT=\"example-org/24\" DISPATCH_URL=\"http://dispatch.test\" FAKE_TMUX_PID=\"$clean_pid\" \\",
+            "  env -u DISPATCH_TOKEN bash \"$checkpoints_script\" 13 >\"$output_file\" 2>&1; then",
+            "  cat \"$output_file\" >&2",
+            "  exit 1",
+            "fi",
+            "[[ \"$(<\"$output_file\")\" == *'CHECKPOINT 13 OK'* ]] || {",
+            "  cat \"$output_file\" >&2",
+            "  exit 1",
+            "}",
+            "printf 'PASS: none mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and leaves 13 ungated\\n'"
+          ],
+          "note": "The existing checkpoint-5 block that follows keeps asserting exit 3 + 'requires live GitHub webhook ingress' under the same recorded `none`; it then switches to envoy at line 176 as today."
+        },
+        {
+          "step": "checkpoints.test.sh line 191: the PASS text becomes `PASS: none mode blocks GitHub-fed checkpoints 5-7 and 9-11 with the GitHub-ingress reason; envoy lets checkpoint 5 reach its own PR check`."
+        },
+        {
+          "step": "checkpoints.test.sh line 196: `printf 'none\\n' >\"${bare_smoke_dir}/webhook-mode\"` becomes `printf 'envoy\\n' >\"${bare_smoke_dir}/webhook-mode\"` (this case proves the missing root-issue-file error, which none mode would now pre-empt)."
+        },
+        {
+          "step": "Green: `bash scripts/smoke/checkpoints.test.sh` (every PASS, including the private-socket sweep at the end — the new runs all go through legion_tmux/curl fakes) and `bash scripts/smoke/up.test.sh`; `bash -n` on up.sh and checkpoints.sh."
+        }
+      ],
+      "locks": [
+        "up.test.sh: the verbatim webhook_ingress_block_reason assertion (148-151)",
+        "checkpoints.test.sh: 'PASS: none mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and leaves 13 ungated' (exit 3, reason substring, zero Dispatch requests, 13 OK under none)",
+        "checkpoints.test.sh: existing checkpoint-5 none/envoy block (GitHub reason unchanged) and the checkpoint 1-4 OK cases now under envoy"
+      ],
+      "commit": {
+        "message": "fix(smoke): none mode blocks the Dispatch-fed checkpoints 1-4 and 12 with their own reason",
+        "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" commit -m '<message>' scripts/smoke/up.sh scripts/smoke/up.test.sh scripts/smoke/checkpoints.sh scripts/smoke/checkpoints.test.sh"
+      }
+    },
+    {
+      "id": 5,
+      "title": "README.md: none mode described as it behaves, envoy named for 1-4 and 12, LEGION_OMP_PATH resolution paragraph",
+      "spec": "Acceptance 4 ('README changes read against that output line by line'); Design row README; Requirement 'README describes exactly what none mode exercises'",
+      "files": {
+        "modify": [
+          "scripts/smoke/README.md lines 22, 47, 65, 73, 75 (new paragraph after it), 121; line 106 stays verbatim"
+        ]
+      },
+      "verifiedBeforePlanning": [
+        "README line 65 ends in a literal U+2026 ellipsis: `...its GitHub hook registration; the rig waits fo…` (od -c confirms bytes 342 200 246). Commit 49efece57f3f truncated it; the text before that commit (e6731ea2b929) read `the rig waits for the forwarder's \\`Forwarding Webhook events from GitHub...\\` tunnel-ready signal before launching the daemon with its normal Bun command:` — which is also the missing lead-in to the bare code block at lines 69-71. Restoring it is adjacent cleanup inside the paragraph this task rewrites (see refinementsToSpec).",
+        "README line 47 (Human-controlled gates table) and line 121 (Checkpoints) both currently claim 'resync-driven checkpoints 1–4 remain usable' in none mode — the false claim acceptance 4 exists to correct. Line 22 (inputs table) says only 'none omits every ingress transport' and needs the Dispatch half.",
+        "README line 106 (`down.sh also succeeds in none mode: ...`) is accurate and the spec says it stays."
+      ],
+      "steps": [
+        {
+          "step": "Line 22, `SMOKE_WEBHOOK_MODE` row, Meaning cell: change `\\`none\\` omits every ingress transport.` to `\\`none\\` omits every ingress transport — neither GitHub events nor Dispatch issue events reach the rig NATS.`"
+        },
+        {
+          "step": "Line 47 (`SMOKE_WEBHOOK_MODE=none` row) becomes:",
+          "code": [
+            "| `SMOKE_WEBHOOK_MODE=none` | Deliberately no live ingress: neither GitHub events nor Dispatch issue events reach the rig NATS | Exercises rig start-up, the fail-closed OMP probe, controller spawn, and checkpoint 13. The daemon never admits the root issue `up.sh` creates (its resync skips issue keys it never ingested), so `checkpoints.sh` prints `SKIPPED-BLOCKED` with the Dispatch-ingress reason for checkpoints 1–4 and 12 and with the GitHub-ingress reason for 5–7 and 9–11, exit 3 each. `envoy` is the mode for checkpoints 1–4 and 12. |"
+          ]
+        },
+        {
+          "step": "Line 65: (a) after `prints the explicit webhook-ingress block, then launches the daemon against the Dispatch server named by \\`DISPATCH_URL\\`/\\`DISPATCH_TOKEN\\`.` insert the sentence `The daemon starts its controller, but no Dispatch issue event ever reaches the rig NATS, so the root issue \\`up.sh\\` creates is never admitted: a \\`none\\` run exercises start-up, the fail-closed OMP probe, controller spawn, and checkpoint 13, and \\`checkpoints.sh\\` blocks 1–4 and 12 with the Dispatch-ingress reason.` (b) replace the truncated tail `the rig waits fo…` with `the rig waits for the forwarder's \\`Forwarding Webhook events from GitHub...\\` tunnel-ready signal before launching the daemon with its normal Bun command:` so the code block at 69-71 has its lead-in again."
+        },
+        {
+          "step": "Line 73: after `and resolves that pinned OMP binary with \\`mise where\\`` insert ` — unless \\`LEGION_OMP_PATH\\` is set, which \\`up.sh\\` always sets for the daemon (next section)`."
+        },
+        {
+          "step": "Insert a new paragraph after line 75 (before the `omp_launch_prefix` paragraph at 77):",
+          "code": [
+            "**Which OMP build the rig runs.** `up.sh` picks the OMP binary during preflight (`resolve_omp_path`) and exports it as `LEGION_OMP_PATH` in the daemon's environment only. If `LEGION_OMP_PATH` is already exported it must name an absolute executable file, otherwise `up.sh` stops before starting anything and names the path. If it is unset, `up.sh` uses the build production runs, `${XDG_STATE_HOME:-$HOME/.local/state}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix`, when that file is executable. If neither exists, `up.sh` stops naming the default path and both remedies (export `LEGION_OMP_PATH`, or raise `omp_pin`). The generated `legion.yaml` keeps `omp_invocation: mise x <pin> -- omp` because the daemon's loader requires that form; its `environment.ts` honours `LEGION_OMP_PATH` over it, so every controller, root, and worker pane runs the selected binary, which `up.sh` prints as `GREEN OMP build: <path>`. The default is a stop-gap: the pinned release predates oh-my-pi `fix/rpc-extension-send-rejection` (commit `0e57a6ca`), without which a headless controller crashes on its first prompt with `send did not invoke the agent`. Bumping `omp_pin` to a tagged release that carries the fix retires the default."
+          ]
+        },
+        {
+          "step": "Line 121 becomes:",
+          "code": [
+            "With a recorded `SMOKE_WEBHOOK_MODE=none`, checkpoints 1–4 and 12 are blocked: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (`resync.ts`'s `healStatusDrift` skips issue keys it has never ingested). Checkpoints 5–7 and 9–11 are blocked because they assert pull-request, check-run, issue-comment, or issue-event delivery. Checkpoints 8 and 13 are not gated by the mode. `envoy` is the mode for checkpoints 1–4 and 12; `envoy` and `forward` both count as live GitHub ingress."
+          ]
+        },
+        {
+          "step": "Consistency check (read-only): `grep -n 'remain usable\\|1–4 remain\\|1-4 remain' scripts/smoke/README.md` → no matches; the three statements (row 47, paragraph 65, paragraph 121) and the up.sh reason all name: no Dispatch issue event → root never admitted → 1–4 and 12 need envoy; 13 usable."
+        }
+      ],
+      "locks": [
+        "No harness locks README prose; the tester reads rows 47/65/121 against the real none-mode `checkpoints.sh 1 2 3 4 12 13` output (Testing row 4) and against the `GREEN OMP build:` / `SKIPPED-BLOCKED webhook ingress:` lines in up.sh stdout."
+      ],
+      "commit": {
+        "message": "docs(smoke): README says what none mode exercises, names envoy for checkpoints 1-4 and 12, documents LEGION_OMP_PATH resolution",
+        "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" commit -m '<message>' scripts/smoke/README.md"
+      }
+    },
+    {
+      "id": 6,
+      "title": "down.test.sh proves forward-mode teardown (process group + hook record) — spec refinement, see refinementsToSpec[1]",
+      "spec": "Acceptance 5 ('forward mode ... its teardown is proven by down.test.sh alone'); Acceptance 6 (down.test.sh passes)",
+      "files": {
+        "modify": [
+          "scripts/smoke/down.test.sh (insert before the two final PASS lines at 88-89; extend cleanup())"
+        ]
+      },
+      "verifiedBeforePlanning": [
+        "down.test.sh today covers only the envoy-bridge pid record (34-44) and tmux session ownership (46-86). Neither forward-mode path in down.sh — terminate_process_group_file webhook-forward (54-83, kills `-<pgid>`) nor remove_webhook_forwarder (86-100, `gh api -X DELETE <hook endpoint>` when SMOKE_REPO is set and a .hook record exists) — is exercised, so the spec's 'proven by down.test.sh alone' is currently hollow.",
+        "up.sh records the forwarder as a process group: start_process_group (148-173) runs `setsid gh webhook forward ...`, writes the pgid to webhook-forward.pid and its /proc start time to webhook-forward.start; record_forwarder_hook (389-397) writes `repos/<owner>/<repo>/hooks/<id>` to webhook-forward.hook.",
+        "In a non-interactive bash script a background job is not a process-group leader, so `setsid sleep 300 &` execs in place: $! is the new session/group leader. The test still reads the pgid from /proc/<pid>/stat field 5 rather than assuming it."
+      ],
+      "steps": [
+        {
+          "step": "Red: add the case; it fails only if down.sh regresses — run it once to see PASS, then run it against a copy of down.sh with `terminate_process_group_file webhook-forward` deleted from main() to confirm the case catches the regression (the sleep survives)."
+        },
+        {
+          "step": "down.test.sh: extend cleanup() so a failing run never leaks the forwarder stand-in — add `forward_pgid=\"\"` next to `bridge_pid=\"\"` (line 12) and, inside cleanup() before `rm -rf`:",
+          "code": [
+            "  if [[ -n \"$forward_pgid\" ]]; then",
+            "    kill -- \"-$forward_pgid\" 2>/dev/null || true",
+            "  fi"
+          ]
+        },
+        {
+          "step": "down.test.sh: insert after line 86 (the closing `}` of the last tmux assertion) and before the PASS lines:",
+          "code": [
+            "# forward mode teardown: a recorded `gh webhook forward` process group and its GitHub hook",
+            "# record. `gh webhook forward` itself needs a user-authenticated gh identity agents do not have,",
+            "# so this stand-in is the only proof the rig has that forward-mode teardown works.",
+            "setsid sleep 300 &",
+            "forward_pid=\"$!\"",
+            "forward_pgid=\"$(awk '{print $5}' \"/proc/${forward_pid}/stat\")\"",
+            "printf '%s\\n' \"$forward_pgid\" >\"${smoke_dir}/webhook-forward.pid\"",
+            "awk '{print $22}' \"/proc/${forward_pgid}/stat\" >\"${smoke_dir}/webhook-forward.start\"",
+            "printf 'repos/example-org/legion-smoke/hooks/7\\n' >\"${smoke_dir}/webhook-forward.hook\"",
+            "gh_log=\"${temporary_dir}/gh.log\"",
+            "cat >\"${fake_bin}/gh\" <<EOF",
+            "#!/usr/bin/env bash",
+            "printf '%s\\n' \"\\$*\" >>\"${gh_log}\"",
+            "EOF",
+            "chmod +x \"${fake_bin}/gh\"",
+            "",
+            "PATH=\"${fake_bin}:${PATH}\" SMOKE_DIR=\"$smoke_dir\" SMOKE_REPO=\"example-org/legion-smoke\" bash \"$down_script\" >\"$output_file\" 2>&1",
+            "if kill -0 -- \"-$forward_pgid\" 2>/dev/null; then",
+            "  printf 'expected down.sh to kill the recorded webhook-forward process group\\n' >&2",
+            "  exit 1",
+            "fi",
+            "forward_pgid=\"\"",
+            "[[ ! -e \"${smoke_dir}/webhook-forward.pid\" && ! -e \"${smoke_dir}/webhook-forward.start\" && ! -e \"${smoke_dir}/webhook-forward.hook\" ]] || {",
+            "  printf 'expected down.sh to remove the webhook-forward pid, start, and hook records\\n' >&2",
+            "  exit 1",
+            "}",
+            "grep -Fxq 'api -X DELETE repos/example-org/legion-smoke/hooks/7' \"$gh_log\" || {",
+            "  printf 'expected down.sh to delete the recorded forwarder hook through gh api; gh log:\\n%s\\n' \"$(cat \"$gh_log\" 2>/dev/null)\" >&2",
+            "  exit 1",
+            "}",
+            "[[ \"$(<\"$output_file\")\" == *\"STOPPED webhook-forward (pgid ${forward_pid})\"* ]] || {",
+            "  cat \"$output_file\" >&2",
+            "  exit 1",
+            "}",
+            "printf 'PASS: forward-mode teardown kills the recorded forwarder process group and deletes its hook record\\n'"
+          ],
+          "note": "The tmux fake left from the previous case only matters when SMOKE_PROJECT is set; it is unset here, so stop_tmux_session returns early. The docker fake exits 1, so the NATS branch is skipped, as in the earlier cases."
+        },
+        {
+          "step": "Green: `bash scripts/smoke/down.test.sh` prints the new PASS plus the two existing ones; `pgrep -f 'sleep 300'` shows no leftover from the harness."
+        }
+      ],
+      "locks": [
+        "down.test.sh: 'PASS: forward-mode teardown kills the recorded forwarder process group and deletes its hook record'"
+      ],
+      "commit": {
+        "message": "test(smoke): down.test.sh proves forward-mode teardown (process group and hook record)",
+        "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" commit -m '<message>' scripts/smoke/down.test.sh"
+      },
+      "plannerSmoke": "2026-09-12: `setsid sleep 300 &` inside a `bash file.sh` script gives pid == pgid with comm=sleep, and `kill -- -$pgid` kills the group (verified). In an interactive/job-control shell setsid forks instead and `$!` is a short-lived parent — that is why the case reads the pgid from /proc/<pid>/stat and probes the group with `kill -0 -- -$pgid`, never `kill -0 $pid`."
+    },
+    {
+      "id": 7,
+      "title": "Whole-PR verification, bookmark push, pull request",
+      "spec": "Acceptance 6",
+      "steps": [
+        {
+          "step": "`cd \"$LEGION_WORKSPACE\" && for f in scripts/smoke/up.sh scripts/smoke/checkpoints.sh scripts/smoke/down.sh scripts/smoke/up.test.sh scripts/smoke/checkpoints.test.sh scripts/smoke/down.test.sh; do bash -n \"$f\" && echo \"syntax ok $f\"; done`"
+        },
+        {
+          "step": "`bash scripts/smoke/up.test.sh && bash scripts/smoke/checkpoints.test.sh && bash scripts/smoke/down.test.sh` — quote the PASS counts in the PR body (LEGION-6's baseline was up 8 / checkpoints 10 / down 2; expect up +6, checkpoints +1, down +1 — count the PASS lines rather than trusting these numbers)."
+        },
+        {
+          "step": "`jj -R \"$LEGION_WORKSPACE\" diff --from 'trunk()' --to @- --summary` lists only scripts/smoke/ files (README.md, up.sh, up.test.sh, checkpoints.sh, checkpoints.test.sh, down.test.sh). `.omp/config.yml` (an empty workspace-provisioning artifact sitting in the working copy) must not be in any commit — the per-task `jj commit <paths>` commands above keep it out; check with `jj -R \"$LEGION_WORKSPACE\" log -r 'trunk()..@' -T 'description.first_line() ++ \"\\n\"'` and `jj -R \"$LEGION_WORKSPACE\" diff -r <each> --summary`."
+        },
+        {
+          "step": "Ancestry check per the worker skill: `jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 12)'` shows only this issue's commits above 7db2cd83."
+        },
+        {
+          "step": "Push: `cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-10 -r @- && jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-10` (the local bookmark already exists at the provisioning commit; `-r @-` points it at the last real commit, not the undescribed working copy)."
+        },
+        {
+          "step": "PR: `legion gh -- pr create --repo sjawhar/legion --base main --head legion/LEGION-10 --title 'fix(smoke): the rig boots again on this box — force root issue, rpc-fix OMP build, honest none mode, real-loader harness (LEGION-10)' --body-file <file>` with the body from prBody below. The body MUST contain the line `Dispatch: LEGION-10`."
+        }
+      ],
+      "locks": [
+        "Acceptance 6 is the PR file list + the three harnesses; no new test."
+      ]
+    }
+  ],
+  "acceptanceMap": {
+    "1 daemon accepts generated config": "Task 1 (cases A, B) + tester E7 by-hand rejection",
+    "2 fresh start creates root issue": "Task 2 + tester E1 (CREATED …, read-back, 409 negative control)",
+    "3 controller starts on the selected build": "Task 3 + tester E2 (state role claim, resync-complete line, /proc/<pid>/exe, negative greps)",
+    "4 README/up.sh/checkpoints agree about none": "Tasks 4, 5 + tester E3 (full 1 2 3 4 12 13 output in PR)",
+    "5 down.sh in every mode": "tester E4 (after none), E5 (after envoy), E6 statement + Task 6 down.test.sh forward case",
+    "6 one PR, scripts/smoke only, bash -n, three harnesses": "Task 7 + tester E7"
+  },
+  "testerE2E": {
+    "purpose": "Spec Testing rows 2-5 on this box, on the real surface, at the PR head. Unit harnesses are regression locks, not proof.",
+    "box": "This machine (the production Legion daemon also runs here: its tmux socket is legion-sjawharlegion, its controller runs the same rpc-fix build). Use SMOKE_PROJECT=sjawhar/24 so the rig's private socket is legion-sjawhar24 and never collides.",
+    "knownGoodInputs": "The LEGION-6 tester ran this rig on 2026-09-11 with SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 (from /tmp/legion6-smoke/*); DISPATCH_URL=http://localhost:8766 (~/.config/opencode/envoy.json → .dispatch.serverUrl). Use a fresh SMOKE_DIR (e.g. /tmp/legion10-smoke/rig) so ${SMOKE_DIR}/root-issue is absent — acceptance 2 requires that.",
+    "secretsWrapper": "README 'Start and stop' documents the required invocation; run up.sh exactly so (the private keys and DISPATCH_TOKEN never touch a file): secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 DISPATCH_TOKEN -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh'. checkpoints.sh 1-12: secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <n>; checkpoint 13 bare. Follow the using-secrets skill for grants.",
+    "prerequisites": [
+      "cd -- \"$LEGION_WORKSPACE\"; `bun install --frozen-lockfile` once (node_modules present in this workspace as of 2026-09-12); docker, go, mise, gh, jq, ss, setsid on PATH (up.sh preflight checks them).",
+      "Do NOT export LEGION_OMP_PATH in the shell that runs up.sh (a Legion worker pane exports one — `unset LEGION_OMP_PATH` first): acceptance 3 is 'without the operator exporting it by hand', i.e. the default branch of resolve_omp_path must be the one exercised. Also unset LEGION_* / DISPATCH_TOKEN inherited from the worker pane except what the README asks for, exactly as the LEGION-6 tester's 'bare gates' runs did.",
+      "Ports 14222 / 19020 / 19370 free or owned by this rig's own PID files (up.sh asserts)."
+    ],
+    "steps": [
+      {
+        "id": "E1 none-mode start (acceptance 2, 3)",
+        "commands": [
+          "export SMOKE_DIR=/tmp/legion10-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 SMOKE_WEBHOOK_MODE=none DISPATCH_URL=http://localhost:8766; unset LEGION_OMP_PATH; test ! -e \"$SMOKE_DIR/root-issue\"",
+          "secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 DISPATCH_TOKEN -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh' 2>&1 | tee /tmp/legion10-smoke/up-none.log"
+        ],
+        "expect": [
+          "stdout in order: `GREEN OMP build: /home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix`, `SKIPPED-BLOCKED webhook ingress: SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, ...`, `STARTED daemon (pid N)`, `GREEN Legion daemon: ...`, `CREATED root issue LEGSMOKE-<n>`, `RIG READY`. No `REUSED root issue`, no `could not create Dispatch root issue`.",
+          "Read the issue back: `secrets DISPATCH_TOKEN -- bash -c 'curl -sf -H \"Authorization: Bearer $DISPATCH_TOKEN\" \"$DISPATCH_URL/api/v1/issues/$(cat $SMOKE_DIR/root-issue)\" | jq \"{key,title,status,project}\"'` → key matches, title `Legion smoke exercise: sjawhar/legion-smoke (<timestamp>)`, and it is visible on the Dispatch board (LEGSMOKE project).",
+          "Negative control for acceptance 2 (quote in PR): the same POST without force → 409 POSSIBLE_DUPLICATE: `secrets DISPATCH_TOKEN -- bash -c 'curl -s -o /dev/null -w \"%{http_code}\\n\" -H \"Authorization: Bearer $DISPATCH_TOKEN\" -H \"Content-Type: application/json\" -d \"{\\\"project\\\":\\\"LEGSMOKE\\\",\\\"title\\\":\\\"Legion smoke exercise: sjawhar/legion-smoke (negative-control)\\\",\\\"actor\\\":{\\\"kind\\\":\\\"session\\\",\\\"id\\\":\\\"legion10-tester\\\",\\\"origin\\\":{\\\"session_title\\\":\\\"Legion smoke rig\\\"}}}\" \"$DISPATCH_URL/api/v1/issues\"'` → `409`. (Creates nothing.)"
+        ]
+      },
+      {
+        "id": "E2 controller ready and running the selected build (acceptance 3)",
+        "commands": [
+          "slug=sjawhar24; state=\"$SMOKE_DIR/daemon/state.json\"",
+          "Wait for ready (the extension posts /controller/ready shortly after the pane opens): `for i in $(seq 1 90); do jq -e --arg k \"legion-${slug}-controller\" '.roles[$k].sessionId | type == \"string\" and length > 0' \"$state\" >/dev/null 2>&1 && break; sleep 2; done; jq -c --arg k \"legion-${slug}-controller\" '{controllerLocator, controller: .roles[$k]}' \"$state\"`",
+          "Daemon-log trace of ready: `grep -n 'resync complete' \"$SMOKE_DIR/daemon.log\" | head -3` — /controller/ready runs a forced resync (index.ts onControllerReady → emitResync({force:true}) → `[legion] resync complete: anomalies=… healed=… ciFetchFailures=…`, index.ts:501); in none mode this is the first such line after `legion daemon listening on 127.0.0.1:19370` and is the only ready trace the daemon writes (routes/controller.ts has no console call of its own — say so in the PR).",
+          "Pid and executable: `pane=$(jq -r .controllerLocator.tmuxPaneId \"$state\"); pane_pid=$(tmux -L legion-$slug display-message -p -t \"$pane\" '#{pane_pid}'); descendants() { local p; for p in $(pgrep -P \"$1\"); do echo \"$p\"; descendants \"$p\"; done; }; for p in \"$pane_pid\" $(descendants \"$pane_pid\"); do printf '%s %s\\n' \"$p\" \"$(readlink /proc/$p/exe)\"; done` → exactly one line whose exe is `/home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix` (the same string up.sh printed after `GREEN OMP build:`); `tr '\\0' ' ' </proc/<that pid>/cmdline | cut -c1-80` shows `... --mode rpc --append-system-prompt`.",
+          "Negative greps: `grep -c 'send did not invoke the agent' \"$SMOKE_DIR/daemon.log\"` → 0; `tmux -L legion-$slug capture-pane -p -S - -t \"$pane\" | grep -c 'send did not invoke the agent'` → 0. Also report `grep -c 'failed to connect controller shim socket on ready' \"$SMOKE_DIR/daemon.log\"` — the LEGION-6 tester's round-1 log on the crashing build showed that line (negotiate_protocol timeout); with the rpc-fix build it should be 0. If it is not, capture the pane and stop: acceptance 3 is not met.",
+          "Let the controller take its first prompt: it is wake-driven, so its first turn is the forced-resync catch-up; after the ready record appears, confirm the process is still alive 60 s later (`kill -0 <pid>`) and the pane shows no crash."
+        ]
+      },
+      {
+        "id": "E3 checkpoints in none mode (acceptance 4)",
+        "commands": [
+          "for n in 1 2 3 4 12; do secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh $n; echo \"exit=$?\"; done 2>&1 | tee /tmp/legion10-smoke/checkpoints-none.log",
+          "bash scripts/smoke/checkpoints.sh 13; echo \"exit=$?\""
+        ],
+        "expect": [
+          "Each of 1 2 3 4 12: `CHECKPOINT <n> SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy` then `exit=3`.",
+          "13: `CHECKPOINT 13 OK: <k> processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24` then `exit=0` (k ≥ 2: tmux server + controller pane).",
+          "Paste the complete output of both commands into the PR body's E2E section verbatim (spec acceptance 4), then read README rows 47, 65 and 121 against it line by line and state that they agree."
+        ]
+      },
+      {
+        "id": "E4 teardown after none (acceptance 5)",
+        "commands": [
+          "bash scripts/smoke/down.sh; echo \"exit=$?\"",
+          "tmux -L legion-sjawhar24 list-sessions 2>&1; docker ps --filter name=legion-smoke-nats --format '{{.Names}}'; ss -ltn | grep -E ':(14222|19020|19370) ' || echo ports-free"
+        ],
+        "expect": [
+          "`STOPPED daemon`, `STOPPED tmux session legion-sjawhar24 on private socket legion-sjawhar24`, `STOPPED listener`, `STOPPED NATS container legion-smoke-nats`, `RIG DOWN`, exit 0; no session, no container, ports free."
+        ]
+      },
+      {
+        "id": "E5 envoy-mode start then teardown (acceptance 5; also the positive control for 1-4 gating)",
+        "commands": [
+          "export SMOKE_DIR=/tmp/legion10-smoke/rig-envoy SMOKE_WEBHOOK_MODE=envoy; (SMOKE_UPSTREAM_NATS defaults to nats://envoy-nats.tailb86685.ts.net:4222 per README; the LEGION-6 rig used the default)",
+          "same secrets-wrapped up.sh → expect `GREEN OMP build: ...`, `GREEN webhook ingress: production Envoy NATS bridge will relay ...`, `GREEN Envoy bridge: upstream subscription is ready`, `CREATED root issue LEGSMOKE-<m>`, `RIG READY`",
+          "Optional but cheap positive control: `secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh 1` a minute or two after RIG READY — in envoy mode the bridge relays `issue.created` and the daemon admits the root, so 1 is either OK or FAILED on a real observable, never SKIPPED-BLOCKED. Quote whichever you see.",
+          "bash scripts/smoke/down.sh; echo \"exit=$?\" → `STOPPED envoy-bridge (pid …)` first, then the same lines as E4, exit 0."
+        ]
+      },
+      {
+        "id": "E6 forward mode (acceptance 5)",
+        "statement": "Not run: `gh webhook forward` needs a user-authenticated gh identity that administers sjawhar/legion-smoke, which agents do not have. Its teardown is proven by down.test.sh only (Task 6's case: recorded process group killed, .pid/.start/.hook removed, `gh api -X DELETE repos/…/hooks/7` issued). Write exactly this in the PR body."
+      },
+      {
+        "id": "E7 unit harness re-run at head (acceptance 1, 6)",
+        "commands": [
+          "for f in scripts/smoke/*.sh; do bash -n \"$f\"; done",
+          "bash scripts/smoke/up.test.sh; bash scripts/smoke/checkpoints.test.sh; bash scripts/smoke/down.test.sh",
+          "Testing row 1 also asks for the case-B rejection by hand: `SMOKE_DIR=/tmp/legion10-smoke/cfg SMOKE_PROJECT=acme/1 SMOKE_REPO=sjawhar/legion-smoke bash -c 'source <(sed \"\\$d\" scripts/smoke/up.sh); mkdir -p \"$SMOKE_DIR\"; write_daemon_config'; sed 's/^  design: root-issues$/  design: root-issues\\n  merge: human/' /tmp/legion10-smoke/cfg/legion.yaml >/tmp/legion10-smoke/cfg/bad.yaml; env -u DISPATCH_URL -u DISPATCH_TOKEN bun run packages/daemon/src/cli/index.ts start acme/1 --config /tmp/legion10-smoke/cfg/bad.yaml --check-config; echo exit=$?` → stderr `gates.merge is not a Legion setting…`, exit 1; and the good file → `Config OK: project=acme1`, exit 0."
+        ]
+      }
+    ],
+    "negativeControlForPRBody": "The 409 POSSIBLE_DUPLICATE in E1 (same POST minus force) and the `LEGION_OMP_PATH=/nonexistent bash scripts/smoke/up.sh` preflight refusal (`error: LEGION_OMP_PATH is not an absolute executable file: /nonexistent`, nothing started — check `docker ps` and the ports) are the deliberately-broken inputs for the E2E section's 'Negative control' line.",
+    "cleanup": "Leave /tmp/legion10-smoke/* in place for the reviewer (logs, up-none.log, checkpoints-none.log), as LEGION-6 did with /tmp/legion6-smoke. Both rigs must be `down.sh`'d before handing off."
+  },
+  "prBody": {
+    "format": "The worker skill's READY format from the moment the PR opens; the implementer fills CI/Threads/Thermo placeholders as they become known, the tester fills E2E.",
+    "mustContain": [
+      "`Dispatch: LEGION-10`",
+      "the full `checkpoints.sh 1 2 3 4 12 13` none-mode output (acceptance 4)",
+      "the sentence: forward mode is proven by `down.test.sh` only because agents lack a user-authenticated `gh` identity (acceptance 5)",
+      "the file list statement: every changed file is under scripts/smoke/ (acceptance 6)"
+    ],
+    "skeleton": [
+      "Dispatch: LEGION-10",
+      "",
+      "Fixes the four smoke-rig defects from dispatch://LEGION-10/spec (v11), all under scripts/smoke/:",
+      "1. ensure_root_issue sends `force: true` (Dispatch near-duplicate check trips on the fixed title prefix; LEGSMOKE keeps every prior root).",
+      "2. resolve_omp_path picks the rpc-fix OMP build in preflight (LEGION_OMP_PATH if set and executable, else production's ${XDG_STATE_HOME:-$HOME/.local/state}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix), exports it to the daemon only, fails closed naming both remedies; omp_invocation stays `mise x <pin> -- omp`.",
+      "3. none mode tells the truth: no Dispatch issue event reaches the rig NATS, the root is never admitted, checkpoints 1-4 and 12 are SKIPPED-BLOCKED (exit 3) with a Dispatch-ingress reason; README rows/paragraphs match up.sh stdout and checkpoints.sh.",
+      "4. up.test.sh runs the real daemon loader (--check-config) against the generated legion.yaml and proves the pre-#941 `gates.merge` block is rejected (the #941 fix itself is untouched).",
+      "",
+      "## Verification",
+      "",
+      "**CI:** `pr-checks-result` run <run-id> — success at <head-sha>.",
+      "",
+      "**Threads:** 0 resolved, 0 unresolved.",
+      "",
+      "**Thermo:** thermonuclear-deep-review + thermonuclear-code-quality run once at <head-sha>: <verdict>.",
+      "",
+      "**E2E:** (tester) none-mode up.sh on this box with ${SMOKE_DIR}/root-issue absent → `CREATED root issue LEGSMOKE-<n>` (read back from Dispatch); controller ready record in state.json + `[legion] resync complete` line; /proc/<pid>/exe == the printed `GREEN OMP build` path; 0 hits for `send did not invoke the agent` in daemon.log and the controller pane. Full `checkpoints.sh 1 2 3 4 12 13` output: <paste>. down.sh after none → RIG DOWN; envoy-mode up.sh → RIG READY; down.sh → RIG DOWN. forward mode is proven by down.test.sh only because agents lack a user-authenticated gh identity. Harnesses at head: up.test.sh <n> PASS, checkpoints.test.sh <n> PASS, down.test.sh <n> PASS; bash -n clean on all six scripts.",
+      "Negative control: the same root-issue POST without `force` → HTTP 409 POSSIBLE_DUPLICATE; `LEGION_OMP_PATH=/nonexistent bash scripts/smoke/up.sh` → `error: LEGION_OMP_PATH is not an absolute executable file: /nonexistent`, nothing started.",
+      "",
+      "**Fast-follow:** none.",
+      "",
+      "**Chain:** not stacked."
+    ]
+  },
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-12T04:54:09.515Z"
+}
