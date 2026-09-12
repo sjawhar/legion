@@ -42,21 +42,25 @@ extension injects the session credential grant for `legion gh --`.
    branch-protection or CODEOWNERS rule, enforced by GitHub and the controller, not by you.
 3. Publish the READY. Its first line is, exactly,
    `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` — the pull
-   request number, the sha of the current head you just re-read, the sha the reviewer approved
-   (the same sha when retro added nothing), this issue's key, and the pull request URL. This is
-   the one definition of the READY shape; `skills/legion-worker/SKILL.md`,
+   request number, the sha of the current head you just re-read, the sha the reviewer's
+   head-pinned approval names (the same sha when retro added nothing), this issue's key, and the
+   pull request URL. This is the one definition of the READY shape; `skills/legion-worker/SKILL.md`,
    `skills/legion-architect/SKILL.md`, and the controller skill's Merge queue section mirror it.
-   The controller merges only the current sha and checks the approval and the PR body's
-   `## Verification` block at the approved sha, so both must be right. Follow the first line with
-   the PR body's gate facts (the `## Verification` block), to the project's controller topic with
-   `envoy_publish`. That topic is named in the `Legion addressing` line at the end of your system
-   prompt (`the project's controller (merge queue) is ...`); never hand-format it. Do not run
-   `legion gh -- pr merge`; the controller re-reads the gates from live GitHub and performs the
-   squash merge under its own authority once it accepts your report. If `envoy_publish` returns a
-   404 no-holder, publish the same `READY` to the architect's role topic instead and stay idle —
-   never merge yourself regardless of how long the controller is away. Do not run
-   `legion handoff complete` until this `READY` has actually been delivered — to the controller,
-   or, on a 404, to the architect.
+   The controller merges only the current sha, pinned with `--match-head-commit`, and uses the
+   approved sha to anchor two path-only compares: the head the PR body's `## Verification` block
+   names (where the tester and reviewer worked) may differ from the approved sha only by
+   deletions under `.legion/`, and the approved sha may differ from the current sha only by
+   changes under `docs/solutions/`. It does not verify the approval itself — whether a review
+   must exist before merge is the repository's own rule, enforced by GitHub at merge time. Follow
+   the first line with the PR body's gate facts (the `## Verification` block), to the project's
+   controller topic with `envoy_publish`. That topic is named in the `Legion addressing` line at
+   the end of your system prompt (`the project's controller (merge queue) is ...`); never
+   hand-format it. Do not run `legion gh -- pr merge`; the controller re-reads the gates from
+   live GitHub and performs the squash merge under its own authority once it accepts your
+   report. If `envoy_publish` returns a 404 no-holder, publish the same `READY` to the
+   architect's role topic instead and stay idle — never merge yourself regardless of how long the
+   controller is away. Do not run `legion handoff complete` until this `READY` has actually been
+   delivered — to the controller, or, on a 404, to the architect.
 
 ## Completion
 
@@ -73,6 +77,6 @@ including the architect, with `envoy_publish` to `notifications.role.` followed 
 role token — never hand-format one: your own role topic and your tree's architect's are stated at
 the end of your system prompt, and a sibling role's topic is yours with the trailing `-<role>`
 replaced; or compute one with the `roleToken` helper from `@legion/contracts` exactly the way the
-daemon does (`legion-<project>-<KEY>-<role>`; for example,
+daemon does (`legion-<project>-<key>-<role>` with the issue key lower-cased; for example,
 project `acme`, issue `LEGION-41`, role `architect` encodes to
-`legion-acme-LEGION-41-architect`).
+`legion-acme-legion-41-architect`).

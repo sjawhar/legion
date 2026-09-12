@@ -44,6 +44,13 @@ The claim is kept alive automatically afterwards: the Envoy registration heartbe
 and re-posts readiness whenever the listener loses sight of this session, so
 `/legion-claim-controller` is the manual override, not a routine step after a listener restart.
 
+Two limits of a takeover session. It caches the controller secret it started with: after the
+daemon respawns its own pane the secret rotates, every `bash` call in the takeover session then
+fails with a 403 from the grant mint, and the fix is to start a fresh OMP with the new secret,
+not to retry. And the role does not follow `/new` or `/fork` in a takeover session — without
+`LEGION_CONTROLLER=1` the new session is not a Legion session to the extension — so after either
+command run `/legion-claim-controller` again.
+
 This handshake lets the daemon redeliver held controller work. It does not turn the controller
 into a state holder: daemon state and the Dispatch project remain authoritative.
 
@@ -152,65 +159,92 @@ claim, never evidence.
 **READY message shape.** Defined once in `packages/pi-envoy/roles/merger.md` and mirrored here
 verbatim. The first line is
 `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`: the pull
-request number, the sha of the pull request's current head, the sha the reviewer approved, the
-issue key, and the pull request URL. The two shas differ whenever retro has run: retro commits
-its `docs/solutions/` learning *after* the reviewer approves, so the current head is normally the
-approved head plus that one commit. The rest of the message is the PR body's gate facts (the
-`## Verification` block). You need every field: the URL addresses the pull request from this
-pane's working directory (which is not a checkout), the key finds the tree's architect (below),
-the current sha is the only head you may merge, and the approved sha is where approval and the
-verification block are checked.
+request number, the sha of the pull request's current head, the sha the reviewer's head-pinned
+approval names, the issue key, and the pull request URL. The rest of the message is the PR
+body's gate facts (the `## Verification` block). You need every field: the URL addresses the
+pull request from this pane's working directory (which is not a checkout), the key finds the
+tree's architect (below), the current sha is the only head you may merge, and the approved sha
+anchors the two path-only compares in gates 5 and 6. The controller never verifies the
+approval itself: whether a review must exist before merge is the repository's own
+branch-protection or CODEOWNERS rule, which GitHub enforces at `pr merge` time and Legion
+neither reads nor writes.
+
+**Three shas.** This repository's flow leaves three commits that matter, and they are normally
+all different. The *verified* sha is the head the tester and the reviewer worked at: the
+`## Verification` block's own `CI`, `Thermo`, and `E2E` lines name it, and they must agree. After
+that head is found clean the implementer pushes the `.legion/` handoff deletion and the reviewer
+approves *that* head by name — the *approved* sha, one commit later. Retro then commits its
+`docs/solutions/` learning on top — the *current* sha. READY carries the current and approved
+shas; the verified sha you read from the block. The gates check the block at the verified sha
+and prove, with two compares, that nothing but the `.legion/` deletion lies between verified and
+approved, and nothing but `docs/solutions/` between approved and current.
 
 **Gates.** Read them from live GitHub, never from the message or the PR body alone. Every `gh`
 command takes the pull request URL, or `--repo <owner>/<repo>` taken from it, because this
 session's working directory has no git remote to resolve a bare number against:
 
 ```text
-legion gh -- pr view <pr url> --json headRefOid,mergeable,reviewDecision,body
-legion gh -- pr checks <pr url> --required --json name,state,bucket
+legion gh -- pr view <pr url> --json headRefOid,mergeable,body
+legion gh -- pr checks <pr url> --required --json name,state,bucket,link
+legion gh -- api repos/<owner>/<repo>/rules/branches/<base branch> --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]'
 legion gh -- api graphql -f query='query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved}}}}}' -F owner=<owner> -F repo=<repo> -F n=<n>
+legion gh -- api repos/<owner>/<repo>/compare/<verified sha>...<approved sha> --jq '{status, files: [.files[].filename]}'
 legion gh -- api repos/<owner>/<repo>/compare/<approved sha>...<current sha> --jq '{status, files: [.files[].filename]}'
 ```
 
 1. **head**: `headRefOid` equals the `<current sha>` in the READY. Any other head is a different
    pull request as far as this READY is concerned.
-2. **checks**: `pr checks --required` lists the checks branch protection requires at that head,
-   and every row's `bucket` is `pass`. A `pending` row is not green; a `fail` row never merges
-   (see Flake). Checks that are not required do not count either way. If the repository has no
-   required checks the list is empty and this gate holds.
+2. **checks**: `pr checks --required` succeeds (exit 0) with a non-empty list in which every
+   row's `bucket` is `pass`. That is the only green. A `pending` row is not green; a `fail` row
+   never merges (see Flake). The command never returns an empty list: when nothing has reported
+   at the head yet it exits 1 with `no checks reported on the '<branch>' branch`, and when checks
+   exist but none is required it exits 1 with `no required checks reported on the '<branch>'
+   branch` — a freshly pushed head has no check runs for a few seconds, and a head that conflicts
+   with the base never gets any. Either exit is **pending**, never green: subscribe to
+   `pr.<n>.checks` exactly as for a running check and re-run the gates on that wake. The one
+   exception is a repository that genuinely requires no checks, and that fact is read from the
+   repository, never from the absence of rows: the `rules/branches/<base branch>` query above
+   returning `[]` is what lets this gate hold with no check rows.
 3. **threads**: zero unresolved review threads (the count of `isResolved: false` is 0).
 4. **mergeable**: `mergeable` is not `CONFLICTING` and not `UNKNOWN`.
-5. **retro only**: `compare/<approved sha>...<current sha>` reports `status` `identical` or
+5. **cleanup only**: `compare/<verified sha>...<approved sha>` reports `status` `identical` or
+   `ahead`, and every path in `files` starts with `.legion/` — the handoff deletion the reviewer
+   directed, and nothing else. Anything else between the two is the failed gate
+   `cleanup changed more than .legion`.
+6. **retro only**: `compare/<approved sha>...<current sha>` reports `status` `identical` or
    `ahead`, and every path in `files` starts with `docs/solutions/`. Anything else between the
-   two shas is a failed gate named `head moved beyond retro`: the approval no longer covers the
-   head.
-6. **verification block**: the PR body's `## Verification` block (the template in
-   `skills/legion-worker/SKILL.md`) is complete and current at the `<approved sha>` — the tester
-   fills it before retro, so it names the approved head, never the post-retro one. Line by line:
-   the `CI` line names a run and reports success at `<approved sha>`; the `Threads` line reports
-   `0 unresolved` (its per-thread lines name fixing commits, never the head — do not look for a
-   sha there); the `Thermo` line names `<approved sha>` and a verdict, unless the pull request is
-   docs-only, in which case the template omits that line entirely; the `E2E` line names
-   `<approved sha>` and has a `Negative control` line; the `Fast-follow` and `Chain` lines are
-   filled in. No `<placeholder>` text remains anywhere in the block.
+   two is the failed gate `head moved beyond retro`: the approval no longer covers the head.
+7. **verification block**: the PR body's `## Verification` block (the template in
+   `skills/legion-worker/SKILL.md`) is complete and current at the verified sha. The tester
+   fills the `E2E` line before review; the reviewer writes the `Thermo` line at the head it
+   audited; approval lands one commit later on the cleanup head; so the block names the verified
+   sha, never the approved or the current one. Line by line: the `CI` line names a run and
+   reports success at one sha; the `Thermo` line names the same sha and a verdict, unless the
+   pull request is docs-only, in which case the template omits that line entirely; the `E2E`
+   line names the same sha and has a `Negative control` line — those lines agreeing on one sha
+   is what defines the verified sha; the `Threads` line reports `0 unresolved` (its per-thread
+   lines name fixing commits, never the head — do not look for a sha there); the `Fast-follow`
+   and `Chain` lines are filled in. No `<placeholder>` text remains anywhere in the block.
 
-When all six hold, merge: `legion gh -- pr merge <pr url> --squash`. The grant your `bash` call
-carries is the controller's own, the only grant the daemon honours for a merge; the merge runs
-under the implement App's identity and the repository's own rules (branch protection,
-CODEOWNERS). Whether a human must approve first is that repository's setting — you neither
-read nor bypass it, and you never admin-merge without an explicit deployment grant from Sami for
-that specific merge.
+When all seven hold, merge:
+`legion gh -- pr merge <pr url> --squash --match-head-commit <current sha>`. The head pin makes
+GitHub refuse the merge if a push landed after gate 1 read the head; that refusal is a failed
+`head` gate, reported like any other. The grant your `bash` call carries is the controller's
+own, the only grant the daemon honours for a merge; the merge runs under the implement App's
+identity and the repository's own rules (branch protection, CODEOWNERS). Whether a human must
+approve first is that repository's setting — you neither read nor bypass it, and you never
+admin-merge without an explicit deployment grant from Sami for that specific merge.
 
 **Failed gate.** Reply to the tree's architect naming the gate (`head`, `checks`, `threads`,
-`mergeable`, `head moved beyond retro`, or `verification block`) and the evidence you read (the
-shas, the check name and run id, the thread count, the `mergeable` value, the offending paths
-from the compare). Do not merge, do not retry on a timer. The architect fixes through the
-phases.
+`mergeable`, `cleanup changed more than .legion`, `head moved beyond retro`, or
+`verification block`) and the evidence you read (the shas, the check name and run link, the
+thread count, the `mergeable` value, the offending paths from the compare). Do not merge, do not
+retry on a timer. The architect fixes through the phases.
 
 **Flake.** A required check that failed for a reason unrelated to the change (a runner outage,
 a rate limit, a known-flaky job) may be rerun once:
 `legion gh -- run rerun <run-id> --failed --repo <owner>/<repo>`, the run id taken from the
-failing check's `detailsUrl` (`legion gh -- pr checks <pr url> --required --json name,link`).
+failing row's `link` (`https://github.com/<owner>/<repo>/actions/runs/<run-id>/job/<job-id>`).
 Then stop. The rerun's result reaches you as a `pr.<n>.checks` wake; re-run the gates then.
 A second failure is a failed gate, reported as above.
 
@@ -220,8 +254,9 @@ reason — the CI queue is long and slow, and an unnecessary rebase clogs it for
 request. `mergeable == UNKNOWN` means GitHub has not finished computing it: do not merge, do
 not poll; re-read on the next `pr.<n>.checks` wake.
 
-**Pending READY.** A READY that cannot merge yet only because checks are still running, a flake
-rerun was issued, or `mergeable` is `UNKNOWN` is pending. Subscribe to that pull request's
+**Pending READY.** A READY that cannot merge yet only because checks are still running, none
+has reported at the head yet (gate 2's `no checks reported` exit), a flake rerun was issued, or
+`mergeable` is `UNKNOWN` is pending. Subscribe to that pull request's
 events so its settlement wakes you:
 
 ```text
@@ -236,7 +271,7 @@ have the READY in your conversation, ask that issue's merger (its token is the `
 `notifications.role.` followed by that key) to republish it; never guess a sha.
 
 **Finding the tree's architect.** Never hand-format a role token: the daemon lower-cases the
-issue key inside it (`LEGION-16` becomes `legion-16`) and escapes other characters, so a token
+issue key inside it (`LEGION-16` becomes `legion-16`) and rejects any other shape, so a token
 you assemble from `<KEY>` never matches a live role. Read it instead: `legion state --json`
 gives `issues[<KEY>].parent`; follow `parent` until it is absent — that key is the root (the
 `trees` map lists the same roots). Then take the `roles` key whose `issue` equals that root and

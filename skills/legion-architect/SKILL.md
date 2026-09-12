@@ -197,12 +197,14 @@ Preserve this order exactly:
    `packages/pi-envoy/roles/merger.md` defines) to the project's controller topic (the merge
    queue; named in its `Legion addressing` line); it never merges. The controller verifies the
    gates against live GitHub — the current head, required checks, review threads, mergeability,
-   that only `docs/solutions/` changed between the two shas, and the `## Verification` block at
-   the approved sha — and merges under the implement App's identity and the repository's own
-   rules (branch protection, CODEOWNERS); whether a human must approve first is that
-   repository's setting, not Legion's, and you never ask for or wait on such an approval. If the
-   controller reports a failed gate to you, treat it like `pr-blocked`: fix through the phases,
-   never bypass.
+   that only `.legion/` deletions lie between the head the `## Verification` block names and
+   the approved sha, that only `docs/solutions/` changed between the approved and current shas,
+   and that the block is complete at the head it names — and merges the current sha, pinned,
+   under the implement App's identity and the repository's own rules (branch protection,
+   CODEOWNERS); it does not check the approval itself, and whether a human must approve first is
+   that repository's setting, not Legion's, so you never ask for or wait on such an approval. If
+   the controller reports a failed gate to you, treat it like `pr-blocked`: fix through the
+   phases, never bypass.
 
 If anything else changes the head, return to review; do not let the merger publish `READY`
 for an obsolete approval.
