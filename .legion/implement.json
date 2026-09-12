@@ -154,6 +154,30 @@
       "github": "PR #956 head dc5fc7e4: MERGEABLE (BLOCKED = awaiting review); Tests run 34729930519 success (lint, typecheck, test, pr-title), Legion Envoy and Contracts run 34729930526 success (pi-envoy job). This handoff-only commit re-runs CI at the final head.",
       "jjNote": "The extension-provisioned working-copy commit (`.omp/config.yml`, change puvoopos) became divergent across the two rebases: two empty-of-tracked-content siblings of the head, both holding only .omp/config.yml, neither under the bookmark. Left as is (the skill forbids `jj abandon`); the working copy sits on 8c80c01f. Not pushed, not in the PR.",
       "harnessNotes": "The bash tool was blocked with `Unable to connect` from the grant hook twice during this round (daemon briefly unreachable at load ~110); work continued through the eval kernel on the same workspace with identical commands. The grant shadow was re-established in the fresh pane per docs/solutions/legion/worker-pane-shell-gotchas.md \u00a71 and `legion gh -- auth status` confirmed before pushing."
+    },
+    {
+      "kind": "nits",
+      "review": "https://github.com/sjawhar/legion/pull/956#pullrequestreview-5188935402 \u2014 clean re-review at 8c988ff2; both prior threads accepted; six non-blocking nits listed for a fast-follow. Architect ruling: no fast-follow, fix all six now in one commit.",
+      "commit": "6af80295ea30eb040d07a2556c08ad1fe475bc5c",
+      "commitMessage": "chore(daemon): align the instructions E2E wait with its siblings and dedupe docs",
+      "branchHeadAfterPush": "6af80295 on top of cb9c7049 (`review: record re-review at the rebased head`, the reviewer's local-only handoff commit, carried to origin by this push) on top of 8c988ff2 (tester handoff)",
+      "changes": [
+        "1. real-deployment-instructions-e2e.test.ts `waitForFile`: the `fs/promises.watch` loop is replaced by a 20 ms `existsSync` poll bounded at 30 s (1500 attempts), the shape of `waitForSocket`/`waitForPaneGone`/`ci-fixtures.waitFor`; the `argv record never appeared at <path>` error is kept; `watch` import dropped. argv-recorder-omp.ts writes `argv.json.tmp` beside the record and renames it to `argv.json` (atomic rename kept \u2014 existence still implies full content); the parent-directory placement and its watcher-coalescing comment are gone.",
+        "2. packages/daemon/src/daemon/AGENTS.md: the standalone 'Before loading state\u2026' paragraph about the instructions file (was ~line 150) is removed; the configuration paragraph (~87\u2013102) now carries the one statement of the boot-order refusal, and says a failed write refuses startup with Node's error naming the target file (`<state_dir>/deployment-instructions.md`), not the instructions path.",
+        "3. deployment-instructions.ts: the const's doc comment is removed; the function's doc comment absorbs the one fact it alone carried (panes read the materialized copy, never the operator's path).",
+        "4. E2E `run` helper: accepts and forwards `{ cwd?, env? }` to `Bun.spawn` exactly like `real-shutdown-e2e.test.ts`'s `run`, so it honestly satisfies the `TmuxRun` type it is passed as (no caller currently passes options; the sibling shape was chosen over dropping the parameter so the two files match).",
+        "5. config.ts loadConfigFromFile: `const instructionsPath = requireNonEmpty(instructions, \"instructions\");` and the resolved path is built from that result, matching the file's `fields.x = requireNonEmpty(...)` idiom instead of a bare call.",
+        "6. scripts/smoke/README.md: the sentence duplicated from up.sh's `write_daemon_config` comment ('every pane the smoke daemon launches gets it appended \u2026 standing rules') is replaced by a pointer to `write_daemon_config` in `up.sh`, which keeps the one copy."
+      ],
+      "threadsResolved": [
+        "PRRT_kwDORFy7ds6huAFv (r3995426385) via GraphQL resolveReviewThread \u2192 isResolved=true",
+        "PRRT_kwDORFy7ds6huAFx (r3995426388) via GraphQL resolveReviewThread \u2192 isResolved=true"
+      ],
+      "loop": "50/50 iterations of `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 src/daemon/__tests__/real-deployment-instructions-e2e.test.ts` from packages/daemon at 6af80295; per-run wall 1.94\u20133.39 s (median 2.50 s); 1-minute load average 104\u2013111 on 32 cores throughout.",
+      "gate": "at 6af80295 from packages/daemon: bunx biome check --write src/ \u2192 no fixes (151 files); bunx tsc --noEmit clean; env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 \u2192 971 pass / 3 skip / 0 fail across 59 files; bash scripts/smoke/up.test.sh exit 0.",
+      "github": "PR #956 head 6af80295: MERGEABLE (BLOCKED = awaiting review). Tests run 34731320610 success and Legion Envoy and Contracts run 34731320412 success at 6af80295; a second Tests run 34731362087 (triggered by the PR-body edit) was in progress when this entry was written. This handoff-only commit re-runs CI at the final head.",
+      "prBody": "Threads line \u2192 '2 resolved, 0 open' with each thread's disposition and a line for the six nits at 6af80295; the corrective E2E paragraph no longer explains the parent-directory placement and states that the wait now polls like its siblings, with the 50/50 loop count and load; gate line gained the 6af80295 re-run; 'Fast-follow: none' unchanged and true.",
+      "notDone": ".legion/ is intentionally not deleted in this push (architect: that follows the tester's and reviewer's pass on this head)."
     }
   ]
 }
