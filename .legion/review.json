@@ -3,17 +3,17 @@
   "pr": {
     "number": 970,
     "url": "https://github.com/sjawhar/legion/pull/970",
-    "reviewedHead": "5344caabdc0196eac323c5f20a6be88c81088893",
+    "reviewedHead": "49f06f4735aa66c5435738b1ba67ee3efe20c34d",
     "branch": "legion/LEGION-29"
   },
   "spec": "dispatch://LEGION-29/artifact/spec (v4)",
-  "verdict": "CHANGES_REQUESTED",
+  "verdict": "APPROVED",
   "review": {
-    "id": 5187400317,
-    "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187400317",
-    "submittedAt": "2026-09-12T17:48:04Z",
-    "event": "REQUEST_CHANGES",
-    "commitId": "5344caabdc0196eac323c5f20a6be88c81088893"
+    "id": 5187529335,
+    "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187529335",
+    "submittedAt": "2026-09-12T18:33:58Z",
+    "event": "APPROVE",
+    "commitId": "49f06f4735aa66c5435738b1ba67ee3efe20c34d"
   },
   "threads": [
     {
@@ -249,7 +249,45 @@
     },
     "nextRound": "Implementer moves the registrationFailed reset into the full-chain-success .then, adds the pinning test, aligns the docblock wording, updates the PR body Thermo/Threads lines; tester re-runs (the R1 outage-recovery path is the one to exercise live: registration failure then a failing role read then healthy → one controller/ready); reviewer reviews that head. .legion/ deletion only after a clean review."
   },
+  "round3": {
+    "reviewedHead": "49f06f4735aa66c5435738b1ba67ee3efe20c34d",
+    "testedHead": "bc163b90f728",
+    "verdict": "APPROVED",
+    "review": {
+      "id": 5187529335,
+      "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187529335",
+      "submittedAt": "2026-09-12T18:33:58Z",
+      "event": "APPROVE",
+      "commitId": "49f06f4735aa66c5435738b1ba67ee3efe20c34d"
+    },
+    "round2ThreadVerification": [
+      {
+        "id": 3997043281,
+        "verified": "fixed in 415f4ba9 — `registrationFailed = true` only in the onRejected arm of the first .then (envoy.ts:454-457); sole `= false` in the full-chain-success .then (envoy.ts:459-462). Pinned by envoy.test.ts:2210 'a failed registration's regain survives a role-read failure on the recovery tick'. Reviewer red/green: throwaway copy of envoy.ts with the reset moved back into the first .then → test times out at 5 s (regained never gets 'reregistered'); at head → 1 pass, 7 expects."
+      },
+      {
+        "id": 3997043284,
+        "verified": "fixed in 415f4ba9 — reassertRole docblock: 'the first healthy tick after a failed registration, during which…'; consistent with the flag comment (envoy.ts:431-435) and AGENTS.md:61."
+      }
+    ],
+    "threads": [],
+    "diffScope": "jj diff 5344caab..49f06f47 --summary: packages/pi-envoy/extensions/envoy.ts (3 code lines + 2 comment lines), envoy.test.ts (1 test), .legion/{implement,review,test}.json. Nothing else moved; round-1/round-2 fixes intact; Acceptance 1-3 code paths untouched.",
+    "githubVerified": {
+      "head": "49f06f4735aa66c5435738b1ba67ee3efe20c34d",
+      "checks": "bc163b90 (16 check-runs incl. duplicate Tests run) and 49f06f47 (12): Tests pr-title/lint/typecheck/test SUCCESS; Legion Envoy and Contracts changes/pi-envoy SUCCESS, others SKIPPED; commit status legion/tester=success on both",
+      "threads": "9/9 isResolved=true, each with one implementer reply naming the fixing commit (415f4ba9 for the two round-2 threads)"
+    },
+    "focusedRun": "cd packages/pi-envoy && env -u LEGION_* -u DISPATCH_TOKEN_FILE bun test extensions/envoy.test.ts extensions/legion.test.ts → 129 pass, 0 fail, 434 expect() calls",
+    "thermo": {
+      "head": "49f06f47",
+      "scope": "round-3 diff 5344caab..49f06f47",
+      "deepReview": "clean, no findings; traced orderings a-f (fail→fail→healthy; fail→registerOK/reassertFail→healthy; healthy→reassertFail→healthy; fail→drifted→healthy; fail→registerOK/softClaimLands→healthy no duplicate; fail→registerOK/409→healthy flag does not stick); no new unhandled-rejection path. agent://ThermoDeepR3",
+      "codeQuality": "clean, no findings; comments current-behaviour and consistent with AGENTS.md:61; new test is the only discriminator of reset-before-reassert vs reset-after-chain; chain shape is minimal. agent://ThermoQualityR3"
+    },
+    "preExistingUnchanged": "context.ui.notify throwing inside the heartbeat .catch (envoy.ts:466) would reject past .finally — present on main, not touched by this PR (noted by deep review rounds 1 and 3).",
+    "next": "Architect sends the implementer to push the .legion/ deletion (this review.json round-3 commit rides along); reviewer reviews that head and approves it by name; then retro, then merger publishes READY."
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T17:48:49.436Z"
+  "completed": "2026-09-12T18:34:22.323Z"
 }
