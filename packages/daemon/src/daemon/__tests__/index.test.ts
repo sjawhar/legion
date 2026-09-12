@@ -835,7 +835,7 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("materializes the instructions file under state_dir at boot and hands its path to every launched pane", async () => {
+  it("materializes the instructions file under state_dir at boot and appends it to the controller's launch command", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const instructionsPath = path.join(stateDir, "ops", "deployment.md");
     await mkdir(path.dirname(instructionsPath), { recursive: true });

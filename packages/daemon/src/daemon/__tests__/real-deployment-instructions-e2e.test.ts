@@ -48,12 +48,21 @@ async function run(
 
 /** Resolves once `target` exists: an existence check first (the recorder may already have run),
  * then inotify events on its directory — the recorder is a real subprocess in a real pane, so
- * there is no promise in this process to await; the directory watch is the event, not a timer. */
+ * there is no promise in this process to await; the directory watch is the event, not a timer.
+ * The recorder moves the finished record in from the parent directory, so this directory sees a
+ * single event and the name appearing means the content is whole (see `argv-recorder-omp.ts`).
+ * Times out naming the path, like `waitForSocket` in `real-shutdown-e2e.test.ts`. */
 async function waitForFile(target: string): Promise<void> {
   if (existsSync(target)) return;
-  for await (const _ of watch(path.dirname(target), { signal: AbortSignal.timeout(30_000) })) {
-    if (existsSync(target)) return;
+  const signal = AbortSignal.timeout(30_000);
+  try {
+    for await (const _ of watch(path.dirname(target), { signal })) {
+      if (existsSync(target)) return;
+    }
+  } catch (error) {
+    if (!signal.aborted) throw error;
   }
+  throw new Error(`argv record never appeared at ${target}`);
 }
 
 function config(stateDir: string): DaemonConfig {
