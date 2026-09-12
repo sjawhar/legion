@@ -226,6 +226,7 @@ function parseHandoffData(raw: string): Record<string, unknown> {
 function loadStartConfig(
   project: string | undefined,
   configPath: string | undefined,
+  env: NodeJS.ProcessEnv,
   options: LoadConfigFileOptions = {}
 ): DaemonConfig {
   let configFile: LoadedConfigFile | undefined;
@@ -240,7 +241,7 @@ function loadStartConfig(
     configFile = loadConfigFromFile(fs.readFileSync("legion.yaml", "utf8"), process.cwd(), options);
   }
   return resolveDaemonConfig({
-    env: process.env,
+    env,
     configFile,
     cliOverrides: project ? { legionId: project } : undefined,
   }).config;
@@ -248,19 +249,21 @@ function loadStartConfig(
 
 export async function cmdCheckConfig(
   project: string | undefined,
-  configPath: string | undefined
+  configPath: string | undefined,
+  env: NodeJS.ProcessEnv
 ): Promise<void> {
-  const config = loadStartConfig(project, configPath, { resolveSecrets: false });
+  const config = loadStartConfig(project, configPath, env, { resolveSecrets: false });
   console.log(`Config OK: project=${config.project}`);
 }
 
 async function cmdStart(
   project: string | undefined,
-  configPath: string | undefined
+  configPath: string | undefined,
+  env: NodeJS.ProcessEnv
 ): Promise<void> {
-  const config = loadStartConfig(project, configPath);
+  const config = loadStartConfig(project, configPath, env);
   const daemon = await startDaemon(config);
-  const paths = resolveLegionPaths(process.env, os.homedir());
+  const paths = resolveLegionPaths(env, os.homedir());
   const port = daemon.server.port;
   if (!port) throw new Error("Daemon did not bind a TCP port");
   await writeLegionEntry(paths.legionsFile, config.legionId, {
@@ -278,9 +281,13 @@ async function cmdStop(project: string): Promise<void> {
   await removeLegionEntry(paths.legionsFile, project);
 }
 
-async function cmdRestart(project: string, configPath: string | undefined): Promise<void> {
+async function cmdRestart(
+  project: string,
+  configPath: string | undefined,
+  env: NodeJS.ProcessEnv
+): Promise<void> {
   await cmdStop(project);
-  await cmdStart(project, configPath);
+  await cmdStart(project, configPath, env);
 }
 
 async function cmdStatus(project: string): Promise<void> {
@@ -479,7 +486,9 @@ const startCommand = defineCommand({
     const project = args.project as string | undefined;
     const configPath = args.config as string | undefined;
     return runCli(() =>
-      args.checkConfig ? cmdCheckConfig(project, configPath) : cmdStart(project, configPath)
+      args.checkConfig
+        ? cmdCheckConfig(project, configPath, process.env)
+        : cmdStart(project, configPath, process.env)
     );
   },
 });
@@ -507,7 +516,7 @@ const restartCommand = defineCommand({
     config: { type: "string", description: "Path to legion.yaml" },
   },
   run: ({ args }) =>
-    runCli(() => cmdRestart(String(args.project), args.config as string | undefined)),
+    runCli(() => cmdRestart(String(args.project), args.config as string | undefined, process.env)),
 });
 
 const statusCommand = defineCommand({
