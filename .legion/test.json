@@ -157,7 +157,68 @@
     ],
     "harness": "Fresh pane: grant-export shadow re-established from docs/solutions/legion/worker-pane-shell-gotchas.md §1 (/tmp/legion17-grant-trap.sh); `legion gh -- auth status` → logged in as legion-implementer[bot] before any write; 2–3 stacked LEGION_GRANT blocks per call throughout."
   },
+  "nitsVerification": {
+    "at": "2026-09-13T01:55:00Z",
+    "codeHead": "6af80295ea30eb040d07a2556c08ad1fe475bc5c (chore(daemon): align the instructions E2E wait with its siblings and dedupe docs)",
+    "branchHead": "65c82fe3d4efee7158887c88e3d018245035f968 (implement: record the re-review nits round; .legion/implement.json only — code identical to 6af80295)",
+    "base": "4d516a1f4f2bed5613920a028ba35f27320e47cf (main); GitHub: MERGEABLE, mergeStateStatus BLOCKED (awaiting review)",
+    "scope": "Third pass, scoped to what the six-nit commit could break (.legion/implement.json corrective[2] `nits`). The first pass (df631359) and re-verification (dc5fc7e4) above remain the record for everything the diff does not touch.",
+    "verdict": "PASS",
+    "findings": [
+      {
+        "kind": "pre-existing CI flake on main, not a LEGION-17 defect — reported to the architect (envoy 9b923c74029f0e58016d880dcd5df384)",
+        "observed": "Tests run 34731406362 attempt 1 at 65c82fe3: 973 pass / 1 fail — `ProcessManager > does not let a slow launch block a concurrent different-role admission decision`: `Incomplete Jujutsu clone at /tmp/legion-processes-sK7ilx/repos/github.com/sjawhar/legion: missing …/.jj` at packages/workspace/src/workspace.ts:90 (ensureRepoClone ← provisionIssueWorkspace). typecheck/lint/pr-title green.",
+        "cause": "Two concurrent provisionIssueWorkspace calls on one repo clone dir; the processes.test.ts fixture's fake `jj git clone` does mkdir(cloneDir/.jj, {recursive:true}) — two syscalls — so the second ensureRepoClone can see cloneDir before .jj exists and throws. Both are main's; this PR touches neither workspace.ts nor worker-admission.ts, and its only processes.test.ts hunk is the new spawn-command test at line 1663.",
+        "evidencePreExisting": "main's own Tests run 34657818354 (main@92890fa4, 2026-09-11) failed with the identical message on the sibling test `serializes two concurrent first spawns on the same issue into a single new window`; the same code at 6af80295 passed Tests twice (34731320610, 34731362087); the test passes 30/30 in isolation at 65c82fe3 locally.",
+        "action": "`legion gh -- run rerun 34731406362 --failed` → attempt 2 success (test, lint, pr-title, typecheck). No code touched."
+      }
+    ],
+    "items": {
+      "1_waitRewriteLoop": {
+        "command": "cd packages/daemon && 50× TMPDIR=/tmp/legion17-n/tmp env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 src/daemon/__tests__/real-deployment-instructions-e2e.test.ts (driver /tmp/legion17-n/loop.sh at branch head 65c82fe3)",
+        "result": "50 pass / 0 fail; per-run wall 2.14–3.25 s (mean 2.49 s); 1-minute load average 109–120 on 32 cores throughout (start 110.72, end 112.69).",
+        "leftoverCheck": "The poller listed the controller directory the moment argv.json appeared: 40 of 50 listings were captured before the test's afterAll removed the temp dir, and every one contained exactly `argv.json` — no `argv.json.tmp` leftover; the other 10 directories were already removed by teardown when the poller listed them (harness race, not the test). No run reported an empty-file parse (`JSON.parse` on a partial record) or `argv record never appeared`.",
+        "argvRecord": [
+          "--mode",
+          "rpc",
+          "--append-system-prompt",
+          "# Legion Controller Root\n\nYou are the resident, wake-driven Legion controller. … never performs phase-worker work or forwards raw events into an architect session.",
+          "--append-system-prompt",
+          "# Deployment instructions (sjawhar/legion)\n\n## Required checks\n\n- `pr-checks-result` must pass.\n\nIt's the operator's call: ask `notifications.role.librarian` first."
+        ],
+        "argvNote": "Two --append-system-prompt values on the controller; argv[-2] is the flag and argv[-1] the header + content — the same record as both earlier passes.",
+        "log": "/tmp/legion17-n/loop-summary.tsv, /tmp/legion17-n/loop-header.txt, /tmp/legion17-n/controller-listing-*.txt"
+      },
+      "2_fullGate": {
+        "cwd": "packages/daemon",
+        "biome": "bunx biome check src/ → Checked 151 files in 569ms. No fixes applied. exit 0",
+        "tsc": "bunx tsc --noEmit → clean, exit 0",
+        "bunTest": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 → 971 pass / 3 skip / 0 fail, Ran 974 tests across 59 files [38.64s], exit 0 (log /tmp/legion17-n/full-suite.log). The CI-flaky admission test passed here too.",
+        "upTest": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bash scripts/smoke/up.test.sh → 8 PASS lines, exit 0"
+      },
+      "3_diffRead": {
+        "diff": "jj diff --summary --from d1b7e3d0 --to 6af80295: argv-recorder-omp.ts, real-deployment-instructions-e2e.test.ts, config.ts, deployment-instructions.ts, packages/daemon/src/daemon/AGENTS.md, scripts/smoke/README.md (+ .legion/review.json and .legion/test.json from the review and tester handoffs). 6af80295..65c82fe3 is .legion/implement.json only.",
+        "perSite": [
+          "argv-recorder-omp.ts: writes `argv.json.tmp` beside the record and renames to `argv.json` (was `../argv.json.tmp`); rename kept, comment shortened.",
+          "real-deployment-instructions-e2e.test.ts: `waitForFile` = 1500 × (existsSync ‖ Bun.sleep(20)) then `argv record never appeared at <path>`; `watch` import dropped; `run` accepts `{cwd?, env?}` and spreads them into Bun.spawn like real-shutdown-e2e's run. Assertions unchanged.",
+          "config.ts loadConfigFromFile: `const instructionsPath = requireNonEmpty(instructions, \"instructions\")` then isAbsolute/resolve on that result — requireNonEmpty returns its input, so behaviour is identical.",
+          "deployment-instructions.ts: the const's doc comment folded into the function's; code unchanged.",
+          "AGENTS.md: boot-order refusal stated once in the config paragraph (plus the write-failure wording); the standalone 'Before loading state…' instructions paragraph removed.",
+          "scripts/smoke/README.md: duplicated sentence replaced by a pointer to `write_daemon_config` in up.sh."
+        ],
+        "untouched": "processes.ts (systemPromptArguments and its two call sites), index.ts (materialize before the probes), the four skill paragraphs, config precedence in resolveDaemonConfig — none appear in the diff.",
+        "checkConfig": "From cwd /tmp against /tmp/legion17-a3/cfg/legion.yaml (`state_dir: ./state`, `instructions: ./ops/deployment.md`): `bun run packages/daemon/src/cli/index.ts start legion17/tester-a3 --check-config --config …` → `Config OK: project=legion17testera3` exit 0; `instructions: ''` → `error: instructions must not be empty` exit 1; key absent + `LEGION_INSTRUCTIONS=''` → `error: LEGION_INSTRUCTIONS must not be empty` exit 1; `instructions: '  '` → `error: instructions must not be empty` exit 1. loadStartConfig with the file key and LEGION_INSTRUCTIONS=/elsewhere/env.md both set resolved instructionsPath=/tmp/legion17-a3/cfg/ops/deployment.md, stateDir=/tmp/legion17-a3/cfg/state (file wins, config-relative)."
+      },
+      "4_ci": {
+        "tests": "Tests run 34731406362 — attempt 1 failure (the flake above), attempt 2 success at 65c82fe3 (test, lint, pr-title, typecheck; https://github.com/sjawhar/legion/actions/runs/34731406362)",
+        "envoyAndContracts": "Legion Envoy and Contracts run 34731406367 — success at 65c82fe3 (changes + pi-envoy; others skipped as unchanged; https://github.com/sjawhar/legion/actions/runs/34731406367)",
+        "codeHead": "at 6af80295: Tests 34731320610 and 34731362087 success, Legion Envoy and Contracts 34731320412 success",
+        "threads": "reviewThreads totalCount 2, both isResolved=true: PRRT_kwDORFy7ds6huAFv (r3995426385, real-deployment-instructions-e2e.test.ts) and PRRT_kwDORFy7ds6huAFx (r3995426388, argv-recorder-omp.ts, outdated by the nits commit)."
+      }
+    },
+    "harness": "Fresh pane: grant-export shadow re-established (docs/solutions/legion/worker-pane-shell-gotchas.md §1, /tmp/legion17-grant-trap.sh); `legion gh -- auth status` → legion-implementer[bot] before any write; 2–3 stacked LEGION_GRANT blocks per call."
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T01:24:42.770Z"
+  "completed": "2026-09-13T01:55:28.902Z"
 }
