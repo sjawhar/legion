@@ -1,0 +1,211 @@
+{
+  "spec": "dispatch://LEGION-23/spec version 6; parent dispatch://LEGION-19/spec §4, §5",
+  "plan": ".legion/plan.json (commit 1a4b7490) executed task-by-task; architect deltas applied: omp-pin.ts added to the worker-image.yaml push-trigger paths; Depot failure remedy and ECR mirror failure note say `gh run rerun <run-id>` or re-push (never `gh workflow run --ref <branch>`); root AGENTS.md WHERE TO LOOK row and packages/daemon/src/daemon/AGENTS.md:128 correction kept",
+  "pr": {
+    "number": 966,
+    "url": "https://github.com/sjawhar/legion/pull/966",
+    "branch": "legion/LEGION-23",
+    "head": "7da0801e59a73f1716a3bcfa0ded9b69f0f07493",
+    "base": "main at 7add4d03087e (unchanged since the plan commit; no rebase was needed)",
+    "bodyFormat": "merge-queue READY format with `Dispatch: LEGION-23`; CI and E2E sections filled with what is provable before the Depot prerequisites exist"
+  },
+  "commits": [
+    {
+      "sha": "36c99c428de26055c8c3538817f5b4d8128f0567",
+      "subject": "refactor(daemon): single-source the OMP fork pin in omp-pin.ts",
+      "files": [
+        "packages/daemon/src/daemon/omp-pin.ts (new)",
+        "packages/daemon/src/daemon/config.ts (import + deleted constant)",
+        "scripts/smoke/up.sh (pin derived via bun omp-pin.ts)"
+      ]
+    },
+    {
+      "sha": "abfea4551657e3f3a290e7c811e15ca838d9c224",
+      "subject": "refactor(daemon): move the OMP boot probes into boot-probes.ts",
+      "files": [
+        "packages/daemon/src/daemon/boot-probes.ts (new; index.ts lines 54-58 and 139-323 moved verbatim, `export` added to the two verify* functions)",
+        "packages/daemon/src/daemon/index.ts (ranges deleted; imports pruned: os, mkdtemp/rm/writeFile, getPluginsNodeModules, withOmpLaunchPrefix)"
+      ]
+    },
+    {
+      "sha": "c5e0d9f5e5d87c785b2beb0fac84c4e91fac3a60",
+      "subject": "feat(cli): hidden probe-image runs the daemon boot probes inside the worker image",
+      "files": [
+        "packages/daemon/src/cli/index.ts (cmdProbeImage, ProbeImageDeps, hidden probe-image subcommand)",
+        "packages/daemon/src/cli/__tests__/index.test.ts (3 tests appended)"
+      ]
+    },
+    {
+      "sha": "a0e1f0702a3e95de3822bd5f274227628a66c2aa",
+      "subject": "feat(daemon): parseImageDigestRef refuses tag-pinned worker images",
+      "files": [
+        "packages/daemon/src/daemon/image-ref.ts (new)",
+        "packages/daemon/src/daemon/__tests__/image-ref.test.ts (4 tests)"
+      ]
+    },
+    {
+      "sha": "3fef2b5191aa9355536b9b30d8d4a54f3a11eff5",
+      "subject": "feat(docker): worker image with the pinned OMP fork, packed plugin, and boot-probe gate",
+      "files": [
+        "packages/daemon/docker/worker.Dockerfile (new)",
+        ".dockerignore (skills un-ignored with the reason comment)"
+      ]
+    },
+    {
+      "sha": "c03c27cff4d4cdb30dad02ba9c2a3931ed0397db",
+      "subject": "ci: build and publish the worker image on Depot from release.yaml",
+      "files": [
+        ".github/workflows/worker-image.yaml (new)",
+        ".github/workflows/release.yaml (permissions packages: write; cli outputs version/release_tag; worker_image job)"
+      ]
+    },
+    {
+      "sha": "7da0801e59a73f1716a3bcfa0ded9b69f0f07493",
+      "subject": "docs: worker image section of docs/kubernetes.md; correct the plugin-probe paragraph",
+      "files": [
+        "docs/kubernetes.md (new, image section only)",
+        "packages/daemon/src/daemon/AGENTS.md:128 (stale minPluginVersion paragraph replaced)",
+        "AGENTS.md (WHERE TO LOOK row after Envoy OMP adapter)"
+      ]
+    }
+  ],
+  "deviationsFromPlan": [
+    "worker.Dockerfile: hadolint reported DL4006 (curl | sh pipe) and SC2155 (export with command substitution) as warnings and DL3066 (non-numeric USER) as info. Fixed all three instead of ignoring: mise installer downloaded to /tmp/mise-install.sh then run (no pipe); MISE_GITHUB_TOKEN assigned then exported; `USER 1000:1000` (numeric, so Kubernetes runAsNonRoot verifies from the image) with `HOME=/home/legion` made explicit in the ENV block. The runtime contract (user legion uid 1000, HOME=/home/legion, OMP_PROFILE=legion, LEGION_OMP_PATH, PATH) is unchanged.",
+    "worker-image.yaml: `vars.*` values are passed through `env:` (DEPOT_PROJECT_ID, AWS_*) instead of interpolated inline in `run:` scripts — no behaviour change, avoids the expression-injection pattern. Two intended SC2016 infos silenced with `# shellcheck disable=SC2016` comments so actionlint is clean.",
+    "worker-image.yaml remedy text (architect delta 2): `gh run rerun ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY}` or push the branch again; same wording in the ECR mirror failure note and docs/kubernetes.md.",
+    "release.yaml: the added `release_tag` GITHUB_OUTPUT line made shellcheck flag SC2129 (three consecutive redirects), so the three echoes are grouped into one `{ …; } >> \"$GITHUB_OUTPUT\"` block; outputs are identical.",
+    "image-ref.test.ts: `DIGEST` is declared `as const` so its type is `sha256:${string}` (tsc rejected the plan's plain string against the ImageDigestRef.digest template type in toEqual).",
+    "docs/kubernetes.md: the plan's 'run it yourself' line used `docker run --rm <digest> legion probe-image`, which the placeholder ENTRYPOINT makes `legion worker-shim legion probe-image` (plan R14); corrected to `docker run --rm --entrypoint legion <digest> probe-image`. Trigger (2) lists omp-pin.ts (delta 1). The user line notes the numeric uid.",
+    "Formatting fixes from `biome format` were squashed into the commits that introduced them (Task 2 import line, Task 4 constant wrap) so every commit is biome-clean on its own.",
+    "packages/daemon/src/daemon/AGENTS.md:62-66 ('The default is: mise x github:sjawhar/oh-my-pi@… -- omp') quoted the pin literally; replaced with a pointer to DEFAULT_OMP_INVOCATION/OMP_FORK_PIN in omp-pin.ts so the docs cannot drift on a pin bump (spec: exactly one copy). scripts/smoke/README.md:73 still quotes the pin in prose — left untouched because LEGION-10's open PR #957 modifies that file; flagged for the architect."
+  ],
+  "commandsRun": [
+    {
+      "cmd": "bun packages/daemon/src/daemon/omp-pin.ts",
+      "output": "github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934"
+    },
+    {
+      "cmd": "bash -n scripts/smoke/up.sh",
+      "output": "ok"
+    },
+    {
+      "cmd": "bun test src/daemon/__tests__/config.test.ts",
+      "output": "35 pass, 0 fail"
+    },
+    {
+      "cmd": "bun test src/daemon/__tests__/index.test.ts (after the Task 2 move, file unchanged)",
+      "output": "21 pass, 0 fail"
+    },
+    {
+      "cmd": "bun test src/cli/__tests__/index.test.ts (before cmdProbeImage existed)",
+      "output": "SyntaxError: Export named 'cmdProbeImage' not found (expected failure)"
+    },
+    {
+      "cmd": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test src/cli/__tests__/index.test.ts",
+      "output": "17 pass, 0 fail (3 new probe-image tests)"
+    },
+    {
+      "cmd": "bun test src/daemon/__tests__/image-ref.test.ts",
+      "output": "before: Cannot find module '../image-ref'; after: 4 pass, 0 fail"
+    },
+    {
+      "cmd": "docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL3003 - < packages/daemon/docker/worker.Dockerfile",
+      "output": "first pass: DL4006 warning (curl|sh), SC2155 warning, DL3066 info; after fixes: no output, exit 0 (Docker Hub was reachable; hadolint/hadolint@sha256:32dac941…)"
+    },
+    {
+      "cmd": "host dry run (/tmp/legion23-dryrun.sh: rsync checkout, bun install --frozen-lockfile, jq omp.extensions rewrite + bun pm pack + tar --strip-components=1, bun build --compile → legion, clean HOME, OMP_PROFILE=legion, LEGION_OMP_PATH=<mise where pin>/bin/omp, provider keys unset)",
+      "output": "✔ Linked @sjawhar/pi-legion-envoy from /tmp/legion23-dryrun-eMBj/plugin; probe-image: OK (/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.15-sami.20260908-220934/bin/omp) exit 0 in 8.8 s; readlink → /tmp/legion23-dryrun-eMBj/plugin; ls ~/.omp/natives → 18.1.15; negative LEGION_OMP_PATH=/nonexistent → '[legion] Configured OMP invocation does not expose pi.agents: sh: 1: exec: /nonexistent: not found' exit 1; no LEGION_OMP_PATH → 'probe-image: set LEGION_OMP_PATH (or pass --omp) to the OMP executable to probe' exit 1; `legion --help | grep -c probe-image` → 0 (hidden); `legion worker-shim --help` exit 0"
+    },
+    {
+      "cmd": "bun -e 'yaml.parse(...)' on worker-image.yaml and release.yaml",
+      "output": "ok both; release.yaml jobs: changes,cli,worker_image,envoy_plugin,pi_envoy"
+    },
+    {
+      "cmd": "actionlint .github/workflows/worker-image.yaml .github/workflows/release.yaml (mise-installed actionlint and the rhysd/actionlint container agree)",
+      "output": "clean after the SC2016/SC2129 adjustments; the base release.yaml was already clean"
+    },
+    {
+      "cmd": "curl -sI https://github.com/depot/cli/releases/tag/v2.102.7; api.github.com latest",
+      "output": "200; latest depot/cli release is v2.102.7 (the pinned depot/setup-action version exists)"
+    },
+    {
+      "cmd": "cd packages/daemon && bunx biome check --error-on-warnings src/ && bunx tsc --noEmit && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
+      "output": "Checked 139 files, no fixes; tsc ok; 822 pass, 5 skip, 0 fail (827 tests, 54 files)"
+    },
+    {
+      "cmd": "jj log -r 'ancestors(@, 12) ~ ancestors(main@origin)'",
+      "output": "only the seven task commits above plus the plan handoff; main@origin ~ ancestors(@) is empty"
+    },
+    {
+      "cmd": "jj bookmark set legion/LEGION-23 -r @- && jj git push --bookmark legion/LEGION-23",
+      "output": "bookmark: legion/LEGION-23 [move forward from 1a4b74900eb6 to 7da0801e59a7]"
+    },
+    {
+      "cmd": "legion gh -- pr create --repo sjawhar/legion --base main --head legion/LEGION-23 --title 'feat(docker): worker image + Depot pipeline (LEGION-23)' --body-file …",
+      "output": "https://github.com/sjawhar/legion/pull/966"
+    },
+    {
+      "cmd": "legion gh -- run list --branch legion/LEGION-23",
+      "output": "34687126608 Tests pull_request success; 34687034827 Worker Image push failure"
+    },
+    {
+      "cmd": "legion gh -- api repos/sjawhar/legion/actions/runs/34687034827/jobs",
+      "output": "job build failure; step 3 'Require the Depot project variable' -> failure; steps 4-14 skipped"
+    },
+    {
+      "cmd": "legion gh -- run view 34687034827 --log-failed",
+      "output": "##[error]Repository variable DEPOT_PROJECT_ID is unset; the worker image builds on Depot and needs a project (root decision 3 on LEGION-19). ##[error]Process completed with exit code 1. (env shows DEPOT_PROJECT_ID empty)"
+    }
+  ],
+  "workerImageRun": {
+    "runId": 34687034827,
+    "url": "https://github.com/sjawhar/legion/actions/runs/34687034827",
+    "trigger": "push of legion/LEGION-23 at 7da0801e59a7 (the R3 branch trigger fired: Dockerfile, omp-pin.ts and the workflow changed)",
+    "outcome": "failure at step 3 'Require the Depot project variable' — the expected failure path; DEPOT_PROJECT_ID is unset on sjawhar/legion",
+    "annotation": "Repository variable DEPOT_PROJECT_ID is unset; the worker image builds on Depot and needs a project (root decision 3 on LEGION-19).",
+    "summaryLine": "**Worker image not built** — repository variable `DEPOT_PROJECT_ID` is unset. (written to GITHUB_STEP_SUMMARY; visible on the run page when signed in — step summaries are not exposed by the REST API)",
+    "prEffect": "the run's `build` job is a failing check on the PR head (Envoy ci-settled-red failing=[build] at 7da0801e); PR #966 stays red until the prerequisites exist and the branch is re-pushed or the run re-run",
+    "nothingCreated": "no Depot project, trust relationship, DEPOT_PROJECT_ID, DEPOT_TOKEN, ECR repository, or IAM role was created; reported to the LEGION-23 architect via envoy_publish (message 0dec1fd5d1a6ef6cdf87f5fae0a3d696)"
+  },
+  "unverifiedUntilDepotPrerequisitesExist": {
+    "prerequisites": [
+      "repository variable DEPOT_PROJECT_ID on sjawhar/legion (root decision 3)",
+      "Depot GitHub OIDC trust relationship admitting sjawhar/legion on that project (Depot dashboard)",
+      "GHCR package legion-worker public after its first push (package settings, no API)"
+    ],
+    "howToRetry": "re-push legion/LEGION-23 (or `gh run rerun 34687034827 --repo sjawhar/legion`); a successful run writes `ghcr.io/sjawhar/legion-worker@sha256:…` and the tag list to the job summary",
+    "checks": [
+      "spec acceptance 1: `docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:<digest> -c 'omp --version && legion --help && jj --version && git --version && gh --version && bun --version && id -u'` exits 0 (id -u = 1000)",
+      "spec acceptance 2: `docker run --rm --entrypoint legion <digest> probe-image` → `probe-image: OK (/opt/omp/bin/omp)`, exit 0; negative control `docker run --rm --entrypoint legion -e LEGION_OMP_PATH=/nonexistent <digest> probe-image` → exit 1",
+      "image layout: `docker run --rm --entrypoint sh <digest> -c 'readlink ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy && ls ~/.omp/natives'` → /opt/legion/pi-legion-envoy and 18.1.15",
+      "placeholder entrypoint: `docker run --rm <digest> --help` prints worker-shim usage, exit 0",
+      "spec acceptance 3 success path: branch run publishes `:sha-<12>` only (no version tag, no release edit); summary carries the digest and `ECR mirror skipped: <var> unset` for each of AWS_ECR_PUBLISH_ROLE_ARN, AWS_ECR_REGISTRY, AWS_REGION; Depot `lint: true` passes on the Dockerfile",
+      "spec acceptance 3 release-body append: only observable on the first main run after merge where `cli` releases a version (release_tag non-empty) — `gh release view cli-v<version> --json body -q .body` shows '## Worker image' with the digest",
+      "the Depot-trust-relationship failure path (step `depot/setup-action` failing with the remedy summary) — only reachable once DEPOT_PROJECT_ID is set but the trust relationship is still missing",
+      "anonymous pull: `docker logout ghcr.io && docker pull <digest>` (GHCR visibility)",
+      "runtime: mise `github:` backend resolution of the OMP fork, jj fork, and gh inside the Depot builder, and OMP's native-module download from the builder (egress) — both worked on this box, unverified on Depot"
+    ]
+  },
+  "verifiedLocally": [
+    "spec acceptance 4: image-ref.test.ts (4 tests) — digest-only, exact refusal text",
+    "spec acceptance 2 logic: probe-image tests (3) + host dry run of the runtime RUN with the pinned omp",
+    "spec acceptance 5: docs/kubernetes.md 'Per-deployment toolchains layer on top' states the reason",
+    "spec acceptance 3 failure path (DEPOT_PROJECT_ID unset): run 34687034827",
+    "OMP pin single source: config.ts imports DEFAULT_OMP_INVOCATION from omp-pin.ts; up.sh derives it; the Dockerfile prints it in-build (grep for the pin string finds only omp-pin.ts and the plan/handoff JSON)"
+  ],
+  "findingsForArchitect": [
+    "Worker-pane grant injection: the bash tool prepends two or three `export LEGION_GRANT=…` blocks per command; only the first grant redeems (legion credential get → username), the later ones return 403, and the last one wins. `jj git push` and `legion gh` therefore fail intermittently. Worked around with a bash DEBUG trap that records each injected grant and restores the first (`l23grant`). The tester/reviewer panes will see the same; likely an extension hook registered more than once.",
+    "packages/daemon/src/cli/__tests__/index.test.ts 'legion start --check-config' calls cmdCheckConfig, which reads ambient process.env; a Legion pane exports DISPATCH_URL without DISPATCH_TOKEN, so that test fails in any worker pane (`dispatch_url is set but DISPATCH_TOKEN is not`). Pre-existing, CI unaffected; run `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test` in a pane. Not changed here (out of scope; LEGION-13 appends to that file).",
+    "PR #966 is red on its own head because the branch-triggered Worker Image run is a failing check — by design until root decision 3 lands; the merge queue should expect that.",
+    "scripts/smoke/README.md:73 quotes the OMP pin literally in prose; it is LEGION-10's file (PR #957 edits it) so it was not changed here. One-line follow-up once #957 lands: point it at omp-pin.ts like the daemon AGENTS.md now does."
+  ],
+  "notInThisPr": [
+    "container entrypoint and *_FILE provider export (LEGION-24); parseImageDigestRef wiring into config.ts (LEGION-24)",
+    "in-cluster probe pod (LEGION-25); rest of docs/kubernetes.md (LEGION-25/26)",
+    "ECR AWS side (root architect / agent-c meta/infra); Depot project, trust policy, DEPOT_PROJECT_ID (root decision 3)"
+  ],
+  "cleanup": "throwaway artifacts removed: /tmp/legion23-dryrun-* trees, /tmp/legion23-dryrun.sh, /tmp/l23-base; `.omp/` (an empty config.yml OMP created in the workspace) is excluded via the worktree's git info/exclude so it never enters a commit",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T10:01:19.185Z"
+}
