@@ -1,0 +1,66 @@
+{
+  "pr": {
+    "number": 962,
+    "url": "https://github.com/sjawhar/legion/pull/962",
+    "branch": "legion/LEGION-21",
+    "base": "main",
+    "headSha": "6a55bd6d13b6",
+    "rebasedOnto": "8f6fad367099 (main, chore: release pi-envoy v1.4.3)"
+  },
+  "commits": [
+    "fa2853597b93 feat(daemon): declare the Runtime boundary (runtime.ts) with a FakeRuntime contract suite",
+    "8815c15fe52b feat(daemon): state v24 tags every persisted locator with runtime: tmux",
+    "f9052adb283f feat(daemon): TmuxRuntime implements Runtime over the private tmux server",
+    "0ecddcbf4c40 refactor(daemon): ProcessManager drives processes through the injected Runtime",
+    "c1c4b5ce56ee feat(daemon,contracts): persisted and projected locators are a runtime-discriminated union",
+    "9ec51db12e10 feat(daemon): runtime, daemon_url, and bind config; spawned processes get config.daemonUrl",
+    "a64f377daf7c docs(daemon): AGENTS rows for the runtime boundary",
+    "6a55bd6d13b6 feat(daemon,contracts,pi-envoy): daemon refuses a plugin built against another daemon API contract version (task 8, architect ruling 2026-09-12T07:05Z)"
+  ],
+  "planTasks": {
+    "1": "done",
+    "2": "done",
+    "3": "done",
+    "4": "done (plus the type widening task 5 step 2-5 needed to compile; see deviationsFromPlan)",
+    "5": "done (zod union + tests)",
+    "6": "done",
+    "7": "done",
+    "8": "done (added by the architect mid-task-7: daemon API contract version gate)"
+  },
+  "behaviouralNarrowing": "spawnRoot's persist-failure reap is runtime.stop(locator, workerStopTimeoutMs, {skipGraceful: true}) = kill-pane of the just-spawned pane (test 'kills the just-spawned pane before propagating a saveState failure...' expects [\"%1\"]); no other tmux behaviour changed (pinned argv tests in processes.test.ts pass unchanged; controller -e pair order: LEGION_CONTROLLER_SECRET_FILE last, compared as an object by the only test reading it).",
+  "deviationsFromPlan": [
+    "Task ordering: runtime.spawn() returns Locator, which cannot be assigned to the plan's interim TmuxLocator-typed state fields, so task 4's commit also carries the type widening the plan put in task 5 (TreeState/WorkerRoleClaim/controllerLocator -> Locator; api/state.ts redactLocator; contracts stateLocator union; api/routes/workers.ts sameProcess; api.test.ts runtime expectations). Task 5's commit is the zod K8sLocatorSchema + LocatorSchema discriminatedUnion and its tests.",
+    "Task 2 interim: TmuxLocator.socketPath is optional, so the six sites that passed claim.locator.socketPath to a string parameter needed an interim shimSocket() narrowing (throws 'tmux locator <window> has no shim socket', the same message TmuxRuntime.connect throws) in processes.ts and worker-boot-watchdog.ts; deleted in task 4.",
+    "Task 6: config.test.ts's 'rejects unknown config keys' example key changed from `runtime` (now a known key) to `backend`; the kubernetes refusal sits at the top of startDaemon (before acquireInstanceLock and defaultDependencies) so the index.test.ts case can assert the lock was never acquired.",
+    "Task 3 harness: the plan's reconcileOrphans case listed known = {@42, %1, @77/*}; locatorHandles for a pane-id-less locator yields BOTH @77 and @77/*, so the test derives `known` from locatorHandles over two locators and asserts that set.",
+    "processes.test.ts helpers: local fakeWorkerRpcClient replaced by the identical export from __tests__/fake-runtime.ts; manager()/workerCapFixture build a TmuxRuntime and route connectWorkerRpc/readProcessCmdline overrides into it; two small test-only helpers (recordedTmuxLocator, tmuxFields) narrow the Locator union where tests spread or read tmux fields (no assertion semantics changed).",
+    "Task 8 (architect-added): LEGION_DAEMON_API_VERSION = 1 in @legion/contracts; packages/pi-envoy/package.json legion.daemonApiVersion = 1; verifyLegionPluginContract in index.ts runs before the plugin-load probe on every boot; four index.test.ts cases that relied on a passing boot never reading the manifest now inject readPluginManifest; 'accepts an installed pi-legion-envoy ... reading its manifest exactly once' expects 1 read."
+  ],
+  "pluginContractFinding": "The installed pi-legion-envoy (dogfood profile ~/.omp/profiles/legion, package 1.3.0) bundles the pre-change strictObject state contract; its controller/architect boot handshake calls daemon.state() first, so under this daemon the controller boots, never claims its role, and is retired/respawned every ~6 min (observed on the rig: 3 sessions, roles {}). Task 8's gate turns that into a named boot refusal. DEPLOY NOTE (Sami's action, shared profile): install the @sjawhar/pi-legion-envoy release built from the merged commit into ~/.omp/profiles/legion BEFORE the dogfood daemon restarts on this code; until then it refuses: '[legion] pi-legion-envoy at /home/ubuntu/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json (package 1.3.0) speaks daemon API contract none; this daemon requires 1. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.' (captured from a real `legion start` against that profile with a scratch state_dir).",
+  "verification": {
+    "unit": "bun test packages/daemon packages/contracts packages/pi-envoy/src/legion/daemon-api-version.test.ts: 966 pass, 5 skip, 0 fail (at 6a55bd6d). Run the daemon suite from a pane as `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test packages/daemon` if src/cli/__tests__/index.test.ts's check-config case trips on the pane's DISPATCH_URL (pre-existing, docs/solutions/legion/worker-pane-shell-gotchas.md §2); it passed for me either way.",
+    "tsc": "tsc --noEmit -p packages/daemon, -p packages/contracts, and packages/pi-envoy: 0 errors (use packages/daemon/node_modules/.bin/tsc — the workspace's bun install is isolated, `bunx tsc` downloads a newer tsc that rejects tsconfig baseUrl).",
+    "biome": "biome check packages/daemon/src packages/contracts/src packages/pi-envoy/src: clean (169 files).",
+    "grepGate": "grep -cE 'tmux\\.|prepareSocket|writePaneSecret|launchShimmedProcess|workerClient\\(|recordedWindowId|rewriteIssueWindowId|probedWindowId|reconcileTmuxWindows' packages/daemon/src/daemon/processes.ts -> 0; grep -nE 'locator\\.runtime|runtime ===' -> nothing; also enforced by runtime.contract.test.ts 'ProcessManager stays runtime-agnostic'.",
+    "smoke": "Checkpoints 1, 2, 3, 4, 13 all OK at head 6a55bd6d (SMOKE_DIR=/tmp/legion21-smoke/rig, root LEGSMOKE-27, child LEGSMOKE-28, SMOKE_WEBHOOK_MODE=envoy). Checkpoint 4 reached by restarting only the rig daemon with gates.design off (/tmp/legion21-smoke/restart-daemon.sh; the documented gate-off boot path marked designApproved: gate-off and the architect released LEGSMOKE-28). Negative controls: checkpoint 13 fails naming LEGION_BOOT_TOKEN when planted on the private server's global env; config refusals for bind/runtime/daemon_url and the kubernetes startup refusal captured from the real CLI; contract-gate refusal captured against the dogfood profile.",
+    "migration": "Copy of the dogfood state.json (v23, 33 locators, 0 tagged) -> loadState: version 24, 33 locators all runtime tmux, state.json.v23.bak byte-identical to the source; saveState+loadState round-trips under the strict v24 schema (scripts at /tmp/legion21-smoke/migrate/)."
+  },
+  "testerNotes": [
+    "Rig artifacts: /tmp/legion21-smoke/{up-wrapper.sh,checkpoint.sh,restart-daemon.sh,watch-state.sh,rig/,negative/,migrate/,pi-legion-envoy/}. The rig was torn down with down.sh after the run; state.json, logs (daemon.log, daemon.log.before-*), root-issue (LEGSMOKE-27) remain under rig/ and up.sh reuses them.",
+    "Run everything from a shell scrubbed of the pane's LEGION_DAEMON_URL/LEGION_STATE_DIR (up-wrapper.sh does `env -u ...`); LEGION_DAEMON_URL is now also a config env key and the yaml daemon_url (added to up.sh) must win.",
+    "The dogfood profile's plugin (1.3.0) cannot drive this daemon (see pluginContractFinding) and the task-8 gate now refuses it at boot. Use the isolated OMP profile ~/.omp/profiles/legion21-smoke (built from this branch: plugins/node_modules/@sjawhar/pi-legion-envoy, version 1.4.3-legion21.<sha>, legion.daemonApiVersion 1); up-wrapper.sh sets OMP_PROFILE/PI_PROFILE=legion21-smoke. Rebuild it after any pi-envoy/contracts change: `bun build extensions/envoy.ts extensions/legion.ts --outdir /tmp/legion21-smoke/pi-legion-envoy/dist ...` + copy skills + jq the manifest (see the build step in this session's transcript or the LEGION-6 tester's legion6-smoke profile).",
+    "LEGION_OMP_PATH must point at the rpcfix OMP (/home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix), same as the dogfood daemon; the pinned mise OMP dies at its first RPC prompt (docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md).",
+    "up.sh's ensure_root_issue 409s POSSIBLE_DUPLICATE against prior smoke roots; create the root by hand with force:true and record it at ${SMOKE_DIR}/root-issue, then re-run up.sh (it reuses everything). Pre-existing rig bug.",
+    "Checkpoint 4 needs a released child, which needs the design gate approved; with the rig's gates.design: root-issues that is a human click on the smoke root's ask. restart-daemon.sh flips a copy of the generated config to design: off and restarts only the daemon — the gate-off boot path approves the registered ask and the architect releases W1.",
+    "Grant workaround for jj git push / legion gh / legion handoff complete from a pane: source /tmp/legion21-grant-trap.sh once and end each command with `; grant_release` (docs/solutions/legion/worker-pane-shell-gotchas.md §1).",
+    "Acceptance 4 on the real surface: tmux -L legion-<slug> display-message -p -t <pane> '#{pane_pid}' then grep only LEGION_DAEMON_URL= in /proc/<pid>/environ (never print the environ); every pane read http://127.0.0.1:19370 = the yaml daemon_url."
+  ],
+  "riskNotes": [
+    "designDecisions.stop ordering preserved: cached-client graceful race + eviction stay in ProcessManager.stopProcess; TmuxRuntime.stop only ever dials its own connection (no negotiate). processes.test.ts stop/connect-count tests pass unchanged.",
+    "locatorsForIssue encodes today's recordedWindowId order (tree locator first when the issue is a root, then claims in state.roles order).",
+    "TmuxRuntime.probe backfills a missing pane id and calls deps.persist (index.ts's save); worker locators always carry a pane id so the watchdog never triggers it."
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T07:15:48.737Z"
+}
