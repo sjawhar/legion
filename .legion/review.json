@@ -1,21 +1,30 @@
 {
-  "spec": "dispatch://LEGION-23/spec version 8; parent dispatch://LEGION-19/spec §4, §5",
-  "round": 1,
+  "spec": "dispatch://LEGION-23/spec version 9 (round 1 reviewed against v8); parent dispatch://LEGION-19/spec §4, §5",
+  "round": 2,
   "pr": {
     "number": 966,
     "url": "https://github.com/sjawhar/legion/pull/966",
     "branch": "legion/LEGION-23",
-    "headReviewed": "6d48a78e253d95271c970bfc078462b02d65925b",
-    "headVerified": "gh pr view 966 --json headRefOid → 6d48a78e253d; jj git fetch → legion/LEGION-23@origin = 6d48a78e (`test: record handoff (round 1b, pull_request trigger)`); base main@origin 7add4d03 unchanged",
+    "headReviewed": "78658561bd682e8394995223cbeb1072bbba77d0",
+    "headVerified": "round 2: gh pr view 966 --json headRefOid → 78658561bd68 (adds only .legion/test.json on 881c1616d179, the code head); jj git fetch → legion/LEGION-23@origin = 78658561; base main@origin 7add4d03 unchanged (LEGION-21 #962 not landed)",
     "review": {
-      "id": 5186297796,
-      "url": "https://github.com/sjawhar/legion/pull/966#pullrequestreview-5186297796",
-      "state": "CHANGES_REQUESTED",
-      "commit": "6d48a78e253d95271c970bfc078462b02d65925b"
-    }
+      "round1": {
+        "id": 5186297796,
+        "url": "https://github.com/sjawhar/legion/pull/966#pullrequestreview-5186297796",
+        "state": "CHANGES_REQUESTED",
+        "commit": "6d48a78e253d95271c970bfc078462b02d65925b"
+      },
+      "round2": {
+        "id": 5186350496,
+        "url": "https://github.com/sjawhar/legion/pull/966#pullrequestreview-5186350496",
+        "state": "COMMENTED",
+        "commit": "78658561bd682e8394995223cbeb1072bbba77d0"
+      }
+    },
+    "headReviewedRound1": "6d48a78e253d95271c970bfc078462b02d65925b"
   },
-  "verdict": "CHANGES_REQUESTED — 1 blocking finding, 5 non-blocking/nit threads, 8 batched wording nits in the review body. The code review is otherwise clean: the boot-probe move is verbatim with no new cycle, probe-image maps errors correctly with no PATH fallback, the OMP pin is single-sourced and its import.meta.main print is eliminated from the compiled CLI, parseImageDigestRef is strict with the spec's exact text, the Dockerfile's secret/layer/user hygiene is sound statically, the workflows are injection-clean with correct BUILT_SHA/permissions/main-only tagging, and the docs match the code apart from the listed nits. Approval is head-pinned and deferred to the cleaned head after tester round 2 (not approved this round by design).",
-  "blockingCount": 1,
+  "verdict": "Round 2: code review CLEAN — every round-1 thread fixed (c212fe93 workflow/docs, a9510e8f Dockerfile comment + rename) and accepted; 0 blocking. Approval deferred to the cleaned head, which still moves for (a) tester round 2 against the published digest once root decision 3 lands (possible Dockerfile CI iteration), (b) the rebase onto LEGION-21 (#962) merge, (c) the .legion/ deletion push. Not approved this round by design. Round 1 verdict preserved in .rounds[\"1\"].",
+  "blockingCount": 0,
   "findings": [
     {
       "id": "R1-B1",
@@ -26,7 +35,11 @@
       "threadId": "PRRT_kwDORFy7ds6hvtt1",
       "finding": "The ECR mirror is gated on the three AWS_* repository variables but not on the ref. Repository variables are visible to same-repo pull_request runs (and non-main workflow_dispatch); the publish role is specified to trust repo:sjawhar/legion:ref:refs/heads/main only (spec Requirements; docs/kubernetes.md:90-91), so once the variables exist every PR-head build attempts AssumeRoleWithWebIdentity with subject repo:sjawhar/legion:pull_request, is denied, and the job fails after the GHCR push succeeded — the PR's image check is red on every PR and the 'ECR mirror failure note' fires each time. PR-head sha- images would also be mirrored into ECR, which is not intended. Latent today (variables unset).",
       "fix": "In 'Decide ECR mirror', before the variable checks: `if [ \"$GITHUB_REF\" != \"refs/heads/main\" ]; then echo enabled=false >> \"$GITHUB_OUTPUT\"; echo 'ECR mirror skipped: not a main run' >> \"$GITHUB_STEP_SUMMARY\"; exit 0; fi` (the same $GITHUB_REF test Compute tags uses at line 87); docs/kubernetes.md ECR section: 'on main runs only'. Extend the implementer's four-shape shell simulation with the pull_request shape for this step.",
-      "foundBy": "reviewer + both thermo agents independently"
+      "foundBy": "reviewer + both thermo agents independently",
+      "disposition": "fixed in c212fe93; accepted round 2",
+      "verification": "step script re-extracted from the YAML and run: pull_request + all AWS vars → enabled=false + `ECR mirror skipped: not a main run`; main + all vars → enabled=true; configure-aws-credentials / Mirror to ECR / failure note still conditioned on steps.ecr.outputs.enabled; docs name both skip lines",
+      "resolved": false,
+      "acceptanceReply": "https://github.com/sjawhar/legion/pull/966#discussion_r3996138300"
     },
     {
       "id": "R1-N1",
@@ -36,7 +49,11 @@
       "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080079",
       "threadId": "PRRT_kwDORFy7ds6hvtt3",
       "finding": "Comment attributes OMP's native-module download to the probe step; measured on this host (same pin, fresh HOME) the ~345 MB download happens in `omp plugin install` (7–35 s), and the probes take ~8 s with natives present. The order is load-bearing: defaultRunner (state/fetch.ts) kills any single omp invocation after 30 s, so a download inside the first probe would be a definitive 'does not expose pi.agents' failure.",
-      "fix": "Reword the comment to attribute the download to step 1 and state that it must precede probe-image because of the 30 s runner ceiling."
+      "fix": "Reword the comment to attribute the download to step 1 and state that it must precede probe-image because of the 30 s runner ceiling.",
+      "disposition": "fixed in a9510e8f; accepted round 2 with a nuance",
+      "verification": "comment attributes the download to `omp plugin install` and states the 30 s defaultRunner cause; tester 1c: natives-deleted first probe still passed in 12.5 s locally, so the failure is conditional on builder egress — comment reads unconditional; optional one-word hedge (\"a slow natives download\") on the cleanup push, not a re-round",
+      "resolved": false,
+      "acceptanceReply": "https://github.com/sjawhar/legion/pull/966#discussion_r3996138357"
     },
     {
       "id": "R1-N2",
@@ -46,7 +63,11 @@
       "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080082",
       "threadId": "PRRT_kwDORFy7ds6hvtt6",
       "finding": "Remedy says `gh run rerun ${GITHUB_RUN_ID}`. For a release.yaml-called run a whole-run rerun re-executes `cli` at the same github.sha, which now sees its own cli-vX tag on the bump commit → release-bump.sh range empty → skip → cli_version/release_tag empty → the retried image publishes sha- only with no :<version> tag and no release-body append.",
-      "fix": "`gh run rerun ${GITHUB_RUN_ID} --failed` in both remedy strings and the docs line; --failed keeps cli's recorded outputs."
+      "fix": "`gh run rerun ${GITHUB_RUN_ID} --failed` in both remedy strings and the docs line; --failed keeps cli's recorded outputs.",
+      "disposition": "fixed in c212fe93; accepted round 2",
+      "verification": "both remedy strings and docs lines say `gh run rerun <run-id> --failed` with the reason; no bare rerun remains",
+      "resolved": false,
+      "acceptanceReply": "https://github.com/sjawhar/legion/pull/966#discussion_r3996138419"
     },
     {
       "id": "R1-N3",
@@ -56,7 +77,11 @@
       "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080083",
       "threadId": "PRRT_kwDORFy7ds6hvtt7",
       "finding": "`secrets: inherit` is unnecessary: worker-image.yaml declares no workflow_call secrets and reads only secrets.GITHUB_TOKEN, which a called workflow gets automatically; inherit hands DEPLOY_KEY and every other repo secret to a PR-authored Dockerfile build job. The spec's Design row names `secrets: inherit`, so removing it is the architect's one-word spec edit.",
-      "fix": "Delete the line (recommended); or keep and record why."
+      "fix": "Delete the line (recommended); or keep and record why.",
+      "disposition": "fixed in c212fe93; accepted round 2",
+      "verification": "yaml.parse: release.yaml top {contents, id-token}; jobs.worker_image {permissions {contents, packages, id-token}: write, secrets absent}; callee workflow-level equal; actionlint clean",
+      "resolved": false,
+      "acceptanceReply": "https://github.com/sjawhar/legion/pull/966#discussion_r3996138480"
     },
     {
       "id": "R1-N4",
@@ -66,7 +91,10 @@
       "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080085",
       "threadId": "PRRT_kwDORFy7ds6hvtt8",
       "finding": "'Two prerequisites … both one-time' followed by three bullets; GHCR visibility is a post-first-push action, not a build prerequisite.",
-      "fix": "Move GHCR visibility to its own sentence or fix the count."
+      "fix": "Move GHCR visibility to its own sentence or fix the count.",
+      "disposition": "fixed in c212fe93; accepted round 2",
+      "resolved": false,
+      "acceptanceReply": "https://github.com/sjawhar/legion/pull/966#discussion_r3996138527"
     },
     {
       "id": "R1-N5",
@@ -76,7 +104,10 @@
       "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080086",
       "threadId": "PRRT_kwDORFy7ds6hvtt9",
       "finding": "Everything the image-time probe proved lives under HOME (plugin link + lock at ~/.omp/profiles/legion/plugins, natives at ~/.omp/natives). A volume mounted at /home/legion (emptyDir, or readOnlyRootFilesystem + HOME volume) shadows both silently; LEGION-24 needs the constraint stated.",
-      "fix": "Add one clause: mount writable volumes below the profile directory, never at /home/legion itself."
+      "fix": "Add one clause: mount writable volumes below the profile directory, never at /home/legion itself.",
+      "disposition": "fixed in c212fe93; accepted round 2",
+      "resolved": false,
+      "acceptanceReply": "https://github.com/sjawhar/legion/pull/966#discussion_r3996138596"
     },
     {
       "id": "R1-W",
@@ -90,7 +121,18 @@
         "packages/daemon/docker/worker.Dockerfile:93 — LABEL org.opencontainers.image.source duplicated and overridden by the workflow's labels",
         ".github/workflows/release.yaml:16-19 — packages: write could live on jobs.worker_image.permissions rather than the top-level block",
         "PR body — spec pointer says v7 (spec is v8); CI line names bfae571e (head is 6d48a78e); refresh both on the cleanup push"
-      ]
+      ],
+      "disposition": "all done in c212fe93/a9510e8f except processes.ts:176 (deferred, agreed)",
+      "perItem": {
+        "processes.ts:176": "DEFERRED, agreed: LEGION-21 (#962) owns processes.ts until it lands; its diff does not touch the withOmpLaunchPrefix doc comment, so the one-word fix belongs on this PR's .legion/ cleanup push after the rebase",
+        "docs/kubernetes.md:24 arm64": "done — has no linux/arm64 build",
+        "docs/kubernetes.md:31-32 LEGION-25": "done — marked planned",
+        "worker-image.yaml:95 version_label": "done — set inside the main + cli_version branch; simulated non-main dispatch with 0.9.0 → sha-",
+        "cli/index.ts ProbeImageDeps": "done — ProbeImageCommandDeps; 21 cli/image-ref tests pass",
+        "Dockerfile LABEL source": "done — workflow labels: drop source; Dockerfile LABEL is the single source",
+        "release.yaml packages: write": "done with R1-N3 — job-level",
+        "PR body": "done — spec v9, CI at a9510e8f, per-thread Threads section"
+      }
     }
   ],
   "notFindings": [
@@ -115,13 +157,37 @@
     "q8_tests": "7 new tests, each fails on a distinct plausible bug; no padding; consistent with existing conventions"
   },
   "nextSteps": {
-    "implementer": "fix R1-B1 (one condition + one docs sentence); fold R1-N1..N5 and the R1-W batch into the same push where they are one-liners; refresh the PR body (spec v8, CI line at the new head); push legion/LEGION-23",
-    "tester": "round 2 against the published digest once root decision 3 lands (spec acceptance 1–2, 3's success path incl. the ECR skip lines and, after the fix, `ECR mirror skipped: not a main run` on a PR run; smoke checkpoints 1–4/13 after PR #957)",
-    "reviewer": "re-review the corrected head (threads dispositioned individually), then, after round 2 and the .legion/ deletion push, review and approve that head by name"
+    "implementer": "carry .legion/review.json (this commit) on the next push; after root decision 3: any Dockerfile CI iteration; after #962 lands: rebase, then the .legion/ deletion push with the processes.ts:176 one-word fix and the optional R1-N1 hedge; resolve the six threads (write access) if no one else has",
+    "tester": "round 2 against the published digest (spec acceptance 1–2, 3 success path incl. `ECR mirror skipped: not a main run` on a PR run); smoke checkpoints 1–4/13 after PR #957 lands",
+    "reviewer": "review and approve the cleaned head by name (approval never while .legion/ is in the diff)"
   },
   "constraintsHonoured": "read-only on source (no file edited besides this handoff); no image build; nothing created on Depot/GitHub/AWS beyond the review itself; LEGION-12 two-call grant pattern used for every legion gh call",
-  "cleanup": "/tmp/l23-review-966.json and /tmp/l23-review-handoff.json removed after the handoff commit; scratch bundles/binaries under /tmp/l23-review-* removed in-call",
+  "cleanup": "/tmp/l23-review2-966.json, /tmp/l23-review2-patch.json, /tmp/l23-r2-*.sh removed after the handoff commit",
+  "rounds": {
+    "1": {
+      "head": "6d48a78e253d95271c970bfc078462b02d65925b",
+      "review": "https://github.com/sjawhar/legion/pull/966#pullrequestreview-5186297796",
+      "state": "CHANGES_REQUESTED",
+      "blockingCount": 1
+    },
+    "2": {
+      "head": "78658561bd682e8394995223cbeb1072bbba77d0",
+      "codeHead": "881c1616d179",
+      "review": "https://github.com/sjawhar/legion/pull/966#pullrequestreview-5186350496",
+      "state": "COMMENTED",
+      "blockingCount": 0
+    }
+  },
+  "threadResolution": "The review App cannot resolve threads: resolveReviewThread → FORBIDDEN `Resource not accessible by integration` on all six (no repository write access). Each thread instead carries an acceptance reply naming its fixing commit (individual disposition); the review body was edited (PUT reviews/5186350496) from `all six resolved` to `fixed and accepted … anyone with write access resolves them, or the implementer does on the cleanup push`.",
+  "round2Verified": {
+    "diffScope": "jj diff 6d48a78e → 881c1616: worker-image.yaml, release.yaml, docs/kubernetes.md, worker.Dockerfile (comment-only hunk, instructions unchanged), cli/index.ts (rename + biome wrap); boot-probes.ts/index.ts/image-ref.ts/omp-pin.ts/processes.ts 0 files changed",
+    "github": "head 78658561; checks: pr-title/lint/typecheck/test SUCCESS (Tests run 34692220390), build FAILURE (Worker Image run 34692220404, by-design DEPOT_PROJECT_ID red); six threads each with one implementer reply naming its commit, none resolved before this round; PR body spec v9 + Threads section verified",
+    "simulations": "ECR step: pull_request+vars → not a main run; main+vars → enabled=true. Compute tags: non-main dispatch with cli_version=0.9.0 → tags sha- only, tag_release=false, version_label=sha-",
+    "tests": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test src/cli/__tests__/index.test.ts src/daemon/__tests__/image-ref.test.ts → 21 pass",
+    "deferral": "#962 (OPEN, BLOCKED/REVIEW_REQUIRED on GitHub; in retro per the architect) — its diff has no hunk touching processes.ts:171-177, so the stale `index.ts` mention survives the rebase and is the cleanup push's one-word fix",
+    "thermo": "not re-run: round-2 diff is comment/wording/YAML-condition changes verified by direct execution above; round-1 thermo at 6d48a78e stands"
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T11:34:09.319Z"
+  "completed": "2026-09-12T12:01:54.722Z"
 }
