@@ -1,0 +1,103 @@
+{
+  "issue": "LEGION-17",
+  "spec": "dispatch://LEGION-17/spec (version 4)",
+  "pr": {
+    "number": 956,
+    "url": "https://github.com/sjawhar/legion/pull/956",
+    "reviewedHeadSha": "ac4849041fd50cb184ab6718883711e528c8d4cd",
+    "reviewedHeadNote": "`test: record handoff` — code unchanged since b31d077b; GitHub head at review time matched",
+    "review": {
+      "id": 5185638453,
+      "url": "https://github.com/sjawhar/legion/pull/956#pullrequestreview-5185638453",
+      "state": "CHANGES_REQUESTED",
+      "commitId": "ac4849041fd50cb184ab6718883711e528c8d4cd"
+    }
+  },
+  "verdict": "REQUEST_CHANGES",
+  "verifiedAgainstGitHub": {
+    "head": "ac4849041fd50cb184ab6718883711e528c8d4cd",
+    "threadsBeforeReview": 0,
+    "ci": "Tests run 34677668796 success at df631359 (typecheck, lint, test, pr-title); at ac484904 both workflows green: Tests 34678146907, Legion Envoy and Contracts 34678146922",
+    "prBody": "carries `Dispatch: LEGION-17`; Verification section CI/Threads/E2E lines match GitHub; Thermo line reads pending (reviewer fills it after the fix lands)"
+  },
+  "specConformance": {
+    "config": "clean — `instructions` via the same resolveValue (cli > file > LEGION_INSTRUCTIONS > absent); relative file value resolved against configDir like state_dir; env used as given; empty file value throws `instructions must not be empty`, empty env throws `LEGION_INSTRUCTIONS must not be empty` (same idiom as omp_invocation at config.ts:912)",
+    "cli": "clean — `--config` passes path.dirname(realpath) as configDir; cwd legion.yaml branch untouched",
+    "boot": "clean — materializeDeploymentInstructions runs after acquireInstanceLock and the dispatch-token write, before verifyOmpAgentsCapability, loadState, NATS; missing/unreadable/directory/blank fails naming the resolved path; write failure fails startup; header `# Deployment instructions (<legionId>)` + content verbatim",
+    "processes": "clean — one systemPromptArguments used by launchShimmedProcess and spawnController; order role, addressing (when present), instructions last via \"$(cat <shellPath>)\"; absent dep → byte-identical commands (191 pre-existing processes.test.ts assertions pass unchanged)",
+    "noLeak": "clean — no new env var or tmux -e pair carries the path or content; stripDispatchEnv untouched",
+    "skillsAndDocs": "clean — four skill paragraphs verbatim to the spec's Change bullet; root AGENTS.md, daemon AGENTS.md, pi-envoy AGENTS.md, smoke README/up.sh/up.test.sh describe current behaviour",
+    "diffHygiene": "clean — no docs/plans/*.md, no .omp/config.yml in main..head"
+  },
+  "localRuns": {
+    "changedTestFiles": "config.test.ts, deployment-instructions.test.ts, processes.test.ts, daemon index.test.ts, cli index.test.ts: 270 pass / 3 pre-existing skips / 0 fail",
+    "realE2E": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test real-deployment-instructions-e2e.test.ts: 1 pass, 4 assertions"
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "blocking",
+      "file": "packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts",
+      "line": "52-57 (waitForFile); consumer at 154",
+      "alsoFile": "packages/daemon/src/cli/__tests__/fixtures/argv-recorder-omp.ts:11",
+      "threads": [
+        "PRRT_kwDORFy7ds6huAFv",
+        "PRRT_kwDORFy7ds6huAFx"
+      ],
+      "defect": "waitForFile returns on the first inotify event where existsSync(target) is true; the recorder's Bun.write is openat(O_CREAT) then a separate write(), so the loop can return while argv.json is empty and JSON.parse('') throws. CI runs this E2E with LEGION_E2E=1 (pr-and-main.yaml:97), so it is a red-CI path for every PR.",
+      "evidence": "Reproduced with a throwaway harness running the real fixture under an identical watch()+existsSync loop, 300 iterations on this box at load average ~100: ok 283, empty 17 (5.7%), parseErr 0. Deep-review's strace confirmed the two-syscall sequence.",
+      "mustChange": "Either make the recorder atomic (write argv.json.tmp then renameSync to argv.json — recommended) or have waitForFile treat the target as ready only when non-empty (statSync(target).size > 0)."
+    }
+  ],
+  "nonBlockingNits": [
+    "deployment-instructions.ts:8 — DEPLOYMENT_INSTRUCTIONS_FILE exported with no consumer outside the module (tests repeat the literal)",
+    "daemon/__tests__/index.test.ts:349 — title claims 'every launched pane' but asserts only the controller launch; root/worker coverage is in processes.test.ts",
+    "real-deployment-instructions-e2e.test.ts:52-57 — on the 30 s abort the failure is a generic AbortError, not naming the file (sibling waitForSocket in real-shutdown-e2e.test.ts names its path)",
+    "Disposition: fold into the same push or record on the PR body's Fast-follow line — implementer's call; no threads opened for these"
+  ],
+  "thermo": {
+    "head": "ac4849041fd50cb184ab6718883711e528c8d4cd",
+    "deepReview": {
+      "agent": "thermonuclear-deep-review",
+      "verdict": "no blocking findings",
+      "shouldFix": [
+        "cli/index.ts:197-206 configDir change also moves relative state_dir — DISMISSED by reviewer: it is the spec's own Requirements row ('a relative instructions (and state_dir) resolves against the directory legion.yaml lives in'), an architect ruling (plan.json architectRulings.cliConfigDir), and already stated in the PR body and daemon AGENTS.md; live deployment and smoke rig use absolute state_dir",
+        "E2E create-vs-write race — UPHELD, reproduced, posted as finding 1"
+      ],
+      "nits": [
+        "afterAll tmux kill-server runs when skipped; fails only without tmux on PATH — parity with real-shutdown-e2e.test.ts, CI checks command -v tmux; dismissed",
+        "config.ts:927-930 requireNonEmpty names LEGION_INSTRUCTIONS for a cliOverrides source — unreachable from the CLI (only legionId is overridden); dismissed",
+        "--check-config does not read the instructions file — out of spec; informational",
+        "stale <state_dir>/deployment-instructions.md after the key is removed — inert, nothing references it; informational"
+      ],
+      "checkedClean": "no leak into env/tmux -e/logs; shell quoting of \"$(cat …)\" verified empirically with hostile paths under sh and bash; boot ordering; absent-key byte-identity; tests observable; docs match code"
+    },
+    "codeQuality": {
+      "agent": "thermonuclear-code-quality",
+      "verdict": "no blocking findings",
+      "nits": [
+        "config.ts isAbsolute ternary redundant with path.resolve — mirrors state_dir; kept for the no-second-convention rule",
+        "config.ts:642 requireNonEmpty return discarded (precedent at :600 uses it)",
+        "DEPLOYMENT_INSTRUCTIONS_FILE dead export (carried into nonBlockingNits)",
+        "index.test.ts:349 title overclaims (carried into nonBlockingNits)",
+        "waitForFile abort message (carried into nonBlockingNits)",
+        "E2E run/config/deps literals duplicate real-shutdown-e2e.test.ts — per-file literal is the directory convention; no action",
+        "DaemonConfig.instructionsPath JSDoc restates boot behaviour documented elsewhere; AGENTS.md table cell says <project> where code uses legionId — the spec itself calls it <project> (project as written); no action"
+      ],
+      "checkedClean": "single builder for both launch sites; module follows secrets.ts precedent; config mirrors state_dir; test style matches surrounding files; fixture location follows existing cli/__tests__/fixtures precedent; comments describe current behaviour"
+    }
+  },
+  "nextSteps": [
+    "Implementer fixes finding 1 (two-line change at either site), optionally folds the three nits, pushes; tester re-verifies (the E2E under LEGION_E2E=1 is the surface); reviewer re-reviews that head.",
+    "When clean: implementer pushes the .legion/ deletion at the reviewer's direction; reviewer approves head-pinned to that cleaned head (approval never while .legion/ is in the diff)."
+  ],
+  "harnessSymptom": "Multi-`export LEGION_GRANT` symptom reproduced (2-6 blocks per bash call); honoured only the first grant per call via the export-shadowing function from docs/solutions/legion/worker-pane-shell-gotchas.md §1, defined inline in the persistent shell; every legion gh call used the daemon-minted grant through the normal helper.",
+  "artifacts": {
+    "codeDiff": "/tmp/legion17-review-diff.patch (main..ac484904 excluding .legion/)",
+    "raceRepro": "/tmp/legion17-race/race.ts",
+    "reviewPayload": "/tmp/legion17-review.json"
+  },
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T06:41:47.165Z"
+}
