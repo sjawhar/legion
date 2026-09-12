@@ -6,6 +6,7 @@ import {
   connectWorkerRpc,
   createWorkerRpcClient,
   type WorkerRpcClient,
+  type WorkerRpcSocket,
   type WorkerRpcSocketData,
   workerRpcSocketHandlers,
 } from "../worker-rpc";
@@ -383,3 +384,36 @@ for (const transport of [unixTransport, tcpTransport]) {
     });
   });
 }
+
+describe("WorkerRpcClient frame decoding", () => {
+  it("reassembles a multi-byte UTF-8 character split across two socket reads", async () => {
+    // Driven through the handlers the client installs, so the split lands exactly where the test
+    // puts it — a real socket may coalesce two writes into one read and hide the bug.
+    const written: string[] = [];
+    const socket = {
+      data: { handlers: undefined },
+      write: (bytes: Uint8Array) => {
+        written.push(Buffer.from(bytes).toString("utf8"));
+        return bytes.byteLength;
+      },
+      end: () => {},
+    } as unknown as WorkerRpcSocket;
+    const client = createWorkerRpcClient(socket);
+    const state = client.getState(2_000);
+    const request = JSON.parse(written[0] ?? "") as { id: string };
+    const frame = Buffer.from(
+      `${JSON.stringify({
+        id: request.id,
+        type: "response",
+        command: "get_state",
+        success: true,
+        data: { isStreaming: false, note: "€" },
+      })}\n`,
+      "utf8"
+    );
+    const split = frame.indexOf(Buffer.from("€", "utf8")) + 1; // inside the E2 82 AC sequence
+    socket.data.handlers?.data(frame.subarray(0, split));
+    socket.data.handlers?.data(frame.subarray(split));
+    expect((await state).data).toEqual({ isStreaming: false, note: "€" });
+  });
+});

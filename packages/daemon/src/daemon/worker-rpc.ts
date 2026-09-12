@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createLineReader } from "./line-reader";
 import { createSocketLineWriter } from "./socket-writer";
 
 const DEFAULT_RPC_TIMEOUT_MS = 5_000;
@@ -154,7 +155,6 @@ export function createWorkerRpcClient(
   socket: WorkerRpcSocket,
   timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
 ): WorkerRpcClient {
-  let buffer = "";
   const pending = new Map<string, PendingRequest>();
   const closedResolvers = Promise.withResolvers<void>();
   let runState: WorkerRunState = "unknown";
@@ -271,7 +271,6 @@ export function createWorkerRpcClient(
   };
 
   const handleLine = (line: string): void => {
-    if (!line) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
@@ -310,15 +309,10 @@ export function createWorkerRpcClient(
   };
 
   const writer = createSocketLineWriter(socket);
+  const reader = createLineReader(handleLine);
   socket.data.handlers = {
     data(chunk) {
-      buffer += chunk.toString("utf8");
-      let index = buffer.indexOf("\n");
-      while (index !== -1) {
-        handleLine(buffer.slice(0, index).trim());
-        buffer = buffer.slice(index + 1);
-        index = buffer.indexOf("\n");
-      }
+      reader.push(chunk);
     },
     drain() {
       writer.drain();

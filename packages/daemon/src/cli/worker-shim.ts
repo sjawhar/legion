@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createLineReader } from "../daemon/line-reader";
 import { createSocketLineWriter, type SocketLineWriter } from "../daemon/socket-writer";
 import { CliError } from "./errors";
 
@@ -391,7 +392,7 @@ export function defaultWorkerShimDeps(): WorkerShimDeps & WorkerShimConnectDeps 
     },
     listen: (socketPath, handlers) => {
       fs.rmSync(socketPath, { force: true });
-      let buffer = "";
+      const reader = createLineReader(handlers.onLine);
       const writers = new WeakMap<object, SocketLineWriter>();
       const server = Bun.listen({
         unix: socketPath,
@@ -408,19 +409,12 @@ export function defaultWorkerShimDeps(): WorkerShimDeps & WorkerShimConnectDeps 
             writers.get(socket)?.drain();
           },
           data(_socket, data) {
-            buffer += data.toString("utf8");
-            let index = buffer.indexOf("\n");
-            while (index !== -1) {
-              const line = buffer.slice(0, index).trim();
-              buffer = buffer.slice(index + 1);
-              if (line) handlers.onLine(line);
-              index = buffer.indexOf("\n");
-            }
+            reader.push(data);
           },
           close(socket) {
             writers.get(socket)?.clear();
             writers.delete(socket);
-            buffer = "";
+            reader.reset();
             handlers.onDisconnect();
           },
         },
@@ -428,7 +422,7 @@ export function defaultWorkerShimDeps(): WorkerShimDeps & WorkerShimConnectDeps 
       return { stop: () => server.stop(true) };
     },
     connect: async (endpoint, handlers) => {
-      let buffer = "";
+      const reader = createLineReader(handlers.onLine);
       let writer: SocketLineWriter | undefined;
       let opened = false;
       const socket = await Bun.connect<undefined>({
@@ -442,18 +436,11 @@ export function defaultWorkerShimDeps(): WorkerShimDeps & WorkerShimConnectDeps 
             writer?.drain();
           },
           data(_socket, data) {
-            buffer += data.toString("utf8");
-            let index = buffer.indexOf("\n");
-            while (index !== -1) {
-              const line = buffer.slice(0, index).trim();
-              buffer = buffer.slice(index + 1);
-              if (line) handlers.onLine(line);
-              index = buffer.indexOf("\n");
-            }
+            reader.push(data);
           },
           close() {
             writer?.clear();
-            buffer = "";
+            reader.reset();
             if (opened) handlers.onDisconnect();
           },
           error() {},
