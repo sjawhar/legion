@@ -237,6 +237,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     // clock would fire on the first idle transition and retire fixtures those tests expect to stay
     // resident. The idle-retire tests opt in explicitly.
     workerIdleRetireSeconds: 0,
+    slowCommandTimeoutSeconds: 300,
     workerStreamPort: 13371,
     gates: { design: "root-issues" },
     githubApps: {},

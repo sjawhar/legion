@@ -173,6 +173,7 @@ function config(
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
     workerIdleRetireSeconds: 600,
+    slowCommandTimeoutSeconds: 300,
     workerStreamPort: 13371,
     gates: { design: "off" },
     githubApps: {},

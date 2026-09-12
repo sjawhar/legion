@@ -116,6 +116,12 @@ export interface DaemonConfig {
    * already responded — small by default, raised only under measured load sensitivity, never a
    * substitute for those routes responding before they dial back into the caller's own socket. */
   workerRpcTimeoutSeconds: number;
+  /** Per-attempt budget, in seconds, for every command that waits on OMP start-up, the
+   * network, or a credential helper: the two boot probes and every workspace-provisioning
+   * command (`jj git clone`/`fetch`, `jj workspace add`, the git config writes). The command
+   * runner's generic 30 s stays for GitHub API reads.
+   * `slow_command_timeout_seconds` / `LEGION_SLOW_COMMAND_TIMEOUT_SECONDS`; default 300. */
+  slowCommandTimeoutSeconds: number;
   /** TCP port the worker stream listener (`worker-stream-listener.ts`) accepts reverse-dialed
    * `legion worker-shim --connect` streams on, bound to the same address as the API.
    * `worker_stream_port` / `LEGION_WORKER_STREAM_PORT`; default `port + 1`. */
@@ -179,6 +185,7 @@ const DEFAULT_WORKER_IDLE_RETIRE_SECONDS = 600;
  * feature inverted for an operator who set a huge value to mean "never" — so a larger value is a
  * startup error that points at `0`, the real disable value. */
 const MAX_WORKER_IDLE_RETIRE_SECONDS = 2_147_483;
+const DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS = 300;
 
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
@@ -217,6 +224,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   worker_idle_retire_seconds: null,
   worker_boot_registration_deadline_intervals: null,
   worker_rpc_timeout_seconds: null,
+  slow_command_timeout_seconds: null,
   worker_stream_port: null,
   state_dir: null,
   // `merge` is recognized (not an "unknown key") so setting it surfaces the specific
@@ -713,6 +721,7 @@ export function loadConfigFromFile(
     ["worker_boot_timeout_seconds", "workerBootTimeoutSeconds"],
     ["worker_boot_registration_deadline_intervals", "workerBootRegistrationDeadlineIntervals"],
     ["worker_rpc_timeout_seconds", "workerRpcTimeoutSeconds"],
+    ["slow_command_timeout_seconds", "slowCommandTimeoutSeconds"],
   ] as const) {
     const value = readPositiveInteger(config[fileKey], fileKey);
     if (value !== undefined) fields[configKey] = value;
@@ -1008,6 +1017,15 @@ export function resolveDaemonConfig(
     ),
     DEFAULT_WORKER_IDLE_RETIRE_SECONDS
   );
+  const slowCommandTimeoutSeconds = resolveValue(
+    opts.cliOverrides?.slowCommandTimeoutSeconds,
+    fileNumber(fields, "slowCommandTimeoutSeconds"),
+    parseEnvPositiveInteger(
+      env.LEGION_SLOW_COMMAND_TIMEOUT_SECONDS,
+      "LEGION_SLOW_COMMAND_TIMEOUT_SECONDS"
+    ),
+    DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS
+  );
   const workerStreamPort = resolveValue(
     opts.cliOverrides?.workerStreamPort,
     fileNumber(fields, "workerStreamPort"),
@@ -1043,6 +1061,7 @@ export function resolveDaemonConfig(
     workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
     workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
     workerRpcTimeoutSeconds: workerRpcTimeoutSeconds.value,
+    slowCommandTimeoutSeconds: slowCommandTimeoutSeconds.value,
   };
   for (const [field, value] of Object.entries(lifecycleNumbers)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
@@ -1101,6 +1120,7 @@ export function resolveDaemonConfig(
       workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
       workerRpcTimeoutSeconds: workerRpcTimeoutSeconds.value,
       workerIdleRetireSeconds: workerIdleRetireSeconds.value,
+      slowCommandTimeoutSeconds: slowCommandTimeoutSeconds.value,
       workerStreamPort: workerStreamPort.value,
       gates: parsedGates,
       githubApps: githubApps.value,

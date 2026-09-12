@@ -249,6 +249,7 @@ function config(stateDir: string): DaemonConfig {
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
     workerIdleRetireSeconds: 600,
+    slowCommandTimeoutSeconds: 300,
     workerStreamPort: 0,
     gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
