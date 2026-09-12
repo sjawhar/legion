@@ -25,6 +25,7 @@ import { parseProcStatStartTicks } from "../proc-stat";
 import {
   addressingFragment,
   type ControlDirective,
+  designGateFragment,
   locatorsForIssue,
   ProcessManager,
   type ProcessManagerDeps,
@@ -295,6 +296,14 @@ function recordedTmuxLocator(state: LegionState, issue: IssueKey = root): TmuxLo
  * (never spawned by these tests) reads as undefined and fails the expectation loudly. */
 function tmuxFields(locator: Locator | undefined): TmuxLocator | undefined {
   return locator?.runtime === "tmux" ? locator : undefined;
+}
+
+/** The root architect's second `--append-system-prompt` fragment exactly as `spawnTree` builds
+ * it — addressing sentence, then the gate policy for `design` (the fixture config's is
+ * `root-issues`) — single-quoted for the launch command. */
+function rootArchitectPrompt(design: "root-issues" | "off" = "root-issues"): string {
+  const fragment = `${addressingFragment("omp", root, root, "architect")} ${designGateFragment(design)}`;
+  return `'${fragment.replaceAll("'", "'\\''")}'`;
 }
 
 function tree(state: LegionState, issue: IssueKey = root, generation = 1) {
@@ -799,7 +808,7 @@ describe("ProcessManager", () => {
         `DISPATCH_TOKEN_FILE=${path.join(stateDir, "secrets", "dispatch-token")}`,
         "-e",
         `LEGION_BOOT_TOKEN_FILE=${path.join(stateDir, "secrets", roleToken("omp", root, "architect"))}`,
-        `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
+        `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)" --append-system-prompt ${rootArchitectPrompt()}`,
       ],
       ["tmux", "-L", "legion-omp", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "-L", "legion-omp", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
@@ -1820,7 +1829,7 @@ describe("ProcessManager", () => {
     const controllerSocketPath = path.join(stateDir, "workers", "controller.sock");
     const windows = commands.filter((command) => command[3] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
-      `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
+      `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt ${rootArchitectPrompt()}`,
       `cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
     ]);
     expect(
@@ -1920,7 +1929,7 @@ describe("ProcessManager", () => {
     const [rootLaunch, workerLaunch, controllerLaunch] = launches as [string, string, string];
 
     expect(rootLaunch).toEndWith(
-      ` --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}' ${instructionsFragment}`
+      ` --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt ${rootArchitectPrompt()} ${instructionsFragment}`
     );
     expect(workerLaunch).toEndWith(
       ` --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/implementer.md)" --append-system-prompt '${addressingFragment("omp", root, child, "implementer").replaceAll("'", "'\\''")}' ${instructionsFragment}`
@@ -2565,7 +2574,7 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`
+      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt ${rootArchitectPrompt()}`
     );
   });
 
@@ -2596,8 +2605,25 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`
+      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc --append-system-prompt "$(cat ${extension}/roles/architect-root.md)" --append-system-prompt ${rootArchitectPrompt()}`
     );
+  });
+
+  it("tells a root architect in its system prompt when the project's design gate is off", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir, { gates: { design: "off" } }),
+    });
+
+    await processes.spawnRoot(root);
+
+    const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
+    const argv = launch?.at(-1) ?? "";
+    expect(argv).toEndWith(`--append-system-prompt ${rootArchitectPrompt("off")}`);
+    expect(argv).toContain("`gates.design: off`");
+    expect(argv).not.toContain("`gates.design: root-issues`");
   });
 
   it("fails a resurrection loudly when the recorded OMP session file is missing, never starting fresh", async () => {

@@ -191,6 +191,17 @@ function systemPromptArguments(
   return fragments.map((fragment) => `--append-system-prompt ${fragment}`).join(" ");
 }
 
+/** The one sentence a root architect's second `--append-system-prompt` fragment carries after
+ * the addressing sentence: whether this project arms the design gate (`config.gates.design`). The
+ * daemon's reply to `/process/started` carries the same value, but the extension never shows it to
+ * the model, so this is the only way the architect learns whether to request spec approval at all.
+ * Root architects only — the root approval covers the tree and a child spec is never gated. */
+export function designGateFragment(design: "root-issues" | "off"): string {
+  return design === "off"
+    ? "Design gate policy: `gates.design: off` — this project does not arm the design gate; do not request spec approval, register a gate, or wait for `design-approved`."
+    : "Design gate policy: `gates.design: root-issues` — this project arms the root design gate; follow the legion-architect skill's approval sequence before any Legion-role spawn.";
+}
+
 /** Prepends the configured `omp_launch_prefix` (see `DaemonConfig.ompLaunchPrefix`) to an OMP
  * invocation shell fragment, so provider credentials or any other launch wrapper are obtained
  * *inside* the pane process rather than carried by the daemon itself — the daemon never exports
@@ -2470,12 +2481,12 @@ export class ProcessManager {
       DISPATCH_URL: this.deps.config.dispatchUrl,
       DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
     };
-    const addressingPrompt = addressingFragment(
+    const addressingPrompt = `${addressingFragment(
       this.deps.state.project,
       tree.root,
       tree.root,
       "architect"
-    );
+    )} ${designGateFragment(this.deps.config.gates.design)}`;
     const innerCommand = await this.issueInnerCommand(
       tree.root,
       promptPath,
