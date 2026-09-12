@@ -1,0 +1,131 @@
+{
+  "issue": "LEGION-10",
+  "title": "The smoke rig cannot start on this machine: four fixes under scripts/smoke/",
+  "spec": {
+    "ref": "dispatch://LEGION-10/spec",
+    "version": 13
+  },
+  "pr": {
+    "number": 957,
+    "url": "https://github.com/sjawhar/legion/pull/957",
+    "headReviewed": "ecea43a81eb113b512a9794bce03fa702890ca4e",
+    "implementationSha": "8f0b120d4958",
+    "review": {
+      "id": 5187408453,
+      "state": "CHANGES_REQUESTED",
+      "url": "https://github.com/sjawhar/legion/pull/957#pullrequestreview-5187408453",
+      "submittedAt": "2026-09-12T17:51:24Z"
+    },
+    "bodyEdited": "CI line moved to the head run 34703258726 at ecea43a8; Threads line now 0 resolved, 7 unresolved with the review link; Thermo line records the verdict; the E2E negative-control quote's `candidates` array corrected to describe the saved response's five objects instead of bare keys (negative-409-body.json). Every other section preserved verbatim (diff against the previous body: lines 42, 44, 46 and 81 only; readback identical apart from GitHub's trailing newline)."
+  },
+  "reviewedBy": {
+    "role": "reviewer",
+    "date": "2026-09-12",
+    "sessionId": "01a096aa-fa6c-7000-ba67-645d3e6f0d4d",
+    "roleTopic": "notifications.role.legion-sjawharlegion-legion-10-reviewer"
+  },
+  "verdict": "CHANGES_REQUESTED at ecea43a8. The shell scripts are correct against spec v13 and every acceptance criterion's evidence holds; the changes requested are to the harnesses (three new cases pass for a reason other than the one they claim, confirmed by mutation), one PASS-line overclaim, one fallback the architect must rule on, and two wording items. Not approved; the .legion/ deletion must wait for the corrected head to come back through tester and reviewer.",
+  "verifiedDirectly": {
+    "head": "legion/LEGION-10 head = ecea43a81eb113b512a9794bce03fa702890ca4e (gh pr view); state OPEN; base main",
+    "ci": "Tests run 34703258726 (https://github.com/sjawhar/legion/actions/runs/34703258726) headSha ecea43a8, conclusion success, all four jobs (pr-title, lint, typecheck, test) SUCCESS via statusCheckRollup. The tester's cited run 34677732739 is at dcabf1ec (also success). PR body CI line was stale by one commit and has been corrected.",
+    "threads": "0 review threads and 0 reviews existed before this review (GraphQL reviewThreads.totalCount=0, reviews empty). After this review: 7 unresolved.",
+    "e2e": "Spot-checked against /tmp/legion10-smoke/: checkpoints-none.log matches the quoted six lines byte for byte; up-none.log matches the quoted line order (GREEN OMP build ... CREATED root issue LEGSMOKE-46 ... RIG READY); controller-pids.txt shows 2935311 bun (worker-shim) and 2935536 omp-18.1.15-sami.9bff2014-rpcfix; controller-ready-state.json carries roles.legion-sjawhar24-controller and the %1 locator; root-issue-readback.json matches; negative-409-status.txt = 409 and negative-409-body.json has error/code as quoted but candidates as objects (corrected in the body); daemon-none.log and daemon-envoy.log have 0 hits for `send did not invoke the agent` and one `failed to connect controller shim socket on ready` each (the accepted daemon timeout); down-none.log and down-envoy.log match; up-none-nonexistent.log matches the second negative control.",
+    "harnessesAtHead": "bash -n clean on all six scripts; up.test.sh 14 PASS rc=0; checkpoints.test.sh 12 PASS rc=0; down.test.sh 3 PASS rc=0 (this machine, 2026-09-12)."
+  },
+  "codeReview": {
+    "up.sh": "resolve_omp_path: four branches as specified (set+valid passes through; set+relative/missing/non-executable fails naming the path; unset+default present resolves; unset+default absent fails naming the path and both remedies); never falls back to the pin. `local omp_path` is declared separately from `omp_path=\"$(resolve_omp_path)\"` so set -e aborts main() on failure; nothing (mkdir, ports, go build, NATS, processes) runs before it. LEGION_OMP_PATH exported only in the daemon start_process env block; the daemon's environment.ts treats \"\" as unset exactly like up.sh's -n test and rejects relative paths, which up.sh now preempts. force: true is inside the existing jq body; curl --fail || fail unchanged.",
+    "checkpoints.sh": "webhook_mode assigned then made readonly (no local shadowing anywhere); the mode gate runs after require_env SMOKE_REPO/SMOKE_PROJECT and the command checks, before any dispatch_request/curl and before checkpoint_twelve's require_env SMOKE_QUEUED_ISSUE; none blocks 1-4,12 (Dispatch reason) and 5-7,9-11 (GitHub reason); forward blocks 1-4,12; envoy blocks nothing; 8 and 13 untouched. stored_webhook_mode never fails so the assignment introduces no new error path.",
+    "down.test.sh": "The stand-in reports $$ from inside the setsid'd shell and the harness requires /proc/<pid>/stat field 5 == pid before writing the record, so the recorded pgid is always a leader distinct from the harness; forward_pgid is cleared before exit on the fixture-error path; the EXIT trap can never target the operator's process group. Field 22 start time matches down.sh's process_start_time. Safe. Rigor gap: single-process group (thread r3997052392).",
+    "README.md": "none row, start-and-stop paragraph and Checkpoints paragraph match the tester's real none-mode output and daemon state; forward described as GitHub-only with 1-4/12 blocked; envoy named as the only mode for 1-4/12; OMP-build paragraph accurate except the `bump omp_pin retires the default` remedy (thread r3997052397); line 65 dangling colon (thread r3997052400)."
+  },
+  "findings": [
+    {
+      "severity": "blocking",
+      "file": "scripts/smoke/up.test.sh",
+      "line": 170,
+      "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052390",
+      "what": "resolve_omp_path cases never exercise the `== /*` or either `-x` guard: `relative/omp` and `missing-omp` both fail on -f. Mutation: removing the leading-slash guard leaves all 14 cases green (reviewer observed); removing both -x tests leaves them green (deep-review observed).",
+      "fix": "Add (a) existing non-executable file at LEGION_OMP_PATH, (b) `(cd \"$fake_bin\" && LEGION_OMP_PATH=omp resolve_omp_path)`, (c) non-executable default under a fresh XDG_STATE_HOME."
+    },
+    {
+      "severity": "blocking",
+      "file": "scripts/smoke/up.test.sh",
+      "line": 412,
+      "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052391",
+      "what": "The fail-closed preflight probe passes with `local omp_path=\"$(resolve_omp_path)\"` (set -e masked): main() prints `GREEN OMP build: ` and is stopped by `cd \"${repo_root}/packages/envoy\"` failing (repo_root is / because the harness sources a mktemp copy), before ensure_nats, so the order log is empty and all three assertions hold. Reviewer observed.",
+      "fix": "Assert the captured output does not contain `GREEN OMP build:`."
+    },
+    {
+      "severity": "blocking",
+      "file": "scripts/smoke/down.test.sh",
+      "line": 99,
+      "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052392",
+      "what": "`exec sleep 300` makes the recorded group one process; a pid-only kill in down.sh (kill \"$pgid\" / kill -0 \"$pgid\" / kill -KILL \"$pgid\") passes the case. Reviewer observed. Production forwarder is gh + gh-webhook child, so the orphaned child is the real regression.",
+      "fix": "`setsid bash -c 'printf \"%s\\n\" \"$$\" >\"$1\"; sleep 300 & wait' _ \"$forward_pid_file\" &` — verified: fails the mutant, passes head down.sh, no leak (cleanup kills the group)."
+    },
+    {
+      "severity": "should-fix",
+      "file": "scripts/smoke/checkpoints.test.sh",
+      "line": 232,
+      "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052394",
+      "what": "PASS line claims none blocks 5-7 and 9-11 but only checkpoint 5 runs; dropping 6/7/9/10/11 from the arm goes unnoticed. Adding 8 to the arm also goes unnoticed (deep-review observed).",
+      "fix": "Loop over 5 6 7 9 10 11 with exit 3 + GitHub-ingress substring + zero new curl calls; run 8 under none asserting the branch-protection reason."
+    },
+    {
+      "severity": "should-fix (architect's call; spec silent)",
+      "file": "scripts/smoke/checkpoints.sh",
+      "line": 525,
+      "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052395",
+      "what": "stored_webhook_mode falls back to `forward` when no mode file and no SMOKE_WEBHOOK_MODE; now that forward gates 1-4/12, an unpopulated SMOKE_DIR run (README:121 supports it) reports `SMOKE_WEBHOOK_MODE=forward:` for a mode nobody set. Not a false green; a fabricated recorded fact.",
+      "fix": "Recommend fail loudly (no-silent-fallback rule); alternative: keep the fallback and add SMOKE_WEBHOOK_MODE to the README's unpopulated-dir variable list. Add one harness case for the no-file path either way."
+    },
+    {
+      "severity": "wording (fix in this round)",
+      "file": "scripts/smoke/up.sh",
+      "line": 91,
+      "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052397",
+      "what": "`bump omp_pin` / `Bumping omp_pin retires the default` (up.sh:79, :91; README:77) is a dead end as written: resolve_omp_path never consults the pin, so a bump alone reproduces the same preflight failure.",
+      "fix": "Say `bump omp_pin and remove resolve_omp_path's default branch` in all three places; update the up.test.sh substring."
+    },
+    {
+      "severity": "wording",
+      "file": "scripts/smoke/README.md",
+      "line": 65,
+      "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052400",
+      "what": "Restored forward sentence ends with `):` introducing the bun command block that sits two paragraphs lower.",
+      "fix": "Full stop, or move the block under it."
+    }
+  ],
+  "cleanupBatch": [
+    "up.test.sh:450 asserts the literal pin string `github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934`; assert `omp_invocation: mise x ${omp_pin} -- omp` (the harness sources up.sh) so the recommended bump does not break the test.",
+    "up.test.sh:446 checks only the listener argv for LEGION_OMP_PATH absence; `grep -l '^LEGION_OMP_PATH=' \"${SMOKE_DIR}\"/start_process.*.argv` == the daemon file covers the bridge too.",
+    "down.test.sh: record `$!` after the setsid line and kill it in cleanup so a fixture failure before the leader check does not leak `sleep 300` for five minutes.",
+    "up.sh:81 evaluates $HOME before the LEGION_OMP_PATH branch; with HOME unset under set -u the operator sees `HOME: unbound variable` even when LEGION_OMP_PATH is valid.",
+    "up.sh:45 none reason says `checkpoint 13 remains usable`; README says 8 and 13 are mode-independent.",
+    "Recorded in the review summary and the PR body's Thermo line; small enough to land in the implementer's next push, otherwise one Fast-follow line."
+  ],
+  "thermo": {
+    "ranAt": "ecea43a81eb113b512a9794bce03fa702890ca4e",
+    "deepReview": "VERDICT: 0 blocking, 5 should-fix, 3 nit (agent://ThermoDeepReview). Confirmed by the reviewer: down.test.sh single-process group; resolve_omp_path -x/leading-slash guards unexercised; stored_webhook_mode forward fallback; bump-omp_pin remedy dead end. Not adopted as threads: HOME-unset nit (cleanup batch), GNU sed \\n (Linux-only rig, guarded by the fixture grep), 12-under-envoy coverage (would need a deliberate case added to the empty envoy arm; folded into the checkpoint-8 suggestion).",
+    "codeQuality": "VERDICT: 0 blocking, 7 should-fix, 8 nit (agent://ThermoCodeQuality). Confirmed: relative-path case gap; PASS-line overclaim at checkpoints.test.sh:232; stored_webhook_mode fallback. Not adopted: forward-mode start-up printing a Dispatch-feed notice (spec did not ask for it — observation for the architect); orphan LEGSMOKE issue per non-envoy run (spec-accepted design — observation for the architect); the full-sentence webhook_ingress_block_reason pin (spec sharedText mandates verbatim consistency; pre-existing pattern); none/forward loop and nested-case duplication (harness has no helper library; two copies is the boring option); README redundancy (operator-facing rows repeat on purpose)."
+  },
+  "notReLitigated": [
+    "forward-mode gating and teardown proven by unit harnesses only (spec v13 acceptance 4 and 5)",
+    "one `failed to connect controller shim socket on ready` per daemon log = 5 s negotiate_protocol timeout under loadavg 42; crash string absent; architect filing separately",
+    "gates: block, omp_pin value, down.sh, packages/ untouched"
+  ],
+  "observationsForArchitect": [
+    "Every none- or forward-mode run now leaves one untriaged LEGSMOKE root issue that the rig daemon can never admit (force: true plus no Dispatch feed); the tester set LEGSMOKE-46 and LEGSMOKE-47 to done by hand. Spec v13 accepted this; if it is unwanted, skipping ensure_root_issue outside envoy mode (with a SKIPPED-BLOCKED line) is the small change, and the comment at up.sh:611-614 should then say so.",
+    "In forward mode (the default on a box with gh webhook forward) up.sh prints nothing about the missing Dispatch feed at start-up; the operator learns it from checkpoints.sh. Spec did not ask for a line; one printf in the forward branch would mirror the none-mode line.",
+    "Thread r3997052395 (stored_webhook_mode forward fallback) needs your ruling: fail loudly, or document SMOKE_WEBHOOK_MODE as required for an unpopulated SMOKE_DIR.",
+    "Grant hygiene for whoever resumes any worker: the harness prepends a fresh `export LEGION_GRANT=...` to every bash call; pasting a second copy into the command overrides it and yields `Unable to redeem LEGION_GRANT (403)`. Two of my calls hit this before I stopped copying the preamble."
+  ],
+  "nextSteps": [
+    "Architect sends the implementer back to dispose the 7 threads individually (fix or `not a defect — reason`), fold the cleanup batch into the same push if trivial, and update the PR body's Threads line.",
+    "Tester re-runs the three harnesses at the new head (the real rig run need not repeat unless up.sh or checkpoints.sh behaviour changes; thread r3997052395's fix, if taken, changes checkpoints.sh's unrecorded-mode behaviour only).",
+    "Reviewer (this session) reviews the new head, then directs the .legion/ deletion and approves that exact SHA."
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T17:53:52.379Z"
+}
