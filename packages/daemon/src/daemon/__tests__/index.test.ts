@@ -1,16 +1,17 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, roleToken, roleTopic } from "@legion/contracts";
+import { controllerToken, type DaemonStateResponse, roleToken, roleTopic } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
 import * as daemonIndex from "../index";
-import { newLegionState } from "../legion-state";
+import { type LegionState, newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
+import { writeSecretFile } from "../secrets";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { fakeDispatchClient } from "./ci-fixtures";
 
@@ -645,6 +646,99 @@ describe("startDaemon", () => {
       expect(state.trees[queuedIssue]?.status).toBe("active");
       expect(state.trees[restoredIssue]?.readyConfirmedAt).toBeUndefined();
     } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("retires a ready-confirmed worker whose shim socket is dead at boot: capability revoked through the live api, locator cleared, secret file removed", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const issue = "WIDGETS-42";
+    const token = roleToken(daemonConfig.project, issue, "tester");
+    const ompSessionFile = path.join(stateDir, "workers", "dead-tester.session.json");
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    // A confirmed, previously-live worker: `sessionId` gives its retirement a capability to
+    // revoke (the `api` dereference), and `readyConfirmedAt` routes `reconnectWorkers` through
+    // `markWorkerDead`, not the unconfirmed-boot retirement.
+    state.roles[token] = {
+      issue,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_dead_tester",
+      readyConfirmedAt: Date.parse("2026-08-23T00:00:00.000Z"),
+      locator: {
+        tmuxSession: `legion-${daemonConfig.project}`,
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: path.join(stateDir, "workers", "dead-tester.sock"),
+        ompSessionFile,
+      },
+    };
+    // The pane's boot-token file a previous daemon process wrote; boot-time hygiene must reap it
+    // once the locator clears.
+    const secretFile = await writeSecretFile(stateDir, token, "stale-boot-token");
+    const saved: LegionState[] = [];
+    const killedPanes: string[] = [];
+    const errorLogs: unknown[][] = [];
+    const consoleError = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorLogs.push(args);
+    });
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    const baseRunner = options.deps?.runner;
+    if (!baseRunner) throw new Error("daemonTestDependencies did not supply a runner");
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+          saveState: async (_file, snapshot) => {
+            saved.push(structuredClone(snapshot));
+          },
+          connectWorkerRpc: async () => {
+            throw new Error("ECONNREFUSED: worker shim socket unreachable");
+          },
+          runner: async (command, runnerOptions) => {
+            if (command[0]?.endsWith("/tmux") && command[3] === "kill-pane") {
+              killedPanes.push(command[5] ?? "");
+              return { stdout: "", stderr: "can't find pane: %7", exitCode: 1 };
+            }
+            return baseRunner(command, runnerOptions);
+          },
+        },
+      });
+
+      // The whole retirement ran: no reconnect-wide failure and no TypeError anywhere in the boot
+      // log. (`[legion] failed to reconnect worker …: ECONNREFUSED` is the expected per-worker
+      // verdict line and is not a failure.)
+      const failures = errorLogs.filter((args) =>
+        args.some(
+          (arg) =>
+            arg instanceof TypeError ||
+            (typeof arg === "string" && arg.includes("worker reconnection failed"))
+        )
+      );
+      expect(failures).toEqual([]);
+      expect(killedPanes).toEqual(["%7"]);
+
+      const persisted = saved.at(-1)?.roles[token];
+      if (!persisted || !("issue" in persisted)) throw new Error("worker claim was not persisted");
+      expect(persisted.locator).toBeUndefined();
+      expect(persisted.resumeSessionFile).toBe(ompSessionFile);
+      expect(persisted.sessionId).toBe("ses_dead_tester");
+
+      const response = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/state`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as DaemonStateResponse;
+      const exposed = body.roles[token];
+      if (!exposed) throw new Error("worker role missing from GET /legion/v1/state");
+      expect(exposed.locator).toBeUndefined();
+      expect(exposed.sessionId).toBe("ses_dead_tester");
+
+      await expect(stat(secretFile)).rejects.toThrow(/ENOENT/);
+    } finally {
+      consoleError.mockRestore();
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }

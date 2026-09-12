@@ -298,21 +298,6 @@ async function startDaemonLocked(
     sleep: deps.sleep,
   });
 
-  // Awaited (not fire-and-forget): reconnectWorkers is the source of truth
-  // runningWorkerCount() relies on, so an admission decision racing ahead of it would risk
-  // over-admitting past the configured cap. This runs before `api` is assigned purely because
-  // it needs no `api` reference (it only probes existing connections; it never mints a boot
-  // token) — but a reconnect's own `get_state` response can still synchronously fire
-  // `onIdle` -> `promoteWorkerQueue`, which is why that trigger (and `reconcileWorkerAdmission`)
-  // stay gated behind `processManager.enableWorkerPromotion()` below until `api` exists: nothing
-  // here is protected by call *ordering*, only by the gate.
-  try {
-    await processManager.reconnectWorkers();
-  } catch (error) {
-    console.error(`[legion] worker reconnection failed:`, error);
-  }
-  // Reaps pane secret files a crash left behind between clearing a locator and its save's prune.
-  await processManager.pruneSecretFiles();
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
     const payload = await overseerCatchup(state, tree);
     await deps.envoyPublish(
@@ -354,29 +339,6 @@ async function startDaemonLocked(
     config,
   };
   const eventPump: EventPump = startEventPump(eventDeps);
-  // A crash between `/controller/ready` persisting its own role claim (`ctx.save()`) and that
-  // same request finishing its own drain (`onControllerReady`, below) would otherwise strand
-  // every notice already recorded in `controllerPendingNotices` forever: the controller session
-  // that already claimed the role will never POST `/controller/ready` again this boot, so
-  // nothing else would ever trigger a drain for it. Keyed off the durable queue itself, not
-  // just a live claim: if no controller role exists at all (its own process died too, or one
-  // never existed for this project), nothing would ever reach `/controller/ready` to trigger a
-  // drain on its own -- `ensureController` spawns one directly, and its own eventual
-  // `/controller/ready` call drains these same notices through the ordinary path once it's
-  // live. Both branches are fire-and-forget: `drainControllerNotices` already retries a failed
-  // publish with its own bounded backoff, `ensureController` is idempotent, and nothing else in
-  // boot depends on either finishing.
-  if (state.controllerPendingNotices.length > 0) {
-    if (state.roles[controllerToken(state.project)]) {
-      void eventPump.drainControllerNotices().catch((error) => {
-        console.error(`[legion] boot-time controller notice drain failed:`, error);
-      });
-    } else {
-      void processManager.ensureController().catch((error) => {
-        console.error(`[legion] boot-time controller spawn for pending notices failed:`, error);
-      });
-    }
-  }
   const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
 
   const emitResync = async (options?: { force?: boolean }): Promise<void> => {
@@ -465,6 +427,55 @@ async function startDaemonLocked(
   } catch (error) {
     api.stop();
     throw error;
+  }
+
+  // Nothing on `processManager` runs before this point. Its `mintControllerCapability`,
+  // `mintBootToken`, `mintWorkerBootToken`, and `revokeSessionCapability` deps read `api` by
+  // reference, and every path into them — a dead worker's retirement (`retireWorkerLocator` ->
+  // `revokeRoleClaim` -> `deps.revokeSessionCapability`), `ensureController`, root and worker
+  // launches — is reachable only from here on. The span from `new ProcessManager(...)` to the
+  // assignment above contains no `await`, so no callback can interleave with it.
+  //
+  // `reconnectWorkers` therefore runs here: after `api` because retiring a confirmed-dead worker
+  // revokes its capability through it, and awaited before `enableWorkerPromotion()` below because
+  // it is the source of truth `runningWorkerCount()` relies on — an admission decision racing
+  // ahead of it would decide against a count that still holds every unprobed claim as running.
+  // A reconnect's own `get_state` response can still synchronously fire `onIdle` ->
+  // `promoteWorkerQueue`; that trigger (and `reconcileWorkerAdmission`) stay gated behind
+  // `enableWorkerPromotion()` until the probe has settled. `Bun.serve` is already accepting
+  // requests while this runs: safe, because every retirement re-validates the claim it was
+  // handed under `mutateClaim(token)`, an unprobed claim counts as running, and promotion stays
+  // gated.
+  try {
+    await processManager.reconnectWorkers();
+  } catch (error) {
+    console.error(`[legion] worker reconnection failed:`, error);
+  }
+  // Reaps pane secret files a crash left behind between clearing a locator and its save's prune.
+  await processManager.pruneSecretFiles();
+  // A crash between `/controller/ready` persisting its own role claim (`ctx.save()`) and that
+  // same request finishing its own drain (`onControllerReady`, below) would otherwise strand
+  // every notice already recorded in `controllerPendingNotices` forever: the controller session
+  // that already claimed the role will never POST `/controller/ready` again this boot, so
+  // nothing else would ever trigger a drain for it. Keyed off the durable queue itself, not
+  // just a live claim: if no controller role exists at all (its own process died too, or one
+  // never existed for this project), nothing would ever reach `/controller/ready` to trigger a
+  // drain on its own -- `ensureController` spawns one directly, and its own eventual
+  // `/controller/ready` call drains these same notices through the ordinary path once it's
+  // live. Both branches are fire-and-forget: `drainControllerNotices` already retries a failed
+  // publish with its own bounded backoff, `ensureController` is idempotent, and nothing else in
+  // boot depends on either finishing. Runs after `api` is assigned because `ensureController`
+  // mints the controller capability through it.
+  if (state.controllerPendingNotices.length > 0) {
+    if (state.roles[controllerToken(state.project)]) {
+      void eventPump.drainControllerNotices().catch((error) => {
+        console.error(`[legion] boot-time controller notice drain failed:`, error);
+      });
+    } else {
+      void processManager.ensureController().catch((error) => {
+        console.error(`[legion] boot-time controller spawn for pending notices failed:`, error);
+      });
+    }
   }
 
   // Awaited only now that `api` is assigned: the promotion cascade this can

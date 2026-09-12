@@ -120,12 +120,14 @@ export class WorkerAdmission {
   /** Gates every worker-queue drain (`promoteWorkerQueue`'s fire-and-forget trigger and
    * `reconcileWorkerAdmission`'s explicit call alike — neither bypasses this) until
    * `enableWorkerPromotion` flips it. False from construction protects boot: `reconnectWorkers`
-   * (called before the daemon's HTTP `api` is ever assigned, since it needs no `api` reference)
-   * can synchronously trigger a chain of `get_state` -> `isStreaming: false` -> `onIdle` ->
-   * `promoteWorkerQueue` -> `launchWorker` -> `mintWorkerBootToken`, and that last step reads
-   * `api` by reference through a closure that does not exist yet at that point in boot — a
-   * queued token would otherwise mint nothing (a spurious launch failure) at every daemon
-   * restart with a non-empty queue.
+   * runs first (after the daemon's HTTP `api` is assigned, since a dead worker's retirement
+   * revokes its capability through it), and a reconnect's own `get_state` -> `isStreaming: false`
+   * -> `onIdle` can synchronously trigger `promoteWorkerQueue` while other claims are still
+   * unprobed — every one of which `runningWorkerCount()` still counts as running. A drain at that
+   * point would decide against a count that is not yet the probed truth and launch fresh panes
+   * interleaved with the probe that may still retire (or resume) their siblings; the gate keeps
+   * the first drain the boot sequence's own ordered `reconcileWorkerAdmission()` call, after every
+   * probe has settled.
    */
   private workerPromotionEnabled = false;
 
@@ -326,8 +328,8 @@ export class WorkerAdmission {
    * cap, or a second pane racing a concurrent same-role spawn, are exactly what that decision
    * exists to prevent). Safe to call before `enableWorkerPromotion()` — the queue push always
    * lands; `promoteWorkerQueue()` itself no-ops (logging) until promotion is enabled, so a
-   * restart-time caller (`reconnectWorkers`, run before `api` exists) leaves the token for the
-   * boot sequence's own `reconcileWorkerAdmission()` to promote once ready.
+   * restart-time caller (`reconnectWorkers`, run before `enableWorkerPromotion()`) leaves the
+   * token for the boot sequence's own `reconcileWorkerAdmission()` to promote once ready.
    */
   async enqueueForRetry(token: string): Promise<void> {
     await this.enqueueForRetryPending(token);

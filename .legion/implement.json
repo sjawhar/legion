@@ -1,0 +1,101 @@
+{
+  "issue": "LEGION-11",
+  "spec": "dispatch://LEGION-11/spec (version 5; Design 5 = no behaviour change in processes.ts/api.ts/api/auth.ts, comment-only edits in scope)",
+  "plan": "docs/plans/2026-09-12-reconnect-workers-after-api.md (commit 5b732e1251a8)",
+  "pr": {
+    "number": 955,
+    "url": "https://github.com/sjawhar/legion/pull/955",
+    "title": "fix(daemon): probe workers after the API starts so a dead worker's cleanup no longer crashes on restart",
+    "base": "main",
+    "head": "legion/LEGION-11"
+  },
+  "commits": [
+    {
+      "change": "lxkxplmn",
+      "commit": "3987da66f3199a3011a80600db8d33a35e07a6b9",
+      "title": "fix(daemon): run reconnectWorkers after the API exists so a dead worker's retirement can revoke its capability",
+      "files": [
+        "packages/daemon/src/daemon/index.ts",
+        "packages/daemon/src/daemon/__tests__/index.test.ts"
+      ],
+      "note": "Plan tasks 1+2. reconnectWorkers try/console.error, pruneSecretFiles(), and the controllerPendingNotices drain/ensureController block moved verbatim to after `api = startLegionApi(...)` and before enableWorkerPromotion(); the 'needs no api reference' comment replaced by the ordering invariant. Regression test added under describe(\"startDaemon\") after the registration-deadline test."
+    },
+    {
+      "change": "pvvsloly",
+      "commit": "74e6c4321d2ed2516373bf42813bd01248d800b7",
+      "title": "docs(daemon): comments and invariants follow reconnectWorkers to its post-API position",
+      "files": [
+        "packages/daemon/src/daemon/worker-admission.ts",
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts",
+        "packages/daemon/src/daemon/AGENTS.md",
+        "docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md"
+      ],
+      "note": "Plan task 3, comment-only. processes.ts: only retireUnconfirmedBoot's doc comment (api-before-exists clause removed, paragraph reflowed to 100 cols). processes.test.ts: four comment edits, no assertion changes. A grep for `before \\`api\\``/`needs no \\`api\\``/`\\`api\\` exists` across packages/daemon/src and docs/solutions finds only the intentional historical note in the retro doc."
+    }
+  ],
+  "redBeforeFix": {
+    "command": "bun test packages/daemon/src/daemon/__tests__/index.test.ts -t \"retires a ready-confirmed worker\"",
+    "result": "0 pass, 1 fail",
+    "failureText": "error: expect(received).toEqual(expected)\n\n- []\n+ [\n+   [\n+     \"[legion] worker reconnection failed:\",\n+     [TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')],\n+   ],\n+ ]\n\n- Expected  - 1\n+ Received  + 6\n\n      at <anonymous> (.../packages/daemon/src/daemon/__tests__/index.test.ts:625:24)\n(fail) startDaemon > retires a ready-confirmed worker whose shim socket is dead at boot: capability revoked through the live api, locator cleared, secret file removed"
+  },
+  "greenAfterFix": "bun test packages/daemon/src/daemon/__tests__/index.test.ts: 19 pass, 0 fail, 87 expect() calls",
+  "gates": {
+    "biome": "cd $LEGION_WORKSPACE && bunx biome check packages/daemon/src -> exit 0, no diagnostics",
+    "tsc": "cd $LEGION_WORKSPACE/packages/daemon && bunx tsc --noEmit -> exit 0",
+    "bunTest": "After rebase onto main 8f6fad36: cd $LEGION_WORKSPACE && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test packages/daemon -> 816 pass, 5 skip, 0 fail, 3333 expect() calls, 821 tests across 53 files, exit 0 (pre-rebase: 812 pass / 0 fail).",
+    "bunTestInPaneEnv": "With the worker pane's DISPATCH_URL/DISPATCH_TOKEN_FILE present: 811 pass, 1 fail — `legion start --check-config > validates github_apps.<role>.private_key_command without executing it` (packages/daemon/src/cli/__tests__/index.test.ts) throws `dispatch_url is set but DISPATCH_TOKEN is not` from resolveDaemonConfig because cmdCheckConfig reads the real process.env. Pre-existing and environment-sensitive: the file passes 14/14 with those two variables unset, and this branch changes nothing under packages/daemon/src/cli or config.ts. Not fixed here (assignment constraint: no executable changes outside index.ts and the new test); CI runners do not carry DISPATCH_URL."
+  },
+  "deviationsFromPlan": [
+    "PR title is `fix(daemon): probe workers after the API starts so a dead worker's cleanup no longer crashes on restart` rather than the assignment's illustrative `Daemon: …` — the Tests workflow's pr-title job requires `^[a-z]+(\\([^)]+\\))?!?: .+`; the wording is otherwise the plain-words title the architect asked for.",
+    "PR body gives the closure audit as one plain-English sentence (per the architect's assignment: no line numbers, expand identifiers) instead of pasting the plan's line-numbered table; the full table remains in the plan document.",
+    "`jj bookmark set legion/LEGION-11 -r @-` needed `--allow-backwards`: in this jj the bookmark had followed the working-copy commit, so pointing it at @- is a local backwards move (still a fast-forward from origin). Push and PR head are the described commits only; .omp/config.yml is not committed.",
+    "index.ts: one blank line added between the `);` closing startLegionApi(...) and the moved block, for readability; otherwise the inserted text is the plan's verbatim.",
+    "Rebased onto main (8f6fad36) before CI could run: main had moved (#947 gates-off boot block, #954 boot-probe retries) and GitHub reported the PR CONFLICTING, which suppresses every pull_request workflow — no Tests run ever appeared for the original head c5cdfc04. Only index.test.ts conflicted (main also added `roleToken` to the @legion/contracts import; merged into one import line). index.ts merged cleanly: main's changes are all above the moved region. Gates re-run on the rebased tree: biome exit 0, tsc exit 0, bun test 816 pass / 5 skip / 0 fail (main added 4 tests). Pushed as a sideways bookmark move; nothing was stacked on the branch."
+  ],
+  "closureAudit": "Confirmed while editing: the span from `new ProcessManager({...})` to `api = startLegionApi(...)` in the new index.ts contains no await (only closure/object construction, the synchronous startEventPump, and createCiStatusFetcher). mintControllerCapability/mintBootToken/mintWorkerBootToken/revokeSessionCapability are reachable only via HTTP handlers, NATS callbacks, timers, promotion cascades gated by enableWorkerPromotion(), or the three moved blocks.",
+  "ci": "Tests run 34714945221 (https://github.com/sjawhar/legion/actions/runs/34714945221) at f8e9a541ce91ae640a785807c2ffef667573f0d4: pr-title, lint, typecheck, test all success. GitHub: MERGEABLE. The run at the final head (the .legion/-only commit on top) is named in the PR body's Verification/CI line.",
+  "testerNotes": [
+    "Follow plan §Tester exactly (docs/plans/2026-09-12-reconnect-workers-after-api.md, 'Tester' section): scratch project sjawhar/11, state under /tmp/legion11-smoke/<main|branch>/daemon, `tmux -L legion-sjawhar11`, port 19371, isolated NATS docker legion11-nats on 127.0.0.1:14223. Main run first from /home/ubuntu/legion-ws-RunDaemon (read-only), branch run from $LEGION_WORKSPACE at the PR head (code head 66bcbb6b; the implement handoff commit sits on top of it).",
+    "Expected main signature: `[legion] worker reconnection failed:` followed by `TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')`, locator retained, secret file retained. Expected branch: only the per-worker `[legion] failed to reconnect worker <token>: … Failed to connect` line, locator cleared in `legion state`, secret file gone.",
+    "Never restart, stop, or reconfigure the production daemon (legion-sjawharlegion, port 13370). Verify `tmux -L legion-sjawharlegion list-panes -a` is identical before/after.",
+    "Fill the PR body's **E2E** line (command/run, observation, head sha, negative control) via `legion gh -- pr edit 955 --body-file …`; keep the rest of the body."
+  ],
+  "reviewerNotes": [
+    "Behaviour diff is index.ts only (`jj diff --from main --to 3987da66 -- packages/daemon/src/daemon/index.ts`). processes.ts, api.ts, api/auth.ts executable code unchanged — processes.ts diff is one doc comment. After the second rebase the moved block sits directly after main's WorkerStreamListener block (#967), which sits directly after `api = startLegionApi(...)`; see rebase2.conflicts.",
+    "Spec Testing row 2: the three processes.test.ts reconnect cases pass unmodified; only their comments changed.",
+    "PR body carries the what-moved list and the closure-audit sentence (spec Acceptance 4) and `Dispatch: LEGION-11`."
+  ],
+  "base": "main@origin fd4fce51204a (chore: release pi-envoy v1.11.1) after the second rebase; previously 8f6fad367099, originally 7db2cd83.",
+  "rebase2": {
+    "reason": "GitHub reported PR #955 CONFLICTING/DIRTY against main after main moved from 8f6fad36 to fd4fce51 (32 commits, including #967 reverse-dial worker-shim + WorkerStreamListener, #952, #971), which also suppresses every pull_request workflow run. Architect instruction: conflict-only rebase, change nothing else.",
+    "command": "jj rebase -s omvmmzoo -d main@origin (rebased all 7 branch commits; commit shape preserved: plan doc, plan handoff, fix+test, comment sweep, implement handoff, test handoff)",
+    "conflicts": [
+      "packages/daemon/src/daemon/index.ts: NONE. jj auto-merged: main (#967) inserted its `startWorkerStreamListener` try/catch immediately after `api = startLegionApi(...)`, the same anchor as the moved block; jj placed main's block first, then the moved block, then `enableWorkerPromotion()`. That is the correct order: the listener is bound with the API and its bind failure is startup-fatal (`api.stop(); throw`), so it must fail before any process-manager work or a fire-and-forget `ensureController` spawn; it is synchronous, so the stated invariant (no top-level await between `new ProcessManager(...)` and the moved block) still holds — verified by an awk scan of index.ts lines 275-431: every `await` in that span is inside a closure (provisioningToken, emitOverseerCatchup, onUndeliverable, onProbe, emitResync, onControllerReady). No line of the moved block or of main's block was edited.",
+      "packages/daemon/src/daemon/AGENTS.md: one 2-sided conflict in the docs commit — main appended a shim-reachability bullet at the end of Operational invariants, the same anchor as the boot-ordering bullet. Resolved by keeping both, main's bullet first, mine second; neither bullet's text changed. Resolution squashed into the docs commit (pvvsloly).",
+      "packages/daemon/src/daemon/__tests__/index.test.ts, processes.test.ts, processes.ts: auto-merged cleanly (main's edits are elsewhere in those files)."
+    ],
+    "diffIdentity": {
+      "tested": "jj diff --from 8f6fad36 --to 66bcbb6b --git  (the code the tester ran at PR head f5cf98f5)",
+      "rebased": "jj diff --from main@origin --to 74e6c432 --git  (new code head)",
+      "method": "Stripped both to their added/removed lines (^[+-], excluding the +++/--- file headers) and diffed.",
+      "result": "IDENTICAL — 1074 added/removed lines in each, byte-for-byte equal; same nine files. The only differences in the full unified diffs are context lines: in AGENTS.md the line preceding the boot-ordering bullet is now main's shim-reachability bullet (was the queued-idle-resume bullet); in index.ts the lines preceding the moved block are now the WorkerStreamListener block's `throw error; }` (were `apiDeps );`). No +/- line differs."
+    },
+    "gates": {
+      "install": "bun install --frozen-lockfile -> exit 0 (20 packages added by main's lockfile)",
+      "biome": "bunx biome check packages/daemon/src -> exit 0",
+      "tsc": "cd packages/daemon && bunx tsc --noEmit -> exit 0",
+      "bunTest": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test packages/daemon -> 872 pass, 5 skip, 0 fail, 3514 expect() calls, 877 tests across 56 files, exit 0 (main added 56 tests since the last run)"
+    },
+    "heads": {
+      "codeHead": "74e6c4321d2ed2516373bf42813bd01248d800b7 (docs commit; the fix commit is 3987da66f3199a3011a80600db8d33a35e07a6b9)",
+      "pushedHeadBeforeHandoffCommit": "f8e9a541ce91ae640a785807c2ffef667573f0d4 (rebased `test: record handoff`)",
+      "finalHead": "the `implement: record handoff` commit carrying this file, pushed after it; .legion/-only on top of f8e9a541"
+    },
+    "ci": "Tests run 34714945221 (https://github.com/sjawhar/legion/actions/runs/34714945221) at f8e9a541ce91ae640a785807c2ffef667573f0d4: pr-title, lint, typecheck, test all success. GitHub: MERGEABLE. The run at the final head (the .legion/-only commit on top) is named in the PR body's Verification/CI line.",
+    "testerEvidence": "Unchanged and still valid: .legion/test.json (PASS on all four acceptance lines) was gathered at the pre-rebase head f5cf98f5 / code head 66bcbb6b, whose diff is identical to the rebased one as proven above."
+  },
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T19:44:23.846Z"
+}

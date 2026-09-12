@@ -909,25 +909,22 @@ export class ProcessManager {
    * tree left to retry against or notify. Below the threshold, the retry is *enqueued*
    * (`WorkerAdmission.enqueueForRetryPending`, folded into this same locked save so the
    * locator-clear and the queue-push are one durable transition), never launched directly here:
-   * a direct `launchWorker`
-   * call would bypass the running-worker cap, the reservation, and the per-role launch lock —
-   * over-admission, or a second pane racing a concurrent same-role spawn — and would also
-   * dereference `api` before it exists when this runs from `reconnectWorkers` at boot (before
-   * `enableWorkerPromotion()`). The whole decision runs under `mutateClaim(token)`, serialized
-   * against every other admission/retirement decision for this token (`spawnWorker`,
-   * `handleWorkerStarted` via `mutateLiveRoleClaim`) — and re-validates the claim it was handed
-   * against the current one before touching anything, since the caller may have captured it,
-   * or decided this boot was dead, some time before this actually runs: a claim that has since
-   * completed its ready path (`readyConfirmedAt` now set), superseded by a newer launch (a
-   * different generation or pane), or deleted entirely (`closeTree`) means this retirement is
-   * stale and must never touch what replaced it. Also never fights a `closeTree` already tearing
-   * this claim's tree down: `closeTreeLocked`'s own fixed-point loop already owns stopping (and
-   * deleting) every worker under a closing/closed tree through its own `stopProcessSerialized`
-   * call — retiring this same token again here would either find nothing left to stop or, worse,
-   * stop a respawned generation `closeTree` never asked for, so a tree that `isTreeGone` reports
-   * gone makes this a no-op instead. Shared by the boot watchdog's own dead verdict,
-   * `reconnectWorkers`' restart-time probe, and a pre-confirmation socket close
-   * (`onWorkerClientClosed`).
+   * a direct `launchWorker` call would bypass the running-worker cap, the reservation, and the
+   * per-role launch lock — over-admission, or a second pane racing a concurrent same-role spawn.
+   * The whole decision runs under `mutateClaim(token)`, serialized against every other
+   * admission/retirement decision for this token (`spawnWorker`, `handleWorkerStarted` via
+   * `mutateLiveRoleClaim`) — and re-validates the claim it was handed against the current one
+   * before touching anything, since the caller may have captured it, or decided this boot was
+   * dead, some time before this actually runs: a claim that has since completed its ready path
+   * (`readyConfirmedAt` now set), superseded by a newer launch (a different generation or pane),
+   * or deleted entirely (`closeTree`) means this retirement is stale and must never touch what
+   * replaced it. Also never fights a `closeTree` already tearing this claim's tree down:
+   * `closeTreeLocked`'s own fixed-point loop already owns stopping (and deleting) every worker
+   * under a closing/closed tree through its own `stopProcessSerialized` call — retiring this
+   * same token again here would either find nothing left to stop or, worse, stop a respawned
+   * generation `closeTree` never asked for, so a tree that `isTreeGone` reports gone makes this
+   * a no-op instead. Shared by the boot watchdog's own dead verdict, `reconnectWorkers`'
+   * restart-time probe, and a pre-confirmation socket close (`onWorkerClientClosed`).
    */
   private async retireUnconfirmedBoot(
     token: string,
