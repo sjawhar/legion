@@ -10,6 +10,7 @@ readonly fake_bin="${temporary_dir}/bin"
 readonly smoke_dir="${temporary_dir}/smoke"
 readonly output_file="${temporary_dir}/output"
 bridge_pid=""
+forward_job_pid=""
 forward_pgid=""
 
 cleanup() {
@@ -19,6 +20,11 @@ cleanup() {
   fi
   if [[ -n "$forward_pgid" ]]; then
     kill -- "-$forward_pgid" 2>/dev/null || true
+  fi
+  # A fixture failure before the leader check leaves only the job pid known; in a
+  # non-interactive script setsid does not fork, so that pid is the new group's leader.
+  if [[ -n "$forward_job_pid" ]]; then
+    kill -- "-$forward_job_pid" 2>/dev/null || kill "$forward_job_pid" 2>/dev/null || true
   fi
   rm -rf "$temporary_dir"
 }
@@ -91,12 +97,16 @@ PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$dow
 
 # forward mode teardown: a recorded `gh webhook forward` process group and its GitHub hook
 # record. `gh webhook forward` itself needs a user-authenticated gh identity agents do not have,
-# so this stand-in is the only proof the rig has that forward-mode teardown works. The stand-in
-# reports its own pid from inside the new session: reading /proc/$!/stat right after `setsid &`
-# races the setsid() call and could record this harness's own process group, which down.sh would
-# then kill -- so the harness also refuses to continue unless that pid is its own group leader.
+# so this stand-in is the only proof the rig has that forward-mode teardown works. It is a
+# two-process group (a shell waiting on its sleep child), like the real `gh` plus its gh-webhook
+# extension child, so a teardown that signals only the recorded pid leaves a survivor the
+# assertion below can see. The stand-in reports its own pid from inside the new session: reading
+# /proc/$!/stat right after `setsid &` races the setsid() call and could record this harness's
+# own process group, which down.sh would then kill -- so the harness also refuses to continue
+# unless that pid is its own group leader.
 forward_pid_file="${temporary_dir}/forward.pid"
-setsid bash -c 'printf "%s\n" "$$" >"$1"; exec sleep 300' _ "$forward_pid_file" &
+setsid bash -c 'printf "%s\n" "$$" >"$1"; sleep 300 & wait' _ "$forward_pid_file" &
+forward_job_pid="$!"
 for ((attempt = 1; attempt <= 100; attempt += 1)); do
   [[ -s "$forward_pid_file" ]] && break
   sleep 0.05
@@ -122,11 +132,14 @@ EOF
 chmod +x "${fake_bin}/gh"
 
 PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" bash "$down_script" >"$output_file" 2>&1
+# The group must be gone, not just its leader: a pid-only kill leaves the sleep child alive and
+# `kill -0` on the group still succeeds.
 if kill -0 -- "-$forward_pgid" 2>/dev/null; then
-  printf 'expected down.sh to kill the recorded webhook-forward process group\n' >&2
+  printf 'expected down.sh to kill the whole recorded webhook-forward process group; survivors:\n%s\n' "$(ps -o pid=,pgid=,comm= -g "$forward_pgid" 2>/dev/null || true)" >&2
   exit 1
 fi
 forward_pgid=""
+forward_job_pid=""
 [[ ! -e "${smoke_dir}/webhook-forward.pid" && ! -e "${smoke_dir}/webhook-forward.start" && ! -e "${smoke_dir}/webhook-forward.hook" ]] || {
   printf 'expected down.sh to remove the webhook-forward pid, start, and hook records\n' >&2
   exit 1
