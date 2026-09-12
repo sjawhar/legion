@@ -12,6 +12,8 @@ status: active
 module: daemon
 related_issues:
   - "sjawhar-legion-436"
+  - "LEGION-13"
+  - "sjawhar/legion#978"
 symptoms:
   - "env var deprecation warnings"
   - "config file vs env var precedence"
@@ -95,19 +97,40 @@ function buildConfig(paths, stateFilePath, overrides = {}) {
 
 **Lesson:** When adding validation to a new code path (YAML parser), always audit existing code paths (env parser) for the same field. Two entry points for the same data → two places that need the same validation. The safest approach: validate in the resolver (Phase 2), not the parser (Phase 1), so all sources get the same treatment.
 
-## Pattern 6: CLI DI with Sentinel Abort
+## Pattern 6: CLI env injection with `process.env` at the citty boundary only
 
-`cmdStart()` accepts a `deps` parameter for `startDaemon` and `resolveLegionId`. Tests inject mocks that capture args and throw a sentinel to abort cleanly:
+The config-resolving CLI commands take their environment as a parameter and thread it down to
+`resolveDaemonConfig({ env, … })`, which already accepted `opts.env`:
 
 ```typescript
-const START_DAEMON_ABORT = "__start-daemon-abort__";
-await cmdStart(undefined, { config: configPath }, {
-  startDaemon: async (config) => {
-    calls.push(config);
-    throw new Error(START_DAEMON_ABORT);
-  },
-  resolveLegionId: async (team) => team,
-});
+function loadStartConfig(project, configPath, env: NodeJS.ProcessEnv, options = {}): DaemonConfig
+export async function cmdCheckConfig(project, configPath, env: NodeJS.ProcessEnv): Promise<void>
+async function cmdStart(project, configPath, env: NodeJS.ProcessEnv): Promise<void>
+async function cmdRestart(project, configPath, env: NodeJS.ProcessEnv): Promise<void>
 ```
 
-This tests CLI wiring without running the actual daemon. Cleaner than module mocking because the DI seam is explicit in the function signature.
+Only the citty `start` and `restart` handlers name `process.env`. A test hands `cmdCheckConfig` the
+environment it wants — `{ PATH: process.env.PATH, HOME: process.env.HOME }` for the fixture shape, or
+`{ ...env, DISPATCH_URL, DISPATCH_TOKEN }` to exercise a resolver rule — and never scrubs or restores
+`process.env` around a case (`src/cli/__tests__/index.test.ts`, `legion start --check-config`).
+
+Three rules that came out of LEGION-13 (`sjawhar/legion#978`):
+
+- **No `= process.env` default on the injected parameter.** A default lets a call site silently fall back to
+  ambient state, which is the exact bug the seam exists to remove: the check-config test had read the pane's
+  `DISPATCH_URL` (set) and `DISPATCH_TOKEN` (unset) and failed in every Legion pane while passing in CI.
+- **Bare positional `env` for a single injected collaborator; a deps object only when there are several.**
+  `cmdGh`, `cmdCredential`, `cmdProbeImage`, and `cmdHandoffComplete` take `{ env, fetch, … }` because they
+  inject two or more; `daemonUrl(env)`, `resolveControllerSecret(env)`, and the four commands above take
+  `env` alone. Match the count, not the nearest example.
+- **Prove the seam with a test only the seam can pass, and revert-guard it in the CI shape.** The
+  pre-existing tests pass whether the env is injected or scrubbed; the test that injects `DISPATCH_URL`
+  without `DISPATCH_TOKEN` and expects the refusal is the one that fails when `loadStartConfig` goes back to
+  `process.env` (see [fix-racing-a-workaround](../legion/fix-racing-a-workaround.md) § 3).
+
+Boundary, deliberately unchanged: `cmdStop`, `cmdStatus`, and `cmdLegions` still call
+`resolveLegionPaths(process.env, …)` — they need the legions-registry path, not the daemon configuration.
+
+The sentinel-abort DI this pattern originally described (`cmdStart(undefined, { config }, { startDaemon,
+resolveLegionId })`, from #436) no longer matches the code: `cmdStart` calls `startDaemon` directly and has no
+deps object.

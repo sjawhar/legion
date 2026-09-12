@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -160,22 +160,11 @@ describe("legion gh", () => {
   });
 });
 describe("legion start --check-config", () => {
-  // `cmdCheckConfig` resolves against the real process env, so ambient daemon settings must not
-  // leak into these cases: a Legion worker pane exports `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`
-  // (never `DISPATCH_TOKEN`), which alone makes `resolveDaemonConfig` refuse the file under test.
-  const ambient = new Map<string, string>();
-  beforeEach(() => {
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value !== undefined && /^(LEGION_|DISPATCH_|ENVOY_)/.test(key)) {
-        ambient.set(key, value);
-        delete process.env[key];
-      }
-    }
-  });
-  afterEach(() => {
-    for (const [key, value] of ambient) process.env[key] = value;
-    ambient.clear();
-  });
+  // The env is an input to cmdCheckConfig, never read from the process: a Legion worker pane
+  // exports DISPATCH_URL and DISPATCH_TOKEN_FILE without DISPATCH_TOKEN, which alone would make
+  // resolveDaemonConfig refuse the file under test. PATH and HOME give the fixture a realistic
+  // shape; resolveDaemonConfig reads neither.
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME };
 
   it("validates github_apps.<role>.private_key_command without executing it", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
@@ -200,7 +189,7 @@ describe("legion start --check-config", () => {
       ].join("\n")
     );
 
-    await cmdCheckConfig(undefined, configPath);
+    await cmdCheckConfig(undefined, configPath, env);
 
     expect(fs.existsSync(marker)).toBe(false);
   });
@@ -226,9 +215,40 @@ describe("legion start --check-config", () => {
       ].join("\n")
     );
 
-    await expect(cmdCheckConfig(undefined, configPath)).rejects.toThrow(
+    await expect(cmdCheckConfig(undefined, configPath, env)).rejects.toThrow(
       "github_apps.implement requires exactly one of private_key or private_key_command"
     );
+  });
+
+  it("resolves Dispatch settings from the injected env, not the process environment", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
+    const configPath = path.join(dir, "legion.yaml");
+    fs.writeFileSync(
+      configPath,
+      [
+        "project: acme/99",
+        "envoy_url: http://127.0.0.1:9020",
+        "dispatch_project: ACME",
+        "repos:",
+        "  - acme/widgets",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "gates:",
+        "  design: off",
+      ].join("\n")
+    );
+
+    await expect(
+      cmdCheckConfig(undefined, configPath, { ...env, DISPATCH_URL: "http://127.0.0.1:1" })
+    ).rejects.toThrow(
+      "dispatch_url is set but DISPATCH_TOKEN is not; the dispatch tools would not register"
+    );
+
+    await cmdCheckConfig(undefined, configPath, {
+      ...env,
+      DISPATCH_URL: "http://127.0.0.1:1",
+      DISPATCH_TOKEN: "t",
+    });
   });
 });
 

@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports and their 60-second lifetime, the pane's DISPATCH_URL in the daemon test suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, and a daemon outage blocking every bash call"
+title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports and their 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, and a pane OMP_SESSION_ID that is not yours"
 category: legion
 tags:
   - legion
@@ -9,6 +9,7 @@ tags:
   - jj
   - bun-test
   - rig
+  - session-identity
 date: 2026-09-12
 status: active
 module: legion
@@ -24,10 +25,11 @@ related_issues:
   - "sjawhar/legion#952"
   - "LEGION-29"
   - "sjawhar/legion#970"
+  - "LEGION-13"
+  - "sjawhar/legion#978"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
   - "the same 403 on the FIRST grant of a call, after a slow jj command ran ahead of the push"
-  - "legion start --check-config > validates github_apps.<role>.private_key_command fails only inside a Legion pane"
   - "bun test from the repository root: hundreds of 'document is not defined' and ECONNREFUSED failures outside the changed package"
   - "Refusing to move bookmark backwards or sideways: legion/<KEY> after jj split"
   - "rig daemon's first jj git clone killed at the 30 s runner timeout; launchFailures 1; tree queued"
@@ -37,17 +39,19 @@ symptoms:
   - "envoy_publish: no holder for role legion-<project>-<KEY>-architect"
   - "bash tool: Unable to connect. Is the computer able to access the url?"
   - "Unable to connect. Is the computer able to access the url? on every bash tool call, whatever the command"
+  - "The Legion PR footer names a session id three days older than the worker; printenv OMP_SESSION_ID disagrees with envoy_whoami"
 ---
 
 # Worker-Pane Shell Gotchas
 
-Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1–3 are from
+Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1 and 3 are from
 LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 and the §1 alternative are
 from LEGION-22; 7–8 and the §1 per-call workaround are from LEGION-18; the 60-second grant lifetime in §1, the
 `packages/daemon` note in §2, and §9 are from LEGION-14, whose four workers hit §1–§3 again; the §1 attribution
-finding and the `packages/pi-envoy` note in §2 are from LEGION-29. None is part of any
-issue's scope; §1 is filed as LEGION-12 (a rig bug in the pi-envoy extension's tool-call hook) and §7 as LEGION-29.
-Until they are fixed, these are the workarounds.
+finding and the `packages/pi-envoy` note in §2 are from LEGION-29; the §2 environment-argument paragraph is from
+LEGION-13 (sjawhar/legion#978). None was part of the scope of the issue whose workers hit it; §1 is filed as LEGION-12
+(a rig bug in the pi-envoy extension's tool-call hook), §7 as LEGION-29, and §2's check-config leak was fixed by
+LEGION-13. Until the rest are fixed, these are the workarounds.
 
 ## 1. Stacked `export LEGION_GRANT=…` lines: only the first per call redeems
 
@@ -139,19 +143,19 @@ again), then `pickgrant && jj git push …` / `pickgrant && legion gh -- …` / 
 It needs no `grant_release` bookkeeping and self-heals if a later grant is the live one. Observed 1 → 10 stacked
 blocks over one implementer session; the first block redeemed every time.
 
-## 2. The pane's `DISPATCH_URL` fails one pre-existing CLI test (fixed in #967)
+## 2. `bun test` in a pane: inject the env the code reads, and run it from `packages/daemon`
 
-Every Legion pane carries `DISPATCH_URL` (and `DISPATCH_TOKEN_FILE`) but not `DISPATCH_TOKEN`.
-`src/cli/__tests__/index.test.ts` › `legion start --check-config > validates github_apps.<role>.private_key_command
-without executing it` read `process.env` rather than an isolated env, so `resolveDaemonConfig` refused
-(`dispatch_url is set but DISPATCH_TOKEN is not`) and the test failed in every pane while staying green in CI.
-sjawhar/legion#967 (`wxzknkyk`) made that `describe` scrub `LEGION_*`/`DISPATCH_*`/`ENVOY_*` around its cases, so
-`bun test packages/daemon` runs clean from a pane on branches that include it. On older branches the workaround is
-still `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`, and say so in the handoff. The general rule stands: a CLI
-test that reaches `process.env` through a helper with no env seam will fail wherever the pane's env differs from CI's.
+Every Legion pane carries `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` without `DISPATCH_TOKEN`, plus the `LEGION_*` and
+`ENVOY_*` families, so a test that reaches `process.env` through a helper with no env seam fails wherever the pane's
+env differs from CI's. `legion start --check-config` takes its environment as an argument
+(`cmdCheckConfig(project, configPath, env)` in `src/cli/index.ts`; the citty `start`/`restart` handlers are the only
+callers that pass `process.env`), and its tests hand it `{ PATH, HOME }`. LEGION-13 (sjawhar/legion#978) introduced
+that argument; before it, `loadStartConfig` hardcoded `process.env` and the test failed in every pane. Prefer that seam
+whenever the code under test can take one; the pane's shape is then irrelevant to the suite.
 
-The same leak hit `packages/pi-envoy` on LEGION-29 (fixed in sjawhar/legion#970): `envoy.test.ts` cleared
-`DISPATCH_TOKEN` but not `DISPATCH_TOKEN_FILE`, which `resolveDispatchConfig` reads *ahead* of the token (see
+The same leak hit `packages/pi-envoy`, whose extension entry points read `process.env` themselves, on LEGION-29
+(fixed in sjawhar/legion#970): `envoy.test.ts` cleared `DISPATCH_TOKEN` but not `DISPATCH_TOKEN_FILE`, which
+`resolveDispatchConfig` reads *ahead* of the token (see
 [secret-file-pointer-precedence](../integration-patterns/secret-file-pointer-precedence.md)), so three Dispatch-tool
 tests registered real tools against the fixture's stub zod; `legion.test.ts` inherited the pane's
 `LEGION_TREE`/`LEGION_ROLE`/`LEGION_ISSUE` markers, so nine tests died on `Legion session has both controller and
@@ -225,9 +229,13 @@ After the daemon or the Envoy listener restarts (LEGION-29: a listener restart d
 can return `no holder` for both your own role and the tree's architect. Two consequences:
 
 - `legion handoff complete` prints `[handoff] Warning: phase recorded; no architect was live to receive the summary` and
-  exits 0. The completion **is** recorded: the daemon captured and cleared the phase, PATCHed the issue's Dispatch
+  exits 0. The completion **is** recorded: the daemon cleared the active phase for routing, PATCHed the issue's Dispatch
   status (`legion state` showed `LEGION-18` at `testing` right after), and parked the summary for the architect's
-  catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not re-run it; do not write a second handoff.
+  catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not write a second handoff file. Do re-run the same
+  `legion handoff complete` once the architect holds its role again — a repeat completion by the same worker is the
+  designed recovery (200, published, record cleared); a repeat while the role is still unheld just 202s again. What
+  the architect can and cannot do about it is in
+  [phase-complete-stranded-on-no-holder](phase-complete-stranded-on-no-holder.md).
 - `envoy_publish` to `notifications.role.legion-<project>-<KEY>-architect` fails with `no holder for role …`. Fall back
   to the architect's session id: `legion state` → `roles["legion-<project>-<KEY>-architect"].sessionId`, then
   `envoy_send(session_id=<that id>, message=…)`. Direct session delivery does not depend on the role claim. The
@@ -277,3 +285,17 @@ What still works, and what to do:
 - **Never restart, signal, or write to the daemon yourself.** It runs under a supervisor from
   `/home/ubuntu/legion-ws-RunDaemon` and comes back on its own; it runs `main`, not your branch, so its restarts are
   never evidence about your change.
+
+## 10. `$OMP_SESSION_ID` in your pane is not your session
+
+The Legion PR footer (`<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->`) needs this session's live id.
+`printenv OMP_SESSION_ID` in a worker pane returns an id inherited from whatever OMP session started the daemon: the
+daemon's private tmux server is forked from the daemon's own environment, every pane inherits it, and the daemon's
+strip list (`PANE_SECRET_ENV_KEYS` in `packages/daemon/src/daemon/environment.ts`) covers secrets only. On LEGION-13
+the pane's value decoded (UUIDv7, first 48 bits are epoch millis) to 2026-09-09T01:51Z, three days before the worker
+was spawned; the implementer's two review-thread replies went out with that id in their footer and had to be edited.
+
+Get the id from `envoy_whoami` (`session_id`) or from `legion state` → `roles["legion-<project>-<KEY>-<role>"].sessionId`;
+the two agree, and both are the id the daemon registered at `/worker/started`. Never from the environment, and — per
+[session-id-remint-stale-transcript-identity](../envoy/session-id-remint-stale-transcript-identity.md) — never from a
+`whoami` result earlier in your own transcript either.
