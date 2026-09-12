@@ -36,14 +36,18 @@ digraph oracle_decision {
 
 ## Research Strategy
 
-Run steps 1-2 first (parallel OK), then 3-4 if needed:
+If the deployment instructions name a librarian role, ask it first (publish to its
+`notifications.role.<name>` topic with `expects_reply: required`). Then run steps 1-2 (parallel
+OK), and 3-4 if needed, with tools a Legion pane actually has: `read`, `grep`, `web_search`, and
+`task(agent="scout")` (fast read-only codebase search) or `task(agent="oracle")` (deeper
+read-only analysis when the answer needs judgment across many files). Do not name any other agent.
 
 | Step | Tool | Query |
 |------|------|-------|
-| 1. Institutional learnings | `Task learnings-researcher` | Search docs/solutions/ for [question] |
-| 2. Codebase patterns | `Task Explore` | Find how src/ handles [topic] |
-| 3. Framework docs | Context7 MCP | resolve-library-id → query-docs |
-| 4. External practices | `Task best-practices-researcher` or `WebSearch` | Current best practices for [topic] |
+| 1. Institutional learnings | `grep` then `read` over `docs/solutions/` (front-matter `tags`, then the body) | [question]'s keywords |
+| 2. Codebase patterns | `task(agent="scout")`; `task(agent="oracle")` when judgment across many files is needed | Find how [module] handles [topic] |
+| 3. Framework docs | `read` the library's documentation URL | [library] [topic] |
+| 4. External practices | `web_search`, then `read` the primary source | Current best practices for [topic] |
 
 ## Output
 
@@ -54,10 +58,11 @@ Run steps 1-2 first (parallel OK), then 3-4 if needed:
 ## Example
 
 ```
-/legion-oracle How should I handle GraphQL pagination?
+Question: How should I paginate a GraphQL connection?
 
-[learnings-researcher] → No matches
-[Explore] → Found src/legion/state/fetch.py uses cursor-based pagination
+grep pagination docs/solutions/   → no matches
+task(agent="scout")               → packages/daemon/src/state/fetch.ts loops on
+                                    pageInfo.hasNextPage / endCursor (contextsPage)
 
-Answer: Use cursor-based pagination per src/legion/state/fetch.py:42
+Answer: cursor-based, per the `while (page.hasNextPage)` loop in packages/daemon/src/state/fetch.ts
 ```

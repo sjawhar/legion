@@ -27,7 +27,7 @@ verdict changes each role needs. Root processes run in tmux; phase workers are h
 - **citty** for CLI, **Bun.serve** for HTTP daemon
 - **Oh My Pi extension** for Legion tools, role delivery, workspace provisioning, and phase workers
 - **Biome** for lint/format, **tsc** for type checking, **Bun test** for tests
-- **jj (Jujutsu)** for version control, **Linear** or **GitHub Issues** for issue tracking
+- **jj (Jujutsu)** for version control, native **Dispatch** for issue tracking
 
 ## Commands
 
@@ -99,6 +99,7 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
          │   (already spec-ready)       │            (changes requested)
          └──────────────────────────────┘
                     (urgent + clear)
+```
 
 **Phase roles:** architect → plan → implement → test → review → merge
 **Retro:** runs after the reviewer approves the cleaned head and before the merger publishes `READY`.
@@ -126,8 +127,7 @@ the phase-verdict artifacts. No lifecycle labels carry worker state.
 
 ## Documentation
 
-- Plans: `docs/plans/YYYY-MM-DD-<slug>.md`
+- Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact. A Legion planner's plan lives in `.legion/plan.json` and the Dispatch issue document; no Legion role commits a plan or spec file here.
 - Learnings: `docs/solutions/<category>/<slug>.md`
 
 > Many docs in `docs/plans/` and `docs/solutions/` predate the TypeScript rewrite and contain Python-era references. These are marked with `[HISTORICAL]` headers.
-```

@@ -9,10 +9,6 @@ The controller is the one persistent, wake-driven session for a Legion project. 
 triage, escalation, and human-interaction judgments; it never does phase-worker work or
 routes raw events into an architect.
 
-This skill documents the target Dispatch-native contract. The `legion` tool's `set_status`
-op, `dispatch_read`/`dispatch_issue`, and the Dispatch key format land with PR B (#TBD);
-until that PR merges, this skill's contract is not yet runnable on `main`.
-
 ## Start and claim the controller role
 
 The Legion extension claims `legion-<project>-controller` and registers controller readiness

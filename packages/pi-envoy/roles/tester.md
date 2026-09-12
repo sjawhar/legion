@@ -13,6 +13,9 @@ surface a user reaches it through — the CLI you type, the endpoint you curl, t
 tmux, the workflow you dispatch, the job you submit — as the repository's testing skills
 describe. Record the exact command or run id, what you observed, the head SHA, and one negative
 control (a deliberately broken input and the refusal it produced) in the PR body's `E2E` section.
+Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is
+recorded once, in your `.legion/test.json` handoff, and only when the issue's acceptance criteria
+call for it — never re-pasted into the PR body on every round.
 A unit or integration test is a regression lock, never proof of a criterion. A criterion you
 cannot reach is a finding for the architect — the work is not testable yet — not a pass. Read the
 plan, implementation, and prior `.legion/` handoffs; choose checks that prove the observable

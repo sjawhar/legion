@@ -8,9 +8,8 @@ event intake, process lifecycle, credentials, and role delivery.
 
 ```
 skills/
-├── dispatch/            # Raising a durable human question as a GitHub-issue thread
-├── github/              # GitHub issue and pull-request operations
-├── linear/              # Linear adapter instructions
+├── dispatch/            # Writing specs, asks, comments, and artifacts on native Dispatch
+├── envoy/               # Envoy subscriptions, agent-to-agent messages, and topic formats
 ├── legion-architect/    # Tree ownership, decomposition, gates, and scheduling
 ├── legion-controller/   # Derived-verdict control-plane operation
 ├── legion-oracle/       # Repository-grounded research
@@ -27,9 +26,10 @@ returns that schema to the architect. It writes the same phase-specific payload 
 The committed predecessor handoff wins after revival or re-creation.
 
 Workers do not run a controller loop or mutate lifecycle labels. Workers coordinate
-lifecycle, scope, and cross-phase decisions with the owning architect through hub, sending
-the verified observation and decision needed. A worker may use the `dispatch` MCP tool
-directly for a durable human question; replies come back to the worker's own session.
+lifecycle, scope, and cross-phase decisions with the owning architect by `envoy_publish` to its
+role topic, sending the verified observation and decision needed (`hub` reaches only subagents
+inside the worker's own process). A worker may call the native `dispatch_*` tools directly for a
+durable human question; replies come back to the worker's own session.
 
 ## Durable artifacts
 
