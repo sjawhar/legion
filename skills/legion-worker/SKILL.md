@@ -246,15 +246,17 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head and records the verdict.
-  Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round**,
-  `CHANGES_REQUESTED` or `APPROVED`, carrying every inline comment in that single call —
-  `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
-  with `commit_id`, `event` (`REQUEST_CHANGES` or `APPROVE`), `body` (with the Legion footer),
-  and a `comments[]` array of `{path, line, side, body}`, one entry per finding — never one
-  `pr review` call per finding (each submission fires a `pr-review` wake). Then return the
-  issue to the architect; when clean, have the architect send the implementer back to push
-  the `.legion/` deletion (the review App cannot push), then review **that** head and approve
-  it by name.
+  Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
+  `REQUEST_CHANGES` when any correctness finding stands, otherwise `COMMENT` while the head
+  still carries `.legion/`; `APPROVE` only for the head that differs from the reviewed one by
+  the `.legion/` deletion alone, named by SHA — carrying every inline comment in that single
+  call: `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
+  with `commit_id`, `event` (`REQUEST_CHANGES`, `COMMENT`, or `APPROVE`), `body` (with the
+  Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
+  finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
+  Then return the issue to the architect; when clean, have the architect send the implementer
+  back to push the `.legion/` deletion (the review App cannot push), then review **that** head
+  and approve it by name.
 - Once a base is frozen for others to stack on, never rewrite it — fixes land as new
   commits on top, and the `Chain` line records what is frozen.
 - The merger confirms the approved head still equals the current head, then publishes
