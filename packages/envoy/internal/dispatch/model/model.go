@@ -94,11 +94,21 @@ type IssueSummary struct {
 	OpenAsks  int       `json:"open_asks"`
 }
 
-// SearchIssue identifies an issue in a global search result.
+// SearchIssue is legacy issue-shaped display metadata for a global search result.
 type SearchIssue struct {
 	Key    string `json:"key"`
 	Title  string `json:"title"`
 	Status string `json:"status"`
+}
+
+// SearchOwner identifies the issue or standalone project document that owns a search result.
+type SearchOwner struct {
+	Kind       string `json:"kind"`
+	Key        string `json:"key,omitempty"`
+	Project    string `json:"project,omitempty"`
+	Slug       string `json:"slug,omitempty"`
+	ArtifactID string `json:"artifact_id,omitempty"`
+	Name       string `json:"name,omitempty"`
 }
 
 // SearchArtifact identifies an artifact attached to a global search result.
@@ -110,6 +120,7 @@ type SearchArtifact struct {
 // SearchResult is one ranked Dispatch search hit.
 type SearchResult struct {
 	Kind     string          `json:"kind"`
+	Owner    SearchOwner     `json:"owner"`
 	Issue    SearchIssue     `json:"issue"`
 	Artifact *SearchArtifact `json:"artifact,omitempty"`
 	ID       string          `json:"id"`

@@ -109,6 +109,9 @@ func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
 			if result.Issue.Key != corpus.issueKey || result.Issue.Status != "triage" {
 				t.Fatalf("result issue = %#v, want key=%q status=triage", result.Issue, corpus.issueKey)
 			}
+			if result.Owner != (model.SearchOwner{Kind: "issue", Key: corpus.issueKey}) {
+				t.Fatalf("result owner = %#v, want issue %q", result.Owner, corpus.issueKey)
+			}
 			if !strings.Contains(result.Snippet, test.mark) {
 				t.Fatalf("snippet %q does not contain %q", result.Snippet, test.mark)
 			}
@@ -213,6 +216,85 @@ func TestSearchFiltersByProjectAndHonoursLimit(t *testing.T) {
 	empty := searchResponse(t, handler, "q=astrolabe&project=NONE")
 	if empty.Results == nil || len(empty.Results) != 0 {
 		t.Fatalf("unknown-project results = %#v, want non-nil empty slice", empty.Results)
+	}
+}
+
+func TestSearchFindsStandaloneProjectDocumentsAndTheirDiscussions(t *testing.T) {
+	handler := newTestHandler(t)
+	for _, project := range []map[string]string{
+		{"key": "CORE", "name": "Core"},
+		{"key": "OTHER", "name": "Other"},
+	} {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", project, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create project %s: status=%d body=%s", project["key"], response.Code, response.Body.String())
+		}
+	}
+
+	document := createProjectDocument(t, handler, "CORE", "Navigation design", "# Design\nThe astrolabe finds latitude.\n")
+	_ = createProjectDocument(t, handler, "OTHER", "Other design", "# Design\nThe astrolabe finds latitude.\n")
+
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+document.ID+"/asks", map[string]any{
+		"question": "Should the quadrant be included?",
+		"actor":    sessionActor(),
+	})
+	if askResponse.Code != http.StatusCreated {
+		t.Fatalf("create document ask: status=%d body=%s", askResponse.Code, askResponse.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, askResponse)
+
+	commentResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+document.ID+"/comments", map[string]any{
+		"body":  "Keep the alidade in the diagram.",
+		"actor": sessionActor(),
+	})
+	if commentResponse.Code != http.StatusCreated {
+		t.Fatalf("create document comment: status=%d body=%s", commentResponse.Code, commentResponse.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, commentResponse)
+
+	owner := model.SearchOwner{
+		Kind:       "document",
+		Project:    "CORE",
+		Slug:       document.Slug,
+		ArtifactID: document.ID,
+		Name:       document.Name,
+	}
+	cases := []struct {
+		query string
+		kind  string
+		id    string
+		href  string
+	}{
+		{"astrolabe", "document", document.ID, "/projects/CORE/documents/" + document.Slug + "?q=astrolabe"},
+		{"quadrant", "ask", ask.ID, "/projects/CORE/documents/" + document.Slug + "?ask=" + ask.ID},
+		{"alidade", "comment", comment.ID, "/projects/CORE/documents/" + document.Slug + "?comment=" + comment.ID},
+	}
+	for _, test := range cases {
+		t.Run(test.query, func(t *testing.T) {
+			results := searchResponse(t, handler, "q="+test.query)
+			var result *model.SearchResult
+			for index := range results.Results {
+				candidate := &results.Results[index]
+				if candidate.Kind == test.kind && candidate.ID == test.id {
+					result = candidate
+					break
+				}
+			}
+			if result == nil {
+				t.Fatalf("results = %#v, want kind=%q id=%q", results.Results, test.kind, test.id)
+			}
+			if result.Href != test.href {
+				t.Fatalf("href = %q, want %q", result.Href, test.href)
+			}
+			if result.Owner != owner {
+				t.Fatalf("owner = %#v, want %#v", result.Owner, owner)
+			}
+		})
+	}
+
+	filtered := searchResponse(t, handler, "q=astrolabe&project=CORE")
+	if len(filtered.Results) != 1 || filtered.Results[0].Owner != owner {
+		t.Fatalf("project-filtered results = %#v, want only %#v", filtered.Results, owner)
 	}
 }
 

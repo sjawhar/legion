@@ -23,6 +23,7 @@ import {
   dispatchIssueSubject,
   dispatchToolSchema,
   dispatchToolSpecs,
+  searchOwnerOf,
   snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -205,9 +206,14 @@ function duplicateCandidates(error: DispatchServiceError): DuplicateCandidate[] 
 }
 
 function searchResultLine(result: SearchResult, baseUrl: string): string {
+  const href = new URL(result.href, baseUrl).toString();
+  const owner = searchOwnerOf(result);
+  if (owner.kind === "document") {
+    const reference = `dispatch://${owner.project}/artifact/${owner.slug}`;
+    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
+  }
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
   const label = `${result.issue.key} [${result.issue.status}] ${result.issue.title} - ${result.kind}${artifactName}`;
-  const href = new URL(result.href, baseUrl).toString();
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
 

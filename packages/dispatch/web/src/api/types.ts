@@ -63,6 +63,7 @@ export type {
   RepoProject,
   SearchArtifactRef,
   SearchIssueRef,
+  SearchOwner,
   SearchResponse,
   SearchResult,
   SearchResultKind,
