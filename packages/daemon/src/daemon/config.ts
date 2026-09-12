@@ -97,6 +97,14 @@ export interface DaemonConfig {
    * path a dead pane would be) — a pane that keeps answering forever without ever registering
    * is not "slow", it never actually completed its boot. */
   workerBootRegistrationDeadlineIntervals: number;
+  /** Seconds a ready-confirmed phase worker may sit idle with nothing assigned to it — its role not
+   * the issue's active phase, no queued task — before the daemon retires it: a graceful `shutdown`
+   * over its shim, locator cleared, OMP session file kept so the next `spawn_worker` for the role
+   * resumes the same agent (`--resume`). Never applies to an `architect` role (a sub-architect's
+   * wakes arrive by a publish that is rejected with no live holder, not by the dead-worker recovery
+   * path). `worker_idle_retire_seconds` / `LEGION_WORKER_IDLE_RETIRE_SECONDS`; default 600; `0`
+   * disables the timer entirely (a finished worker then stays resident until its tree closes). */
+  workerIdleRetireSeconds: number;
   /** Seconds before a single worker RPC request over a `legion worker-shim` unix socket
    * (`negotiate_protocol`/`get_state`/`prompt`) times out. Governs the connect-time
    * `negotiate_protocol` round trip that `markTreeReady`/`workerReady`/`markControllerReady`
@@ -160,6 +168,7 @@ const DEFAULT_TREE_STOP_TIMEOUT_SECONDS = 60;
 const DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS = 120;
 const DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS = 3;
 const DEFAULT_WORKER_RPC_TIMEOUT_SECONDS = 5;
+const DEFAULT_WORKER_IDLE_RETIRE_SECONDS = 600;
 
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
@@ -195,6 +204,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   worker_stop_timeout_seconds: null,
   tree_stop_timeout_seconds: null,
   worker_boot_timeout_seconds: null,
+  worker_idle_retire_seconds: null,
   worker_boot_registration_deadline_intervals: null,
   worker_rpc_timeout_seconds: null,
   worker_stream_port: null,
@@ -286,6 +296,28 @@ function parseEnvPositiveInteger(value: string | undefined, field: string): numb
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number <= 0) {
     throw new Error(`${field} must be a positive integer`);
+  }
+  return number;
+}
+
+/** As `readPositiveInteger`, but admits `0`. Only `worker_idle_retire_seconds` uses this: zero is a
+ * meaningful setting there ("never retire an idle worker"), not the typo it would be for a cap or a
+ * timeout. */
+function readNonNegativeInteger(value: unknown, field: string): number | undefined {
+  const number = readNumber(value, field);
+  if (number === undefined) return undefined;
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error(`${field} must be a non-negative integer`);
+  }
+  return number;
+}
+
+/** The environment-variable twin of `readNonNegativeInteger`. */
+function parseEnvNonNegativeInteger(value: string | undefined, field: string): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error(`${field} must be a non-negative integer`);
   }
   return number;
 }
@@ -658,6 +690,15 @@ export function loadConfigFromFile(
     const value = readPositiveInteger(config[fileKey], fileKey);
     if (value !== undefined) fields[configKey] = value;
   }
+  // Outside the positive-integer loop above on purpose: `0` is a valid value here (it disables the
+  // idle-retire timer), so this key takes the non-negative parser.
+  const workerIdleRetireSeconds = readNonNegativeInteger(
+    config.worker_idle_retire_seconds,
+    "worker_idle_retire_seconds"
+  );
+  if (workerIdleRetireSeconds !== undefined) {
+    fields.workerIdleRetireSeconds = workerIdleRetireSeconds;
+  }
   const resyncIntervalSeconds = readPositiveInteger(
     config.resync_interval_seconds,
     "resync_interval_seconds"
@@ -931,6 +972,15 @@ export function resolveDaemonConfig(
     ),
     DEFAULT_WORKER_RPC_TIMEOUT_SECONDS
   );
+  const workerIdleRetireSeconds = resolveValue(
+    opts.cliOverrides?.workerIdleRetireSeconds,
+    fileNumber(fields, "workerIdleRetireSeconds"),
+    parseEnvNonNegativeInteger(
+      env.LEGION_WORKER_IDLE_RETIRE_SECONDS,
+      "LEGION_WORKER_IDLE_RETIRE_SECONDS"
+    ),
+    DEFAULT_WORKER_IDLE_RETIRE_SECONDS
+  );
   const workerStreamPort = resolveValue(
     opts.cliOverrides?.workerStreamPort,
     fileNumber(fields, "workerStreamPort"),
@@ -971,6 +1021,11 @@ export function resolveDaemonConfig(
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`${field} must be a positive integer`);
     }
+  }
+  // `workerIdleRetireSeconds` is the one lifecycle number that admits 0 (timer disabled), so it is
+  // validated here rather than in the positive-integer loop above (this also covers a cliOverride).
+  if (!Number.isSafeInteger(workerIdleRetireSeconds.value) || workerIdleRetireSeconds.value < 0) {
+    throw new Error("workerIdleRetireSeconds must be a non-negative integer");
   }
 
   const gates = resolveValue(opts.cliOverrides?.gates, fileGates(fields), undefined, {
@@ -1019,6 +1074,7 @@ export function resolveDaemonConfig(
       workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
       workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
       workerRpcTimeoutSeconds: workerRpcTimeoutSeconds.value,
+      workerIdleRetireSeconds: workerIdleRetireSeconds.value,
       workerStreamPort: workerStreamPort.value,
       gates: parsedGates,
       githubApps: githubApps.value,

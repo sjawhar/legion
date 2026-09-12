@@ -457,6 +457,69 @@ describe("daemon config", () => {
     expect(withoutEither.workerRpcTimeoutSeconds).toBe(5);
   });
 
+  it("resolves workerIdleRetireSeconds: YAML beats env, env beats the 600 default, and 0 is valid from either source", () => {
+    const yaml = (seconds: number) =>
+      [
+        "project: acme/7",
+        "envoy_url: http://listener:9020",
+        "dispatch_project: ACME",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "repos:",
+        "  - acme/widgets",
+        `worker_idle_retire_seconds: ${seconds}`,
+        "gates:",
+        "  design: off",
+      ].join("\n");
+    const cliOverrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+    const file = loadConfigFromFile(yaml(900), "/tmp/legion-config");
+
+    expect(resolveDaemonConfig({ configFile: file }).config.workerIdleRetireSeconds).toBe(900);
+    // Config-file value wins over env (`resolveValue`: cli > config > env > default).
+    expect(
+      resolveDaemonConfig({ configFile: file, env: { LEGION_WORKER_IDLE_RETIRE_SECONDS: "30" } })
+        .config.workerIdleRetireSeconds
+    ).toBe(900);
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: "30" },
+        cliOverrides,
+      }).config.workerIdleRetireSeconds
+    ).toBe(30);
+    expect(
+      resolveDaemonConfig({ env: requiredEnv, cliOverrides }).config.workerIdleRetireSeconds
+    ).toBe(600);
+
+    // `0` disables the timer: unlike every other seconds key it must survive both parsers.
+    expect(
+      resolveDaemonConfig({ configFile: loadConfigFromFile(yaml(0), "/tmp/legion-config") }).config
+        .workerIdleRetireSeconds
+    ).toBe(0);
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: "0" },
+        cliOverrides,
+      }).config.workerIdleRetireSeconds
+    ).toBe(0);
+  });
+
+  it("rejects a negative or non-integer worker_idle_retire_seconds from either source, naming the key", () => {
+    expect(() =>
+      loadConfigFromFile("project: acme/7\nworker_idle_retire_seconds: -1\n", "/tmp/legion-config")
+    ).toThrow("worker_idle_retire_seconds must be a non-negative integer");
+    expect(() =>
+      loadConfigFromFile("project: acme/7\nworker_idle_retire_seconds: 1.5\n", "/tmp/legion-config")
+    ).toThrow("worker_idle_retire_seconds must be a non-negative integer");
+    expect(() =>
+      resolveDaemonConfig({ env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: "-1" } })
+    ).toThrow("LEGION_WORKER_IDLE_RETIRE_SECONDS must be a non-negative integer");
+    expect(() =>
+      resolveDaemonConfig({ env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: "ten" } })
+    ).toThrow("LEGION_WORKER_IDLE_RETIRE_SECONDS must be a non-negative integer");
+  });
+
   it("resolves workerStreamPort: YAML beats env, env beats the port + 1 default", () => {
     const cliOverrides = {
       githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
