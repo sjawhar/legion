@@ -1,0 +1,116 @@
+{
+  "issue": "LEGION-29",
+  "pr": {
+    "number": 970,
+    "url": "https://github.com/sjawhar/legion/pull/970",
+    "reviewedHead": "b2381958a39b1ad9b977d7938b3ab28d98471eb1",
+    "branch": "legion/LEGION-29"
+  },
+  "spec": "dispatch://LEGION-29/artifact/spec (v4)",
+  "verdict": "CHANGES_REQUESTED",
+  "review": {
+    "id": 5187041653,
+    "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187041653",
+    "submittedAt": "2026-09-12T16:02:19Z",
+    "event": "REQUEST_CHANGES",
+    "commitId": "b2381958a39b1ad9b977d7938b3ab28d98471eb1"
+  },
+  "threads": [
+    {
+      "id": 3996761324,
+      "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3996761324",
+      "file": "packages/pi-envoy/extensions/legion.ts",
+      "line": 517,
+      "blocking": true,
+      "summary": "onEnvoyRoleRegained registered at legionExtension(pi) setup; a task subagent's in-process re-bind (oh-my-pi sdk.ts bindPreparedExtensions) overwrites the single bridge slot with a no-op listener, so the controller's regain never re-runs /controller/ready after its first task call. Reproduced with a throwaway copy of the controller regain test plus a second legionExtension(createPi().pi) + subagent session_start: soft claim sent, controller/ready count stays 1. Fix: register from claimController/bootstrapRoot once identity exists; add that regression test; correct envoy.ts:90 premise."
+    },
+    {
+      "id": 3996761326,
+      "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3996761326",
+      "file": "packages/pi-envoy/extensions/envoy.ts",
+      "line": 401,
+      "blocking": true,
+      "summary": "Hook awaited inside the heartbeat chain before .finally releases `healing`; daemon-client.ts:108 fetch has no timeout; /controller/ready awaits drainControllerNotices (events.ts:572-610, unbounded attempts) + forced resync. A stuck drain/resync pins healing=true, registerSession() stops, registry TTL lapses, session deaf. Fix: fire the hook off the chain with its own catch (or from .finally after healing=false); regression test: never-settling hook, next tick still POSTs /v1/interests/subscribe."
+    },
+    {
+      "id": 3996761327,
+      "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3996761327",
+      "file": "packages/pi-envoy/extensions/envoy.ts",
+      "line": 424,
+      "blocking": false,
+      "summary": "afterOutage derived from any chain rejection; a reassertRole-internal failure (getRole 5xx) yields a spurious 'reregistered' ready call next tick. Track registerSession failure separately."
+    },
+    {
+      "id": 3996761329,
+      "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3996761329",
+      "file": "packages/pi-envoy/extensions/envoy.ts",
+      "line": 374,
+      "blocking": false,
+      "summary": "sessionID read live across awaits; a session rebind racing a tick can 409 against the process's own new id and drop the valid claim / dangle the old-id claim. Capture id at entry and guard like claimedRoleTopic."
+    },
+    {
+      "id": 3996761332,
+      "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3996761332",
+      "file": "packages/pi-envoy/extensions/legion.ts",
+      "line": 524,
+      "blocking": false,
+      "summary": "Controller branch lacks callReadyWithRetry (root branch has it); L516 comment overstates retry. Wrap once the hook is off the heartbeat chain."
+    },
+    {
+      "id": 3996761334,
+      "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3996761334",
+      "file": "packages/pi-envoy/extensions/envoy.ts",
+      "line": 347,
+      "blocking": false,
+      "summary": "History narration in comment ('until now ... a human re-ran envoy_role_set')."
+    },
+    {
+      "id": 3996761338,
+      "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3996761338",
+      "file": "packages/pi-envoy/extensions/legion.test.ts",
+      "line": 798,
+      "blocking": false,
+      "summary": "History narration in test comment ('tonight's incident')."
+    }
+  ],
+  "preExistingForRetro": "The same in-process re-bind overwrites bridge.claim (envoy.ts:650) on main: /legion-claim-controller and the reclaim-architect directive resolve to a subagent's envoy instance after any task call. Not this PR's defect; docs/solutions note + follow-on.",
+  "contractChecks": {
+    "heartbeatReassertion": "PASS — reassertRole runs only after a successful registerSession() on the non-drifted path (envoy.ts:428); GET first; soft POST only when holder !== sessionID; no previous_session_id (client.setRole called without it; test asserts exact body); 409 → claimedRoleTopic=undefined, one ui.notify, no further GET or POST (envoy.test.ts 409 case asserts roleReads=1, one notify, claim gone); no pi.appendEntry on regain or 409.",
+    "regainHook": "Fires 'reclaimed' on a landed soft claim and 'reregistered' on the first healthy tick after an outage (envoy.ts:369-401). legion.ts: controller → controllerReady again; root architect → processReady with generation(process.env) via callReadyWithRetry/roleDaemon(); phase worker → nothing (pinned by test). Correct as written but defeated by blocking item 1 in a controller that has spawned a task subagent.",
+    "failureModes": "reassertRole errors stay inside the heartbeat .catch (warn once); legion.ts hook try/catch never rejects; messageFor/requiredEnvironment/generation/roleDaemon inside the try. Blocking item 2: the awaited hook couples the healing latch to an unbounded daemon round-trip.",
+    "tests": "envoy.test.ts 4 new cases assert listener request bodies, GET counts, exact notify text, transcript entry count, hook reason — consumer-observable. legion.test.ts 3 new cases assert daemon ready-call bodies and count. Env scrubbing (legion.test.ts beforeEach deletes environmentKeys; envoy.test.ts clears/restores DISPATCH_TOKEN_FILE) is hermetic and cannot mask a failure — a test that relied on inherited env now fails loudly. Missing: subagent-rebind regression (item 1) and never-settling-hook regression (item 2).",
+    "docs": "packages/pi-envoy/AGENTS.md:61 and skills/legion-controller/SKILL.md:32-35 accurate to the code, no history narration; packages/envoy/AGENTS.md unchanged (role durability bullet intact).",
+    "scope": "jj diff main@origin..b2381958 --summary: .legion/*, docs/plans/2026-09-12-heartbeat-role-reassertion.md, packages/pi-envoy/{AGENTS.md, extensions/envoy.ts, envoy.test.ts, legion.ts, legion.test.ts}, skills/legion-controller/SKILL.md. No Go/listener, daemon, package.json, or plugin-pin change.",
+    "conventions": "EnvoyApiError is a value import (instanceof) — correct; no new inline cast access; biome/tsc green in CI."
+  },
+  "githubVerified": {
+    "head": "b2381958a39b1ad9b977d7938b3ab28d98471eb1",
+    "checks": "Tests: pr-title/lint/typecheck/test SUCCESS; Legion Envoy and Contracts: changes/pi-envoy SUCCESS, contracts/envoy-plugin/envoy-client/dispatch/claude-envoy-bridge/envoy-go SKIPPED (path filter); legion/tester SUCCESS",
+    "reviewDecisionBefore": "REVIEW_REQUIRED",
+    "prBodyGaps": "CI: line still '<pending>' (repo has no pr-checks-result check; name the Tests / Legion Envoy and Contracts run ids); Thermo: line pending — verdict recorded in the review body."
+  },
+  "thermo": {
+    "head": "b2381958",
+    "deepReview": "1 blocking (hook awaited on heartbeat critical path → item 2), 2 non-blocking (sessionID live read; afterOutage over-fire); clean: sync throws, hook branches/409, secret leakage, test hermeticity, docs. agent://ThermoDeep",
+    "codeQuality": "0 blocking; non-blocking: afterOutage over-fire, controllerRoleToken third parallel let, controller branch without callReadyWithRetry, duplicated refused-claim drop, two history-narration comments, AGENTS.md bullet length, test-name/daemon-effect wording, formatter reflow in first commit. agent://ThermoQuality",
+    "rerunNext": "Re-run only if the fix touches more than the two hook sites; otherwise a targeted re-read of the fix commits suffices."
+  },
+  "evidenceRead": [
+    "dispatch://LEGION-29/artifact/spec v4",
+    ".legion/plan.json",
+    ".legion/implement.json",
+    ".legion/test.json",
+    "jj diff main@origin..b2381958 (all 10 files)",
+    "packages/envoy-client/src/transport.ts (EnvoyApiError, setRole 409 → claimed:false, getRole)",
+    "packages/pi-envoy/src/legion/daemon-client.ts:107-116",
+    "packages/daemon/src/daemon/api/routes/controller.ts",
+    "packages/daemon/src/daemon/index.ts:625-628",
+    "packages/daemon/src/daemon/events.ts:563-619",
+    "oh-my-pi packages/coding-agent/src/sdk.ts:2157-2195 and task/executor.ts:3448-3493 (read-only, managed fork)"
+  ],
+  "throwaway": "packages/pi-envoy/extensions/zz-review-throwaway.test.ts (copy of legion.test.ts + one case) — run once with --test-name-pattern 'review throwaway', failed as predicted (controller/ready count 1, expected 2), deleted; not committed.",
+  "nextRound": "Implementer fixes items 1 and 2 (plus any cheap non-blocking), pushes to legion/LEGION-29, fills the PR body CI/Thermo lines; tester re-runs behavioural testing on the new head; reviewer reviews that head. .legion/ deletion only after a clean review.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T16:03:35.471Z"
+}
