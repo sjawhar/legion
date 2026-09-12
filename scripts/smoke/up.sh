@@ -11,6 +11,8 @@ readonly listener_port="${ENVOY_PORT:-19020}"
 readonly smoke_dispatch_project="LEGSMOKE"
 readonly daemon_port="${LEGION_DAEMON_PORT:-19370}"
 readonly nats_url="nats://127.0.0.1:${nats_port}"
+# Predates oh-my-pi fix/rpc-extension-send-rejection (0e57a6ca); see resolve_omp_path for the
+# build the daemon actually runs until a tagged release carries it.
 readonly omp_pin="github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934"
 LEGION_IMPLEMENT_APP_ID="${LEGION_IMPLEMENT_APP_ID:-3202636}"
 readonly LEGION_IMPLEMENT_APP_ID
@@ -63,6 +65,27 @@ resolve_webhook_mode() {
       fail "SMOKE_WEBHOOK_MODE must be forward, envoy, or none"
       ;;
   esac
+}
+
+# Picks the OMP build every daemon-spawned pane runs (controller, roots, workers). `omp_pin`
+# predates oh-my-pi fix/rpc-extension-send-rejection (0e57a6ca), so a headless controller on the
+# pinned release crashes on its first prompt with "send did not invoke the agent"; until a tagged
+# release carries that fix the rig runs the same rpc-fix build production does, or whatever
+# LEGION_OMP_PATH names. Never falls back to the pin: that reproduces the crash later, in the
+# controller, instead of stopping here in preflight. Bumping `omp_pin` retires the default.
+resolve_omp_path() {
+  local default_path="${XDG_STATE_HOME:-$HOME/.local/state}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"
+
+  if [[ -n "${LEGION_OMP_PATH:-}" ]]; then
+    # The daemon's environment.ts rejects a relative LEGION_OMP_PATH at startup; stop here instead.
+    [[ "$LEGION_OMP_PATH" == /* && -f "$LEGION_OMP_PATH" && -x "$LEGION_OMP_PATH" ]] ||
+      fail "LEGION_OMP_PATH is not an absolute executable file: ${LEGION_OMP_PATH}"
+    printf '%s\n' "$LEGION_OMP_PATH"
+    return
+  fi
+  [[ -f "$default_path" && -x "$default_path" ]] ||
+    fail "no OMP build with the rpc-extension fix: ${default_path} is missing or not executable; export LEGION_OMP_PATH=<absolute executable omp> or bump omp_pin once a tagged oh-my-pi release carries fix/rpc-extension-send-rejection (0e57a6ca)"
+  printf '%s\n' "$default_path"
 }
 
 normalize_github_webhook_secret() {
@@ -493,6 +516,7 @@ main() {
   require_command awk
   require_command setsid
   local webhook_mode
+  local omp_path
 
   require_env SMOKE_REPO
   require_env SMOKE_PROJECT
@@ -509,6 +533,8 @@ main() {
   [[ "$SMOKE_REPO" =~ ^[^/]+/[^/]+$ ]] || fail "SMOKE_REPO must be <owner>/<repo>"
   [[ "$SMOKE_PROJECT" =~ ^[^/]+/[0-9]+$ ]] || fail "SMOKE_PROJECT must be <owner>/<number>"
   webhook_mode="$(resolve_webhook_mode)"
+  omp_path="$(resolve_omp_path)"
+  printf 'GREEN OMP build: %s\n' "$omp_path"
 
   mkdir -p "$smoke_dir" "${smoke_dir}/daemon" \
     "${smoke_dir}/xdg-data" "${smoke_dir}/xdg-state/legion" "$gh_config_dir"
@@ -554,10 +580,14 @@ main() {
     printf 'SKIPPED-BLOCKED webhook ingress: %s\n' "$(webhook_ingress_block_reason)"
   fi
 
+  # LEGION_OMP_PATH is exported for the daemon only: legion.yaml keeps `omp_invocation: mise x
+  # <pin> -- omp` (the loader requires that form) and environment.ts honours LEGION_OMP_PATH over
+  # it, so every pane the daemon spawns runs the build resolve_omp_path selected.
   start_process daemon env \
     ENVOY_NATS_URL="$nats_url" \
     ENVOY_URL="http://127.0.0.1:${listener_port}" \
     LEGION_DAEMON_PORT="$daemon_port" \
+    LEGION_OMP_PATH="$omp_path" \
     DISPATCH_URL="$DISPATCH_URL" \
     DISPATCH_TOKEN="$DISPATCH_TOKEN" \
     LEGION_STATE_DIR="${smoke_dir}/daemon" \
