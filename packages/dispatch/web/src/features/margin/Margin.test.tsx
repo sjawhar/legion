@@ -109,6 +109,7 @@ const anchoredAsk: Ask = {
   edited_at: null,
   id: "ask-1",
   issue_key: "CORE-1",
+  kind: "question",
   multiple: false,
   opened_event_id: 1,
   options: [{ label: "Ship" }],
@@ -722,6 +723,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
     edited_at: null,
     id: "ask-answered",
     issue_key: issue.key,
+    kind: "question",
     opened_event_id: 2,
     multiple: false,
     options: [],
@@ -750,6 +752,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
     options: [],
     question: "Why the?",
     state: "open",
+    kind: "question",
     urgency: "med",
   };
   // This viewer's tab never had either ask open in its inbox or query cache - unlike a tab

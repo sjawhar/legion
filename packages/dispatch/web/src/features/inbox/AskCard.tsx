@@ -349,6 +349,7 @@ export function AskCard({
   });
 
   const hasOptions = ask.options.length > 0;
+  const isApproval = ask.kind === "approval";
 
   const selectRealOption = (label: string) => {
     if (ask.multiple) {
@@ -383,6 +384,10 @@ export function AskCard({
     event.preventDefault();
     const text = answerText.trim();
     submitGuard.guard(() => {
+      if (isApproval) {
+        mutation.mutate(selected.includes("Request changes") ? { selected, text } : { selected });
+        return;
+      }
       if (hasOptions) {
         mutation.mutate(otherSelected ? { selected, text } : { selected });
         return;
@@ -390,10 +395,14 @@ export function AskCard({
       mutation.mutate(text === "" ? { selected } : { selected, text });
     });
   };
-  const canSubmit = hasOptions
-    ? selected.length > 0 || (otherSelected && answerText.trim() !== "")
-    : answerText.trim() !== "";
-  const showTextarea = !hasOptions || otherSelected;
+  const canSubmit = isApproval
+    ? selected.length > 0 && (!selected.includes("Request changes") || answerText.trim() !== "")
+    : hasOptions
+      ? selected.length > 0 || (otherSelected && answerText.trim() !== "")
+      : answerText.trim() !== "";
+  const showTextarea = isApproval
+    ? selected.includes("Request changes")
+    : !hasOptions || otherSelected;
   const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
 
   const completed = justAnswered ?? (ask.state === "open" ? null : ask);
@@ -444,6 +453,11 @@ export function AskCard({
         <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
+            {ask.kind === "approval" ? (
+              <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
+                Approval requested
+              </p>
+            ) : null}
             <div className={`font-medium ${textPrimaryOnSurface}`}>
               <MarkdownBody markdown={ask.question} />
             </div>
@@ -500,18 +514,20 @@ export function AskCard({
                   </label>
                 );
               })}
-              <label
-                className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
-              >
-                <input
-                  checked={otherSelected}
-                  disabled={mutation.isPending}
-                  name={`ask-${ask.id}`}
-                  onChange={toggleOther}
-                  type={ask.multiple ? "checkbox" : "radio"}
-                />
-                <span className={`font-medium ${textPrimaryOnSurface}`}>Other</span>
-              </label>
+              {isApproval ? null : (
+                <label
+                  className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
+                >
+                  <input
+                    checked={otherSelected}
+                    disabled={mutation.isPending}
+                    name={`ask-${ask.id}`}
+                    onChange={toggleOther}
+                    type={ask.multiple ? "checkbox" : "radio"}
+                  />
+                  <span className={`font-medium ${textPrimaryOnSurface}`}>Other</span>
+                </label>
+              )}
             </fieldset>
           )}
           {showTextarea ? (
@@ -519,7 +535,7 @@ export function AskCard({
               className={`block text-sm font-medium ${textSecondaryOnSurface}`}
               htmlFor={answerFieldId}
             >
-              Your answer
+              {isApproval ? "Reason" : "Your answer"}
               <textarea
                 className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
                 disabled={mutation.isPending}

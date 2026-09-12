@@ -18,6 +18,7 @@ function ask(overrides: Partial<Ask> = {}): Ask {
     edited_at: null,
     id: "ask-1",
     issue_key: "CORE-1",
+    kind: "question",
     multiple: false,
     opened_event_id: 1,
     options: [],
@@ -292,6 +293,88 @@ test("AskCard hides the Other field and drops its text once a real option is pic
 
     fireEvent.click(view.getByRole("radio", { name: "Other" }));
     expect(view.getByLabelText("Your answer")).toHaveProperty("value", "");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval-kind ask labels itself Approval requested and offers no Other row", async () => {
+  const input = ask({
+    kind: "approval",
+    options: [{ label: "Approve" }, { label: "Request changes" }],
+    question: "Approve this document?",
+  });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    expect(within(card).getByText("Approval requested")).toBeTruthy();
+    await view.findByRole("radio", { name: "Approve" });
+    expect(within(card).getByRole("radio", { name: "Request changes" })).toBeTruthy();
+    expect(within(card).queryByRole("radio", { name: "Other" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval-kind ask submits Approve with no reason", async () => {
+  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const input = ask({
+    kind: "approval",
+    options: [{ label: "Approve" }, { label: "Request changes" }],
+  });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Approve" }));
+    expect(view.queryByLabelText("Reason")).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+
+    await waitFor(() => expect(submitted).toEqual([{ selected: ["Approve"] }]));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval-kind ask requires a reason before Request changes can submit", async () => {
+  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const input = ask({
+    kind: "approval",
+    options: [{ label: "Approve" }, { label: "Request changes" }],
+  });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Request changes" }));
+    const reasonField = view.getByLabelText("Reason");
+    const submit = view.getByRole("button", { name: "Submit answer" });
+    expect(submit.hasAttribute("disabled")).toBe(true);
+
+    fireEvent.change(reasonField, { target: { value: "Needs another pass" } });
+    expect(submit.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(submit);
+
+    await waitFor(() =>
+      expect(submitted).toEqual([{ selected: ["Request changes"], text: "Needs another pass" }])
+    );
   } finally {
     view.unmount();
   }

@@ -59,6 +59,7 @@ test("accepts an artifact-owned ask edit event", () => {
       issue_key: null,
       artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
       author: { kind: "session", id: "session-1" },
+      kind: "question",
       question: "Publish?",
       options: [],
       multiple: false,

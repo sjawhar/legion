@@ -19,6 +19,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
@@ -102,6 +103,11 @@ export function ArtifactHeader({
           <h2 className={`truncate text-lg font-semibold ${textPrimaryOnSurface}`}>
             {artifact.name}
           </h2>
+          {artifact.approval === undefined ? null : (
+            <div className="mt-1">
+              <ApprovalChip artifact={artifact} variant="header" />
+            </div>
+          )}
         </div>
         {showVersionPicker || toolbar !== undefined ? (
           <div className="flex min-w-0 flex-wrap items-center gap-3">

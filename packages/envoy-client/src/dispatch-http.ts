@@ -1,6 +1,7 @@
 import type {
   Actor,
   Artifact,
+  ArtifactApproval,
   ArtifactDetails,
   ArtifactReferences,
   ArtifactText,
@@ -151,6 +152,22 @@ export class DispatchClient {
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
+  }
+
+  /**
+   * Opens (or returns the open) approval ask for a document at its latest version. When that
+   * version is already approved, `ask` is null and `approval` carries the standing approval.
+   */
+  async requestApproval(
+    artifactID: string,
+    input: { actor: Actor }
+  ): Promise<{
+    ask: Ask | null;
+    artifact_id: string;
+    version: number;
+    approval: ArtifactApproval;
+  }> {
+    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
   }
 
   async editAsk(id: string, input: EditAskInput): Promise<Ask> {

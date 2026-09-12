@@ -45,6 +45,7 @@ import {
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
+import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import {
@@ -190,6 +191,7 @@ function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
 }
 
 function IssueHeader({
+  documentArtifact,
   isClosed,
   issue,
   onShowDiffChange,
@@ -200,6 +202,7 @@ function IssueHeader({
   toolbar,
   version,
 }: {
+  documentArtifact: Artifact | undefined;
   isClosed: boolean;
   issue: Issue;
   onShowDiffChange(next: boolean): void;
@@ -356,6 +359,9 @@ function IssueHeader({
             ))}
           </select>
         </label>
+        {showDocumentControls && documentArtifact !== undefined ? (
+          <ApprovalChip artifact={documentArtifact} variant="header" />
+        ) : null}
         {showDocumentControls && toolbar !== undefined ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <label
@@ -690,6 +696,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         </p>
       ) : null}
       <IssueHeader
+        documentArtifact={primaryArtifact}
         isClosed={isClosed}
         issue={issue.data}
         onShowDiffChange={setSpecShowDiff}

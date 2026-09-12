@@ -478,17 +478,38 @@ function toolActor(origin: DispatchOrigin, input: ExecuteDispatchToolInput): Act
   };
 }
 
+/** One line describing a document's approval, or undefined for a draft nobody has asked about. */
+function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined {
+  const approval = artifact.approval;
+  if (approval === undefined || approval.state === "draft") return undefined;
+  switch (approval.state) {
+    case "awaiting":
+      return `Approval: awaiting (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    case "approved":
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
+    case "stale":
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again`;
+    case "changes_requested":
+      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
+  }
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
   references: IssueReferences | string
 ): string {
   const asks = issue.open_asks;
+  const spec = issue.artifacts?.find((artifact) => artifact.primary);
+  const specApproval = spec === undefined ? undefined : approvalLine(spec);
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
     `Status: ${issue.status}`,
     `Route: ${issue.route ?? "none"}`,
+    ...(specApproval === undefined
+      ? []
+      : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
     "Open asks:",
     ...(asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`)),
     "References:",
@@ -905,11 +926,16 @@ export async function executeDispatchTool(
       const version = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
       const document = await client.docRead(resolved.artifact.id, version);
       const marks = await openArtifactMarks(client, resolved);
+      const approval = approvalLine(resolved.artifact);
+      const trailer = [
+        ...(marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`]),
+        ...(approval === undefined ? [] : [approval]),
+      ];
       return {
         text:
-          marks.length === 0
+          trailer.length === 0
             ? document.markdown
-            : `${document.markdown}\n\nOpen anchored asks/comments: ${marks.join(", ")}`,
+            : `${document.markdown}\n\n${trailer.join("\n")}`,
         details:
           resolved.owner.kind === "project"
             ? {
@@ -917,6 +943,32 @@ export async function executeDispatchTool(
                 document: `${resolved.artifact.project}/${resolved.artifact.slug}`,
               }
             : { issue: resolved.issue?.key },
+      };
+    }
+    case "dispatch_request_approval": {
+      const artifactReference =
+        optionalString(args, "artifact") ??
+        (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact"
+          ? ownerArguments.ref.id
+          : undefined);
+      const resolved = await resolveArtifact(client, documentOwner(), artifactReference);
+      const result = await client.requestApproval(resolved.artifact.id, { actor });
+      if (result.ask === null) {
+        return {
+          text: `${resolved.artifact.name} is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          details: {
+            ...(resolved.owner.kind === "project"
+              ? documentResultDetails(resolved.artifact)
+              : { issue: resolved.issue?.key }),
+            artifact: resolved.artifact.id,
+            version: result.version,
+          },
+        };
+      }
+      const details = await askResultDetails(client, result.ask, resolved);
+      return {
+        text: `Approval requested for ${resolved.artifact.name} at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }
     case "dispatch_artifact": {
@@ -1008,6 +1060,9 @@ export async function executeDispatchTool(
             `Document: ${resolved.artifact.project} / ${resolved.artifact.name}`,
             `Reference: dispatch://${resolved.artifact.project}/artifact/${resolved.artifact.slug}`,
             `Versions: ${resolved.artifact.versions.length}`,
+            ...(approvalLine(resolved.artifact) === undefined
+              ? []
+              : [approvalLine(resolved.artifact) as string]),
           ].join("\n"),
           details: {
             project: resolved.artifact.project,

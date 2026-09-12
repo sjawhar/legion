@@ -173,6 +173,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
     ask: {
       id: "ask-1",
       issue_key: "CORE-1",
+      kind: "question",
       author: { id: "alice", kind: "user" },
       question: "Should we ship this on Friday or wait for the review to land first?",
       options: [],

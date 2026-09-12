@@ -123,6 +123,22 @@ clarification, not an answer: the human did not understand the question or needs
 in their Inbox. Answer in the same thread with `dispatch_comment({ reply_to_ask })`, or reword the question itself with
 `dispatch_edit_ask` when the wording was the problem; either puts the ask back in front of them. Do not open a second ask.
 
+## Approval of a spec
+
+Approval is a property of a document, not a question you phrase: a human approves a specific version, the way a pull-request
+review approves a commit, and any later edit makes that approval stale. It is the exception, not a step for every issue - reach
+for it when a spec departs from what the human already settled, proposes children, or when the project has armed a design gate.
+
+```
+dispatch_request_approval({ issue?, project?, artifact? })
+```
+
+Opens (or returns the open) approval ask for the document at its latest version - options `Approve` and `Request changes`, in
+the human's Inbox like any ask. The answer reaches you as `artifact.approved` or `artifact.changes_requested` with the pinned
+`version`; `changes_requested` carries the reason, which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show
+the document's approval state; `stale` means it was approved and then edited - request again for the new version. Never write
+"Approve" options into an ordinary `dispatch_ask`, and never approve anything yourself: only humans review.
+
 ## The Spec
 
 The spec holds requirements, design, acceptance, decisions, and rejected alternatives, structured per [Writing a spec](#writing-a-spec).

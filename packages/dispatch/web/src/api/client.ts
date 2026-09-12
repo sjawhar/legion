@@ -3,6 +3,8 @@ import type {
   AnswerAskInput,
   Artifact,
   ArtifactDetails,
+  ArtifactReview,
+  ArtifactReviewState,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionContent,
@@ -99,6 +101,17 @@ export interface ListEventsOptions {
 }
 
 export type ArtifactOwner = { issue: string } | { project: string };
+
+export interface CreateArtifactReviewInput {
+  state: ArtifactReviewState;
+  reason?: string;
+}
+
+export interface RequestArtifactApprovalResponse {
+  ask: Ask;
+  artifact_id: string;
+  version: number;
+}
 
 function normalizeAsk(ask: Ask): Ask {
   return Array.isArray(ask.options) ? ask : { ...ask, options: [] };
@@ -366,6 +379,21 @@ export class DispatchApiClient {
 
   editArtifact(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
     return this.post<EditArtifactResponse>(`/api/v1/artifacts/${pathSegment(id)}/edits`, input);
+  }
+
+  listArtifactReviews(id: string): Promise<ArtifactReview[]> {
+    return this.json<ArtifactReview[]>(`/api/v1/artifacts/${pathSegment(id)}/reviews`);
+  }
+
+  createArtifactReview(id: string, input: CreateArtifactReviewInput): Promise<ArtifactReview> {
+    return this.post<ArtifactReview>(`/api/v1/artifacts/${pathSegment(id)}/reviews`, input);
+  }
+
+  requestArtifactApproval(id: string): Promise<RequestArtifactApprovalResponse> {
+    return this.post<RequestArtifactApprovalResponse>(
+      `/api/v1/artifacts/${pathSegment(id)}/approval-requests`,
+      {}
+    );
   }
 
   async listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
