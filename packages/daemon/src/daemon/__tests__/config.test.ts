@@ -457,6 +457,75 @@ describe("daemon config", () => {
     expect(withoutEither.workerRpcTimeoutSeconds).toBe(5);
   });
 
+  it("resolves workerStreamPort: YAML beats env, env beats the port + 1 default", () => {
+    const cliOverrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "port: 19370",
+        "envoy_url: http://listener:9020",
+        "dispatch_project: ACME",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "repos:",
+        "  - acme/widgets",
+        "worker_stream_port: 19400",
+        "gates:",
+        "  design: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+    expect(resolveDaemonConfig({ configFile: file }).config.workerStreamPort).toBe(19400);
+    expect(
+      resolveDaemonConfig({ configFile: file, env: { LEGION_WORKER_STREAM_PORT: "19500" } }).config
+        .workerStreamPort
+    ).toBe(19400);
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_WORKER_STREAM_PORT: "19500" },
+        cliOverrides,
+      }).config.workerStreamPort
+    ).toBe(19500);
+    expect(
+      resolveDaemonConfig({ env: { ...requiredEnv, LEGION_DAEMON_PORT: "14000" }, cliOverrides })
+        .config.workerStreamPort
+    ).toBe(14001);
+    expect(resolveDaemonConfig({ env: requiredEnv, cliOverrides }).config.workerStreamPort).toBe(
+      13371
+    );
+  });
+
+  it("rejects a worker_stream_port that is not a TCP port or collides with port", () => {
+    const cliOverrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+    expect(() => loadConfigFromFile("worker_stream_port: 70000", "/tmp/legion-config")).toThrow(
+      "worker_stream_port must be at most 65535"
+    );
+    expect(() => loadConfigFromFile("worker_stream_port: 0", "/tmp/legion-config")).toThrow(
+      "worker_stream_port must be a positive integer"
+    );
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_WORKER_STREAM_PORT: "70000" },
+        cliOverrides,
+      })
+    ).toThrow("LEGION_WORKER_STREAM_PORT must be a valid TCP port");
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_DAEMON_PORT: "14000", LEGION_WORKER_STREAM_PORT: "14000" },
+        cliOverrides,
+      })
+    ).toThrow("worker_stream_port must differ from port (both 14000)");
+    expect(() =>
+      resolveDaemonConfig({ env: { ...requiredEnv, LEGION_DAEMON_PORT: "65535" }, cliOverrides })
+    ).toThrow(
+      "worker_stream_port defaults to port + 1 (65536), which is not a valid TCP port; set worker_stream_port"
+    );
+  });
+
   it("resolves workerBootRegistrationDeadlineIntervals: YAML beats env, env beats the 3 default", () => {
     const file = loadConfigFromFile(
       [
