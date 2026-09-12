@@ -438,7 +438,7 @@ export interface SocketProbeResult {
 }
 
 /** Connects to `socketPath` (via the caller's own connect-and-cache `connect` function — every
- * caller in this daemon reuses `ProcessManager.workerClient`'s per-token cache/negotiate) and
+ * caller in this daemon reuses `ProcessManager`'s per-token cache/negotiate) and
  * probes `get_state`, gathering the raw facts every liveness dialect in this package needs
  * (`reconnectWorkers`, `onWorkerClientClosed`, `spawnWorker`'s resume check, and the boot
  * watchdog's own alive probe) instead of each duplicating this same connect-then-getState
