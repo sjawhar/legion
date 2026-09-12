@@ -355,7 +355,104 @@
       "The 30 s eval cell limit interrupted one wrapper mid-run; every step it had issued completed and was reconstructed from the proxy/fake-daemon/omp logs, which carry their own timestamps."
     ]
   },
+  "round2Completed": "2026-09-12T17:37:33.034Z",
+  "round3": {
+    "head": "bc163b90f728ce98fa90999a7192ce60053fbaac",
+    "changeUnderTest": "415f4ba98aee — `registrationFailed = false` moved from the registration-success branch into the full-chain-success `.then` (beside `heartbeatOutageNotified = false`), plus the reassertRole docblock wording; one new pinning test.",
+    "verdict": "PASS — the ordering fix is pinned (test fails with the pre-fix ordering, passes with the fix) and proven live at the request level: registration failure → (registration OK, role read fails) → healthy produced exactly one `reregistered` controller/ready on the healthy tick, none earlier, with every heartbeat on its 10 s grid; A1/A3 regress clean; CI green at bc163b90.",
+    "statusCheck": {
+      "context": "legion/tester",
+      "state": "success",
+      "sha": "bc163b90f728ce98fa90999a7192ce60053fbaac",
+      "createdAt": "2026-09-12T18:06:12Z",
+      "creator": "legion-implementer[bot]"
+    },
+    "ci": {
+      "runs": [
+        "Tests run 34709575722 (created 17:53:44Z) — completed success",
+        "Tests run 34709660120 (duplicate, created 17:55:32Z) — completed success",
+        "Legion Envoy and Contracts run 34709575729 (17:53:44Z) — completed success"
+      ],
+      "checkRuns": "GET …/commits/bc163b90/check-runs: changes ×1, pi-envoy ×1, lint ×2, pr-title ×2, test ×2, typecheck ×2 all `completed/success`; claude-envoy-bridge, contracts, dispatch, envoy-client, envoy-go, envoy-plugin `completed/skipped`; nothing failed or pending.",
+      "pass": true
+    },
+    "unitGates": {
+      "command": "cd $WS/packages/pi-envoy && bun test extensions/envoy.test.ts extensions/legion.test.ts",
+      "result": "129 pass, 0 fail, 434 expect() calls across 2 files [9.85s] (round 2: 128; +1)",
+      "pinningTest": "extensions/envoy.test.ts:2210 `a failed registration's regain survives a role-read failure on the recovery tick` — run alone: 1 pass",
+      "redGreen": {
+        "method": "working copy of extensions/envoy.ts edited in place (no commit): the `.then` pair restored to the pre-415f4ba9 shape — `registrationFailed = false` back in the registration-success branch before `reassertRole`, removed from the full-chain `.then`; the pinning test run alone; file restored byte-identical (`jj diff --summary -- …/envoy.ts` → 0 lines; `jj status` shows only the pane's untracked .omp/config.yml).",
+        "preFixOrdering": "(fail) envoy OMP extension > a failed registration's regain survives a role-read failure on the recovery tick [5001.21ms] — ^ this test timed out after 5000ms. 0 pass, 1 fail (the hook never fires because the role-read-failure tick had already cleared the flag)",
+        "fixedOrdering": "1 pass, 0 fail"
+      },
+      "pass": true
+    },
+    "smokeSetup": {
+      "session": {
+        "sid": "01a096c5-e33e-7000-8d9c-b8624c70afba",
+        "panePid": 3283178,
+        "launched": "2026-09-12T17:59:0xZ",
+        "quit": "2026-09-12T18:03:1xZ"
+      },
+      "launch": "tmux -L legion29-r3 … env -u OMP_PROFILE -u PI_PROFILE -u LEGION_* -u DISPATCH_* ENVOY_URL=http://127.0.0.1:9021 ENVOY_HEARTBEAT_MS=10000 OMP_LOG_LEVEL=debug LEGION_DAEMON_URL=http://127.0.0.1:9022 LEGION_CONTROLLER_SECRET=smoke29r3-not-a-real-secret <omp 18.1.18> --no-extensions -e $WS/packages/pi-envoy/extensions/envoy.ts -e $WS/packages/pi-envoy/extensions/legion.ts --session-dir <workdir>/sessions",
+      "extensionProvenance": "~/.omp/logs/omp.2026-09-12.3283178.log `extension instance loaded` extension=file:///…/legion-29/packages/pi-envoy/extensions/envoy.ts?mtime=1789235948331 and …/legion.ts?mtime=1789235948656 (this checkout at bc163b90)",
+      "faultProxy": "/tmp/legion29-proxy-r3.ts (archived at /tmp/legion29-evidence/r3/) — logging reverse proxy 127.0.0.1:9021 → listener 127.0.0.1:9020 that reads a control file per request: `failSubscribe: n` answers the next n POST /v1/interests/subscribe FROM the smoke session's id with 503 (not forwarded); `failRoleRead: n` answers the next n GET /v1/roles/* with 503. n=2 per fault because @legion/envoy-client's `request()` retries a 5xx exactly once (transport.ts:246), so two 503s make the tick's call reject.",
+      "fakeDaemon": "/tmp/legion29-fake-daemon.ts on 127.0.0.1:9022, project `smoke29r3`: GET /legion/v1/state → minimal valid state; POST /legion/v1/controller/ready → call 1 answers 200 at once, later calls held 1 s then 200; every call logged with the sessionId and a redacted secret marker.",
+      "identity": "`/legion-claim-controller` 17:59:27Z → fake daemon GET /legion/v1/state 17:59:28.719; listener POST /v1/roles/set {session_id, role: legion-smoke29r3-controller} 17:59:28.731 → 200; fake daemon POST /legion/v1/controller/ready call 1 17:59:28.738 (secret present) → 200. Not a production role (project smoke29r3 does not exist); the production daemon and roles were untouched."
+    },
+    "r1RecoveryLive": {
+      "pass": true,
+      "requirement": "(a) one tick with failed registration, (b) next tick registration 200 but GET /v1/roles 5xx, (c) next tick healthy ⇒ exactly one controller/ready after (c), none after (a)/(b), heartbeat schedule intact.",
+      "timeline": [
+        "17:59:50.851 POST /v1/interests/subscribe 200 ; 17:59:50.854 GET /v1/roles/legion-smoke29r3-controller 200   (baseline)",
+        "18:00:00.851 subscribe 200 ; 18:00:00.856 GET roles 200",
+        "18:00:10.851 subscribe 200 ; 18:00:10.855 GET roles 200",
+        "18:00:14.517 armed failSubscribe=2",
+        "(a) 18:00:20.854 POST /v1/interests/subscribe → 503 injected ; 18:00:21.111 retry → 503 injected  ⇒ registerSession() rejected; pane: `Warning: envoy: registry heartbeat failed (injected fault: registry unavailable); retrying every heartbeat` (once); fake daemon: nothing",
+        "18:00:21.591 armed failRoleRead=2",
+        "(b) 18:00:30.853 POST /v1/interests/subscribe → 200 ; 18:00:30.857 GET /v1/roles/legion-smoke29r3-controller → 503 injected ; 18:00:31.111 retry → 503 injected  ⇒ reassertRole rejected; fake daemon: nothing",
+        "18:00:31.178 faults cleared",
+        "(c) 18:00:40.853 POST /v1/interests/subscribe → 200 ; 18:00:40.859 GET /v1/roles → 200 (holder = self) ; fake daemon 18:00:40.867 POST /legion/v1/controller/ready call 2 {sessionId: 01a096c5…, secret: <present>} → 200 at 18:00:41.868 ; pane (compose-box footer, captured live): `[legion] re-ran controller/ready after role legion-smoke29r3-controller was reregistered`",
+        "18:00:50.853 subscribe 200 ; 18:00:50.857 GET roles 200 — no further controller/ready",
+        "18:01:00 … 18:01:20 three more healthy ticks — no further controller/ready (fake daemon log: calls 1 and 2 only for the session's whole life)"
+      ],
+      "schedule": "every one of the session's ticks from 17:59:50 to 18:02:20 landed at hh:mm:x0.85 ± 0.3 s (10 s grid); the faulted ticks (a) and (b) each added only the transport's single ~250 ms retry.",
+      "preFixExpectation": "with the pre-415f4ba9 ordering, tick (b)'s successful registration would have cleared `registrationFailed` before its role read failed, so tick (c) would run with afterOutage=false and never call controller/ready — the same failure mode the unit red/green shows (5 s timeout, hook never fires).",
+      "noRoleClaimInvolved": "no POST /v1/roles/set at (a)/(b)/(c): the claim survived (the fault was in the session's own calls, not the listener's state), so the regain is purely the R1 `reregistered` path — the one this commit repairs."
+    },
+    "acceptance1": {
+      "pass": true,
+      "roleSwitch": "18:01:23.012 POST /v1/roles/set {session_id, role: smoke-legion-29} (hard, envoy_role_set) → 200 ; 18:01:23.022 unsubscribe of notifications.role.legion-smoke29r3-controller (hand-back); transcript envoy-role-claim 1 → 2",
+      "steadyTicks": "18:01:30 / 18:01:40: subscribe 200 + GET /v1/roles/smoke-legion-29 200 holder=self; 0 roles/set",
+      "removal": "18:01:45.199Z POST /v1/interests/unsubscribe {session_id, topics:[notifications.role.smoke-legion-29]} → removed; GET → 404",
+      "listenerSaw": [
+        "18:01:50.854 POST /v1/interests/subscribe 200",
+        "18:01:50.858 GET /v1/roles/smoke-legion-29 404",
+        "18:01:50.860 POST /v1/roles/set {session_id, role, soft: true} (no previous_session_id) → 200"
+      ],
+      "reheld": "GET names the session again after 7 s (18:01:51.648Z); transcript envoy-role-claim still 2"
+    },
+    "acceptance3": {
+      "pass": true,
+      "rival": "smoke-legion-29-rival subscribed; hard POST /v1/roles/set at 18:02:19.786Z → holder smoke-legion-29-rival",
+      "listenerSaw": [
+        "18:02:20.858 GET /v1/roles/smoke-legion-29 200 {holder: smoke-legion-29-rival}",
+        "18:02:20.860 POST /v1/roles/set {session_id, role, soft: true} → 409 {error: role smoke-legion-29 is held by smoke-legion-29-rival, holder, role}",
+        "after the 409: 3 own subscribes to 18:02:51, 0 POST /v1/roles/set, 0 GET /v1/roles"
+      ],
+      "paneWarning": "exactly 1: `Warning: envoy: role smoke-legion-29 is now held by session smoke-legion-29-rival; this session no longer holds it`",
+      "rivalKeepsRole": "holder smoke-legion-29-rival at 18:02:51Z (3 ticks later)",
+      "noRetakeAfterRelease": "18:02:51.329Z rival unsubscribe → 22 consecutive 1 s GETs all 404; 0 roles/set, 0 GET /v1/roles from the session; pane warning count still 1; transcript envoy-role-claim 2 (no release entry)",
+      "cleanup": "DELETE /v1/sessions/smoke-legion-29-rival → 200"
+    },
+    "teardown": "/quit → registry for the workdir empty, GET /v1/roles/smoke-legion-29 404, GET /v1/roles/legion-smoke29r3-controller 404; tmux -L legion29-r3 kill-server; proxy and fake daemon stopped (exit 143); workdir, fault file and round-2 marker files removed; no /tmp/legion29-r*-smoke.* left. No production role claimed, released or otherwise touched.",
+    "evidenceFiles": "/tmp/legion29-evidence/r3/{transcript.jsonl, omp.log, proxy-requests.jsonl, fake-daemon.jsonl, pane.txt, launch.sh, legion29-proxy-r3.ts, legion29-fake-daemon.ts} (ephemeral; excerpts inlined above)",
+    "incidents": [
+      "The production Legion daemon (:13370) restarted under its supervisor at 18:03:34Z — after the smoke rig was torn down and unrelated to it (its previous log ends on ordinary event consumption) — and spent ~2 min in `waiting for calm disk`; every worker `bash` call is gated on minting a LEGION_GRANT from it, so this phase paused until it answered again at 18:05:43Z (controllerPendingNotices 0 afterwards).",
+      "The `[legion] re-ran controller/ready … was reregistered` pane line was captured live at 18:00:5x in the compose-box footer; the later full-scrollback archive (pane.txt) no longer shows it because the footer is not scrollback. The fake daemon's call 2 is the durable record of the same event."
+    ]
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-12T17:37:33.034Z"
+  "completed": "2026-09-12T18:07:18.420Z"
 }
