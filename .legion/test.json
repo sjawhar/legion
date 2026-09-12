@@ -1,0 +1,331 @@
+{
+  "issue": "LEGION-14",
+  "spec": {
+    "ref": "dispatch://LEGION-14/spec",
+    "version": 4
+  },
+  "planDoc": "docs/plans/2026-09-12-resync-queued-root-anomaly.md",
+  "verdict": "PASS",
+  "headSha": "8ac5754c8d201414a8daa94fb08931f4ddccc289",
+  "fixCommitSha": "8fec55b322e8",
+  "resyncTsIdenticalAtHeadAndFix": "sha256 ea515886328a7127398ce80a8b56ff49c503792ad5fa0a873bf7889d8696a93b at 8fec55b322e8, 8ac5754c8d20, and the workspace file",
+  "preFixModule": "jj file show -r mspqmpzy- (commit cddc7a0b) packages/daemon/src/daemon/resync.ts, sha256 d879e57c9df8b077c99d8759d731deb54895e67947c36716f715cd97be811ea8, imports rewritten to absolute workspace paths per plan Task 2 Step 1, staged at /tmp/legion14-live/resync-before.ts",
+  "driver": "/tmp/legion14-live/run-resync.tester.ts (byte-identical to the planner's /tmp/legion14-live/run-resync.ts and to the plan text); cwd packages/daemon; dispatchClient/saveState/fetchCiStatusBatch/applyEffects mocked; never touched the live daemon, Dispatch, GitHub, or tmux",
+  "prNumber": 952,
+  "prUrl": "https://github.com/sjawhar/legion/pull/952",
+  "prBodyUpdated": "E2E and Negative control lines filled; a 'Tester evidence at 8ac5754c8d20' paragraph appended after the implementer's evidence paragraph; every other line unchanged",
+  "liveProof": {
+    "inputCopyTime": "2026-09-12T05:50:10Z",
+    "inputs": {
+      "state-2026-09-11T2304Z-v22.json": "copy of $LEGION_STATE_DIR/state.json.v22.bak (sha256 c703ef4c20cd33d5db4fba5078fcba8bf7299ec9b0abe1a280eb5aecadf13d6c), schema version 22, written 2026-09-11 23:04Z inside the incident window",
+      "state-current.json": "copy of $LEGION_STATE_DIR/state.json at copy time (sha256 2f7a1fbad9bf160174169402598c804ce463beafb17f78e9de4e8bc00fbdd651), schema version 23"
+    },
+    "currentQueueAtCopyTime": {
+      "cap": 14,
+      "active": [
+        "LEGION-10",
+        "LEGION-11",
+        "LEGION-12",
+        "LEGION-13",
+        "LEGION-14",
+        "LEGION-17",
+        "LEGION-18",
+        "LEGION-20",
+        "LEGION-19",
+        "LEGION-21",
+        "LEGION-16",
+        "LEGION-9"
+      ],
+      "queue": [],
+      "note": "no queued roots and no queued children at copy time; the current pair is a no-regression control only, not the proof (LEGION-22 and LEGION-23, queued at plan time, had since escalated to launch-failed trees)"
+    },
+    "reports": {
+      "before-v22": {
+        "module": "resync-before.ts",
+        "input": "state-2026-09-11T2304Z-v22.json",
+        "admission": {
+          "cap": 1,
+          "active": [
+            "LEGION-9"
+          ],
+          "queue": [
+            "LEGION-10",
+            "LEGION-11"
+          ]
+        },
+        "queuedRoots": [
+          {
+            "key": "LEGION-10",
+            "dispatchStatus": "todo",
+            "treeStatus": "queued"
+          },
+          {
+            "key": "LEGION-11",
+            "dispatchStatus": "todo",
+            "treeStatus": "queued"
+          }
+        ],
+        "queuedChildren": [],
+        "anomalies": [
+          {
+            "kind": "zero-owner-tree",
+            "issue": "LEGION-10",
+            "detail": "Dispatch status \"todo\" has no active Legion tree"
+          },
+          {
+            "kind": "zero-owner-tree",
+            "issue": "LEGION-11",
+            "detail": "Dispatch status \"todo\" has no active Legion tree"
+          }
+        ],
+        "effects": {
+          "probe": 1
+        },
+        "pendingStatusWrites": [],
+        "healed": 0
+      },
+      "after-v22": {
+        "module": "workspace resync.ts (fixed)",
+        "input": "state-2026-09-11T2304Z-v22.json",
+        "admission": {
+          "cap": 1,
+          "active": [
+            "LEGION-9"
+          ],
+          "queue": [
+            "LEGION-10",
+            "LEGION-11"
+          ]
+        },
+        "queuedRoots": [
+          {
+            "key": "LEGION-10",
+            "dispatchStatus": "todo",
+            "treeStatus": "queued"
+          },
+          {
+            "key": "LEGION-11",
+            "dispatchStatus": "todo",
+            "treeStatus": "queued"
+          }
+        ],
+        "queuedChildren": [],
+        "anomalies": [],
+        "effects": {
+          "probe": 1
+        },
+        "pendingStatusWrites": [],
+        "healed": 0
+      },
+      "before-current": {
+        "module": "resync-before.ts",
+        "input": "state-current.json",
+        "admission": {
+          "cap": 14,
+          "active": [
+            "LEGION-10",
+            "LEGION-11",
+            "LEGION-12",
+            "LEGION-13",
+            "LEGION-14",
+            "LEGION-17",
+            "LEGION-18",
+            "LEGION-20",
+            "LEGION-19",
+            "LEGION-21",
+            "LEGION-16",
+            "LEGION-9"
+          ],
+          "queue": []
+        },
+        "queuedRoots": [],
+        "queuedChildren": [],
+        "anomalies": [
+          {
+            "kind": "untriaged-open",
+            "issue": "LEGION-27",
+            "detail": "tracked triage issue has no Legion tree or admission entry"
+          },
+          {
+            "kind": "untriaged-open",
+            "issue": "LEGION-28",
+            "detail": "tracked triage issue has no Legion tree or admission entry"
+          },
+          {
+            "kind": "launch-failed",
+            "issue": "LEGION-22",
+            "detail": "tree launch failed 3 times"
+          },
+          {
+            "kind": "launch-failed",
+            "issue": "LEGION-23",
+            "detail": "tree launch failed 3 times"
+          }
+        ],
+        "effects": {
+          "controller": 2,
+          "probe": 12
+        },
+        "pendingStatusWrites": [],
+        "healed": 0
+      },
+      "after-current": {
+        "module": "workspace resync.ts (fixed)",
+        "input": "state-current.json",
+        "admission": {
+          "cap": 14,
+          "active": [
+            "LEGION-10",
+            "LEGION-11",
+            "LEGION-12",
+            "LEGION-13",
+            "LEGION-14",
+            "LEGION-17",
+            "LEGION-18",
+            "LEGION-20",
+            "LEGION-19",
+            "LEGION-21",
+            "LEGION-16",
+            "LEGION-9"
+          ],
+          "queue": []
+        },
+        "queuedRoots": [],
+        "queuedChildren": [],
+        "anomalies": [
+          {
+            "kind": "untriaged-open",
+            "issue": "LEGION-27",
+            "detail": "tracked triage issue has no Legion tree or admission entry"
+          },
+          {
+            "kind": "untriaged-open",
+            "issue": "LEGION-28",
+            "detail": "tracked triage issue has no Legion tree or admission entry"
+          },
+          {
+            "kind": "launch-failed",
+            "issue": "LEGION-22",
+            "detail": "tree launch failed 3 times"
+          },
+          {
+            "kind": "launch-failed",
+            "issue": "LEGION-23",
+            "detail": "tree launch failed 3 times"
+          }
+        ],
+        "effects": {
+          "controller": 2,
+          "probe": 12
+        },
+        "pendingStatusWrites": [],
+        "healed": 0
+      }
+    },
+    "expectedVsObserved": [
+      "v22 before: expected [zero-owner-tree:LEGION-10, zero-owner-tree:LEGION-11], observed exactly that",
+      "v22 after: expected [], observed []",
+      "v22 probes: expected unchanged, observed probe 1 -> 1",
+      "current before/after: expected identical lists minus zero-owner-tree for queued roots (none queued), observed identical [untriaged-open:LEGION-27, untriaged-open:LEGION-28, launch-failed:LEGION-22, launch-failed:LEGION-23]",
+      "current effects: expected unchanged, observed probe 12 -> 12 and controller 2 -> 2 (the two controller effects are the untriaged-open self-heal wakes for LEGION-27/LEGION-28, present before and after)"
+    ]
+  },
+  "negativeControls": {
+    "deadLEGION10_fixedModule": {
+      "input": "state-v22-dead-LEGION-10.json = v22 copy with the single edit trees[\"LEGION-10\"].status = \"dead\" (jq diff confirmed one changed line)",
+      "queuedRoots": [
+        {
+          "key": "LEGION-10",
+          "dispatchStatus": "todo",
+          "treeStatus": "dead"
+        },
+        {
+          "key": "LEGION-11",
+          "dispatchStatus": "todo",
+          "treeStatus": "queued"
+        }
+      ],
+      "anomalies": [
+        {
+          "kind": "zero-owner-tree",
+          "issue": "LEGION-10",
+          "detail": "Dispatch status \"todo\" has no active Legion tree"
+        }
+      ],
+      "effects": {
+        "probe": 1
+      },
+      "expected": [
+        "zero-owner-tree:LEGION-10"
+      ],
+      "result": "match — LEGION-11 (queued) not reported; queue membership does not rescue a dead tree"
+    },
+    "deadLEGION10_preFixModule_contrast": {
+      "anomalies": [
+        "zero-owner-tree:LEGION-10",
+        "zero-owner-tree:LEGION-11"
+      ]
+    },
+    "safetyRail": "bun run-resync.tester.ts <fixed> $LEGION_STATE_DIR/state.json x.json -> exit 1, `refusing to load /home/ubuntu/.local/state/legion/sjawhar-legion/state.json: state input must be a copy under /tmp`, x.json not written"
+  },
+  "stateDirListing": {
+    "before": [
+      "state.json 57605 bytes 05:49",
+      "state.json.bak-20260912T051244Z 55253 bytes Sep 12 05:12",
+      "state.json.v21.bak 7948 bytes Sep 11 18:26",
+      "state.json.v22.bak 12586 bytes Sep 11 23:04"
+    ],
+    "after": [
+      "state.json 63197 bytes 05:51 (rewritten by the live daemon itself between listings, not by this phase)",
+      "state.json.bak-20260912T051244Z 55253 bytes Sep 12 05:12",
+      "state.json.v21.bak 7948 bytes Sep 11 18:26",
+      "state.json.v22.bak 12586 bytes Sep 11 23:04"
+    ],
+    "deviation": "the assignment expected exactly three files; a fourth, state.json.bak-20260912T051244Z, already existed before this phase started (mtime 05:12Z, inside the daemon outage the implementer recorded) and is not this phase's. Same four files before and after; sha256 of the three backups unchanged; loadState's migration side-effect files (.v22.bak) landed only beside the /tmp copies."
+  },
+  "tests": {
+    "fourNewTests": "4 pass, 0 fail (bun test src/daemon/__tests__/resync.test.ts -t 'zero-owner-tree|launch-failed')",
+    "resyncTestFile": "36 pass, 0 fail",
+    "daemonPackageSuite": {
+      "invocation": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test (the Tests workflow's test job runs bun test with working-directory packages/daemon)",
+      "run1": "814 pass, 5 skip, 1 fail",
+      "run2": "815 pass, 5 skip, 0 fail",
+      "run1Failure": "acquireInstanceLock > resolves exactly one winner when contenders race a stale lock — src/daemon/__tests__/instance-lock.test.ts:87 expect(fulfilled).toHaveLength(1) received 2; passes 3/3 in isolation; file untouched by this PR; not one of the two known items LEGION-9's plan records — a one-run flake that is nonetheless a real two-winner observation in acquireInstanceLock's stale-lock takeover, reported to the architect"
+    },
+    "rootBunTest": {
+      "invocation": "cd $LEGION_WORKSPACE && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
+      "result": "1791 pass, 5 skip, 262 fail, 2 errors across 156 files",
+      "daemonFailures": 0,
+      "diagnosis": "not a CI or repo entry point (root package.json has no scripts); 226 'document is not defined' + 17 'window is not defined' from packages/dispatch/web (its DOM preload is in packages/dispatch/bunfig.toml and only loads when run from that package — packages/dispatch bun test passes 709/0); ECONNREFUSED from packages/pi-envoy and packages/claude-envoy-bridge tests needing a live NATS broker; 1 in packages/workspace (provisionIssueWorkspace stale-workspace repair, 5 s timeout) and 1 in packages/envoy-plugin — all outside the changed package"
+    },
+    "dispatchPackageSuite": "709 pass, 0 fail (control for the root-run DOM failures)",
+    "tsc": "exit 0 (packages/daemon)",
+    "biome": "bunx biome check src/ — 135 files, no fixes, exit 0"
+  },
+  "staticChecks": {
+    "hasActiveTreeAbsent": "grep over packages/ — no matches (only the plan doc mentions it)",
+    "gate": "packages/daemon/src/daemon/resync.ts:273-276 reads deps.state.trees[node.key]?.status and continues on active|queued|launch-failed; the only admission.* reads left are the pre-existing triage branch (lines 246-247)",
+    "fixDiffSummary": "jj diff -r mspqmpzy --summary: M resync.test.ts, M resync.ts only"
+  },
+  "ci": {
+    "branchRuns": [
+      "Tests 34675797999 success at 8ac5754c8d20",
+      "Tests 34675792441 success at 8ac5754c8d20",
+      "Tests 34674989204 success at 8fec55b322e8"
+    ],
+    "note": "no pr-checks-result job exists in this repository's Tests workflow; lint/pr-title/typecheck/test are the whole rollup"
+  },
+  "deviations": [
+    "State dir held four files, not three, before this phase began (see stateDirListing.deviation).",
+    "Current state.json held no queued roots at copy time, so the current before/after pair proves no regression only; the v22 incident snapshot is the proof input, as the plan anticipated.",
+    "Root bun test is not the suite CI runs; reported as observed with its diagnosis, and the daemon package suite (CI's invocation) is the authoritative count."
+  ],
+  "artifactsLeftForReviewer": "/tmp/legion14-live/ (driver, pre-fix module, state copies, before/after/negative reports, root-bun-test.log, daemon-bun-test.log, daemon-bun-test-2.log, dispatch-bun-test.log, pr-body-before.md, pr-body-after.md)",
+  "rigNotes": [
+    "LEGION-12 grant-stacking rig bug is live: 2-3 export LEGION_GRANT blocks per bash call in this session; the export-shadowing function from docs/solutions/legion/worker-pane-shell-gotchas.md §1 (/tmp/legion14-grant-trap.sh) kept every grant-consuming command working.",
+    "Box was far lighter than at plan time: each driver run <1 s wall, resync.test.ts 0.2 s, daemon suite 26-30 s."
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T06:00:04.550Z"
+}
