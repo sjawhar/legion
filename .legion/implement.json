@@ -1,0 +1,108 @@
+{
+  "issue": "LEGION-30",
+  "plan": ".legion/plan.json at 0f6f1383 (planner commit); spec = Dispatch primary document of LEGION-30 version 4",
+  "summary": "Executed plan Steps 1, 2, 3, 4, and 6 as written. Step 5 (live before/after counts on the deployment) is the tester's, timed by the architect post-merge; the PR body marks criterion 6 pending.",
+  "pr": {
+    "number": 973,
+    "url": "https://github.com/sjawhar/legion/pull/973",
+    "base": "main",
+    "head_bookmark": "legion/LEGION-30",
+    "head_sha_at_open": "a920cf339500a28de39e2a80c912a138cd1a5766",
+    "note": "The handoff commit that carries this file advances the head past a920cf33; the PR body's CI line is updated to the post-handoff head SHA after this push."
+  },
+  "commits": [
+    {
+      "step": 1,
+      "message": "feat(daemon): worker_idle_retire_seconds config key (LEGION-30)",
+      "files": [
+        "packages/daemon/src/daemon/config.ts",
+        "packages/daemon/src/daemon/__tests__/config.test.ts"
+      ]
+    },
+    {
+      "step": "2+3",
+      "message": "feat(daemon): retire a phase worker idle past worker_idle_retire_seconds and resume it on demand (LEGION-30)",
+      "files": [
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/worker-rpc.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts",
+        "packages/daemon/src/daemon/__tests__/ci-fixtures.ts",
+        "packages/daemon/src/daemon/__tests__/index.test.ts",
+        "packages/daemon/src/daemon/__tests__/processes.thermo-ops.test.ts",
+        "packages/daemon/src/daemon/__tests__/real-shutdown-e2e.test.ts"
+      ],
+      "note": "Step 3's regression-lock test is folded into this commit (plan offered either option)."
+    },
+    {
+      "step": 4,
+      "message": "docs(legion): a finished worker is retired idle and resumed by spawn_worker; name worker_idle_retire_seconds (LEGION-30)",
+      "files": [
+        "packages/daemon/src/daemon/AGENTS.md",
+        "skills/legion-architect/SKILL.md",
+        "skills/legion-worker/SKILL.md",
+        "packages/pi-envoy/roles/architect.md"
+      ],
+      "note": "skills/legion-worker/SKILL.md is in scope per the architect's decision (spec Acceptance 7 v4 names it); only the two sentences at former lines 63-64 and 318-319 changed."
+    }
+  ],
+  "deviations_from_plan": [
+    "The plan's 'untouched' tests snapshot the seeded locator as `{ ...worker.claim().locator }`; that spreads an optional and tsc rejects it against `toEqual(WorkerLocator | undefined)`. Replaced with `structuredClone(worker.claim().locator)` in the five tests — same assertion (deep-equal against a snapshot, so an in-place mutation or a cleared locator both fail), correct type.",
+    "Biome reformatted three files after the commits (config.ts's if-condition onto one line; wrapping in config.test.ts and processes.test.ts); squashed into the owning step's commit per Step 6 (`jj squash --into`).",
+    "No other deviation. The connectAttempts() === 2 assertion in Step 2 test 1 held as the plan reasoned: onWorkerClientClosed runs before stopProcess evicts the client from the cache (it was registered first on client.closed), finds the locator still set and confirmed, spends its one reconnect probe (refused), and its markWorkerDead queues behind retireIdleWorker's critical section, where markWorkerDeadLocked's pane-id re-check returns early."
+  ],
+  "invariants_held": [
+    "exactly one graceful `shutdown` frame per retirement; no `kill-pane`",
+    "locator cleared; `resumeSessionFile` = the locator's `ompSessionFile`",
+    "`launchFailures` and `promptFailures` untouched anywhere in the new path (asserted undefined after retirement)",
+    "zero publications: no `worker-died`, no `launch-failed`",
+    "no cancel hook added to WorkerRpcClient (spec: Rejected); the single onIdle slot composes armIdleRetire + promoteWorkerQueue in workerClient()",
+    "no change to worker-admission.ts",
+    "processes.test.ts config() fixture defaults workerIdleRetireSeconds: 0 with the plan's comment; ci-fixtures.ts, index.test.ts, processes.thermo-ops.test.ts, real-shutdown-e2e.test.ts carry 600",
+    "`.omp/config.yml` never entered a commit: every commit carved by path; `jj diff --from main --to legion/LEGION-30 --summary` listed no `.omp/` before the push"
+  ],
+  "tests": {
+    "config.test.ts": [
+      "resolves workerIdleRetireSeconds: YAML beats env, env beats the 600 default, and 0 is valid from either source",
+      "rejects a negative or non-integer worker_idle_retire_seconds from either source, naming the key"
+    ],
+    "processes.test.ts": [
+      "does not count a retired claim (locator cleared, resumeSessionFile kept) toward the running-worker cap",
+      "retires a confirmed idle worker past the idle window when phases[issue] is %s (it.each: absent | completed | naming another role)",
+      "leaves a confirmed idle worker untouched while its idle window is still running",
+      "leaves a worker re-prompted inside the idle window untouched, and its next idle transition arms a fresh clock that does retire it",
+      "never retires an idle worker whose role is the issue's active phase",
+      "never retires an idle worker holding a queued pendingAssignment",
+      "never retires an idle sub-architect, however long its idle window has run",
+      "never arms the idle-retire clock when worker_idle_retire_seconds is 0, while the idle trigger still fires for queue promotion",
+      "resumes a retired worker with --resume on its next spawn_worker, exactly like a dead-pane recovery"
+    ],
+    "helpers_added": [
+      "manualSleep()",
+      "idleWorkerFixture()"
+    ],
+    "red_green": {
+      "step1": "red: Unknown config key worker_idle_retire_seconds (0 pass, 2 fail) -> green: 39 pass, 0 fail",
+      "step2": "red: 8 fail on clock.fire()/armed toBeTrue and toHaveLength (the 0-disables test passes vacuously as predicted) -> green: 23 pass under filter, 201 pass / 0 fail whole file",
+      "step3": "regression lock; passes against pre-change code by design",
+      "step6": "bunx biome check src/ clean; bunx tsc --noEmit clean; bun test 880 pass, 5 skip, 0 fail across 56 files (from packages/daemon)"
+    }
+  },
+  "acceptance_to_tests": {
+    "1": "processes.test.ts: retires … (x3), untouched-under-window, re-prompted, active-phase, pendingAssignment, 0-disables",
+    "2": "processes.test.ts: resumes a retired worker with --resume … (+ existing resume tests)",
+    "3": "processes.test.ts: does not count a retired claim … toward the running-worker cap",
+    "4": "processes.test.ts: never retires an idle sub-architect …; the root has no worker claim",
+    "5": "config.test.ts: two tests",
+    "6": "PENDING — tester, post-merge daemon restart from main (architect-timed); PR body E2E line says so",
+    "7": "reading the four changed documents; grep for the struck claims returns nothing"
+  },
+  "for_the_tester": [
+    "Criterion 6 is the only unverified criterion. The live daemon is sjawhar/legion (port 13370), supervised outside any Legion pane; plan Step 5 has the exact rebase/restart/rollback notes. Record `pgrep -fc 'omp --mode rpc'` before the restart and one idle window (600 s) after, plus the daemon's `[legion] retiring idle worker …` lines, in the PR body's E2E line with a negative control (a worker whose role is the issue's active phase, or a sub-architect, stays resident).",
+    "Every other criterion's regression lock is listed under tests above; the PR body table maps them.",
+    "Operational: only the first of several stacked `export LEGION_GRANT=` blocks in a bash call redeems (LEGION-12). The planner's recorder workaround in .legion/messages/20260912191117-f0d8c84c-plan-to-implement.json worked for every push and legion gh call here."
+  ],
+  "base_note": "main advanced 12 commits past this branch's merge-base (d07086e1) while implementing; none of those commits touch a file this branch changes (checked with comm over the two diff summaries). Not rebased: the plan does not call for it and the merge queue's standing rule is no rebases unless GitHub reports CONFLICTING.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T19:33:03.646Z"
+}
