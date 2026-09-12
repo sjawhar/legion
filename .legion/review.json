@@ -2,81 +2,54 @@
   "issue": "LEGION-18",
   "prNumber": 953,
   "prUrl": "https://github.com/sjawhar/legion/pull/953",
-  "headReviewed": "6e40e8e9f0c51f295aee7e9c0222aca872f16ee5",
-  "headChain": "6e40e8e9 (test: record handoff) -> 15ed27b1 (implement: record handoff) -> 9438f735 (last text change); merge base with origin/main 7db2cd83",
-  "verdict": "changes_requested",
+  "round": 2,
+  "headReviewed": "ed4c9b7bf3c133bf6765368f1ab4eaa617869c77",
+  "headChain": "ed4c9b7b (test: record handoff) -> e2c6b9ea (implement: record handoff, round 2) -> 10b4a022 -> 962278ef (round-2 text fixes) -> 420d788e (round-1 review handoff) -> 6e40e8e9; merge base with origin/main 7db2cd83",
+  "verdict": "approved",
+  "verdictNote": "Clean; the .legion/ deletion is the only remaining work. Event was COMMENT because ed4c9b7b still carries .legion/; APPROVE follows for the head that differs from ed4c9b7b by that deletion alone, named by SHA, via legion gh -- pr review 953 --approve.",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "reviewSubmission": {
-    "how": "one call: legion gh -- api --method POST repos/sjawhar/legion/pulls/953/reviews --input body.json (event in the JSON body, 4 comments[] entries)",
+    "how": "one call: legion gh -- api --method POST repos/sjawhar/legion/pulls/953/reviews --input body.json (event COMMENT in the JSON body, empty comments[])",
+    "reviewId": 5186914159,
+    "state": "COMMENTED",
+    "url": "https://github.com/sjawhar/legion/pull/953#pullrequestreview-5186914159",
+    "submittedAt": "2026-09-12T15:14:49Z"
+  },
+  "round1": {
     "reviewId": 5186814873,
     "state": "CHANGES_REQUESTED",
-    "url": "https://github.com/sjawhar/legion/pull/953#pullrequestreview-5186814873",
-    "submittedAt": "2026-09-12T14:48:03Z"
-  },
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/pi-envoy/roles/reviewer.md:16",
-      "threadId": "PRRT_kwDORFy7ds6hw7uR",
-      "commentId": 3996552577,
-      "blocking": true,
-      "description": "New fix-5 text binds APPROVED to 'no correctness finding stands' at the first submission, so a clean first pass approves the head that still carries .legion/. Contradicts the same file's mandatory order (single approval at the final head, step 3) and line 57 (no implementation change after approval; the deletion push would follow), and fires the extra pr-review wake fix 5 exists to remove. Fix: REQUEST_CHANGES when a finding stands, otherwise COMMENT while the head carries .legion/; APPROVE only for the deletion head. List COMMENT in the event parenthetical."
-    },
-    {
-      "severity": "important",
-      "file": "skills/legion-worker/SKILL.md:250",
-      "threadId": "PRRT_kwDORFy7ds6hw7uW",
-      "commentId": 3996552583,
-      "blocking": true,
-      "description": "Same finding, worker-skill reviewer bullet: 'CHANGES_REQUESTED or APPROVED' leaves no event for a clean pre-deletion pass; same fix, keep the bullet's tail (approve the deletion head by name) as the only APPROVE."
-    },
-    {
-      "severity": "minor",
-      "file": "skills/legion-worker/SKILL.md:97",
-      "threadId": "PRRT_kwDORFy7ds6hw7ub",
-      "commentId": 3996552588,
-      "blocking": false,
-      "description": "Fix-4 sentence 'the daemon ignores them' is imprecise: every phase schema is .passthrough() (handoff-schema.ts:186-192), so undeclared fields survive parsing and legion handoff read prints them; the real trap is a declared field of the wrong type nulling the whole file. Suggested wording in the thread."
-    },
-    {
-      "severity": "minor",
-      "file": "skills/AGENTS.md:11",
-      "threadId": "PRRT_kwDORFy7ds6hw7ue",
-      "commentId": 3996552591,
-      "blocking": false,
-      "description": "Redrawn skills tree omits skills/envoy/ (tracked at head). Pre-existing omission, but fix 9 redraws the tree; add the envoy/ line between dispatch/ and legion-architect/."
+    "head": "6e40e8e9f0c51f295aee7e9c0222aca872f16ee5",
+    "threads": {
+      "PRRT_kwDORFy7ds6hw7uR": "reviewer.md fix-5 rule; fixed in 962278ef; resolved",
+      "PRRT_kwDORFy7ds6hw7uW": "worker skill fix-5 reviewer bullet; fixed in 962278ef; resolved",
+      "PRRT_kwDORFy7ds6hw7ub": "worker skill fix-4 passthrough wording; fixed in 10b4a022; resolved",
+      "PRRT_kwDORFy7ds6hw7ue": "skills/AGENTS.md tree missing envoy/; fixed in 10b4a022; resolved"
     }
-  ],
-  "fastFollow": "The two minor items above (fix-4 passthrough wording; envoy/ in the skills tree). Fold into the corrective push if trivial, otherwise one fast-follow.",
+  },
   "githubFactsVerified": {
-    "checksAtHead": "statusCheckRollup SUCCESS at 6e40e8e9: lint, typecheck, test, pr-title, changes, pi-envoy pass; contracts, envoy-client, envoy-go, envoy-plugin, dispatch, claude-envoy-bridge SKIPPED (runs 34699863604 / 34699863610)",
-    "threadsBeforeReview": "0 threads, 0 reviews",
-    "e2e": "PR body E2E names the surface (acceptance greps + bun test packages/pi-envoy), exact commands, observed output, 11-hit negative control on origin/main, head 15ed27b1; jj log -r '15ed27b1 & ancestors(6e40e8e9)' confirms ancestry",
-    "files": "11 spec'd text files + .legion/{plan,implement,test}.json; nothing under docs/, no .omp/config.yml; mergeable MERGEABLE",
+    "checksAtHead": "statusCheckRollup SUCCESS at ed4c9b7b itself: Tests run 34701422973, Legion Envoy and Contracts run 34701422960; lint, typecheck, test, pr-title, changes, pi-envoy pass; other package jobs SKIPPED. The handoff-only commits above 10b4a022 triggered their own green runs.",
+    "threads": "4 threads, all isResolved=true, each with a legion-implementer reply naming the fixing commit; PR body Threads line reads 4 resolved, 0 unresolved with one line per thread",
+    "e2e": "E2E section at head e2c6b9ea (ancestor of ed4c9b7b) names surface, commands, observed output, negative control (11 hits on origin/main 7add4d03), plus the two round-2 assertions",
+    "files": "15 files: 11 spec'd text files + .legion/{plan,implement,test,review}.json; nothing under docs/, no .omp/config.yml; mergeable MERGEABLE; reviewDecision REVIEW_REQUIRED (App reviews do not drive it)",
     "thermo": "skipped (docs-only PR)"
   },
-  "contentVerified": {
-    "fix1": "scout and oracle both present in this pane's task agent list; packages/daemon/src/state/fetch.ts has contextsPage (435) and while (page.hasNextPage) (455)",
-    "fix2": "gh-shim.ts:17 exec legion gh -- \"$@\"; cli/index.ts:102-114 redeems LEGION_GRANT at /legion/v1/gh-token per call, token passed to gh only via env; isPrMergeInvocation (91-100) refuses pr ... merge and api .../merge",
-    "fix3": "acceptance grep exit 1 at head; Post every correctness finding / no schema validation / Context7 exit 1",
-    "fix4": "validatePhaseHandoff (handoff-schema.ts:205) runs on every readPhaseHandoff (ledger.ts:88), failure -> null; legion handoff read validates this PR's three handoffs (schemaVersion 1 each)",
-    "fix5": "gh api manual: field flags go to the URL query string with --input, so event must be in the body; GitHub create-review body accepts commit_id, event APPROVE|REQUEST_CHANGES|COMMENT, body, comments[] {path,line,side,body}; this review was submitted exactly that way and produced one CHANGES_REQUESTED review with 4 inline threads",
-    "fix6": "planner.md and worker skill carry the one-line sentence; root AGENTS.md Plans row qualified; 6 fence lines (even), diagram fence closes at line 100, ## Documentation is a heading at 121",
-    "fix7": "tester.md and worker skill carry the recorded-once rule; the tester complied (environment evidence only in .legion/test.json)",
-    "fix8": "both Sami quotes verbatim, 1 hit each in the worker skill; bullets sit between the fast-follow and tester bullets",
-    "fix9": "skills/AGENTS.md tree without github/linear, dispatch line corrected, coordination paragraph names envoy_publish and native dispatch_* tools",
-    "coordination": "merger.md absent from the diff; no +/- line containing pr-queue in the worker or architect skill; architect skill still reads notifications.role.pr-queue"
+  "contentVerifiedAtHead": {
+    "fix5": "reviewer.md:15-25 and worker skill:249-259 carry the three-event rule (REQUEST_CHANGES / COMMENT while .legion/ present / APPROVE only for the deletion head named by SHA) and list all three in the event parenthetical; consistent with the Final review gate (single approval at step 3, no implementation change after approval)",
+    "fix4": "worker skill 94-98: undeclared fields pass through; a wrong-typed declared field nulls the file (matches handoff-schema.ts .passthrough() and ledger.ts null-on-failure)",
+    "fix9": "skills/AGENTS.md tree lists dispatch, envoy, legion-architect, legion-controller, legion-oracle, legion-retro, legion-worker — every directory under skills/",
+    "greps": "acceptance grep exit 1; Post every correctness finding / no schema validation / Context7 / daemon ignores them exit 1; APPROVED absent from both fix-5 files (sole hit skills/legion-architect/SKILL.md:210, a pre-existing GitHub review-state enum reference, untouched); both Sami quotes 1 hit each; AGENTS.md 6 fence lines",
+    "coordination": "merger.md 0-byte diff vs merge base; no +/- line containing pr-queue in AGENTS.md, skills, or roles"
   },
   "observations": [
-    "LEGION-12 reproduced in this pane: from ~14:48 every bash call carried 2-3 injected LEGION_GRANT headers; the last export wins and 403s on redeem. Workaround used for the remaining calls: name the first-injected grant of a previous call explicitly (LEGION_GRANT=<id> legion gh ...); such a grant still redeems minutes later.",
-    "legion gh -- api --help prints the citty help for `legion gh` instead of gh's: citty intercepts --help even after `--`. Pre-existing CLI bug, not part of this PR.",
-    "GitHub reviewDecision stays REVIEW_REQUIRED after the App's CHANGES_REQUESTED review (App reviews do not drive reviewDecision here); the daemon's phaseCompleteStatus keys off state.prs reviewDecision === changes_requested, so the architect may need to route the corrective implementer explicitly."
+    "Each of the implementer's four thread replies created its own COMMENTED review record (5186872570, 5186872622, 5186872686, 5186872763) — GitHub does this for any standalone reply, so individual thread disposition inherently costs one pr-review wake per thread; not something this PR's text can change.",
+    "LEGION-12 still live in this pane: bash calls carry 2-3 injected LEGION_GRANT headers and the last one 403s; naming the first-injected grant of a previous call explicitly (LEGION_GRANT=<id> legion gh ...) still redeems."
   ],
-  "handoffCommit": "committed locally with jj split; not pushed (review App holds no contents permission)",
-  "whatRemains": "Implementer fixes the one correctness finding in both files (and optionally the two minor wording items), tester re-runs the acceptance checks at the new head, reviewer re-reviews; then the .legion/ deletion push and approval of that head by name.",
+  "handoffCommit": "committed locally with jj split; not pushed (review App holds no contents permission); the implementer's deletion push carries it",
+  "whatRemains": "Implementer pushes the .legion/ deletion on top of ed4c9b7b at the architect's direction; reviewer re-reads the PR head, confirms it differs from ed4c9b7b only by that deletion, and approves it by SHA with legion gh -- pr review 953 --approve; then retro and merger.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T14:55:04.975Z"
+  "completed": "2026-09-12T15:15:33.539Z"
 }
