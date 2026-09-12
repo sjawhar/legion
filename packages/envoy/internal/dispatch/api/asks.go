@@ -18,7 +18,14 @@ import (
 const (
 	maxAskQuestion16 = 800
 	maxAskOptions    = 8
+	actionOptionDone = "Done"
+	actionOptionCant = "Can't"
 )
+
+var actionAskOptions = []model.AskOption{
+	{Label: actionOptionDone},
+	{Label: actionOptionCant},
+}
 
 func validateAskQuestion(question string) error {
 	if strings.TrimSpace(question) == "" {
@@ -60,6 +67,19 @@ func normalizeAskUrgency(value string) (string, error) {
 	return urgency, nil
 }
 
+func normalizeAskKind(value string) (string, error) {
+	switch kind := strings.TrimSpace(value); kind {
+	case "", "question":
+		return "question", nil
+	case "action":
+		return "action", nil
+	case "approval":
+		return "", errorf(http.StatusBadRequest, "ASK_KIND_INPUT", "approval asks are server-created only")
+	default:
+		return "", errorf(http.StatusBadRequest, "ASK_KIND_INPUT", "ask kind must be question or action")
+	}
+}
+
 func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 	s.createAskFor(w, r, issueOwner(r.PathValue("key")))
 }
@@ -70,6 +90,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	var input struct {
 		Question string             `json:"question"`
+		Kind     string             `json:"kind"`
 		Options  []model.AskOption  `json:"options"`
 		Multiple *bool              `json:"multiple"`
 		Urgency  string             `json:"urgency"`
@@ -84,19 +105,28 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	if !ok {
 		return
 	}
+	kind, err := normalizeAskKind(input.Kind)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if err := validateAskQuestion(input.Question); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if input.Options == nil {
-		input.Options = []model.AskOption{}
-	}
-	if err := validateAskOptions(input.Options); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	if kind == "action" {
+		input.Options = append([]model.AskOption(nil), actionAskOptions...)
+	} else {
+		if input.Options == nil {
+			input.Options = []model.AskOption{}
+		}
+		if err := validateAskOptions(input.Options); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	multiple := false
-	if input.Multiple != nil {
+	if kind != "action" && input.Multiple != nil {
 		multiple = *input.Multiple
 	}
 	urgency, err := normalizeAskUrgency(input.Urgency)
@@ -158,9 +188,9 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	var ask model.Ask
 	if err := tx.QueryRow(r.Context(), `
 		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'question')
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		returning created_at
-	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON).Scan(&ask.CreatedAt); err != nil {
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON, kind).Scan(&ask.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -174,7 +204,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	ask.Urgency = urgency
 	ask.Anchor = anchor
 	ask.State = "open"
-	ask.Kind = "question"
+	ask.Kind = kind
 	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -289,6 +319,10 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; retract it and request approval again")
 		return
 	}
+	if ask.Kind == "action" && (input.Options != nil || input.Multiple != nil) {
+		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an action ask's Done and Can't options are fixed")
+		return
+	}
 	if actor.Kind == "session" && (ask.Author.Kind != actor.Kind || ask.Author.ID != actor.ID) {
 		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the asking session may edit an ask")
 		return
@@ -377,8 +411,8 @@ type askTransition struct {
 	After func(context.Context, pgx.Tx, model.Ask) ([]model.Event, error)
 }
 
-// answerTransition is the answer of an ask: option labels for a question, or
-// exactly one of Approve / Request changes for an approval ask.
+// answerTransition records a human answer. Approval asks have their review options,
+// action asks have fixed Done / Can't options, and questions accept their configured options.
 func answerTransition(
 	actor model.Actor,
 	selected []string,
@@ -389,11 +423,25 @@ func answerTransition(
 		EventType: "ask.answered",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
 			hasText := text != nil && strings.TrimSpace(*text) != ""
-			if ask.Kind == "approval" {
+			switch ask.Kind {
+			case "approval":
 				if _, _, err := reviewFromAnswer(selected, text); err != nil {
 					return model.Ask{}, err
 				}
-			} else {
+			case "action":
+				if len(selected) != 1 {
+					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "an action ask takes exactly one of Done or Can't")
+				}
+				switch selected[0] {
+				case actionOptionDone:
+				case actionOptionCant:
+					if !hasText {
+						return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "Can't requires an explanation")
+					}
+				default:
+					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "an action ask takes exactly one of Done or Can't")
+				}
+			default:
 				if !ask.Multiple && len(selected) > 1 {
 					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "single-select asks accept at most one selected answer")
 				}

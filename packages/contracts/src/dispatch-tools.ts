@@ -108,8 +108,9 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_ask",
     description:
-      "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
-      "use dispatch_message instead. Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
+      "Open a durable, answerable decision or human to-do on an issue or project document. Do not use it for a status update or discussion; " +
+      "use dispatch_message instead. Use kind: action for a to-do a human must complete; it has fixed Done / Can't answers. " +
+      "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". Question is at most 800 ` +
       `characters and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
@@ -118,6 +119,7 @@ export const dispatchToolSpecs = [
       artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       question: z.string({ max: 800 }).describe("Decision question, at most 800 characters."),
+      kind: z.enum(["action"]).describe("Optional human to-do ask kind.").optional(),
       options: z
         .array(
           z.object({

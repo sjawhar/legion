@@ -100,7 +100,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
 
   const inboxCards = alicePage.locator("[data-testid^=ask-]");
   await expect(inboxCards).toHaveCount(3);
-  await expect(inboxCards.nth(0)).toContainText("Newest ask");
+  await expect(inboxCards.nth(0)).toContainText("First ask");
   await expect(alicePage.getByTestId(`ask-${newestAsk.id}`).locator("time")).toHaveAttribute(
     "dateTime",
     newestAsk.created_at
@@ -283,8 +283,9 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    // Nothing is waiting on an agent yet: one flat list, no section headings.
+    // Every open ask whose next turn is the human's appears in the top blocker section.
     await expect(page.locator("[data-testid^=ask-]")).toHaveCount(2);
+    await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Needs you" })).toHaveCount(0);
 
     // Alice asks for clarification instead of answering.
@@ -295,9 +296,9 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
     await expect(thread.getByText("Ship what, exactly?")).toBeVisible();
     await expect(card).toBeVisible();
 
-    // The ask is no longer hers to answer: it waits on its asker, below what needs her.
+    // The clarification now waits on its asker, below the older ask still waiting on Alice.
     await page.reload();
-    await expect(page.getByRole("heading", { name: "Needs you" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Waiting on agents" })).toBeVisible();
     await expect(page.getByText("Waiting on e2e-session-title")).toBeVisible();
     const cards = page.locator("[data-testid^=ask-]");
@@ -314,8 +315,8 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
     await page.reload();
     await expect(page.getByRole("heading", { name: "Waiting on agents" })).toHaveCount(0);
     await expect(page.getByText("e2e-session-title replied")).toBeVisible();
-    await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
-    await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
+    await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
+    await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
 
     const questionShaped = await createAsk(
       issue.key,

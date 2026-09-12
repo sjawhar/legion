@@ -159,6 +159,18 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
+  test("dispatch_ask accepts action kind and rejects server-created approval kind", () => {
+    const schema = schemaFor("dispatch_ask");
+
+    expect(
+      schema.safeParse({ issue: "DSP-1", kind: "action", question: "Confirm the deploy." })
+    ).toMatchObject({ data: { kind: "action" }, success: true });
+    expect(
+      schema.safeParse({ issue: "DSP-1", kind: "approval", question: "Approve this document?" })
+        .success
+    ).toBe(false);
+  });
+
   test("requires an ask edit to include a patch field", () => {
     const schema = schemaFor("dispatch_edit_ask");
 

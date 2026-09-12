@@ -193,6 +193,8 @@ export interface Version {
   readonly sha256?: string;
 }
 
+export type AskKind = "question" | "approval" | "action";
+
 export interface Ask {
   readonly id: string;
   readonly issue_key: string | null;
@@ -202,9 +204,8 @@ export interface Ask {
   /** The document that contains a typed ask block. */
   readonly block_artifact?: AskBlockArtifact;
   readonly author: Actor;
-  /** `approval` asks are opened by an approval request; their options are fixed
-   *  (`Approve`, `Request changes`) and their answer writes a document review. */
-  readonly kind: "question" | "approval";
+  /** `approval` asks are server-created document reviews. `action` asks are fixed human to-dos. */
+  readonly kind: AskKind;
   readonly question: string;
   readonly options: AskOption[];
   readonly multiple: boolean;
@@ -670,6 +671,7 @@ export interface UpdateIssueInput {
 
 export interface CreateAskInput {
   readonly question: string;
+  readonly kind?: "action";
   readonly options?: AskOption[];
   readonly multiple?: boolean;
   readonly urgency?: AskUrgency;
@@ -859,6 +861,7 @@ export const ArtifactReviewEventPayloadSchema = z.object({
 const askEventPayloadFields = {
   id: z.string().optional(),
   opened_event_id: z.number().int().positive(),
+  kind: z.enum(["question", "approval", "action"]).optional(),
   question: z.string().optional(),
   options: z.array(z.object({ label: z.string().optional() })).nullish(),
   answer: z

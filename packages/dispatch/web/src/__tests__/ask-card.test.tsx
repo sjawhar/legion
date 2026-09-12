@@ -487,6 +487,46 @@ test("an approval-kind ask requires a reason before Request changes can submit",
   }
 });
 
+test("an action-kind ask renders its age and only Done and Can't controls", async () => {
+  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const input = ask({
+    created_at: new Date(Date.now() - 35 * 60 * 1000).toISOString(),
+    kind: "action",
+    options: [{ label: "Done" }, { label: "Can't" }],
+    question: "Confirm the deployment.",
+  });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    expect(within(card).getByText("Action", { exact: true })).toBeTruthy();
+    expect(within(card).getByText("35m", { exact: true })).toBeTruthy();
+    expect(within(card).queryByText("Other", { exact: true })).toBeNull();
+
+    fireEvent.click(await within(card).findByRole("button", { name: "Can't" }));
+    fireEvent.change(within(card).getByLabelText("Reason"), {
+      target: { value: "The release permission is missing." },
+    });
+    fireEvent.click(within(card).getByRole("button", { name: "Submit Can't" }));
+    await waitFor(() =>
+      expect(submitted).toEqual([
+        { selected: ["Can't"], text: "The release permission is missing." },
+      ])
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard submits checked options alongside Other's free text for a multiple-select ask", async () => {
   const submitted: Array<{ selected: string[]; text?: string }> = [];
   const input = ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] });

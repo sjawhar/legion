@@ -128,6 +128,24 @@ An ask must be answerable from its own text and its anchor alone. Anchor a quest
 about a comment with `reply_to`; thread a follow-up on your own ask with `reply_to_ask`; cite anything else with a `dispatch://`
 reference (see [References](#references)). Never write "see above", "the message above", or "as attached".
 
+**Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
+a setting only they can change, a review click, a conflict between two of their own rules - if
+your work waits on it, open a `dispatch_ask` with `kind: "action"` the moment you know, the
+action as the question (the server supplies the fixed `Done` / `Can't` options; `Can't` requires
+an explanation). Never write it into a spec, a comment reply, a message, or a
+pull-request body: nothing in those paths reaches the human's Inbox, and a human who is not
+reading your document does not know they are the blocker. Before asking, try to remove the
+step: a value already on the machine, a permission you already hold, an API that replaces the
+click. One ask per item, `urgency: "high"` when work is stopped on it; while it is open, keep
+working on everything that is not.
+
+Use `kind: "action"` for a to-do handed to a human. It has fixed `Done` / `Can't` options;
+`Can't` requires an explanation, while the asker can still correct the action's wording:
+```ts
+dispatch_ask({ issue: "DSP-42", kind: "action",
+  question: "Confirm the deployment is complete." })
+```
+
 Correct or refine an open ask in place instead of opening a second question:
 ```ts
 dispatch_edit_ask({
