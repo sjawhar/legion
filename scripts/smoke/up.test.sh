@@ -389,5 +389,10 @@ jq -e '.actor.kind == "session" and (.actor.id | type == "string" and length > 0
   printf 'expected the root-issue creation request to carry actor.kind == "session"; body:\n%s\n' "$(<"$actor_body_file")" >&2
   exit 1
 }
+jq -e '.force == true' >/dev/null "$actor_body_file" || {
+  printf 'expected the root-issue creation body to carry force: true (Dispatch near-duplicate bypass); body:\n%s\n' "$(<"$actor_body_file")" >&2
+  exit 1
+}
+printf 'PASS: root-issue creation request forces past the Dispatch near-duplicate check\n'
 
 printf 'PASS: root-issue creation request carries a session actor for the bearer-authenticated POST\n'

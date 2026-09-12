@@ -316,10 +316,14 @@ ensure_root_issue() {
     return
   fi
   title="Legion smoke exercise: ${SMOKE_REPO} ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+  # `force: true`: Dispatch's near-duplicate check (POST /api/v1/issues -> 409 POSSIBLE_DUPLICATE)
+  # matches on the fixed prefix of this title even though it ends in a timestamp, and LEGSMOKE
+  # keeps every earlier run's root. A disposable near-duplicate per run is exactly the rig's
+  # intent, so it asks for one; any other non-2xx still fails `curl --fail` below.
   response="$(curl --fail --silent --show-error \
     -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
     -H 'Content-Type: application/json' \
-    -d "$(jq -nc --arg project "$smoke_dispatch_project" --arg title "$title" --arg actor "$smoke_actor_id" '{project: $project, title: $title, actor: {kind: "session", id: $actor, origin: {session_title: "Legion smoke rig"}}}')" \
+    -d "$(jq -nc --arg project "$smoke_dispatch_project" --arg title "$title" --arg actor "$smoke_actor_id" '{project: $project, title: $title, force: true, actor: {kind: "session", id: $actor, origin: {session_title: "Legion smoke rig"}}}')" \
     "${DISPATCH_URL%/}/api/v1/issues")" ||
     fail "could not create Dispatch root issue in ${smoke_dispatch_project}"
   key="$(jq -er '.key' <<<"$response")" || fail "Dispatch issue creation response lacked a key: ${response}"
