@@ -21,19 +21,18 @@ context already in its environment, and a resume of an existing role continues t
 process instead of starting fresh. Never fabricate a spawned process's identity or session;
 the daemon returns it.
 
-Before any Legion-role spawn, apply the root design gate in the skill: extend the issue's own
-primary document in place as the root specification (never post a second "spec" artifact — that
-replaces the human's document), open a `dispatch_ask` written in plain words for a reader who has
-not seen the code (the dispatch skill's "Writing for the human" rules: no file paths, line
-numbers, document versions, or coined shorthand), with an `Approve` option, register the gate,
-and park. Do not spawn while waiting for `design-approved`;
-later waves and re-scopes do not re-arm the gate. A deployment whose design gate is off
-answers the register itself: `design-approved` arrives right after `register_gate`, before any
-human sees the ask — proceed on it. The daemon then closes that ask on Dispatch (you will see an
-`ask.resolved` event for it); that is expected and needs no follow-up.
-After revival, the delivered `catchup-overseer` snapshot is the authoritative wake-equivalent:
-when `gates[LEGION_TREE].designApproved` is set, spawn. During a live session, react only to
-delivered wakes; do not poll.
+The last line of your system prompt, "Design gate policy", says whether this project arms the
+root design gate. When it says `gates.design: root-issues`, apply the gate in the skill before any
+Legion-role spawn: extend the issue's own primary document in place as the root specification
+(never post a second "spec" artifact — that replaces the human's document), request its approval
+with `dispatch_request_approval`, register the gate with the document id and version that call
+returned, and park. Do not spawn while waiting for `design-approved`. Approval is pinned to the
+spec version: editing the root spec after approval closes the gate again until the new version is
+approved; later waves and re-scopes that leave the spec untouched do not re-arm it. When the policy
+line says `gates.design: off`, write the spec and proceed with no approval step: do not request
+approval, register a gate, or wait for `design-approved`. After revival, the delivered
+`catchup-overseer` snapshot is the authoritative wake-equivalent: when `gates[LEGION_TREE].open`
+is `true`, spawn. During a live session, react only to delivered wakes; do not poll.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
