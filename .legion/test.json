@@ -4,17 +4,32 @@
     "number": 961,
     "url": "https://github.com/sjawhar/legion/pull/961",
     "branch": "legion/LEGION-16",
-    "testedHead": "df6646704ceabe90cff1a23fbe4927fb05ab0f07",
+    "testedHead": "665f4b1be75516dabd285578d2b9c85256e8f129",
     "headComposition": "0f3edc92 (round-1 tested head) + corrective pass d6c74c4e, b97d64b7, df3f417b, 7d6f2fb6, de5a130e, bc84d57b + reviewer handoff 2a109026 + implementer handoff f27af7ec",
     "ciAtHead": "every check SUCCESS at f27af7ec (pr-and-main: lint, typecheck, test, pr-title; envoy-and-contracts: contracts, envoy-client, envoy-plugin, pi-envoy, dispatch, claude-envoy-bridge, envoy-go) — legion gh -- pr view 961 --json statusCheckRollup at 17:47Z",
     "previousTestedHeads": [
       "0f3edc92af045598cf47c342cca85c6b9bc74bea (round 1)",
-      "f27af7ecaaeba31e48be43a10f10e59ac908cacf (round 2)"
+      "f27af7ecaaeba31e48be43a10f10e59ac908cacf (round 2)",
+      "df6646704ceabe90cff1a23fbe4927fb05ab0f07 (round 3)"
     ]
   },
-  "round": 3,
+  "round": 4,
   "verdict": {
-    "overall": "Round 3 at df666470: PASS on every round-3 item; A5(iii)/(iv) remain HELD (hold not released, confirmed 17:59Z). No manual state.json edits this round. Round-2 verdicts (f27af7ec) stand: PARTIAL, no criterion failed. 1(a) PASS, 1(b) PASS, 1(c) PASS, 2 PASS (red case; 'head moved beyond retro' live case HELD), 3(a) PASS, 3(b) PASS, 3(c) PASS, 3(d) PASS, 3(e) PASS, 4 PASS, 5: A5(iii) HELD, A5(iv) HELD (supplementary red READY at this head PASS). Two findings for the architect/reviewer, neither introduced by this change: F1 the controller registration deadline is inert after the first registration (pre-existing guard); F2 the bash-hook grant stacking now bites the controller TUI (pre-existing hook behaviour). Details under findings.",
+    "overall": "Round 4 at 665f4b1b: PASS on every criterion. A1 PASS, A2 PASS, A3 PASS, A4 PASS, A5 PASS (i controller TUI, ii resume incl. deadline and launch-failure ordering, iii green merge by the controller, iv red READY / head-moved-beyond-retro / head gate each named to the architect, v checkpoint 13 by hand). No FAIL, nothing HELD.",
+    "round4": {
+      "overall": "PASS on every criterion. A1 PASS, A2 PASS, A3 PASS, A4 PASS, A5 PASS (i controller TUI, ii resume incl. deadline and launch-failure ordering, iii green merge by the controller, iv red READY / head-moved-beyond-retro / head gate each named to the architect, v checkpoint 13 by hand). No FAIL, nothing HELD.",
+      "A1_daemonUnitLocks": "PASS — bun test 885 pass / 0 fail with LEGION_E2E=1 LEGION_TMUX_LIVE=1 (56 files)",
+      "A2_addressingFragment": "PASS — in the 885; live: rig controller claimed legion-sjawhar16-controller for project sjawhar/16",
+      "A3_mergeAuthority": "PASS — CLI+routes+extension tests green; live negative control from a real worker pane refused (see negativeControl)",
+      "A4_repoGates": "PASS — grep pr-queue empty; biome (143 files) and tsc clean; daemon 885/0, contracts (98 in bun run test), pi-envoy 155/0; go test all 29 packages ok (no flakes this run); constraint A one hunk @@ -260,10 +260,14 @@ against current main@origin",
+      "A5_smoke": {
+        "i_tui": "PASS",
+        "ii_resume": "PASS (1a registered-pane, 1b boot-kill deadline, 1c alive-unclaimed deadline, 1d tmux launch failure)",
+        "iii_greenMerge": "PASS (sandbox PR #20 merged by the controller)",
+        "iv_redReady": "PASS (checks gate on #21; head moved beyond retro on #23; head gate on #23 with a wrong current sha)",
+        "v_checkpoint13": "PASS by hand (script blocked by stale worker locators, pre-existing)"
+      }
+    },
     "round3": {
       "overall": "PASS on every round-3 item; A5(iii)/(iv) remain HELD (hold not released, confirmed 17:59Z). No manual state.json edits this round.",
       "1_f1SequenceNoStateEdit": "PASS",
@@ -50,6 +65,100 @@
         "iv": "HELD",
         "supplementaryRedReadyAtThisHead": "PASS"
       }
+    }
+  },
+  "round4": {
+    "testedHead": "665f4b1be75516dabd285578d2b9c85256e8f129",
+    "headComposition": "fourth pass (second rebase onto main fd4fce51 after LEGION-18 #953, LEGION-22 #967, LEGION-29 #970): gate model of three heads (verified/approved/current), gate 2 free-plan rule (73dbb617), pr merge --match-head-commit, spawnController deletes locator+claim only after openWindow succeeds (61b272c5), session-change re-claim honours the subagent guard (98bc069b), role-claim bridge routes to the instance serving the session (5ca28946), pr-queue fixture rename (1011b0e2). CI at head: Tests 34715140329 and 34715694262, Legion Envoy and Contracts 34715140309, all success; mergeable MERGEABLE at 20:40Z.",
+    "stepZero": "PR #961 head 665f4b1b confirmed (jj new legion/LEGION-16@origin; @- = 665f4b1b). #962 (LEGION-21) still OPEN at 20:40Z. LEGION-21's rig confirmed down (no legion-smoke-nats container, no rig ports, no `legion start sjawhar/24` process, tmux legion-sjawhar24 gone); one stale `bun run scripts/smoke/envoy-bridge.ts` (pid 1940036, cwd deleted, SMOKE_REPO=trajectory-labs-pbc/legion-smoke, upstream 14222) is another team's orphan, not a LEGSMOKE consumer — left alone. Plugin rebuilt into legion16-smoke as 1.4.3-legion16.665f4b1b (dist/legion.js carries checkSubagentSession; dist skill carries the free-plan rule). First up.sh attempt died at the daemon's pi.agents probe: ~/.omp/natives/18.1.15/pi_natives.linux-x64-modern.node was mid-rewrite by another process at 20:44:07Z (version sentinel mismatch); the retry 30 s later passed — host artifact, not this change.",
+    "verdict": {
+      "overall": "PASS on every criterion. A1 PASS, A2 PASS, A3 PASS, A4 PASS, A5 PASS (i controller TUI, ii resume incl. deadline and launch-failure ordering, iii green merge by the controller, iv red READY / head-moved-beyond-retro / head gate each named to the architect, v checkpoint 13 by hand). No FAIL, nothing HELD.",
+      "A1_daemonUnitLocks": "PASS — bun test 885 pass / 0 fail with LEGION_E2E=1 LEGION_TMUX_LIVE=1 (56 files)",
+      "A2_addressingFragment": "PASS — in the 885; live: rig controller claimed legion-sjawhar16-controller for project sjawhar/16",
+      "A3_mergeAuthority": "PASS — CLI+routes+extension tests green; live negative control from a real worker pane refused (see negativeControl)",
+      "A4_repoGates": "PASS — grep pr-queue empty; biome (143 files) and tsc clean; daemon 885/0, contracts (98 in bun run test), pi-envoy 155/0; go test all 29 packages ok (no flakes this run); constraint A one hunk @@ -260,10 +260,14 @@ against current main@origin",
+      "A5_smoke": {
+        "i_tui": "PASS",
+        "ii_resume": "PASS (1a registered-pane, 1b boot-kill deadline, 1c alive-unclaimed deadline, 1d tmux launch failure)",
+        "iii_greenMerge": "PASS (sandbox PR #20 merged by the controller)",
+        "iv_redReady": "PASS (checks gate on #21; head moved beyond retro on #23; head gate on #23 with a wrong current sha)",
+        "v_checkpoint13": "PASS by hand (script blocked by stale worker locators, pre-existing)"
+      }
+    },
+    "scenario1_resumeAndDeadline": {
+      "config": "rig deadline 30 s x 2 = 60 s (LEGION_WORKER_BOOT_TIMEOUT_SECONDS / _REGISTRATION_DEADLINE_INTERVALS in the wrapper); no state.json edit anywhere in round 4",
+      "1a_registeredPaneKillResume": "scenR4-1b-run.txt: 20:48:30 killed registered pane %1 (claim 01a0960c), wake LEGSMOKE-68 -> `resurrecting the controller legion-sjawhar16-controller by resuming OMP session <14-36-05 file>` -> pane %4 argv --resume=<same file>; claims [] right after the respawn (previous claim deleted); re-registered under 01a0960c at 20:48:36.",
+      "1b_bootKillDeadline": "scenR4-1b-run.txt (retry): 20:50:43 wake LEGSMOKE-70 -> respawn %6, killed during boot before /controller/ready; no wake, no edit; 20:51:43.40 (60 s) `resurrecting the controller … by resuming OMP session <same file>` -> pane %7 argv --resume=<same file>, controllerLocator keeps the file, secret file present; re-registered 20:51:46. (The first attempt at 20:48:38 published its wake 2 s after the kill; the dying session still receipted it, so no 404 fired and nothing probed — script timing; the retry settles 5 s.)",
+      "1c_aliveUnclaimedDeadline": "scenR4-1c-run.txt: daemon restarted once with LEGION16_OMP_PATH=/tmp/legion16-smoke/stub/omp (a bash `omp` that delegates the boot probes to the real binary and otherwise stays alive without registering; SIGSTOP does not hold on this box). 20:52:44 wake LEGSMOKE-71 -> stub pane %8 (claims []), alive 10 s later; 20:53:44.83 (60 s) killed %8 (pid dead) and `resurrecting … by resuming OMP session <same file>` -> %9 argv --resume=<same file>. Then real-omp daemon restarted: 20:54:31 wake LEGSMOKE-72 -> 20:55:31 the alive stub %9 was killed at its deadline and a REAL pane %10 resumed the same file; registered 20:55:36 under 01a0960c, Envoy holder the same. Zero 'no OMP session file is recorded' lines all round.",
+      "1d_tmuxLaunchFailure_NEW": "scenR4-1-run.txt: LEGION_TMUX_PATH=/tmp/legion16-smoke/tmuxwrap/tmux (fails `new-window` with exit 1 while a marker file exists, else passes through). Marker set; registered pane %17 killed; wake LEGSMOKE-65 -> daemon.log: `resurrecting the controller … by resuming OMP session <file>` then `onUndeliverable recovery failed for legion-sjawhar16-controller: … tmux new-window failed (exit 1): injected new-window failure at openWindow (tmux.ts:141) at spawnController (processes.ts:2678)`. State after the failed launch: controllerLocator STILL %17 with the SAME ompSessionFile, claim STILL 01a0960c, secret file present, zero 'no OMP session file is recorded' lines — locator, transcript and claim survived the failure exactly as the fourth pass intended. Marker removed; wake LEGSMOKE-66 -> `resurrecting the controller … by resuming OMP session <same file>`, new pane launched with --resume=<same file>."
+    },
+    "scenario2_sessionHandling": {
+      "2a_subagentInPane": "scenR4-2-session.txt: 20:56:24 the controller pane ran a task subagent (scout, `date -u`) — a second envoy instance bound in-process; claim/holder/file unchanged after it.",
+      "2b_newAfterSubagent": "20:57:59 `/new` typed: daemon claim -> 01a09769-aba8 after 3 s; controllerLocator.ompSessionFile -> the new transcript (2026-09-12T20-57-59-976Z_01a09769…); Envoy holder -> 01a09769-aba8 after 5 s (heartbeat interval is 120 s — well within); a typed `legion state --json` ran grant-wrapped (prelude GH_CONFIG_DIR=/tmp/legion16-smoke/rig/daemon/gh, PATH=…/worker-bin) and returned controllerClaim 01a09769…. This is exactly the bridge-fix case (5ca28946): the re-claim reached the pane's own envoy instance after a subagent had bound.",
+      "2c_resume": "20:59:24 `/resume` -> original 14-36-05 transcript: claim, file and Envoy holder back to 01a0960c within 2 s; wrapped bash returned controllerClaim 01a0960c.",
+      "2d_takeover": "21:00:39 hand-started omp (tmux -L legion16-takeover, cwd /tmp/legion16-smoke/takeover; env per the skill: LEGION_CONTROLLER_SECRET_FILE, LEGION_DAEMON_URL, LEGION_STATE_DIR, no LEGION_CONTROLLER=1). Launch changed nothing. `/legion-claim-controller` 21:01:17: claim -> 01a0976c-2eb5, Envoy holder -> 01a0976c-2eb5, controllerLocator.ompSessionFile UNCHANGED (…14-36-05-897Z_01a0960c…); the operator session's own transcript is …21-00-44-597Z_01a0976c….",
+      "2e_subagentNeverReclaims": "21:01:18 a task subagent (scout, `date -u`) ran inside the operator session; claim stayed 01a0976c-2eb5 (never a subagent id), file unchanged.",
+      "restore": "21:02:52 operator session and pane %10 killed; wake LEGSMOKE-73 -> `resurrecting … by resuming OMP session <14-36-05 file>` -> pane %11 --resume=<pane's own file>; registered under 01a0960c at 21:03:02."
+    },
+    "scenario3_sandboxPullRequests": {
+      "hygiene": "Hold lifted 19:28Z (Sami via the pr-queue organizer). Each PR registered with the organizer as T4 at open (message 90bd98ac… names #20 and the two to follow). At most two open at a time (verified by the runbook's open_count guard); every PR merged or closed before the run ended; close-all registered in a trap before each gh pr create. Runbook /tmp/legion16-smoke/sandbox/round4-prs.sh; branches prepared 19:32Z (prep.sh).",
+      "readyShape": "READY #<n> at <current sha> (approved at <approved sha>) for LEGSMOKE-43 (<pr url>) + the PR body's ## Verification block, taken from roles/merger.md at 665f4b1b. Payloads: pr20-ready-payload.txt, pr-red-ready-payload.txt, pr-retro-ready-payload.txt, pr-head-ready-payload.txt.",
+      "iii_green_pr20": {
+        "before": "21:04:04 #20 OPEN mergedAt=null mergeCommit=null head e8773e51 MERGEABLE; checks (no --required): check x2, gate x2 all pass; `pr checks --required` -> exit 1 `no required checks reported on the 'legion16/green-…' branch` (the free-plan case)",
+        "ready": "21:04:45 published (event 50262ad9…, holder 01a0960c): `READY #20 at e8773e51… (approved at e8773e51…) for LEGSMOKE-43 (https://github.com/sjawhar/legion-smoke/pull/20)` + block naming e8773e51 on CI/Thermo/E2E",
+        "controller": "ran `legion gh -- pr view 20 -R sjawhar/legion-smoke --json headRefOid,mergeable,mergeStateStatus,…,statusCheckRollup,body`, the reviewThreads GraphQL, `legion state --json` (root lookup), re-read the head, then `legion gh -- pr merge 20 -R sjawhar/legion-smoke --squash --match-head-commit e8773e51ff7a652c895093601dac8181bb8704f8` (pr20-controller-commands.txt). Gate evidence it reported: head matched, 4 rollup entries all SUCCESS, threads [], MERGEABLE/CLEAN, block names e8773e51. It published nothing to the architect (zero envoy_publish/envoy_send tool calls after the READY).",
+        "after": "21:05:55 #20 MERGED, mergeCommit 1ed646787455768099e6d7a7f9c12c5b2e9ec20f (pr20-after.txt)",
+        "prMergedToArchitect": "the LEGSMOKE-43 architect's transcript received `envoy: from: agent … summary: {\"type\":\"pr-merged\",\"pr\":20,\"mergeCommitSha\":\"1ed64678…\"}` at 21:05:56Z — from the DAEMON (from: agent, derived from GitHub's merged webhook: daemon.log consumed notifications.github.sjawhar.legion-smoke.pr.20 / pr.20.checks), not from the controller. The architect judged it not its tree's deliverable and took no sign-off (correct).",
+        "grantNote": "The controller's hook-injected grant 403'd on its first attempt (the model-written extra `export LEGION_GRANT=` blocks, LEGION-12's finding); it minted a controller grant itself from $LEGION_CONTROLLER_SECRET_FILE through the same /grants {sessionId, secret} route and the daemon honoured merge:true for it — proving the controller-grant merge authority end to end. Reading the secret file is a workaround the skill does not sanction; goes away with LEGION-12's fix."
+      },
+      "iv_a_red_pr21": {
+        "before": "21:07:41 #21 OPEN head 21fe8970 MERGEABLE; checks: gate x2 FAILURE, check x2 SUCCESS (.fail-me present)",
+        "ready": "21:07:54 published (event c6245b62…): `READY #21 at 21fe8970… (approved at 21fe8970…) …` with a block claiming green",
+        "controller": "pr view, threads GraphQL, `legion state`, `pr view --json files`, `run view 34719029332 … --log-failed` (pr-red-controller-commands.txt); judged gate `checks` failed, deterministic (.fail-me), no rerun; envoy_publish to notifications.role.legion-sjawhar16-legsmoke-43-architect (id af6f33f0…, re: the READY)",
+        "architectReceipt": "21:09:00 `Merge queue: pull request #21 for your tree failed the checks gate and was not merged. … the required check named gate, from the fail-on-demand workflow, finished with conclusion FAILURE … (latest run 34719029332, job 103621342432; earlier run 34714490326). … This is not a flake, so I did not rerun it.` (pr-red-architect-receipt.txt)",
+        "after": "21:12:00 #21 still OPEN, mergedAt null; closed by the tester at 21:12:18 (branch deleted)"
+      },
+      "iv_b_retro_pr23": {
+        "before": "21:12:55 #23 OPEN head 306a5c0e MERGEABLE; approved sha 880e9c4a = head minus one commit that adds smoke/legion16-retro-…-extra.txt (not docs/solutions/); block names 880e9c4a",
+        "firstReady": "21:13:29 published (event bea6c182…). The long-lived controller session (started 14:36 at round-1 head; skill last read then, before the three-sha gates existed) read the gates it had, ran the compare 880e9c4a...306a5c0e (ahead, 1 file, not docs/solutions/), refused, and named the gate `verification block` in its report (c6e2eba3…, 21:14:32) — right refusal, older gate vocabulary, because it had never loaded the current skill text.",
+        "freshSession": "21:16:46 `/new` in the controller pane so the session starts from the current skill (claim -> 01a0977a-de1c; the skill read and the `retro only`/`cleanup only` gate text confirmed in its transcript). READY republished 21:17:49 (event d5143ef6…). Controller commands (pr-retro2-controller-commands.txt): `legion gh -- pr view <url> --json headRefOid,mergeable,baseRefName,state,body`; `legion gh -- pr checks <url> --required --json name,state,bucket,link` (exit 1, no required checks); reviewThreads GraphQL; `legion gh -- api repos/sjawhar/legion-smoke/compare/880e9c4a…...306a5c0e… --jq '{status, files}'`; `legion state --json`; head re-read twice.",
+        "architectReceipt": "21:18:52 (id dea17100…): `Merge refused for pull request #23 … Failed gate: head moved beyond retro. The READY names approved sha 880e9c4a… and current head 306a5c0e…. GitHub's compare of 880e9c4a...306a5c0e reports status \"ahead\" with one changed file: smoke/legion16-retro-20260912T193247Z-extra.txt. That path is not under docs/solutions/, so the reviewer's approval at 880e9c4a does not cover the current head. Other gates read live: head matches; MERGEABLE; zero unresolved threads; the verification block names 880e9c4a on its CI, Thermo, and E2E lines, so verified and approved shas are identical…` (pr-retro2-architect-receipt.txt)",
+        "after": "#23 stayed OPEN, mergedAt null (pr-retro-after2.txt); closed by the tester at 21:23:20 (branch deleted)"
+      },
+      "iv_c_headGate_pr23": {
+        "ready": "21:20:13 published (event 3f0f3929…): `READY #23 at 0000000000000000000000000000000000000000 (approved at 880e9c4a…) …`",
+        "architectReceipt": "21:20:32 (id 9d3367df…): `Merge refused for pull request #23 … Failed gate: head. A second READY for this pull request names current sha 0000…0000 … GitHub reports the pull request's live head as 306a5c0e…. The READY's current sha does not match the head…` (pr-head-architect-receipt.txt); #23 unchanged"
+      },
+      "cleanup": "sandbox-close.txt: #20 MERGED (by the controller), #21 CLOSED, #23 CLOSED, and #22 (the rig's own LEGSMOKE-45 pipeline PR, opened by the rig implementer at 21:11:51) CLOSED with the rig teardown; branches deleted; 0 open pull requests on sjawhar/legion-smoke at 21:23:21Z. Nothing opened on sjawhar/legion."
+    },
+    "negativeControl": "From a real tester phase-worker pane spawned by the rig daemon (POST /worker/spawn, role tester, LEGSMOKE-43) against sandbox PR #23: `legion gh -- pr merge https://github.com/sjawhar/legion-smoke/pull/23 --squash; echo exit=$?` -> `this grant cannot merge; publish READY to the controller` and `exit=1` (the fourth pass dropped the doubled JSON suffix — nit N2); the same worker's `legion handoff complete` then succeeded. #23 stayed OPEN (merged by nobody). gh not spawned: the CLI throws before spawnGh (cli/index.ts), confirmed by the round-1 strace of the same path.",
+    "checkpoint13": "scripts/smoke/checkpoints.sh 13 aborts with `cannot read /proc/` because daemon state records dead worker locators (%4 etc.; the pre-existing boot-time reconnectWorkers TypeError, index.ts unchanged vs main). By hand on all 8 live recorded processes (server, controller %11, root %2, sub-architect %3, workers %5 %12 %13 %14): no DISPATCH_TOKEN=/LEGION_BOOT_TOKEN=/LEGION_CONTROLLER_SECRET= on argv or environ (only *_FILE pointers), server global env clean, default tmux server hosts no legion-sjawhar16 — MANUAL CHECKPOINT 13 OK (checkpoint-13-manual.txt).",
+    "unitStatic": "run-bun.sh / run-go.sh at 665f4b1b, 20:43-20:45Z, pane env scrubbed (env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN): grep -rn pr-queue skills packages docs --exclude-dir=plans -> nothing (exit 1); daemon biome `Checked 143 files. No fixes applied.`, tsc exit 0, LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test 885 pass / 0 fail; contracts lint+typecheck+test+build exit 0; pi-envoy biome lint `Checked 19 files`, tsc exit 0, bun test 155 pass / 0 fail; go (pmdoc gen deps installed) all 29 non-integration packages ok, exit 0, no NATS flakes this run; constraint A: jj diff --git --from main@origin --to 665f4b1b skills/legion-worker/SKILL.md -> one hunk @@ -260,10 +260,14 @@ (merger bullet only).",
+    "f2GrantStacking": "CORRECTED attribution (LEGION-12 architect, 18:48Z; verified by the tester against the rig controller transcript, evidence-round3-df666470/f2-attribution-check.txt): the bash hook is NOT stacking and the host does NOT invoke it more than once — the first credential block on every bash call is the hook's (a valid v4 UUID); the extra `export LEGION_GRANT=` blocks are text the model wrote by imitating its own prior tool input (Oh My Pi writes a hook's revised input back into the assistant message): of 73 extra blocks, 20 were the literal placeholder `...`, 2 repeated an earlier id, the rest model-shaped ids. The shell's last export wins, so the placeholder/stale id is what redeems and 403s. Round-2 F2's 'every UUID is fresh' was a first-occurrence check, not proof of hook origin — withdrawn. Fix in flight on LEGION-12 (dispatch://LEGION-12/spec version 6, which records this evidence): the credential moves into the bash tool's per-command env and covers the controller through the unified wrapper. Still observed in round 4 (the controller hand-minted a grant from its secret file to get past it; see iii). Not filed separately; not a defect of #961.",
+    "observations": [
+      "The long-lived rig controller session (booted at round-1 head) carries the skill it read at 14:36 and never re-reads it; after a plugin/skill change the pane must be started fresh (`/new` or a new pane) to pick up new gate wording. Its refusals were correct under both vocabularies; only the gate NAME differed (`verification block` vs `head moved beyond retro`). Worth a sentence in the runbook: after a skill change, /new the controller.",
+      "A `legion gh` call issued within ~2 s of killing the registered pane is receipted by the dying session (no delivery exception, no probe). Settle a few seconds before the wake in scripts; not a product defect.",
+      "scripts/smoke/checkpoints.sh 13 aborts on stale worker locators left by the pre-existing boot TypeError (index.ts, unchanged vs main); by-hand assertions pass.",
+      "The daemon's pi.agents boot probe failed once because ~/.omp/natives/18.1.15/*.node was being rewritten by another process on the host at that instant; retry passed. Host artifact.",
+      "Rig side effects in LEGSMOKE this round: LEGSMOKE-64..73 (tester wake probes, iceboxed by the rig controller); the rig's LEGSMOKE-45 pipeline reached implementer and opened sandbox PR #22, closed with teardown."
+    ],
+    "rigCoordinates": {
+      "wrapper": "/tmp/legion16-smoke/up-wrapper.sh (honours LEGION16_OMP_PATH for the stub omp; sets LEGION_TMUX_PATH=/tmp/legion16-smoke/tmuxwrap/tmux, the failure-injecting tmux wrapper; deadline 30 s x 2)",
+      "SMOKE_DIR": "/tmp/legion16-smoke/rig",
+      "SMOKE_PROJECT": "sjawhar/16",
+      "slug": "sjawhar16",
+      "SMOKE_REPO": "sjawhar/legion-smoke",
+      "webhookMode": "envoy",
+      "ports": {
+        "daemon": 19371,
+        "listener": 19021,
+        "nats": 14223
+      },
+      "ompProfile": "legion16-smoke, plugin 1.4.3-legion16.665f4b1b built from this head",
+      "scripts": "scenR4-1.sh, scenR4-1b (inline), scenR4-1c (inline), scenR4-2 (inline), sandbox/prep.sh, sandbox/round4-prs.sh, stub/omp, tmuxwrap/tmux, takeover/launch.sh",
+      "tornDown": "yes — see teardown",
+      "evidence": "/tmp/legion16-smoke/evidence/ (round 4), evidence-round3-df666470/, evidence-round2-f27af7ec/, evidence-round1-0f3edc92/; tests under /tmp/legion16-smoke/tests/",
+      "teardown": "teardown at 2026-09-12T21:25:57Z STOPPED tmux session legion-sjawhar16 on private socket legion-sjawhar16 STOPPED NATS container legion-smoke-nats RIG DOWN "
     }
   },
   "round3": {
@@ -89,7 +198,7 @@
     },
     "ciAtHead": "No workflow run and no check run exists for df666470 or ef45db4e (pushed 18:06:49Z; checked 18:43Z and again after the reviewer round-two review). Root cause per the reviewer, consistent with what I saw: GitHub does not run pull_request workflows when it cannot build the merge ref, and #961 has been mergeable_state dirty since #967/#953 landed on main. The previous heads (0f3edc92, bc84d57b, f27af7ec, 70114855) all ran green. CI at this head therefore cannot be green or red; it is absent until the rebase. Local suites at df666470 pass (unitStatic).",
     "checkpoint13": "Not re-run by script this round (it still aborts on the stale round-1 planner locator %4, pre-existing daemon boot TypeError); the by-hand check from round 2 applies unchanged to the controller pane's launch shape (no secret on argv/environ; `LEGION_CONTROLLER_SECRET_FILE` only), confirmed again on pane %17's environ.",
-    "f2GrantStacking": "Still present (controller reported 3-5 injected export LEGION_GRANT= blocks per bash call this round; this time every in-effect grant redeemed on first try). Not addressed in this PR per the architect; with LEGION-12's architect.",
+    "f2GrantStacking": "CORRECTED attribution (LEGION-12 architect, 18:48Z, from a re-read of this controller transcript; verified by the tester against the same transcript, /tmp/legion16-smoke/evidence/f2-attribution-check.txt): the bash hook is NOT stacking and the host does NOT invoke it more than once. The first credential block on every one of the 44 bash calls is the hook's (a valid v4 UUID); the extra `export LEGION_GRANT=` blocks are text the model wrote by imitating its own prior tool input (Oh My Pi writes a hook's revised input back into the assistant message): 20 of 73 extra blocks are the literal placeholder `...`, 2 repeat an earlier id verbatim, and the rest are model-shaped ids (e.g. c1f4a9b8-5b8e-4a0f-9c1e-3f2d8e7a6b5c). The shell's last export wins, so a placeholder or stale id is what redeems and 403s. Round-2 F2's \"every UUID is fresh\" was a first-occurrence check, not proof of hook origin — withdrawn. The fix (LEGION-12, dispatch://LEGION-12/spec version 6, which records this evidence) moves the credential into the bash tool's per-command env and covers the controller through the unified wrapper. Not filed separately; not a defect of #961.",
     "rigCoordinates": {
       "unchanged": "SMOKE_DIR=/tmp/legion16-smoke/rig, SMOKE_PROJECT=sjawhar/16 (tmux -L legion-sjawhar16), daemon 19371 / listener 19021 / NATS 14223, profile legion16-smoke (plugin 1.4.3-legion16.f27af7ec), deadline 30 s x 2",
       "wrapperChange": "/tmp/legion16-smoke/up-wrapper.sh now honours LEGION16_OMP_PATH (default: the real pinned binary) so the stub can be swapped in with `LEGION16_OMP_PATH=/tmp/legion16-smoke/stub/omp secrets … -- bash /tmp/legion16-smoke/up-wrapper.sh`",
@@ -118,7 +227,8 @@
         "id": "F2",
         "title": "bash-hook grant stacking now hits the controller TUI (pre-existing hook behaviour, docs/solutions/legion/worker-pane-shell-gotchas.md section 1)",
         "evidence": "Per-bash-call count of injected `export LEGION_GRANT=` lines in the controller transcript: already 2 at 14:37:36Z in round 1 (head 0f3edc92, before any session switch), 2-3 through most of round 2, then 2,3,4,5,6 on consecutive calls at 17:47-17:49Z; every UUID is fresh (minted by the hook, not copied by the model). Only one redeems; the controller's `legion gh` calls 403'd `Invalid or expired grant` on two of three attempts during the READY probe and on all attempts during the 3(c) dry run, after which it minted a grant by hand from $LEGION_CONTROLLER_SECRET_FILE and went off investigating instead of answering. Hook registration is once per extension instance and the pane's OMP log shows one instance, so the multiplication is inside the host's hook dispatch, not this branch's session_switch handlers (which register no hooks). grant-prelude-analysis.txt.",
-        "impact": "The controller is the merge queue: a `legion gh -- pr merge` can 403 and need a retry, and a controller that works around it by reading the secret file is one step from exposing it. Not a regression of #961; worth its own issue."
+        "impact": "The controller is the merge queue: a `legion gh -- pr merge` can 403 and need a retry, and a controller that works around it by reading the secret file is one step from exposing it. Not a regression of #961; worth its own issue.",
+        "attributionCorrected": "CORRECTED attribution (LEGION-12 architect, 18:48Z, from a re-read of this controller transcript; verified by the tester against the same transcript, /tmp/legion16-smoke/evidence/f2-attribution-check.txt): the bash hook is NOT stacking and the host does NOT invoke it more than once. The first credential block on every one of the 44 bash calls is the hook's (a valid v4 UUID); the extra `export LEGION_GRANT=` blocks are text the model wrote by imitating its own prior tool input (Oh My Pi writes a hook's revised input back into the assistant message): 20 of 73 extra blocks are the literal placeholder `...`, 2 repeat an earlier id verbatim, and the rest are model-shaped ids (e.g. c1f4a9b8-5b8e-4a0f-9c1e-3f2d8e7a6b5c). The shell's last export wins, so a placeholder or stale id is what redeems and 403s. Round-2 F2's \"every UUID is fresh\" was a first-occurrence check, not proof of hook origin — withdrawn. The fix (LEGION-12, dispatch://LEGION-12/spec version 6, which records this evidence) moves the credential into the bash tool's per-command env and covers the controller through the unified wrapper. Not filed separately; not a defect of #961."
       }
     ],
     "stepZero": {
@@ -200,5 +310,5 @@
   "round1Summary": "Head 0f3edc92 (tested 14:25Z-15:00Z): A1-A4 PASS, A5(i)(ii)(v) PASS, A5(iii)(iv) HELD; the reviewer's CHANGES_REQUESTED at that head led to the corrective pass tested here.",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-12T18:45:31.865Z"
+  "completed": "2026-09-12T21:26:29.633Z"
 }
