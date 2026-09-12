@@ -198,6 +198,9 @@ export default function legionExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
+  /** The transcript the last successful controller claim reported (undefined for a takeover,
+   * which reports none); lets a session-tree navigation that changed nothing skip a re-claim. */
+  let controllerTranscript: string | undefined;
   let controlConnection: NatsConnection | undefined;
   let controlSubscription: Subscription | undefined;
   const controlCodec = StringCodec();
@@ -315,6 +318,7 @@ export default function legionExtension(pi: PiApi): void {
       ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
     });
     controllerSessionID = sessionID;
+    controllerTranscript = ompSessionFile;
     onEnvoyRoleRegained(async (role, reason) => {
       if (role !== token) return;
       await rerunReadyAfterRegain("controller/ready", role, reason, () =>
@@ -326,15 +330,26 @@ export default function legionExtension(pi: PiApi): void {
   /** `/new`, `/resume`, or `/fork` typed into the controller pane replaces the session id and its
    * transcript. Re-claim so the Envoy role, the daemon's recorded session id, the transcript the
    * daemon would resume, and the `controllerSessionID` that keeps `bash` wrapped all follow the
-   * new session; otherwise the merge queue is stranded until the pane dies. A failed re-claim is
-   * reported to the operator sitting at the pane rather than thrown out of the handler. */
+   * new session; otherwise the merge queue is stranded until the pane dies. A `task`-spawned
+   * subagent inside the pane loads its own instance of this module with the pane's environment
+   * and must never claim (see `isSubagentSession`), and a tree navigation that left the session
+   * id and transcript as they were has nothing to re-claim — every `/controller/ready` runs a
+   * forced resync, so it is not posted for nothing. A failed re-claim is reported to the operator
+   * sitting at the pane rather than thrown out of the handler. */
   const reclaimControllerAfterSessionChange = async (context: SessionContext): Promise<void> => {
+    if (await checkSubagentSession(context)) return;
     if (classifySession(process.env).kind !== "controller") return;
+    if (
+      context.sessionManager.getSessionId() === controllerSessionID &&
+      context.sessionManager.getSessionFile() === controllerTranscript
+    ) {
+      return;
+    }
     try {
       await claimController(context, { reportTranscript: true });
     } catch (error) {
       context.ui.notify(
-        `legion: re-claiming the controller for this session failed (${messageFor(error)}); controller wakes and merges will not reach this session until it succeeds`,
+        `legion: re-claiming the controller for this session failed (${messageFor(error)}); controller wakes and merges will not reach this session, and its shell commands run without a Legion grant (no legion gh), until a re-claim succeeds`,
         "warning"
       );
     }

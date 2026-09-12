@@ -2072,6 +2072,29 @@ describe("Legion OMP extension", () => {
     }
     await sessionStart({}, sessionContext("ses_pane_first", "/tmp/first.jsonl"));
 
+    // A tree navigation that leaves the session id and transcript as they were re-claims nothing:
+    // every /controller/ready runs a forced resync and must not be posted for nothing.
+    await sessionSwitch({ reason: "fork" }, sessionContext("ses_pane_first", "/tmp/first.jsonl"));
+    // A task-spawned subagent inside the pane loads its own instance of this module with the
+    // pane's environment; its switch events must never take the controller role or record the
+    // subagent's transcript as the pane's.
+    const { childFile } = await createSubagentTranscriptPaths();
+    const subagentFixture = createPi();
+    legionExtension(subagentFixture.pi);
+    const subagentSwitch = subagentFixture.handlers.get("session_switch");
+    if (subagentSwitch === undefined) throw new Error("subagent switch handler missing");
+    await subagentSwitch({ reason: "new" }, sessionContext("ses_subagent", childFile));
+    expect(requests.filter((request) => request.path === "/legion/v1/controller/ready")).toEqual([
+      {
+        path: "/legion/v1/controller/ready",
+        body: {
+          secret: "controller-secret",
+          sessionId: "ses_pane_first",
+          ompSessionFile: "/tmp/first.jsonl",
+        },
+      },
+    ]);
+
     // Sami types /new into the pane: OMP moves it to a fresh session id and transcript.
     const switched = sessionContext("ses_pane_second", "/tmp/second.jsonl");
     await sessionSwitch({ reason: "new" }, switched);
