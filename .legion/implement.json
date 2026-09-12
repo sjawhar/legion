@@ -1,0 +1,57 @@
+{
+  "filesChanged": [
+    "packages/daemon/src/daemon/proc-stat.ts",
+    "packages/daemon/src/daemon/__tests__/proc-stat.test.ts",
+    "packages/daemon/src/daemon/legion-state.ts",
+    "packages/daemon/src/daemon/__tests__/legion-state.test.ts",
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/daemon/src/daemon/worker-boot-watchdog.ts",
+    "packages/daemon/src/daemon/tmux.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/processes.thermo-ops.test.ts",
+    "packages/daemon/src/daemon/AGENTS.md"
+  ],
+  "commits": [
+    "daemon: parse /proc/<pid>/stat start ticks",
+    "daemon: record pane pid and start ticks on every locator (state v24)",
+    "daemon: trust a pane only as the process its locator recorded",
+    "docs(daemon): a root is trusted only as the process its locator recorded"
+  ],
+  "trickyParts": [
+    "Identity is read INSIDE launchShimmedProcess's per-issue serialize lane, not after it: the in-memory issue->window map (`issueWindows`, formerly `issueWindowIds`) now stores the opened pane's full locator (window id + pane id + pid + start ticks). `recordedLocatorsInWindow` includes that entry, so a concurrent second spawn on the same issue (queued behind the first launch) can verify the first pane by identity and split into its window; with the plan's original 'read identity after the lane' shape the existing test 'serializes two concurrent first spawns on the same issue into a single new window' opened two windows because the first launch's claim was not yet persisted when the second probed.",
+    "Amendment A implemented: controllerAlive on any non-verified verdict other than pane-gone logs both identities, then runs stopProcess(controllerToken, locator, workerStopTimeoutMs) in a try/catch (graceful shutdown over the controller's per-role socket; kill-pane gated by the same identity verdict) before deleting controllerLocator. Test 'ensureController gracefully stops, never kills, a controller locator whose pane id was reissued...' asserts the shutdown reached the controller socket, no kill-pane, fresh `new-window controller`.",
+    "Sweep rules applied (Task 4). Rule (a) seeded identity: closeTree/graceful-stop tests (livePanes(command, 4242) -> livePanes(command) so tree()'s recorded pid 12345 verifies), controller registration-deadline tests (`...paneIdentity()` on seeded controller locators; launched controller `toEqual` gained panePid/paneStartTicks), dead-socket respawn tests (`...paneIdentity()`/`paneIdentity(22222)` on the stale worker + list-panes reporting it), root registration-deadline tests (a `launchedPids` Map so list-panes answers each launched pane with its own `1000N`/`8765N` pid). Rule (c) applied to 'clears completed-tree phases ... shuts down its recorded tmux tree' and 'treats a kill-pane that finds no server...': list-panes now reports the recorded identity and connectWorkerRpc refuses so the kill IS attempted and PANE_GONE_STDERR stays covered; no kill-pane-presence assertion was dropped. Rule (b): the backfill test was deleted (replaced by the legacy-locator test).",
+    "One pre-existing assertion was strengthened rather than weakened: 'retires the pane instead of writing a claim when closeTree closes the tree while a launch is still in flight' previously passed only because the ROOT's dead-looking pane got killed (any kill-pane counted); it now makes the tester's shim refuse and asserts `kill-pane -t %1` for the just-opened tester pane specifically.",
+    "index.test.ts (startDaemon) and processes.thermo-ops.test.ts construct their own deps without `readProcessStat`, so the real /proc/12345/stat read made every launch a launch failure. `DaemonDependencies` gained `readProcessStat?` (passed through exactly like readProcessCmdline) and both fixtures inject a fake stat line (`fakeProcStat` in index.test.ts, inline in thermo-ops).",
+    "The LEGION_TMUX_LIVE=1 gated test 'probes a real tmux pane as alive, detects its death, and resurrects it once' now uses the REAL /proc read (`readProcessStat: undefined`) and asserts the recorded paneStartTicks equals parseProcStatStartTicks(readFile('/proc/<panePid>/stat')). Ran green locally with LEGION_TMUX_LIVE=1 on a throwaway `legion-smoke<ts>` server.",
+    "Log assertions follow amendment B: tests assert both identities appear (observed pid, 'recorded pid N start M') and, for the legacy case, /no recorded process identity/; nothing pins 'not killing pane'. The watchdog 'never re-armed' contract is asserted as retirement within the first fake-clock interval (currentTime advanced < 2000ms) plus locator cleared / launchFailures 1 / queued, not via log-absence.",
+    "Pre-existing tick-bounded waits (flushEventLoopUntil against real fs I/O) are load-sensitive: in one 4-file run under load three older tests failed on tick exhaustion and passed on every other run (40/40 alone on both the pre-change baseline copy and the new code); one full-package run had an unrelated flake in instance-lock.test.ts ('resolves exactly one winner when contenders race a stale lock'), green on the next run. No test I touched depends on new fs I/O (the fixture's readProcessStat is synchronous)."
+  ],
+  "deviations": [
+    "Plan T2b asserted the second `new-window` carries `--resume=` for a root whose registration deadline elapses on a reissued pane. A root that never reached /process/started has no ompSessionFile, so that resurrect is a fresh start exactly as the mirrored pre-existing test ('resurrects directly, once, when the root registration deadline elapses on a dead pane') already is; the --resume assertion lives in the sibling reconnectRoots test, whose seeded locator carries a real session file.",
+    "Plan's `issueWindowIds: Map<IssueKey, string>` kept as-is would have broken concurrent same-issue first spawns (see trickyParts); it became `issueWindows: Map<IssueKey, PaneLocator>` and identity is read inside the launch lane. Same contract (a recorded window is reused only when a recorded pane in it verifies), one more recorded pane source.",
+    "Plan T5 asserted the literal phrase /not killing pane %1/; per the architect's amendment B the test asserts /%1/, /pid 777/, /recorded pid 12345 start 4242/ instead.",
+    "Two additional test files outside the plan's fileMap needed the readProcessStat seam (index.test.ts, processes.thermo-ops.test.ts) plus a two-line pass-through in daemon/index.ts."
+  ],
+  "verification": {
+    "biome": "packages/daemon: biome check --error-on-warnings src/ -> 145 files, no fixes",
+    "tsc": "packages/daemon: tsc --noEmit clean",
+    "bunTest": "packages/daemon: bun test -> 892 pass, 5 skip, 0 fail (897 across 57 files); LEGION_TMUX_LIVE=1 live-tmux tests 3/3 pass",
+    "smoke": [
+      "socket: legion-smoke-8426",
+      "before: %0 2834137",
+      "start ticks: 161177102",
+      "after:  %0 2837336",
+      "start ticks after: 161177355"
+    ],
+    "smokeNote": "Same pane id %0 handed out again after `tmux -L legion-smoke-8426 kill-server` + new-session, with a different pid and different start ticks; parseProcStatStartTicks read the real /proc line. The deployment's own legion-<project> server was never touched."
+  },
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T20:46:31.270Z"
+}
