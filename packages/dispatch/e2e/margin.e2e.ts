@@ -653,7 +653,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
     await page.goto("/");
     const inboxCard = page.getByTestId(`ask-${askId}`);
     await inboxCard.getByRole("checkbox", { name: "Ship" }).check();
-    await inboxCard.getByRole("button", { name: "Submit answer" }).click();
+    await inboxCard.getByRole("button", { name: "Answer" }).click();
     await expect
       .poll(() => getAsk(askId))
       .toMatchObject({
@@ -692,7 +692,7 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     const aliceCard = marginCard(alicePage, ask.id);
     await expect(aliceCard).toContainText("brown");
     await aliceCard.getByLabel("Your answer").fill("Because it is precise.");
-    await aliceCard.getByRole("button", { name: "Submit answer" }).click();
+    await aliceCard.getByRole("button", { name: "Answer" }).click();
     await expect.poll(() => getAsk(ask.id)).toMatchObject({ ask: { state: "answered" } });
     await setSheet(alicePage, testInfo.project.name, false);
 

@@ -119,7 +119,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   const shipOption = newestAskCard.getByRole("radio", { name: "Ship" });
   await shipOption.click();
   await expect(shipOption).toBeChecked();
-  await newestAskCard.getByRole("button", { name: "Submit answer" }).click();
+  await newestAskCard.getByRole("button", { name: "Answer" }).click();
   await expect(newestAskCard).toHaveCount(0);
   await expect
     .poll(() => getAsk(newestAsk.id))
@@ -228,13 +228,11 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   );
   await alicePage.goto("/");
   const textOnlyCard = alicePage.getByTestId(`ask-${textOnlyAsk.id}`);
-  // Free text is a choice of its own: the Other row reveals the answer field.
-  await expect(textOnlyCard.getByLabel("Your answer")).toHaveCount(0);
-  await textOnlyCard.getByRole("radio", { name: "Other" }).check();
+  // A typed answer is the text-only option; no separate choice is required.
   await textOnlyCard
     .getByLabel("Your answer")
     .fill("Neither option fits; going with a third path.");
-  await textOnlyCard.getByRole("button", { name: "Submit answer" }).click();
+  await textOnlyCard.getByRole("button", { name: "Answer" }).click();
   await expect(textOnlyCard).toHaveCount(0);
   await expect
     .poll(() => getAsk(textOnlyAsk.id))
@@ -290,9 +288,9 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
 
     // Alice asks for clarification instead of answering.
     const card = page.getByTestId(`ask-${clarifying.id}`);
-    const thread = page.getByTestId(`thread-${clarifying.id}`);
-    await thread.getByLabel("Ask for clarification").fill("Ship what, exactly?");
-    await thread.getByRole("button", { name: "Send" }).click();
+    const thread = card.getByTestId(`thread-${clarifying.id}`);
+    await card.getByLabel("Your answer").fill("Ship what, exactly?");
+    await card.getByRole("button", { name: "Ask back" }).click();
     await expect(thread.getByText("Ship what, exactly?")).toBeVisible();
     await expect(card).toBeVisible();
 
@@ -320,17 +318,14 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
 
     const questionShaped = await createAsk(
       issue.key,
-      { options: [{ label: "Ship" }, { label: "Hold" }], question: "Question-shaped Other" },
+      { options: [{ label: "Ship" }, { label: "Hold" }], question: "Question-shaped response" },
       session
     );
     await page.reload();
     const questionCard = page.getByTestId(`ask-${questionShaped.id}`);
-    await questionCard.getByRole("radio", { name: "Other" }).check();
     await questionCard.getByLabel("Your answer").fill("How does this fit our release plan?");
-    await questionCard.getByRole("button", { name: "Submit answer" }).click();
-    const clarification = questionCard.getByRole("button", {
-      name: "This reads like a question — send as clarification (keeps the ask open)",
-    });
+    await questionCard.getByRole("button", { name: "Answer" }).click();
+    const clarification = questionCard.getByRole("button", { name: "Ask back instead" });
     await expect(clarification).toBeFocused();
     await clarification.press("Enter");
     await expect

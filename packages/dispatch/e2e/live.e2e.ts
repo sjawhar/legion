@@ -85,10 +85,7 @@ test("live: answering an ask updates the Inbox and project badges immediately", 
   await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
 
   await inboxPage.getByTestId(`ask-${ask.id}`).getByRole("radio", { name: "Yes" }).check();
-  await inboxPage
-    .getByTestId(`ask-${ask.id}`)
-    .getByRole("button", { name: "Submit answer" })
-    .click();
+  await inboxPage.getByTestId(`ask-${ask.id}`).getByRole("button", { name: "Answer" }).click();
   await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
 
   // The answer happened on a different tab (inboxPage) than the one displaying the

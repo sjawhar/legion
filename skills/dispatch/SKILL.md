@@ -179,10 +179,11 @@ in its Conversation card and reply thread. Resolution is not an answer: it never
 resolved. A human may reply to an open or answered ask; so may you, e.g. after finding the answer — use `reply_to_ask` on
 `dispatch_comment` (mutually exclusive with `reply_to`).
 
-A human reply while your ask is still open (the delivered `comment.created` carries `ask_state: open`) is a request for
-clarification, not an answer: the human did not understand the question or needs more before choosing. The ask now waits on you
-in their Inbox. Answer in the same thread with `dispatch_comment({ reply_to_ask })`, or reword the question itself with
-`dispatch_edit_ask` when the wording was the problem; either puts the ask back in front of them. Do not open a second ask.
+A human answers or asks back from the same field; a question-shaped free-text answer is offered as a clarification first. A human
+reply while your ask is still open (the delivered `comment.created` carries `ask_state: open`) is a request for clarification, not
+an answer: the human did not understand the question or needs more before choosing. The ask now waits on you in their Inbox. Answer
+in the same thread with `dispatch_comment({ reply_to_ask })`, or reword the question itself with `dispatch_edit_ask` when the wording
+was the problem; either puts the ask back in front of them. Do not open a second ask.
 
 ## Approval of a spec
 

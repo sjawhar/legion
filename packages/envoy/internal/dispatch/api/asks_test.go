@@ -88,6 +88,32 @@ func TestActionAskDoneAnswers(t *testing.T) {
 	}
 }
 
+func TestSingleSelectAnswerKeepsOptionalText(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Annotated answer", "A spec")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"actor":    sessionActor(),
+		"options":  []map[string]string{{"label": "Ship"}, {"label": "Hold"}},
+		"question": "Should we ship?",
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create single-select ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, created)
+
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected": []string{"Ship"},
+		"text":     "After the release note is published.",
+	}, "alice")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("answer single-select ask with note: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	result := decodeBody[model.Ask](t, answered)
+	if result.Answer == nil || len(result.Answer.Selected) != 1 || result.Answer.Selected[0] != "Ship" || result.Answer.Text == nil || *result.Answer.Text != "After the release note is published." {
+		t.Fatalf("single-select answer = %#v", result)
+	}
+}
+
 func TestCreateAskRejectsApprovalKind(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Server-created approval", "A spec")

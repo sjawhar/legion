@@ -547,7 +547,7 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
     const shipOption = await within(needsYou).findByRole("radio", { name: "Ship" });
     fireEvent.click(shipOption);
     expect((shipOption as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(within(needsYou).getByRole("button", { name: "Submit answer" }));
+    fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
       expect(answerAsk).toHaveBeenCalledWith(unanchoredAsk.id, { selected: ["Ship"] })
     );
@@ -594,7 +594,7 @@ test("Margin clears an answered anchored ask from Needs you without an event str
   try {
     const needsYou = await screen.findByRole("region", { name: "Needs you" });
     fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
-    fireEvent.click(within(needsYou).getByRole("button", { name: "Submit answer" }));
+    fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
       expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, { selected: ["Ship"] })
     );

@@ -103,7 +103,7 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
         .getByRole("region", { name: "Needs you" })
         .getByTestId(`ask-${openAsk.id}`);
       await askCard.getByLabel("Your answer").fill("Yes.");
-      await askCard.getByRole("button", { name: "Submit answer" }).click();
+      await askCard.getByRole("button", { name: "Answer" }).click();
       await expect
         .poll(() => getAsk(openAsk.id))
         .toMatchObject({

@@ -36,10 +36,11 @@ test("an action ask waits on a human and Done clears the Inbox", async ({ browse
     const card = page.getByTestId(`ask-${action.id}`);
     await expect(card.getByText("Action", { exact: true })).toBeVisible();
     await expect(card.getByText("0m", { exact: true })).toBeVisible();
-    await expect(card.getByRole("button", { name: "Done" })).toBeVisible();
-    await expect(card.getByRole("button", { name: "Can't" })).toBeVisible();
+    await expect(card.getByRole("radio", { name: "Done" })).toBeVisible();
+    await expect(card.getByRole("radio", { name: "Can't" })).toBeVisible();
 
-    await card.getByRole("button", { name: "Done" }).click();
+    await card.getByRole("radio", { name: "Done" }).click();
+    await card.getByRole("button", { name: "Answer" }).click();
     await expect(card).toHaveCount(0);
     await expect(page.getByText(/Blocked on you:/)).toHaveCount(0);
     await expect
