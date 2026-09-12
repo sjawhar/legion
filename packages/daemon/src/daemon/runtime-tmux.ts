@@ -147,27 +147,26 @@ export class TmuxRuntime implements Runtime {
     role: LegionRole,
     spec: SpawnSpec,
     token: string,
-    [secretName, secretValue]: [string, string]
+    secret: [string, string]
   ): Promise<TmuxLocator> {
-    const socketPath = await this.prepareSocket(workerSocketBasename(issue, role));
-    const shellCommand = this.shimmedShellCommand(spec.workspaceDir, socketPath, spec.innerCommand);
+    const { socketPath, paneArgv } = await this.preparePane(
+      workerSocketBasename(issue, role),
+      spec,
+      token,
+      secret
+    );
     const session = this.deps.tmux.socket;
-    const secretFile = await writeSecretFile(this.deps.stateDir, token, secretValue);
-    const pairs = [...tmuxEnv(spec.env), ...tmuxEnv({ [`${secretName}_FILE`]: secretFile })];
     const { tmuxWindowId, tmuxPaneId } = await serialize(this.issueLaunchQueue, issue, async () => {
       const existingWindowId = await this.probedWindowId(issue);
       if (existingWindowId) {
-        const { paneId } = await tmux.splitWindow(this.deps.tmux, existingWindowId, [
-          ...pairs,
-          shellCommand,
-        ]);
+        const { paneId } = await tmux.splitWindow(this.deps.tmux, existingWindowId, paneArgv);
         return { tmuxWindowId: existingWindowId, tmuxPaneId: paneId };
       }
       const window = await tmux.openWindow(
         this.deps.tmux,
         session,
         treeName(issue),
-        [...pairs, shellCommand],
+        paneArgv,
         session
       );
       this.rewriteIssueWindowId(issue, window.windowId);
@@ -179,20 +178,11 @@ export class TmuxRuntime implements Runtime {
   private async spawnController(
     spec: SpawnSpec,
     token: string,
-    [secretName, secretValue]: [string, string]
+    secret: [string, string]
   ): Promise<TmuxLocator> {
-    const socketPath = await this.prepareSocket("controller");
-    const shellCommand = this.shimmedShellCommand(spec.workspaceDir, socketPath, spec.innerCommand);
+    const { socketPath, paneArgv } = await this.preparePane("controller", spec, token, secret);
     const session = this.deps.tmux.socket;
-    const secretFile = await writeSecretFile(this.deps.stateDir, token, secretValue);
-    const pairs = [...tmuxEnv(spec.env), ...tmuxEnv({ [`${secretName}_FILE`]: secretFile })];
-    const window = await tmux.openWindow(
-      this.deps.tmux,
-      session,
-      "controller",
-      [...pairs, shellCommand],
-      session
-    );
+    const window = await tmux.openWindow(this.deps.tmux, session, "controller", paneArgv, session);
     return {
       runtime: "tmux",
       tmuxSession: session,
@@ -202,14 +192,22 @@ export class TmuxRuntime implements Runtime {
     };
   }
 
-  /** The `legion worker-shim --socket <path> -- <inner>` command every Legion OMP process — root,
-   * phase worker, and controller alike — runs inside its tmux pane. */
-  private shimmedShellCommand(
-    workspaceDir: string,
-    socketPath: string,
-    innerCommand: string
-  ): string {
-    return `cd ${shellPath(workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${innerCommand}`;
+  /** Everything a new pane needs before any tmux call, in the order every spawn performs it: a
+   * fresh shim socket path (its directory made, a stale socket removed), the process's one secret
+   * written as a 0600 file, and the pane argv — the spec's env pairs, the secret's `<NAME>_FILE`
+   * pointer, then the `legion worker-shim --socket <path> -- <inner>` command every Legion OMP
+   * process (root, phase worker, controller) runs inside its pane. */
+  private async preparePane(
+    socketName: string,
+    spec: SpawnSpec,
+    token: string,
+    [secretName, secretValue]: [string, string]
+  ): Promise<{ socketPath: string; paneArgv: string[] }> {
+    const socketPath = await this.prepareSocket(socketName);
+    const shellCommand = `cd ${shellPath(spec.workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${spec.innerCommand}`;
+    const secretFile = await writeSecretFile(this.deps.stateDir, token, secretValue);
+    const pairs = [...tmuxEnv(spec.env), ...tmuxEnv({ [`${secretName}_FILE`]: secretFile })];
+    return { socketPath, paneArgv: [...pairs, shellCommand] };
   }
 
   private async prepareSocket(name: string): Promise<string> {

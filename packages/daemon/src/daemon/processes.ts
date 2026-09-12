@@ -1932,6 +1932,24 @@ export class ProcessManager {
     console.info(`[legion] ${logVerb} ${issue} by resuming OMP session ${resumeSessionFile}`);
     return ` --resume=${shellPath(resumeSessionFile)}`;
   }
+
+  /** The OMP command every issue process — root architect and phase worker alike — runs inside
+   * its shim: the configured launch prefix and invocation, `--resume` when a recorded session is
+   * being resumed (a missing session file is a launch failure, see `computeResumeArgument`), RPC
+   * mode, the role's system prompt, and the addressing fragment. The prompt file is stat'ed
+   * first so a missing role prompt fails before any resume decision or spawn. */
+  private async issueInnerCommand(
+    issue: IssueKey,
+    promptPath: string,
+    addressingPrompt: string,
+    resumeSessionFile: string | undefined,
+    logVerb: string
+  ): Promise<string> {
+    await (this.deps.statPrompt ?? stat)(promptPath);
+    const resumeArgument = await this.computeResumeArgument(issue, resumeSessionFile, logVerb);
+    return `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
+  }
+
   /** Provisions the jj workspace and credential wiring shared by every issue's process — the
    * root architect and every phase worker alike. */
   private async provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
@@ -1988,13 +2006,13 @@ export class ProcessManager {
       tree.root,
       "architect"
     );
-    await (this.deps.statPrompt ?? stat)(promptPath);
-    const resumeArgument = await this.computeResumeArgument(
+    const innerCommand = await this.issueInnerCommand(
       tree.root,
+      promptPath,
+      addressingPrompt,
       priorSessionFile,
       "resurrecting"
     );
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
     const architectToken = roleToken(this.deps.state.project, tree.root, "architect");
     // Cleared before the process starts, not after `runtime.spawn` resolves: the root is a real
     // OMP process outside this event loop, so a fast root's own `/process/started` +
@@ -2291,13 +2309,13 @@ export class ProcessManager {
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
       const addressingPrompt = addressingFragment(this.deps.state.project, treeKey, issue, role);
-      await (this.deps.statPrompt ?? stat)(promptPath);
-      const resumeArgument = await this.computeResumeArgument(
+      const innerCommand = await this.issueInnerCommand(
         issue,
+        promptPath,
+        addressingPrompt,
         resumeSessionFile,
         "respawning"
       );
-      const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
       this.processSecretFiles.add(token);
