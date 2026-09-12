@@ -1,0 +1,241 @@
+{
+  "issue": "LEGION-29",
+  "pr": {
+    "number": 970,
+    "url": "https://github.com/sjawhar/legion/pull/970",
+    "headTested": "515d2eefc5f6a41225f2c2b6c53a0d7f29044b64",
+    "branch": "legion/LEGION-29"
+  },
+  "spec": "dispatch://LEGION-29/artifact/spec (version 3)",
+  "verdict": "PASS — every acceptance line assigned to the tester passes on head 515d2eef; A6 recorded retrospectively per the architect's 14:11Z amendment (no restart performed). Two production findings recorded under acceptance6 for the retro, neither a defect in this PR.",
+  "statusCheck": {
+    "context": "legion/tester",
+    "state": "success",
+    "sha": "515d2eefc5f6a41225f2c2b6c53a0d7f29044b64",
+    "createdAt": "2026-09-12T15:02:27Z",
+    "creator": "legion-implementer[bot]",
+    "command": "legion gh -- api -X POST repos/sjawhar/legion/statuses/515d2eef… -f state=success -f context=legion/tester -f target_url=https://github.com/sjawhar/legion/pull/970 -f description=…"
+  },
+  "prBody": "E2E section filled at 15:03Z via `legion gh -- pr edit 970 --body-file`; tester footer appended.",
+  "environment": {
+    "host": "sami-agents, 32 vCPU / 247 GB; load avg 66–93 and 1 GB free at 14:20Z (global OOM 14:03Z killed a 9.5 GB python3 — not ours); load 27 by 14:53Z",
+    "omp": "/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp (the binary the Legion panes run); the dotfiles `omp` shim was bypassed because its `secrets … --` wrapper hung 300 s — the pane already carries ANTHROPIC/GEMINI/OPENAI keys (agent-tier) and the smoke session inherited them",
+    "listener": "http://127.0.0.1:9020, ENVOY_API_TOKEN disabled (`listener API auth: disabled`)",
+    "evidenceFiles": "/tmp/legion29-evidence/ (run1/run2 transcripts + OMP logs, run2-proxy-requests.jsonl, run2-pane.txt, listener-13.00-14.50.log, daemon-output.log, daemon-state*.json, roles-table.psv, live-unheld-heartbeats.psv) — ephemeral; key excerpts are inlined below"
+  },
+  "unitGates": {
+    "command": "cd $WS/packages/pi-envoy && bun test extensions/envoy.test.ts extensions/legion.test.ts",
+    "result": "125 pass, 0 fail, 414 expect() calls across 2 files [10.54s]",
+    "eightNewCasesEachRunAlone": {
+      "command": "bun test extensions/envoy.test.ts extensions/legion.test.ts -t '<name>'",
+      "results": {
+        "a heartbeat tick re-asserts a held role the listener no longer holds, softly and without a transcript entry": "1 pass",
+        "heartbeat ticks while this session is the live holder issue no claim and append no transcript entry": "1 pass",
+        "a 409 on re-assertion drops the local claim, warns once, and ends re-assertion for that role": "1 pass",
+        "the first healthy heartbeat after a registry outage fires the regain hook even though the claim survived": "1 pass",
+        "a role claim keeps the existing registration fresh (modified: mock answers GET /v1/roles/legion-controller)": "1 pass",
+        "a controller that regains its role re-runs controller/ready so held notices drain": "1 pass",
+        "a root architect that regains its role re-runs process/ready so the overseer catch-up replays": "1 pass",
+        "a phase worker that regains its role re-runs nothing: the daemon's own no-holder recovery prompts its catch-up": "1 pass"
+      }
+    },
+    "pass": true
+  },
+  "acceptance1": {
+    "pass": true,
+    "setup": [
+      "workdir=$(mktemp -d /tmp/legion29-smoke.XXXXXX); tmux -L legion29-smoke new-session -d -s legion29-smoke -x 220 -y 50 -c $workdir $workdir/launch.sh",
+      "launch.sh: env -u OMP_PROFILE -u PI_PROFILE -u PI_CODING_AGENT_DIR -u TMUX -u OMP_SESSION_ID -u LEGION_* -u DISPATCH_* ENVOY_URL=http://127.0.0.1:9021 ENVOY_HEARTBEAT_MS=10000 OMP_LOG_LEVEL=debug <omp> --no-extensions -e $WS/packages/pi-envoy/extensions/envoy.ts --session-dir $workdir/sessions",
+      "request capture: /tmp/legion29-proxy.ts (Bun reverse proxy 127.0.0.1:9021 → 127.0.0.1:9020 logging {at, method, path, body, status, response} per request); a first run without the proxy (ENVOY_URL default) gave the same result"
+    ],
+    "extensionProvenance": "~/.omp/logs/omp.2026-09-12.823720.log: {\"timestamp\":\"2026-09-12T14:38:44.470+00:00\",\"level\":\"debug\",\"message\":\"extension instance loaded\",\"extension\":\"file:///home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-29/packages/pi-envoy/extensions/envoy.ts?mtime=1789223923683\"} (run 1: pid 720846, same path)",
+    "session": {
+      "sid": "01a0960e-6505-7000-babc-35e5d2cc49b9",
+      "registryCrossCheck": "GET /v1/sessions?dir=$workdir → [{session_id: 01a0960e-…, dir: /tmp/legion29-smoke.PgVUCD, port: 0}]",
+      "run1Sid": "01a0960a-468c-7000-9b14-640bda62ea3d"
+    },
+    "claim": "prompt `Call the envoy_role_set tool with role=\"smoke-legion-29\" and reply DONE.` → proxy 14:41:44.624Z POST /v1/roles/set {session_id, role} → 200; GET /v1/roles/smoke-legion-29 → {holder: 01a0960e-…}; transcript envoy-role-claim count = 1 ({\"role\":\"smoke-legion-29\"} at 14:41:44.657Z)",
+    "removal": "14:43:11.536Z curl -X POST /v1/interests/unsubscribe -d '{\"session_id\":\"01a0960e-…\",\"topics\":[\"notifications.role.smoke-legion-29\"]}' → {\"removed\":[\"notifications.role.smoke-legion-29\"]}; GET /v1/roles/smoke-legion-29 → 404 {\"error\":\"no holder for role smoke-legion-29\"}",
+    "reholdObserved": "poll `until GET .holder == $SID` → re-held after 1 s at 14:43:13.475Z (run 1 without proxy: removed 14:36:44.2Z, re-held after 7 s at 14:36:51.2Z) — both ≤ 30 s",
+    "listenerSawExactly": [
+      "14:43:12.655Z POST /v1/interests/subscribe → 200",
+      "14:43:12.673Z GET /v1/roles/smoke-legion-29 → 404",
+      "14:43:12.681Z POST /v1/roles/set body={\"session_id\":\"01a0960e-6505-7000-babc-35e5d2cc49b9\",\"role\":\"smoke-legion-29\",\"soft\":true} (no previous_session_id) → 200"
+    ],
+    "sessionLog": "{\"timestamp\":\"2026-09-12T14:43:12.692+00:00\",\"level\":\"warn\",\"message\":\"envoy: role re-asserted after the listener lost the claim\",\"role\":\"smoke-legion-29\",\"sessionID\":\"01a0960e-…\",\"previousHolder\":null}",
+    "transcriptAfter": "grep -c envoy-role-claim <session.jsonl> = 1 (unchanged)",
+    "teardown": "/quit → GET /v1/roles/smoke-legion-29 404 within 1 s (run 1) / immediately (run 2); GET /v1/sessions?dir=$workdir → []; tmux -L legion29-smoke kill-server; rm -rf $workdir"
+  },
+  "acceptance2": {
+    "pass": true,
+    "window": "14:41:44.7Z → 14:42:45Z as live holder (6 ticks at ENVOY_HEARTBEAT_MS=10000)",
+    "listenerSaw": "6 × (POST /v1/interests/subscribe → 200 ; GET /v1/roles/smoke-legion-29 → 200 holder=01a0960e-…) at 14:41:52, :42:02, :42:12, :42:22, :42:32, :42:42; POST /v1/roles/set count = 0",
+    "command": "jq -c 'select(.at > \"2026-09-12T14:41:44.7\" and .path == \"/v1/roles/set\")' /tmp/legion29-proxy.log | wc -l → 0",
+    "transcript": "envoy-role-claim count before 1 → after 1 (the same held across the whole 14:41–14:45 run: 1)"
+  },
+  "acceptance3": {
+    "pass": true,
+    "rival": "curl POST /v1/interests/subscribe {session_id: smoke-legion-29-rival, dir: /tmp, topics: [notifications.agent.smoke-legion-29-rival], port: 0, self_subscribed: true} then 14:43:35.793Z POST /v1/roles/set {session_id: smoke-legion-29-rival, role: smoke-legion-29} → 200; GET → holder smoke-legion-29-rival",
+    "listenerSaw": [
+      "14:43:42.656Z POST /v1/interests/subscribe → 200",
+      "14:43:42.676Z GET /v1/roles/smoke-legion-29 → 200 {holder: smoke-legion-29-rival}",
+      "14:43:42.682Z POST /v1/roles/set {session_id: 01a0960e-…, role: smoke-legion-29, soft: true} → 409 {\"error\":\"role smoke-legion-29 is held by smoke-legion-29-rival\",\"holder\":\"smoke-legion-29-rival\",\"role\":\"smoke-legion-29\"}",
+      "14:43:52 … 14:45:02 (8 ticks): POST /v1/interests/subscribe only — /v1/roles/set count 0, GET /v1/roles/smoke-legion-29 count 0"
+    ],
+    "paneWarning": "tmux capture-pane | grep -c 'is now held by session smoke-legion-29-rival' → 1: ` Warning: envoy: role smoke-legion-29 is now held by session smoke-legion-29-rival; this session no longer holds it` (matches implement.json interfaces verbatim); still 1 at teardown",
+    "sessionLog": "{\"timestamp\":\"2026-09-12T14:43:42.712+00:00\",\"level\":\"warn\",\"message\":\"envoy: role re-assertion refused; held by another live session\",\"role\":\"smoke-legion-29\",\"holder\":\"smoke-legion-29-rival\"}",
+    "rivalKeepsRole": "GET /v1/roles/smoke-legion-29 at 14:44:07Z (≥3 ticks later) → holder smoke-legion-29-rival",
+    "noRetakeAfterRelease": "14:44:36.883Z rival unsubscribe of the role topic → 27 consecutive 1-s GETs all 404 through 14:45:05Z while the first session stayed live (5 heartbeats, 0 /v1/roles/* requests); transcript envoy-role-claim still 1 (no release entry — R2)",
+    "cleanup": "DELETE /v1/sessions/smoke-legion-29-rival → 200; GET /v1/registry/smoke-legion-29-rival → 404"
+  },
+  "acceptance6": {
+    "pass": "recorded (no restart performed — architect amendment 14:11:49Z: listener already rolled 13:27Z by the Envoy owner)",
+    "image": {
+      "tag": "ghcr.io/sjawhar/legion/envoy:15d92603987d8f04a8e434948617f45dd8aedd2b",
+      "digest": "sha256:b5f8e6728e1d0033021dd76828fa503cc58210c1fa009d5077996789fe2a0410",
+      "created": "2026-09-12T08:11:46Z",
+      "containerStartedAt": "2026-09-12T13:27:23.189Z",
+      "restartCount": 0
+    },
+    "preconditionGrep": "docker exec envoy-listener sh -c 'grep -c -a <s> /usr/local/bin/envoy-listener' → envoy_roles=1, ReleaseExpiredRoleClaim=3, ReapRoleClaims=3, StartRoleClaimReaper=3 (PR #958 is deployed)",
+    "listenerLog_13:27-13:35": [
+      "13:27:23.431Z listener API auth: disabled (ENVOY_API_TOKEN); 13:27:23.440Z envoy-listener listening addr=127.0.0.1:9020; 13:27:31.137Z envoy-listener ready (NATS connected)",
+      "13:32:31 INFO reaper cycle reaped=0; 13:32:31 INFO role claim reaper cycle reaped=11  ← first StartRoleClaimReaper tick, exactly one session TTL (5 min) after open, when ReleaseExpiredRoleClaim's restore grace (`time.Since(openedAt) < sessionTTL`) had just lapsed",
+      "every later `role claim reaper cycle` through 14:27:31: reaped=0; interest `reaper cycle` reaped 0/1/7/1/0/0/0/1/0",
+      "no WARN/ERROR line containing role/claim/expired/'no holder' in 13:00–14:50 (WARN/ERROR histogram: 45 listener upsert failed [13:58:54–14:00:xx NATS timeout storm], 22 stream info failed, 20 invalid envelope, 3 registry put failed, 3 decode failed, 2 self-health probe failed)"
+    ],
+    "controllerRole": {
+      "at14:46:20Z": "GET /v1/roles/legion-sjawharlegion-controller → 404 {\"error\":\"no holder for role legion-sjawharlegion-controller\"}; daemon state controllerPendingNotices=37; roles map controller sessionId 01a0938a-9efb-7000-b308-9d6e5818f37b; that session heartbeating every 120 s (listener subscribe 13:28:43 … 14:44:50) on the legion-profile plugin 1.3.0 (never re-asserts)",
+      "daemonLog": "~/.omp/run/daemons/82845bd2a1cc0810/daemons/legion-daemon-sjawhar-legion/output.log (no timestamps): line 39 — immediately after the daemon's boot at 10:59:57Z — `error: Envoy publish to notifications.role.legion-sjawharlegion-controller failed with status 404` while retrying `pending controller notice resync:dc7fba44-…`; 230 such 404s by 14:49Z; no ensureController/resumeWorker line for the controller. So the controller claim was already gone before the 13:27 roll; the roll did not cause it and the 13:32:31 reap could not have (nothing to reap).",
+      "at14:54:30Z": "GET → {holder: 01a0938a-…} (the architect had the controller run /legion-claim-controller); 14:59Z GET /legion/v1/state → controllerPendingNotices 0, roles 68 — the drain happened via the manual re-claim, i.e. the exact path this PR automates"
+    },
+    "rolesTable": {
+      "command": "for tok in $(jq -r '.roles|keys[]' state.json); do GET /v1/roles/$tok; jq 'map(select(.session_id==$daemon_session))|length' /v1/sessions; done (14:54:30Z, 117 live sessions)",
+      "totals": {
+        "roles": 68,
+        "held": 23,
+        "holder404": 45,
+        "holder404_daemonSessionLive": 31,
+        "holder404_daemonSessionDeadOrNull": 14
+      },
+      "heldByMatchingDaemonSession": [
+        "legion-sjawharlegion-controller",
+        "legion-sjawharlegion-legion-14-reviewer",
+        "legion-sjawharlegion-legion-16-tester",
+        "legion-sjawharlegion-legion-18-architect",
+        "legion-sjawharlegion-legion-18-reviewer",
+        "legion-sjawharlegion-legion-18-tester",
+        "legion-sjawharlegion-legion-19-architect",
+        "legion-sjawharlegion-legion-20-implementer",
+        "legion-sjawharlegion-legion-21-architect",
+        "legion-sjawharlegion-legion-21-reviewer",
+        "legion-sjawharlegion-legion-22-architect",
+        "legion-sjawharlegion-legion-22-implementer",
+        "legion-sjawharlegion-legion-22-merger",
+        "legion-sjawharlegion-legion-22-reviewer",
+        "legion-sjawharlegion-legion-22-tester",
+        "legion-sjawharlegion-legion-23-architect",
+        "legion-sjawharlegion-legion-23-implementer",
+        "legion-sjawharlegion-legion-23-planner",
+        "legion-sjawharlegion-legion-23-reviewer",
+        "legion-sjawharlegion-legion-23-tester",
+        "legion-sjawharlegion-legion-29-architect",
+        "legion-sjawharlegion-legion-29-implementer",
+        "legion-sjawharlegion-legion-29-tester"
+      ],
+      "unheld_liveSession_heartbeating_13:27:31-13:33": [
+        "legion-sjawharlegion-legion-10-architect",
+        "legion-sjawharlegion-legion-10-implementer",
+        "legion-sjawharlegion-legion-10-planner",
+        "legion-sjawharlegion-legion-11-architect",
+        "legion-sjawharlegion-legion-11-implementer",
+        "legion-sjawharlegion-legion-11-planner",
+        "legion-sjawharlegion-legion-12-architect",
+        "legion-sjawharlegion-legion-13-architect",
+        "legion-sjawharlegion-legion-13-planner",
+        "legion-sjawharlegion-legion-14-architect",
+        "legion-sjawharlegion-legion-14-implementer",
+        "legion-sjawharlegion-legion-14-planner",
+        "legion-sjawharlegion-legion-14-tester",
+        "legion-sjawharlegion-legion-16-architect",
+        "legion-sjawharlegion-legion-16-implementer",
+        "legion-sjawharlegion-legion-16-planner",
+        "legion-sjawharlegion-legion-17-architect",
+        "legion-sjawharlegion-legion-17-implementer",
+        "legion-sjawharlegion-legion-17-planner",
+        "legion-sjawharlegion-legion-17-reviewer",
+        "legion-sjawharlegion-legion-17-tester",
+        "legion-sjawharlegion-legion-18-implementer",
+        "legion-sjawharlegion-legion-18-planner",
+        "legion-sjawharlegion-legion-20-architect",
+        "legion-sjawharlegion-legion-20-planner",
+        "legion-sjawharlegion-legion-21-implementer",
+        "legion-sjawharlegion-legion-21-planner",
+        "legion-sjawharlegion-legion-21-tester",
+        "legion-sjawharlegion-legion-22-planner",
+        "legion-sjawharlegion-legion-29-planner",
+        "legion-sjawharlegion-legion-9-architect"
+      ],
+      "unheld_deadOrNullSession": [
+        "legion-sjawharlegion-legion-10-tester",
+        "legion-sjawharlegion-legion-11-tester",
+        "legion-sjawharlegion-legion-12-planner",
+        "legion-sjawharlegion-legion-6-architect",
+        "legion-sjawharlegion-legion-6-implementer",
+        "legion-sjawharlegion-legion-6-merger",
+        "legion-sjawharlegion-legion-6-planner",
+        "legion-sjawharlegion-legion-6-reviewer",
+        "legion-sjawharlegion-legion-6-tester",
+        "legion-sjawharlegion-legion-9-implementer",
+        "legion-sjawharlegion-legion-9-merger",
+        "legion-sjawharlegion-legion-9-planner",
+        "legion-sjawharlegion-legion-9-reviewer",
+        "legion-sjawharlegion-legion-9-tester"
+      ],
+      "reading": "The 14 dead/null-session 404s are LEGION-6 ×6, LEGION-9 ×5 (all but its architect) and 3 never-claimed null tokens; 6 + 5 = 11 = `reaped=11`, so the new image's single non-zero reaper cycle removed exactly the claims of dead holders and no live one. All 31 live-session 404s were heartbeating 2–3 times inside 13:27:31–13:33:00 (so `isAlive` was true at 13:32:31) and there is no later non-zero reaper cycle, no self-health rebuild, and the 13:59 storm lasted ~70 s (< the 5-min session-cache TTL) — no evidence the NEW image dropped a live holder's claim. Their claims were therefore lost before 13:27:23 on the old image (fcd13a14: interest `Reap()`→`Remove()`→`releaseAllRoleClaims` on any KV read error, Part A path (b)) or via the unlogged read-path `ReleaseExpiredRoleClaim`; the old container's log is gone (container recreated), so the moment is unrecoverable. The controller's loss is proven pre-10:59:57Z by the daemon log."
+    },
+    "architectRoleForensics": {
+      "token": "legion-sjawharlegion-legion-29-architect",
+      "session": "01a0949a-16c4-7000-bfd3-77babbb16c76",
+      "listenerLog": "session heartbeating every 120 s 13:29:28 → 13:57:28, 13:59:43/13:59:58 (one `listener upsert failed nats: timeout` at 13:59:55), 14:01:29 → 14:05:29 …; no delivery to notifications.role.legion-sjawharlegion-legion-29-architect logged between 13:27:23 and 14:13:07 (first: 14:13:07.665Z `listener role forwarded` to 01a0949a — after the 14:07:33 re-claim)",
+      "daemonLog": "line 2712 `phase-complete for LEGION-29 (implementer) has no live architect holder at legion-sjawharlegion-legion-29-architect; recording it for catch-up` — that completion is implement.json completed=13:48:36.430Z; line 2729 `resumeWorker no-op for legion-sjawharlegion-legion-29-architect: no claim or resumable identity` (Part B's root-architect no-op); lines 3069–3071 envoy.exceptions for that role topic",
+      "conclusion": "Claim gone by 13:48:36Z; last provably-held moment unknown (planner completion 09:27:37Z predates this daemon's log). Not the new image's reaper (see rolesTable.reading). Path: unknown — old-image Reap before 13:27 or unlogged read-path release. Retro item: the listener should log every role-claim deletion with role, holder and path (reaper vs read path); today it logs only a count."
+    },
+    "distinctListenerFinding": "None proven against the new image (15d92603): the one reap it performed removed dead holders only. Observation for the Envoy owner: the restore grace is `time.Since(openedAt) < sessionTTL` and the reaper's first tick is at exactly `interval == sessionTTL`, so a restored claim whose holder has not re-registered by then has zero margin — harmless while heartbeats (120 s) are well inside 5 min."
+  },
+  "acceptance7": {
+    "pass": true,
+    "command": "cd $WS/packages/envoy && go test -count=1 ./cmd/listener/ ./internal/store/",
+    "run1_14:09Z": "FAIL github.com/sjawhar/envoy/cmd/listener 537.372s (31 tests failed, every one `thermo_ops_test.go:59: failed to connect bus: nats: no servers available for connection` / 10.0x s connect timeouts after the shared nats:2.10 testcontainer stopped answering at ~14:09:48 — hundreds of `envoy nats recovery reconnect failed … no servers available` lines); ok github.com/sjawhar/envoy/internal/store 30.183s. Host: load avg 66–93, 1 GB free, global OOM at 14:03Z.",
+    "run2_14:22Z": "FAIL github.com/sjawhar/envoy/cmd/listener 600.431s — `panic: test timed out after 10m0s; running tests: TestStartListenerSubscriptionMigratesLegacyDurableConsumer (1m57s)` (default -timeout under the same load)",
+    "namedTests_14:53Z": "go test -count=1 -v -run 'TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL|TestRoleSetHandlerSoftClaim|TestThermoOpsRoleSetRejectsUnregisteredSession' ./cmd/listener/ → all PASS (TestRoleSetHandlerSoftClaim 5/5 subtests incl. live_holder_is_refused_with_409_naming_the_holder), ok 12.191s; go test -run TestSetRole_PersistsClaimMetadata ./internal/store/ → PASS ok 1.229s",
+    "run3_14:53Z_full": "go test -count=1 -timeout 45m -v ./cmd/listener/ → ok github.com/sjawhar/envoy/cmd/listener 50.213s; 99 `--- PASS` (157 RUN incl. subtests), 0 FAIL, at load 27. (-p 1 as the architect asked is a no-op for a single package; -count=1 was used on every run.)",
+    "reading": "Listener code is untouched by this PR (jj diff main@origin..@ under packages/envoy/ is empty); the two failures are the shared NATS testcontainer / host-load environment, reproduced as passing once load fell."
+  },
+  "acceptance8": {
+    "pass": true,
+    "pi-envoy/AGENTS.md:61": "states: heartbeat re-asserts the held role after every successful re-registration — GET /v1/roles/<role>, soft POST /v1/roles/set only when the listener does not name this session; healthy tick writes nothing, no envoy-role-claim entry; a 409 drops the local claim, warns once, ends re-assertion; regain/reregistered fires onEnvoyRoleRegained → controller/ready, process/ready; phase worker needs nothing",
+    "skills/legion-controller/SKILL.md:32-35": "`The claim is kept alive automatically afterwards: the Envoy registration heartbeat re-asserts it and re-posts readiness whenever the listener loses sight of this session, so /legion-claim-controller is the manual override, not a routine step after a listener restart.`",
+    "packages/envoy/AGENTS.md": "jj diff --from main@origin --to @ -- packages/envoy/AGENTS.md → 0 files changed; the `Role ownership is durable in the envoy_roles JetStream KV bucket…` bullet (line 53) is unchanged"
+  },
+  "filesChangedOnBranch": "jj diff --from main@origin --to @ --summary: .legion/{implement,plan}.json, docs/plans/2026-09-12-heartbeat-role-reassertion.md, packages/pi-envoy/{AGENTS.md, extensions/envoy.ts, envoy.test.ts, legion.ts, legion.test.ts}, skills/legion-controller/SKILL.md (+ the pane's untracked .omp/config.yml, kept out of every commit)",
+  "notesForReviewer": [
+    "Live evidence is proxy-captured request logs (method/path/body/status), not inferred from listener logs — the listener has no HTTP access log for /v1/roles/*.",
+    "The re-assert tick's soft claim never carried previous_session_id (body inspected on both runs).",
+    "During the smoke the tester never re-claimed any production role; the controller re-claim at ~14:54Z was the controller's own /legion-claim-controller at the architect's request.",
+    "Tester tooling note: multiple stale `export LEGION_GRANT=` preludes in a bash call made `legion gh` 403 (`Invalid or expired grant`, 60 s TTL); running the same command through eval's tool.bash worked first time — the duplicates came from the model's own command text, not the extension."
+  ],
+  "commands": [
+    "bun test extensions/envoy.test.ts extensions/legion.test.ts",
+    "go test -count=1 ./cmd/listener/ ./internal/store/",
+    "tmux -L legion29-smoke new-session … omp --no-extensions -e $WS/packages/pi-envoy/extensions/envoy.ts",
+    "curl -X POST /v1/interests/unsubscribe {session_id, topics:[notifications.role.smoke-legion-29]}",
+    "curl -X POST /v1/interests/subscribe (rival) ; curl -X POST /v1/roles/set {session_id: rival, role}",
+    "docker inspect envoy-listener ; docker exec envoy-listener grep -c -a … /usr/local/bin/envoy-listener ; docker logs envoy-listener --since 2026-09-12T13:00:00Z --until 2026-09-12T14:50:00Z",
+    "curl $LEGION_DAEMON_URL/legion/v1/state ; curl http://127.0.0.1:9020/v1/roles/<token> ; curl http://127.0.0.1:9020/v1/sessions",
+    "legion gh -- api -X POST repos/sjawhar/legion/statuses/515d2eef… ; legion gh -- pr edit 970 --body-file …"
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T15:05:40.740Z"
+}
