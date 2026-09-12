@@ -97,7 +97,91 @@
     "raceRepro": "/tmp/legion17-race/race.ts",
     "reviewPayload": "/tmp/legion17-review.json"
   },
+  "rereview": {
+    "at": "2026-09-13T01:35:00Z",
+    "reviewedHead": "8c988ff234e10da388b2103cd62ebce1bd797a60",
+    "reviewedHeadNote": "`test: record re-verification at the rebased head` — .legion/test.json only; last code commit a0af66dc2e36982a3c9a60a2bc3ef2f48e5598df (corrective fix, rebased); base main 4d516a1f",
+    "verdict": "CLEAN_PENDING_LEGION_DELETION",
+    "review": {
+      "id": 5188935402,
+      "url": "https://github.com/sjawhar/legion/pull/956#pullrequestreview-5188935402",
+      "state": "COMMENTED",
+      "commitId": "8c988ff234e10da388b2103cd62ebce1bd797a60",
+      "note": "Not an approval: the diff still carries .legion/*.json. Approval is head-pinned to the cleaned head after the implementer pushes the .legion/ deletion."
+    },
+    "verifiedAgainstGitHub": {
+      "head": "8c988ff234e10da388b2103cd62ebce1bd797a60 (matched the workspace bookmark legion/LEGION-17@origin)",
+      "ci": "at 8c988ff2: Tests 34730499815 success, Tests 34730469700 success, Legion Envoy and Contracts 34730469761 success. PR body's CI line names 34730013103/34730013107 at d1b7e3d0 (head before the tester's handoff push) — also green; merger re-confirms head at READY.",
+      "threads": "2 total, both mine from review 5185638453; each carries the implementer's fix reply (r3995584355, r3995585131) and my acceptance reply (r3998258650, r3998258782)",
+      "prBody": "carries `Dispatch: LEGION-17`; Threads section dispositions both threads and the two extra nits individually; Thermo line still reads pending (reviewer fills at approval)"
+    },
+    "threadDispositions": [
+      {
+        "thread": "PRRT_kwDORFy7ds6huAFv",
+        "file": "packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts (waitForFile) + consumer",
+        "disposition": "FIXED in a0af66dc (043d4ad6 pre-rebase): recorder writes ../argv.json.tmp then renameSync to argv.json; waitForFile names the path on abort. Independently verified: my original race harness (17/300 empty reads before) → 300/300 ok, 0 empty, no temp file left; E2E under LEGION_E2E=1 10/10 at load ~110.",
+        "acceptanceReply": "https://github.com/sjawhar/legion/pull/956#discussion_r3998258650",
+        "resolved": "NOT by reviewer — review App lacks permission (resolveReviewThread → Resource not accessible by integration; docs/solutions/daemon/external-red-and-phase-ownership.md §3). Implementer resolves with the deletion push."
+      },
+      {
+        "thread": "PRRT_kwDORFy7ds6huAFx",
+        "file": "packages/daemon/src/cli/__tests__/fixtures/argv-recorder-omp.ts",
+        "disposition": "FIXED in a0af66dc: producer side of the same race (parent-directory temp + rename; same-directory temp rejected by the implementer's measurement of Bun 1.3.14 watcher coalescing, recorded in the fixture comment).",
+        "acceptanceReply": "https://github.com/sjawhar/legion/pull/956#discussion_r3998258782",
+        "resolved": "NOT by reviewer — same as above; implementer resolves."
+      }
+    ],
+    "priorNits": "All three fixed in a0af66dc: DEPLOYMENT_INSTRUCTIONS_FILE unexported; index.test.ts boot test retitled to `…appends it to the controller's launch command`; waitForFile abort names the path.",
+    "specConformanceRebased": {
+      "diffScope": "main(4d516a1f)..8c988ff2, 26 paths; every code commit rebased across main's runtime-boundary refactor (#962), idle-retire (#973), injected-env CLI (#978), LEGION-18 skill audit (#953); `conflicts() & (main..head)` empty",
+      "config": "clean — same resolveValue call (cli > file > LEGION_INSTRUCTIONS > absent); relative file value resolved against configDir like state_dir; env as given; empty file value → `instructions must not be empty`, empty env → `LEGION_INSTRUCTIONS must not be empty`",
+      "cli": "clean — --config passes path.dirname(realpath); cwd branch untouched; main's `env` parameter merged (loadStartConfig(project, configPath, env, options))",
+      "boot": "clean — materialize at index.ts:231 after acquireInstanceLock/resolveDaemonEnvironment/dispatch-token write, before verifyOmpAgentsCapability (241), verifyLegionPluginContract (247), verifyLegionPluginLoaded (248), tokenManager.getToken (255), loadState (257)",
+      "processes": "clean — systemPromptArguments defined once (156); called from issueInnerCommand (2086; reached by spawnRoot 2145 and spawnWorker 2452 incl. --resume respawn and admission-queue promotion) and spawnController (2598); grep `append-system-prompt` in processes.ts/runtime.ts/runtime-tmux.ts/index.ts/boot-probes.ts finds no other producer; order role → addressing → instructions via \"$(cat <shellPath>)\"; absent dep → byte-identical commands (pre-existing exact-string assertions untouched and passing)",
+      "noLeak": "clean — no env var or tmux -e pair carries path or content (spawnTree/launchWorker/spawnController env blocks unchanged); shell $(cat) output not re-expanded",
+      "skillsAndDocs": "clean — worker/architect/controller paragraphs verbatim to the spec's Change bullet; legion-oracle: spec sentence verbatim first, then main's LEGION-18 text, librarian rule once; root/daemon/pi-envoy AGENTS.md rows and paragraphs current; smoke README/up.sh/up.test.sh consistent",
+      "diffHygiene": "clean — no docs/plans/*.md, no .omp/config.yml"
+    },
+    "localRuns": {
+      "changedTestFiles": "config.test.ts, deployment-instructions.test.ts, processes.test.ts, daemon index.test.ts, cli index.test.ts: 313 pass / 3 pre-existing skips / 0 fail (4.0 s) at load ~111",
+      "realE2E": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 real-deployment-instructions-e2e.test.ts ×10: 10 pass / 0 fail",
+      "raceHarness": "/tmp/legion17-race/race.ts against the new recorder, 300 iterations: ok 300, empty 0, parseErr 0 (was ok 283 / empty 17 at ac484904)"
+    },
+    "thermo": {
+      "head": "8c988ff234e10da388b2103cd62ebce1bd797a60",
+      "deepReview": {
+        "agent": "thermonuclear-deep-review",
+        "verdict": "no blocking, no should-fix; three nits",
+        "nits": [
+          "cli/index.ts configDir change also moves relative state_dir — DISMISSED again: spec Requirements row + architect ruling (plan.json architectRulings.cliConfigDir), stated in PR body and daemon AGENTS.md; no shipped config uses a relative state_dir",
+          "legion-oracle wording 'wait for the reply before researching yourself' tightens main's 'ask it first' — DISMISSED: the branch sentence is the spec's verbatim Change paragraph; main's LEGION-18 text was a paraphrase landed in between",
+          "waitForFile check-then-watch microsecond window before inotify_add_watch — practically unreachable (recorder is behind two bun startups in a fresh pane); recorded under Fast-follow nit 1"
+        ],
+        "checkedClean": "recorder atomicity (same filesystem, cwd = <state_dir>/controller, temp in <state_dir>, one IN_MOVED_TO, no cross-test collision); single builder behind every runtime.spawn call incl. --resume and queue promotion; boot ordering; E2E fixture lifecycle (dispose in finally, unconditional kill-server like the sibling); loadStartConfig signature; no path/content leak; tests observable; docs match code"
+      },
+      "codeQuality": {
+        "agent": "thermonuclear-code-quality",
+        "verdict": "no blocking; two should-fix (both judged non-blocking by reviewer, recorded as Fast-follow nits); several nits",
+        "items": [
+          "waitForFile inotify vs the directory's poll convention (waitForSocket, waitForPaneGone, ci-fixtures.waitFor); a 20 ms poll would remove the parent-directory placement + comment — recorded as Fast-follow nit 1; works reliably as is (10/10, 300/300, implementer 150/150, tester 57/57)",
+          "daemon AGENTS.md:150 duplicates lines 92-95 and 'naming the resolved path' is loose for the write-failure case — Fast-follow nit 2",
+          "deployment-instructions.ts const doc duplicates function doc — nit 3",
+          "E2E `run` drops the options argument the sibling forwards — nit 4",
+          "config.ts:753 bare requireNonEmpty vs inline-assign idiom; env-side label LEGION_INSTRUCTIONS regardless of source (unreachable) — nit 5",
+          "smoke README/up.sh repeat one sentence — nit 6",
+          "skill paragraph triplicated and controller quotes no Sami ruling — spec-mandated verbatim text; no action",
+          "systemPromptArguments positional undefined at controller site — acceptable, file's module-function pattern"
+        ],
+        "checkedClean": "single builder, doc names both sites; E2E per-file literals within directory convention, static connectWorkerRpc import; recorder comment accurate (coalescing verified empirically by the agent); config mirrors state_dir; oracle merge reads as one voice; AGENTS rows accurate; comments describe current behaviour"
+      }
+    },
+    "nextSteps": [
+      "Implementer: push the .legion/ deletion (carrying this review.json commit first so it is an ancestor), resolve threads PRRT_kwDORFy7ds6huAFv and PRRT_kwDORFy7ds6huAFx, fill the PR body's Fast-follow line with the six nits (or 'none' with reasons) and the Thermo line with 'no blocking findings at 8c988ff2'.",
+      "Architect messages reviewer; reviewer verifies the cleaned head equals the PR head, diff excludes .legion/, then APPROVEs head-pinned to that sha."
+    ],
+    "harnessSymptom": "Fresh pane: grant-export shadow re-established inline per docs/solutions/legion/worker-pane-shell-gotchas.md §1; `legion gh -- auth status` → legion-reviewer[bot] before any write. One call that omitted `; grant_release` left the lock set and the next `legion gh` 403'd on the stale grant; releasing and retrying recovered. 2–5 stacked LEGION_GRANT blocks per call."
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T06:41:47.165Z"
+  "completed": "2026-09-13T01:37:23.797Z"
 }
