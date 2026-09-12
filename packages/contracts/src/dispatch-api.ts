@@ -15,7 +15,25 @@ export interface ActorOrigin {
 
 export type Actor =
   | { readonly kind: "user"; readonly id: string }
-  | { readonly kind: "session"; readonly id: string; readonly origin?: ActorOrigin };
+  | {
+      readonly kind: "session";
+      readonly id: string;
+      readonly origin?: ActorOrigin;
+      readonly owner?: string;
+    };
+
+export interface AgentToken {
+  readonly id: string;
+  readonly name: string;
+  readonly prefix: string;
+  readonly created_at: string;
+  readonly last_used_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+export interface CreatedAgentToken extends AgentToken {
+  readonly token: string;
+}
 
 export interface Anchor {
   readonly artifact_id: string;

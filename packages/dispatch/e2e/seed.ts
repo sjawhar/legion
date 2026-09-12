@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const tables = [
+  "agent_tokens",
   "repo_projects",
   "user_issue_state",
   "events",

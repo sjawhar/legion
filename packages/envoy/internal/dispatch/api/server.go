@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -145,6 +146,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/settings/repo-projects", s.listRepoProjects)
 	mux.HandleFunc("PUT /api/v1/settings/repo-projects/{owner}/{repo}", s.putRepoProject)
 	mux.HandleFunc("DELETE /api/v1/settings/repo-projects/{owner}/{repo}", s.deleteRepoProject)
+	mux.HandleFunc("GET /api/v1/me/agent-tokens", s.listAgentTokens)
+	mux.HandleFunc("POST /api/v1/me/agent-tokens", s.createAgentToken)
+	mux.HandleFunc("DELETE /api/v1/me/agent-tokens/{id}", s.revokeAgentToken)
 	mux.HandleFunc("GET /api/v1/issues", s.listIssues)
 	mux.HandleFunc("POST /api/v1/issues", s.createIssue)
 	mux.HandleFunc("GET /api/v1/issues/resolve", s.resolveIssue)
@@ -294,10 +298,21 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
 	if authorization != "" {
-		if s.deps.AgentToken == "" || authorization != "Bearer "+s.deps.AgentToken {
+		token, ok := strings.CutPrefix(authorization, "Bearer ")
+		if !ok || token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
-		return model.Actor{}, false, nil
+		if matchesSharedAgentToken(token, s.deps.AgentToken) {
+			return model.Actor{}, false, nil
+		}
+		actor, err := s.personalTokenActor(r.Context(), token)
+		if err != nil {
+			return model.Actor{}, false, err
+		}
+		if actor.Owner == nil {
+			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
+		}
+		return actor, false, nil
 	}
 	if s.deps.Identity == nil {
 		return model.Actor{}, false, errorf(http.StatusInternalServerError, "IDENTITY_ERROR", "identity service unavailable")
@@ -307,6 +322,10 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		return model.Actor{}, false, err
 	}
 	return model.Actor{Kind: "user", ID: login}, true, nil
+}
+
+func matchesSharedAgentToken(token, configured string) bool {
+	return configured != "" && subtle.ConstantTimeCompare([]byte(token), []byte(configured)) == 1
 }
 
 func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor, error) {
@@ -320,7 +339,12 @@ func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor,
 	if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
 		return model.Actor{}, errorf(http.StatusBadRequest, "ACTOR_KIND", "bearer callers require actor.kind session")
 	}
-	return *supplied, nil
+	return model.Actor{
+		Kind:   "session",
+		ID:     supplied.ID,
+		Origin: supplied.Origin,
+		Owner:  actor.Owner,
+	}, nil
 }
 
 func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {

@@ -12,6 +12,7 @@ type Actor struct {
 	Kind   string       `json:"kind"`
 	ID     string       `json:"id"`
 	Origin *ActorOrigin `json:"origin,omitempty"`
+	Owner  *string      `json:"owner,omitempty"`
 }
 
 // ActorOrigin describes the client environment of a session actor.
@@ -22,6 +23,16 @@ type ActorOrigin struct {
 	Tmux         string `json:"tmux,omitempty"`
 	Pane         string `json:"pane,omitempty"`
 	SessionTitle string `json:"session_title,omitempty"`
+}
+
+// AgentToken is the safely displayable metadata for a human-owned agent token.
+type AgentToken struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Prefix     string     `json:"prefix"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	RevokedAt  *time.Time `json:"revoked_at"`
 }
 
 // Anchor identifies a document mark at a particular named version.

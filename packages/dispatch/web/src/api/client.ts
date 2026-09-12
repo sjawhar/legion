@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AgentToken,
   AnswerAskInput,
   Artifact,
   ArtifactDetails,
@@ -17,6 +18,7 @@ import type {
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
+  CreatedAgentToken,
   CreateIssueInput,
   CreateMessageInput,
   CreateProjectInput,
@@ -198,6 +200,18 @@ export class DispatchApiClient {
 
   async deleteRepoProject(repo: string): Promise<void> {
     await this.response(`/api/v1/settings/repo-projects/${repoPath(repo)}`, { method: "DELETE" });
+  }
+
+  listAgentTokens(): Promise<AgentToken[]> {
+    return this.json<AgentToken[]>("/api/v1/me/agent-tokens");
+  }
+
+  createAgentToken(input: { name: string }): Promise<CreatedAgentToken> {
+    return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input);
+  }
+
+  async revokeAgentToken(id: string): Promise<void> {
+    await this.response(`/api/v1/me/agent-tokens/${pathSegment(id)}`, { method: "DELETE" });
   }
 
   listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {

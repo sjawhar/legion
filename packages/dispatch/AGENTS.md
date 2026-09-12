@@ -47,10 +47,11 @@ On compact screens the sheet lists thread summaries; opening one presents a full
 view with a bottom-pinned reply composer and Back control.
 
 `AuthGate` resolves `GET /auth/whoami`; unauthenticated visitors see the GitHub
-sign-in link at `/auth/start`. Authenticated humans can create native projects
-(key + name) and manage external repository-to-project mappings at `/settings`.
-All application requests use the same origin so the browser sends the
-signed-in cookie.
+sign-in link at `/auth/start`. Authenticated humans can create native projects,
+manage external repository-to-project mappings, and mint or revoke personal agent
+tokens at `/settings`. A personal token's session writes display the session title
+followed by `(for <owner>)`. All application requests use the same origin
+so the browser sends the signed-in cookie.
 
 ## Dark mode
 
