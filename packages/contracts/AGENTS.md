@@ -11,6 +11,7 @@ the native Dispatch tool suite:
 - model-facing `dispatchToolSpecs` built over an injected Zod surface and
   `zodSchemaApi`
 - Go output in `packages/envoy/internal/contracts/generated.go`
+- Dispatch `Actor` session values may include an `owner` GitHub login when a personal agent token authenticated the request; consumers render it as `(for <owner>)` and persist it wherever they preserve actor JSON.
 
 ## Where to look
 

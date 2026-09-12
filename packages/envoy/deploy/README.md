@@ -102,7 +102,7 @@ available. Host adapters use the same file or the `DISPATCH_URL` and
 | --- | --- | --- |
 | `DISPATCH_PG_PASSWORD` | yes | Password for the Compose-managed Postgres database. |
 | `DISPATCH_PG_PORT` | no | Host-network Postgres port, shared by the Dispatch server and backup worker; defaults to `55432`. |
-| `DISPATCH_AGENT_TOKEN` | yes | Agent bearer token; generate with `openssl rand -hex 32`. |
+| `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. |
 | `DISPATCH_ALLOWED_LOGINS` | human identity | Cookie identity requires it at startup; header identity accepts only included logins. |
 | `DISPATCH_BACKUP_BUCKET` | yes | Private S3 bucket receiving daily PostgreSQL dumps. |
 | `S3_REGION` | yes | AWS Region that contains the backup bucket. |

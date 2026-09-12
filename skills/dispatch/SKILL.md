@@ -29,6 +29,13 @@ vocabulary, and is often on a phone. Write for that person.
 - Before posting, test it: could Sami, reading only this text on his phone, know what he is being
   told or asked? If not, rewrite it. Length is not the problem; density is.
 
+## Agent authentication
+
+Use a personal Dispatch token: a human mints it in Dispatch **Settings → Agent tokens** and supplies
+it to the agent through `dispatch.token` in `~/.config/opencode/envoy.json` or `DISPATCH_TOKEN`.
+The server records the minting human as the owner of that session's writes. `DISPATCH_AGENT_TOKEN`
+is the shared devbox fallback; do not configure it for an individual agent.
+
 ## Writing a spec
 
 A spec has two readers: the human who decides reads the top; the implementer who builds reads the

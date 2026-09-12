@@ -55,8 +55,10 @@ users through `Identity.Login` and write identity errors with
   requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
 - GitHub OAuth credentials come from `DISPATCH_APP_CLIENT_ID` and
   `DISPATCH_APP_CLIENT_SECRET`, or the Dispatch app credentials file.
-- Agents authenticate with `Authorization: Bearer $DISPATCH_AGENT_TOKEN` and a
-  `session` actor. Bearer callers cannot act as users.
+- Agents normally authenticate as a `session` actor with a personal `dsp_` token
+  minted by a human in Settings, sent as `Authorization: Bearer <token>`.
+  `DISPATCH_AGENT_TOKEN` is the shared devbox fallback; its callers have no
+  owner attribution. Bearer callers cannot act as users.
 
 The GitHub proxy needs the resolved user's stored GitHub token. Without one it
 returns `503 GITHUB_TOKEN_UNAVAILABLE`.
@@ -78,6 +80,8 @@ the table says human only.
 | `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. |
 | `/api/v1/settings/repo-projects` | GET | human only | List repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | human only | Create or replace, or remove, a repository mapping. |
+| `/api/v1/me/agent-tokens` | GET, POST | human only | List personal token metadata or mint a personal agent token. |
+| `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
 | `/api/v1/search?q=&project=&limit=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results contain `<mark>` snippets and SPA `href`s. `limit` is 1–50 (default 20); an under-two-character or stop-word-only query returns `400 INVALID_QUERY`, and an invalid limit returns `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. |

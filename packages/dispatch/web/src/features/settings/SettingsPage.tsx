@@ -21,6 +21,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { AgentTokensSection } from "./AgentTokensSection";
 import { ProjectsSection } from "./ProjectsSection";
 
 type FailedAction =
@@ -112,6 +113,7 @@ export function SettingsPage(): ReactNode {
         </p>
       </header>
       <ProjectsSection />
+      <AgentTokensSection />
       <section aria-labelledby="repository-projects-heading">
         <h2
           className={`text-xl font-semibold ${textPrimaryOnCanvas}`}

@@ -38,6 +38,7 @@ test("human users manage repository project mappings from the settings route", a
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([mapping]);
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -81,6 +82,7 @@ test("human users manage repository project mappings from the settings route", a
     getMyState.mockRestore();
     getInbox.mockRestore();
     listRepoProjects.mockRestore();
+    listAgentTokens.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
     deleteRepoProject.mockRestore();
@@ -99,6 +101,7 @@ test("repository settings retries a failed mapping query", async () => {
   const listRepoProjects = spyOn(api, "listRepoProjects")
     .mockRejectedValueOnce(new Error("network"))
     .mockResolvedValueOnce([]);
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -126,6 +129,7 @@ test("repository settings retries a failed mapping query", async () => {
     getMyState.mockRestore();
     getInbox.mockRestore();
     listRepoProjects.mockRestore();
+    listAgentTokens.mockRestore();
     listProjects.mockRestore();
     globalThis.EventSource = originalEventSource;
   }
@@ -141,6 +145,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects")
     .mockResolvedValueOnce([core])
     .mockResolvedValueOnce([core, created]);
@@ -180,6 +185,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     getInbox.mockRestore();
     getMyState.mockRestore();
     listRepoProjects.mockRestore();
+    listAgentTokens.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
     globalThis.EventSource = originalEventSource;
@@ -195,6 +201,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([core]);
   const createProject = spyOn(api, "createProject").mockRejectedValue(
     new ApiError(409, { code: "PROJECT_EXISTS", error: "a project with this key already exists" })
@@ -226,6 +233,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
     getInbox.mockRestore();
     getMyState.mockRestore();
     listRepoProjects.mockRestore();
+    listAgentTokens.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
     globalThis.EventSource = originalEventSource;
