@@ -1,14 +1,24 @@
-import { LegionDaemonApi } from "@legion/contracts";
+import { type IssueKey, LegionDaemonApi, roleTopic } from "@legion/contracts";
 import { writeStatus } from "../../dispatch-client";
-import type { IssueStatus } from "../../legion-state";
+import type { IssueStatus, LegionState } from "../../legion-state";
+import { type EnvelopeJson, routeActive } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import {
+  EnvoyPublishError,
   HttpError,
   issueKey,
   optionalStrings,
   requiredString,
   validateContractResponse,
 } from "../http";
+
+/** The `designApproved` marker a gate carries when the deployment's design gate is `off`: the
+ * daemon, not a human, satisfied it. Distinguishable from an ask id in state dumps and tests. */
+export const GATE_OFF_APPROVAL = "gate-off";
+
+/** `routeActive` takes the triggering envelope only to keep one signature with the reducers; the
+ * gate-off wake has no Dispatch event behind it. */
+const GATE_OFF_ENVELOPE: EnvelopeJson = { event_id: "gate-off", issued_at: 0 };
 
 /**
  * Sets an issue's Dispatch status. Two mutually exclusive credentials, distinguished by which is
@@ -54,9 +64,39 @@ export async function handleIssueStatus(
   return Response.json(validateContractResponse(LegionDaemonApi.IssueStatus.response, {}));
 }
 
+/** Publishes the `design-approved` wake for a gate the daemon satisfied itself (`gates.design:
+ * off`), to exactly the role the reducer's `ask.answered` path would have chosen (`routeActive`:
+ * the issue's active phase worker if any, else its tree's architect). Best-effort: the state
+ * already carries the approval, so a resumed architect's catch-up shows it; a 404 no-holder is
+ * silent, anything else is logged. Shared by the register route and the boot fixup. */
+export async function publishDesignApproved(
+  state: LegionState,
+  issue: IssueKey,
+  envoyPublish: (topic: string, payloadJson: string) => Promise<void>
+): Promise<void> {
+  for (const effect of routeActive(state, issue, { type: "design-approved" }, GATE_OFF_ENVELOPE)) {
+    if (effect.kind !== "publish") continue;
+    try {
+      await envoyPublish(roleTopic(effect.role), JSON.stringify(effect.payload));
+    } catch (error) {
+      if (!(error instanceof EnvoyPublishError) || error.status !== 404) {
+        console.error(
+          `[legion] design gate is off but the design-approved wake for ${issue} failed to publish; the architect's catch-up carries the approval: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  }
+}
+
 /** Registers the design gate's ask id: the architect opens `dispatch_ask` on its root issue, then
  * records the resulting ask id here so `ask.answered` (`reducers.ts`'s `reduceAskAnswered`) knows
- * which answer approves the gate. */
+ * which answer approves the gate.
+ *
+ * With `gates.design: off` the daemon satisfies the gate itself: the register records
+ * `designApproved: GATE_OFF_APPROVAL` and publishes the same `design-approved` wake a human
+ * answer would, so the architect proceeds without anyone clicking. The ask stays open on Dispatch
+ * as a record; answering it later is a no-op (`reduceAskAnswered` skips an approved gate). The
+ * publish is best-effort: state is already approved, so a resumed architect's catch-up shows it. */
 export async function handleGatesRegister(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -68,8 +108,19 @@ export async function handleGatesRegister(
     throw new HttpError(403, "Issue is outside tree");
   }
   const askId = requiredString(body, "askId");
-  ctx.deps.state.gates[issue] = { ...ctx.deps.state.gates[issue], designAskId: askId };
+  const gateOff = ctx.config.gates.design === "off";
+  const prior = ctx.deps.state.gates[issue];
+  ctx.deps.state.gates[issue] = {
+    ...prior,
+    designAskId: askId,
+    ...(gateOff && prior?.designApproved === undefined
+      ? { designApproved: GATE_OFF_APPROVAL }
+      : {}),
+  };
   await ctx.save();
+  if (gateOff && prior?.designApproved === undefined) {
+    await publishDesignApproved(ctx.deps.state, issue, ctx.deps.envoyPublish);
+  }
   return Response.json(validateContractResponse(LegionDaemonApi.GatesRegister.response, {}));
 }
 

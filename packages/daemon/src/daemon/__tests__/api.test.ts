@@ -1088,6 +1088,55 @@ describe("Legion HTTP API", () => {
     expect(state.gates[child]).toEqual({ designAskId: "ask-2", designApproved: "ask-1" });
   });
 
+  it("with gates.design off, registering a gate approves it at once and wakes the architect", async () => {
+    const published: Array<{ topic: string; payload: string }> = [];
+    await start({
+      gates: { design: "off" },
+      envoyPublish: async (topic, payload) => {
+        published.push({ topic, payload });
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const architect = { sessionId: "ses_root", secret: started.body.secret };
+    published.length = 0;
+
+    const registered = await json("/legion/v1/gates/register", {
+      tree: root,
+      issue: root,
+      askId: "ask-1",
+      ...architect,
+    });
+    expect(registered.response.status).toBe(200);
+    expect(state.gates[root]).toEqual({ designAskId: "ask-1", designApproved: "gate-off" });
+    expect(published).toEqual([
+      {
+        topic: roleTopic(roleToken(state.project, root, "architect")),
+        payload: JSON.stringify({ type: "design-approved" }),
+      },
+    ]);
+
+    // Re-registering an already-approved gate records the new ask id and wakes nobody twice.
+    const again = await json("/legion/v1/gates/register", {
+      tree: root,
+      issue: root,
+      askId: "ask-2",
+      ...architect,
+    });
+    expect(again.response.status).toBe(200);
+    expect(state.gates[root]).toEqual({ designAskId: "ask-2", designApproved: "gate-off" });
+    expect(published).toHaveLength(1);
+  });
+
   it("persists a minted controller capability before controller spawn can proceed", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-controller-capability-"));
     const file = path.join(tempDir, "state.json");
