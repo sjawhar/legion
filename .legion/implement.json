@@ -1,0 +1,101 @@
+{
+  "issue": "LEGION-17",
+  "spec": "dispatch://LEGION-17/spec (version 4)",
+  "plan": ".legion/plan.json at 2bbb2544 — followed verbatim; every code block applied as written and re-verified red→green in this workspace",
+  "pr": {
+    "number": 956,
+    "url": "https://github.com/sjawhar/legion/pull/956",
+    "base": "main",
+    "head": "legion/LEGION-17",
+    "headSha": "b31d077bcfbc09cc46b6aae5663b2e2e86a72d34 (last code commit; the branch head is the `implement: record handoff` commit directly above it, which adds only .legion/implement.json)",
+    "title": "feat(daemon): legion.yaml instructions appended to every pane's system prompt",
+    "ci": "Tests run 34677595614 — success at 61631b7c (lint, typecheck, test, pr-title all pass; https://github.com/sjawhar/legion/actions/runs/34677595614). Legion Envoy and Contracts run 34677587650 — pass (pi-envoy job ran; the other package jobs skipped as unchanged). This handoff-only commit re-triggers CI at the final head; the tester records that run in the PR body.",
+    "rebasedOnto": "8f6fad3670993105b8082504fb701a789ac075d1 (main, chore: release pi-envoy v1.4.3): the branch as first pushed was based on 7db2cd83 and GitHub reported it CONFLICTING with main, so no pull_request workflow ran; rebased with `jj rebase -s <plan handoff> -d main` and resolved two 2-sided conflicts — index.ts (main #954 added probeSleep and a fourth verifyOmpAgentsCapability argument; kept the materialize block ahead of the probe call) and packages/pi-envoy/AGENTS.md (main changed the adjacent Dispatch-tools row from twelve to thirteen tools; kept both rows). Gate re-run on the rebased tree: 828 pass / 3 skip / 0 fail, biome and tsc clean, up.test.sh exit 0."
+  },
+  "commits": [
+    {
+      "sha": "2b2964f7295cf5ebc06c197e29a3a710f53619ef",
+      "message": "feat(daemon): legion.yaml instructions key, LEGION_INSTRUCTIONS, config-relative --config paths",
+      "files": [
+        "packages/daemon/src/daemon/config.ts",
+        "packages/daemon/src/cli/index.ts",
+        "packages/daemon/src/daemon/__tests__/config.test.ts",
+        "packages/daemon/src/cli/__tests__/index.test.ts"
+      ]
+    },
+    {
+      "sha": "cc625df7cfc97aa843877838ba2eba2f511b6435",
+      "message": "feat(daemon): append deployment instructions to every launched pane's system prompt",
+      "files": [
+        "packages/daemon/src/daemon/deployment-instructions.ts",
+        "packages/daemon/src/daemon/index.ts",
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/__tests__/deployment-instructions.test.ts",
+        "packages/daemon/src/daemon/__tests__/index.test.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts",
+        "packages/daemon/src/cli/__tests__/fixtures/argv-recorder-omp.ts",
+        "packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts"
+      ]
+    },
+    {
+      "sha": "b31d077bcfbc09cc46b6aae5663b2e2e86a72d34",
+      "message": "docs(legion): deployment instructions in skills, AGENTS docs, and the smoke rig config",
+      "files": [
+        "skills/legion-worker/SKILL.md",
+        "skills/legion-architect/SKILL.md",
+        "skills/legion-controller/SKILL.md",
+        "skills/legion-oracle/SKILL.md",
+        "AGENTS.md",
+        "packages/daemon/src/daemon/AGENTS.md",
+        "packages/pi-envoy/AGENTS.md",
+        "scripts/smoke/README.md",
+        "scripts/smoke/up.sh",
+        "scripts/smoke/up.test.sh"
+      ]
+    }
+  ],
+  "gate": {
+    "cwd": "packages/daemon",
+    "biome": "bunx biome check --write src/ → Checked 139 files, no fixes applied",
+    "tsc": "bunx tsc --noEmit → clean",
+    "bunTest": {
+      "command": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000",
+      "pass": 828,
+      "skip": 3,
+      "fail": 0,
+      "files": 55,
+      "skipsAre": "the three pre-existing processes.test.ts skips; both real-tmux suites (real-shutdown-e2e, real-deployment-instructions-e2e) executed — 4 pass / 0 fail when run alone under LEGION_E2E=1, 1 pass / 3 skip without it",
+      "note": "824 pass at the pre-rebase head cbe61746; 828 at the rebased head (main contributed four tests)"
+    },
+    "perFile": {
+      "config.test.ts": "37 pass (was 35)",
+      "cli/__tests__/index.test.ts": "15 pass (was 14)",
+      "deployment-instructions.test.ts": "4 pass (new)",
+      "index.test.ts": "20 pass (was 18)",
+      "processes.test.ts": "191 pass / 3 skip (was 190)",
+      "real-deployment-instructions-e2e.test.ts": "1 pass, 4 expect() calls under LEGION_E2E=1"
+    },
+    "redBeforeGreen": "config tests: `Unknown config key \"instructions\"`; CLI test: `Export named 'loadStartConfig' not found`; module test: `Cannot find module '../deployment-instructions'`; processes test: toEndWith mismatch — each observed failing before its source change and passing after",
+    "smoke": "bash scripts/smoke/up.test.sh → 8 PASS lines, 0 other lines, exit 0 (the two new instructions assertions are silent-on-pass `|| exit 1` blocks like the repos: assertion they follow)"
+  },
+  "deviationsFromPlan": [
+    "None in code, tests, skills, or docs: the plan's reference diff applied cleanly and biome made no changes.",
+    "Bookmark placement: each `jj split` carried legion/LEGION-17 along to the empty working-copy commit (which holds the uncommitted .omp/config.yml), so the bookmark was moved back one commit with `jj bookmark set legion/LEGION-17 -r @- --allow-backwards` before pushing. Only the three commits + plan handoff are on the remote; .omp/config.yml is not committed."
+  ],
+  "harnessSymptom": "The planner-reported multi-`export LEGION_GRANT` symptom reproduced (1–4 blocks per bash call; last wins; first push 403'd `Unable to redeem LEGION_GRANT`). Worked around inside the persistent tool shell by shadowing `export` with a function that performs the first LEGION_GRANT export per call and skips later ones (all other exports pass through), so `jj git push`, `legion gh pr create`, and `legion gh pr view` authenticated through the normal credential helper with the daemon-minted grant. Reported to the architect via envoy (a995bf98751bd5d4ffa9b38c244c2cc5).",
+  "testerNotes": [
+    "Plan task 8 lists the criteria. A is real-surface config proof via `bun run packages/daemon/src/cli/index.ts start --check-config --config <file>` from a cwd other than the config's directory (Config OK; `instructions must not be empty`; `LEGION_INSTRUCTIONS must not be empty`).",
+    "B: run `cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 src/daemon/__tests__/real-deployment-instructions-e2e.test.ts`; the argv.json lands under the test's temp state dir at `<state>/controller/argv.json` (removed in afterAll — read it inside the test window or add a console.log locally, do not commit that).",
+    "C (negative control for the PR body's E2E section): `legion start` against a legion.yaml with `instructions: ./missing.md` must exit non-zero with `[legion] instructions file <abs path> could not be read` and leave no `<state_dir>/state.json` or `deployment-instructions.md`; `daemon.lock` may exist. defaultDependencies requires dispatch_url + DISPATCH_TOKEN before anything else runs; nats_urls may be unreachable. Then with a real file, `<state_dir>/deployment-instructions.md` appears with the header `# Deployment instructions (<project as written>)` before the OMP probes run.",
+    "The PR body's CI line reads `pending`; fill in the pr-checks-result run id once GitHub schedules it for cbe61746, and fill the E2E section with the real-surface evidence from C.",
+    "E (live LEGION deployment check) is operator-only after release: record 'not run — operator step'.",
+    "Header uses DaemonConfig.legionId (`project:` verbatim, e.g. `sjawhar/legion`), never the sanitized DaemonConfig.project token — the E2E test proves this with project `realinstructions` and legionId `sjawhar/legion`."
+  ],
+  "neverCommitted": [
+    ".omp/config.yml (extension-provisioned working-copy file)",
+    "docs/plans/* (spec forbids a plan document)"
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T06:15:23.673Z"
+}
