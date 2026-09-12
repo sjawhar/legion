@@ -1468,6 +1468,104 @@ describe("Legion HTTP API", () => {
     });
     expect(token.response.status).toBe(403);
   });
+  it("mints a controller grant from the controller capability and lets only it redeem gh-token with merge", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const architectGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+    expect(architectGrant.status).toBe(200);
+
+    // A phase-worker grant carrying merge intent is refused before any GitHub lease is fetched.
+    const refusedToken = await json("/legion/v1/gh-token", {
+      grantId: architectGrant.body.grantId,
+      merge: true,
+    });
+    expect(refusedToken.response.status).toBe(403);
+    expect(refusedToken.body).toEqual({
+      error: "Only the controller may merge; publish READY to the controller",
+    });
+    const refusedCredential = await json("/legion/v1/git-credential", {
+      grantId: architectGrant.body.grantId,
+      merge: true,
+    });
+    expect(refusedCredential.response.status).toBe(403);
+    expect(tokenRoles).toEqual([]);
+    // The same grant without merge intent still redeems as before.
+    const plainToken = await json("/legion/v1/gh-token", { grantId: architectGrant.body.grantId });
+    expect(plainToken.response.status).toBe(200);
+    expect(tokenRoles).toEqual(["implement"]);
+
+    // The controller form: no tree/issue, authenticated by the controller capability.
+    const wrongSecret = await json("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: "wrong",
+    });
+    expect(wrongSecret.response.status).toBe(403);
+    expect(wrongSecret.body).toEqual({ error: "Invalid controller capability" });
+    const halfForm = await json("/legion/v1/grants", {
+      tree: root,
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(halfForm.response.status).toBe(400);
+
+    const controllerGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(controllerGrant.status).toBe(200);
+    expect(controllerGrant.body).toEqual({
+      grantId: expect.any(String),
+      expiresAt: new Date(now + 60_000).toISOString(),
+    });
+
+    const merged = await json("/legion/v1/gh-token", {
+      grantId: controllerGrant.body.grantId,
+      merge: true,
+    });
+    expect(merged.response.status).toBe(200);
+    expect(merged.body).toEqual({
+      token: "minted-implement-acme",
+      appLogin: "legion-implement[bot]",
+    });
+    const credential = await curl("/legion/v1/git-credential", {
+      grantId: controllerGrant.body.grantId,
+      merge: true,
+    });
+    expect(credential.status).toBe(200);
+    expect(credential.body).toBe("username=x-access-token\npassword=minted-implement-acme");
+    expect(tokenRoles).toEqual(["implement", "implement", "implement"]);
+  });
+  it("refuses a controller grant on phase/complete", async () => {
+    await start();
+    const controllerGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(controllerGrant.status).toBe(200);
+
+    const completed = await json("/legion/v1/phase/complete", {
+      grantId: controllerGrant.body.grantId,
+      summary: "done",
+    });
+    expect(completed.response.status).toBe(403);
+    expect(completed.body).toEqual({ error: "A controller grant cannot complete a phase" });
+    expect(publications).toEqual([]);
+  });
   it("rejects gh-token/git-credential with 403 when the minting session's capability is revoked while the GitHub lease is in flight", async () => {
     const reachedLease = Promise.withResolvers<void>();
     const leaseGate = Promise.withResolvers<void>();
