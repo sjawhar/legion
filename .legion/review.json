@@ -1,0 +1,82 @@
+{
+  "issue": "LEGION-18",
+  "prNumber": 953,
+  "prUrl": "https://github.com/sjawhar/legion/pull/953",
+  "headReviewed": "6e40e8e9f0c51f295aee7e9c0222aca872f16ee5",
+  "headChain": "6e40e8e9 (test: record handoff) -> 15ed27b1 (implement: record handoff) -> 9438f735 (last text change); merge base with origin/main 7db2cd83",
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "reviewSubmission": {
+    "how": "one call: legion gh -- api --method POST repos/sjawhar/legion/pulls/953/reviews --input body.json (event in the JSON body, 4 comments[] entries)",
+    "reviewId": 5186814873,
+    "state": "CHANGES_REQUESTED",
+    "url": "https://github.com/sjawhar/legion/pull/953#pullrequestreview-5186814873",
+    "submittedAt": "2026-09-12T14:48:03Z"
+  },
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/roles/reviewer.md:16",
+      "threadId": "PRRT_kwDORFy7ds6hw7uR",
+      "commentId": 3996552577,
+      "blocking": true,
+      "description": "New fix-5 text binds APPROVED to 'no correctness finding stands' at the first submission, so a clean first pass approves the head that still carries .legion/. Contradicts the same file's mandatory order (single approval at the final head, step 3) and line 57 (no implementation change after approval; the deletion push would follow), and fires the extra pr-review wake fix 5 exists to remove. Fix: REQUEST_CHANGES when a finding stands, otherwise COMMENT while the head carries .legion/; APPROVE only for the deletion head. List COMMENT in the event parenthetical."
+    },
+    {
+      "severity": "important",
+      "file": "skills/legion-worker/SKILL.md:250",
+      "threadId": "PRRT_kwDORFy7ds6hw7uW",
+      "commentId": 3996552583,
+      "blocking": true,
+      "description": "Same finding, worker-skill reviewer bullet: 'CHANGES_REQUESTED or APPROVED' leaves no event for a clean pre-deletion pass; same fix, keep the bullet's tail (approve the deletion head by name) as the only APPROVE."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-worker/SKILL.md:97",
+      "threadId": "PRRT_kwDORFy7ds6hw7ub",
+      "commentId": 3996552588,
+      "blocking": false,
+      "description": "Fix-4 sentence 'the daemon ignores them' is imprecise: every phase schema is .passthrough() (handoff-schema.ts:186-192), so undeclared fields survive parsing and legion handoff read prints them; the real trap is a declared field of the wrong type nulling the whole file. Suggested wording in the thread."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/AGENTS.md:11",
+      "threadId": "PRRT_kwDORFy7ds6hw7ue",
+      "commentId": 3996552591,
+      "blocking": false,
+      "description": "Redrawn skills tree omits skills/envoy/ (tracked at head). Pre-existing omission, but fix 9 redraws the tree; add the envoy/ line between dispatch/ and legion-architect/."
+    }
+  ],
+  "fastFollow": "The two minor items above (fix-4 passthrough wording; envoy/ in the skills tree). Fold into the corrective push if trivial, otherwise one fast-follow.",
+  "githubFactsVerified": {
+    "checksAtHead": "statusCheckRollup SUCCESS at 6e40e8e9: lint, typecheck, test, pr-title, changes, pi-envoy pass; contracts, envoy-client, envoy-go, envoy-plugin, dispatch, claude-envoy-bridge SKIPPED (runs 34699863604 / 34699863610)",
+    "threadsBeforeReview": "0 threads, 0 reviews",
+    "e2e": "PR body E2E names the surface (acceptance greps + bun test packages/pi-envoy), exact commands, observed output, 11-hit negative control on origin/main, head 15ed27b1; jj log -r '15ed27b1 & ancestors(6e40e8e9)' confirms ancestry",
+    "files": "11 spec'd text files + .legion/{plan,implement,test}.json; nothing under docs/, no .omp/config.yml; mergeable MERGEABLE",
+    "thermo": "skipped (docs-only PR)"
+  },
+  "contentVerified": {
+    "fix1": "scout and oracle both present in this pane's task agent list; packages/daemon/src/state/fetch.ts has contextsPage (435) and while (page.hasNextPage) (455)",
+    "fix2": "gh-shim.ts:17 exec legion gh -- \"$@\"; cli/index.ts:102-114 redeems LEGION_GRANT at /legion/v1/gh-token per call, token passed to gh only via env; isPrMergeInvocation (91-100) refuses pr ... merge and api .../merge",
+    "fix3": "acceptance grep exit 1 at head; Post every correctness finding / no schema validation / Context7 exit 1",
+    "fix4": "validatePhaseHandoff (handoff-schema.ts:205) runs on every readPhaseHandoff (ledger.ts:88), failure -> null; legion handoff read validates this PR's three handoffs (schemaVersion 1 each)",
+    "fix5": "gh api manual: field flags go to the URL query string with --input, so event must be in the body; GitHub create-review body accepts commit_id, event APPROVE|REQUEST_CHANGES|COMMENT, body, comments[] {path,line,side,body}; this review was submitted exactly that way and produced one CHANGES_REQUESTED review with 4 inline threads",
+    "fix6": "planner.md and worker skill carry the one-line sentence; root AGENTS.md Plans row qualified; 6 fence lines (even), diagram fence closes at line 100, ## Documentation is a heading at 121",
+    "fix7": "tester.md and worker skill carry the recorded-once rule; the tester complied (environment evidence only in .legion/test.json)",
+    "fix8": "both Sami quotes verbatim, 1 hit each in the worker skill; bullets sit between the fast-follow and tester bullets",
+    "fix9": "skills/AGENTS.md tree without github/linear, dispatch line corrected, coordination paragraph names envoy_publish and native dispatch_* tools",
+    "coordination": "merger.md absent from the diff; no +/- line containing pr-queue in the worker or architect skill; architect skill still reads notifications.role.pr-queue"
+  },
+  "observations": [
+    "LEGION-12 reproduced in this pane: from ~14:48 every bash call carried 2-3 injected LEGION_GRANT headers; the last export wins and 403s on redeem. Workaround used for the remaining calls: name the first-injected grant of a previous call explicitly (LEGION_GRANT=<id> legion gh ...); such a grant still redeems minutes later.",
+    "legion gh -- api --help prints the citty help for `legion gh` instead of gh's: citty intercepts --help even after `--`. Pre-existing CLI bug, not part of this PR.",
+    "GitHub reviewDecision stays REVIEW_REQUIRED after the App's CHANGES_REQUESTED review (App reviews do not drive reviewDecision here); the daemon's phaseCompleteStatus keys off state.prs reviewDecision === changes_requested, so the architect may need to route the corrective implementer explicitly."
+  ],
+  "handoffCommit": "committed locally with jj split; not pushed (review App holds no contents permission)",
+  "whatRemains": "Implementer fixes the one correctness finding in both files (and optionally the two minor wording items), tester re-runs the acceptance checks at the new head, reviewer re-reviews; then the .legion/ deletion push and approval of that head by name.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T14:55:04.975Z"
+}
