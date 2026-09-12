@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import type {
   AnswerAskInput,
   Ask,
@@ -194,8 +194,11 @@ test("AskCard renders Markdown in the question, including bold text and a list",
   }
 });
 
-test("AskCard submits the selected single option", async () => {
-  const submitted: Array<{ id: string; input: { selected: string[]; text?: string } }> = [];
+test("AskCard submits the selected single option with the revision the human reviewed", async () => {
+  const submitted: Array<{
+    id: string;
+    input: { selected: string[]; text?: string; expected_edited_at: string | null };
+  }> = [];
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(
     <AskCard
@@ -219,7 +222,9 @@ test("AskCard submits the selected single option", async () => {
     fireEvent.click(submit);
 
     await waitFor(() =>
-      expect(submitted).toEqual([{ id: "ask-1", input: { selected: ["Ship"] } }])
+      expect(submitted).toEqual([
+        { id: "ask-1", input: { selected: ["Ship"], expected_edited_at: null } },
+      ])
     );
   } finally {
     view.unmount();
@@ -227,7 +232,7 @@ test("AskCard submits the selected single option", async () => {
 });
 
 test("AskCard submits every checked multiple option", async () => {
-  const submitted: Array<{ selected: string[] }> = [];
+  const submitted: AnswerAskInput[] = [];
   const input = ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] });
   const { view } = renderCard(
     <AskCard
@@ -245,14 +250,16 @@ test("AskCard submits every checked multiple option", async () => {
     fireEvent.click(view.getByRole("checkbox", { name: "Tests" }));
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
-    await waitFor(() => expect(submitted).toEqual([{ selected: ["Docs", "Tests"] }]));
+    await waitFor(() =>
+      expect(submitted).toEqual([{ selected: ["Docs", "Tests"], expected_edited_at: null }])
+    );
   } finally {
     view.unmount();
   }
 });
 
 test("AskCard submits free-text without inventing a selected option", async () => {
-  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const submitted: AnswerAskInput[] = [];
   const input = ask();
   const { view } = renderCard(
     <AskCard
@@ -271,14 +278,18 @@ test("AskCard submits free-text without inventing a selected option", async () =
     });
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
-    await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Take the third path" }]));
+    await waitFor(() =>
+      expect(submitted).toEqual([
+        { selected: [], text: "Take the third path", expected_edited_at: null },
+      ])
+    );
   } finally {
     view.unmount();
   }
 });
 
 test("AskCard reveals the Other field only once Other is picked, and submits its text with no real option", async () => {
-  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const submitted: AnswerAskInput[] = [];
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(
     <AskCard
@@ -302,7 +313,9 @@ test("AskCard reveals the Other field only once Other is picked, and submits its
     expect(submit.hasAttribute("disabled")).toBe(false);
     fireEvent.click(submit);
 
-    await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Try a hybrid" }]));
+    await waitFor(() =>
+      expect(submitted).toEqual([{ selected: [], text: "Try a hybrid", expected_edited_at: null }])
+    );
   } finally {
     view.unmount();
   }
@@ -381,7 +394,9 @@ test("AskCard lets a human explicitly answer with a question-shaped Other respon
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
     fireEvent.click(await view.findByRole("button", { name: "Answer with it anyway" }));
 
-    await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Why wait?" }]));
+    await waitFor(() =>
+      expect(submitted).toEqual([{ selected: [], text: "Why wait?", expected_edited_at: null }])
+    );
   } finally {
     view.unmount();
   }
@@ -425,7 +440,7 @@ test("an approval-kind ask labels itself Approval requested and offers no Other 
 });
 
 test("an approval-kind ask submits Approve with no reason", async () => {
-  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const submitted: AnswerAskInput[] = [];
   const input = ask({
     kind: "approval",
     options: [{ label: "Approve" }, { label: "Request changes" }],
@@ -446,14 +461,16 @@ test("an approval-kind ask submits Approve with no reason", async () => {
     expect(view.queryByLabelText("Reason")).toBeNull();
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
-    await waitFor(() => expect(submitted).toEqual([{ selected: ["Approve"] }]));
+    await waitFor(() =>
+      expect(submitted).toEqual([{ selected: ["Approve"], expected_edited_at: null }])
+    );
   } finally {
     view.unmount();
   }
 });
 
 test("an approval-kind ask requires a reason before Request changes can submit", async () => {
-  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const submitted: AnswerAskInput[] = [];
   const input = ask({
     kind: "approval",
     options: [{ label: "Approve" }, { label: "Request changes" }],
@@ -480,7 +497,9 @@ test("an approval-kind ask requires a reason before Request changes can submit",
     fireEvent.click(submit);
 
     await waitFor(() =>
-      expect(submitted).toEqual([{ selected: ["Request changes"], text: "Needs another pass" }])
+      expect(submitted).toEqual([
+        { selected: ["Request changes"], text: "Needs another pass", expected_edited_at: null },
+      ])
     );
   } finally {
     view.unmount();
@@ -488,7 +507,7 @@ test("an approval-kind ask requires a reason before Request changes can submit",
 });
 
 test("AskCard submits checked options alongside Other's free text for a multiple-select ask", async () => {
-  const submitted: Array<{ selected: string[]; text?: string }> = [];
+  const submitted: AnswerAskInput[] = [];
   const input = ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] });
   const { view } = renderCard(
     <AskCard
@@ -510,7 +529,9 @@ test("AskCard submits checked options alongside Other's free text for a multiple
     fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
 
     await waitFor(() =>
-      expect(submitted).toEqual([{ selected: ["Docs"], text: "Also update the wiki" }])
+      expect(submitted).toEqual([
+        { selected: ["Docs"], text: "Also update the wiki", expected_edited_at: null },
+      ])
     );
   } finally {
     view.unmount();
@@ -535,6 +556,36 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
     await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([]));
     rejectAnswer(new Error("offline"));
     await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([input]));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard reloads a changed question and requires the human to reconfirm", async () => {
+  const input = ask({ options: [{ label: "Ship" }] });
+  const current = ask({
+    edited_at: "2026-09-12T12:00:00Z",
+    options: [{ label: "Hold" }],
+    question: "Should we hold this release?",
+  });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async () => {
+        throw new ApiError(409, { code: "ASK_CHANGED", error: "question changed" });
+      }}
+      getAskThread={async () => ({ ask: current, edits: [], replies: [] })}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+
+    await view.findByText(/This question changed while you were answering/);
+    expect(view.getByText("Should we hold this release?")).toBeTruthy();
+    expect(view.getByRole("radio", { name: "Hold" }).hasAttribute("checked")).toBe(false);
+    expect(view.getByRole("button", { name: "Submit answer" }).hasAttribute("disabled")).toBe(true);
   } finally {
     view.unmount();
   }

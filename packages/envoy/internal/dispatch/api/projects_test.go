@@ -55,6 +55,75 @@ func TestListProjectsIncludesCreatedAt(t *testing.T) {
 	}
 }
 
+func TestProjectAndSettingsMutationsAppendLiveEvents(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "CORE",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("map repository: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "CORE", "title": "State owner",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
+		"pinned": true,
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("write user state: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	rows, err := database.Pool.Query(t.Context(), `
+		select type, coalesce(project_key, ''), coalesce(issue_key, ''), notify
+		from events
+		where type in ('project.created', 'settings.repo_project.updated', 'user_state.updated')
+		order by id
+	`)
+	if err != nil {
+		t.Fatalf("read settings events: %v", err)
+	}
+	defer rows.Close()
+	type persistedEvent struct {
+		Type    string
+		Project string
+		Issue   string
+		Notify  bool
+	}
+	var got []persistedEvent
+	for rows.Next() {
+		var event persistedEvent
+		if err := rows.Scan(&event.Type, &event.Project, &event.Issue, &event.Notify); err != nil {
+			t.Fatalf("scan settings event: %v", err)
+		}
+		got = append(got, event)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate settings events: %v", err)
+	}
+	want := []persistedEvent{
+		{Type: "project.created", Project: "CORE"},
+		{Type: "settings.repo_project.updated", Project: "CORE"},
+		{Type: "user_state.updated", Project: "CORE"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("settings events = %#v, want %#v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("settings event %d = %#v, want %#v", index, got[index], want[index])
+		}
+	}
+}
+
 func TestListProjectsCountsOpenAsksOnIssuesAndDocuments(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{

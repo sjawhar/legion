@@ -514,6 +514,20 @@ export interface SubscriptionRemovedEventPayload {
   readonly session_id: string;
   readonly by: Actor;
   readonly topics: readonly string[];
+  /** True only while Dispatch is retrying the listener-side removal. */
+  readonly pending?: boolean;
+  /** The remove-requested event this completion settles. */
+  readonly request_event_id?: number;
+}
+
+export interface RepoProjectUpdatedEventPayload {
+  readonly mapping: RepoProject;
+  readonly deleted: boolean;
+}
+
+export interface UserStateUpdatedEventPayload {
+  readonly login: string;
+  readonly state: UserIssueState;
 }
 
 interface DispatchEventBase {
@@ -528,6 +542,16 @@ interface DispatchEventBase {
 }
 
 export type DispatchEvent =
+  | (DispatchEventBase & { readonly type: "project.created"; readonly payload: Project })
+  | (DispatchEventBase & { readonly type: "project.updated"; readonly payload: Project })
+  | (DispatchEventBase & {
+      readonly type: "settings.repo_project.updated";
+      readonly payload: RepoProjectUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "user_state.updated";
+      readonly payload: UserStateUpdatedEventPayload;
+    })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: Issue })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: Issue })
   | (DispatchEventBase & { readonly type: "issue.closed"; readonly payload: Issue })
@@ -600,6 +624,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "child.status";
       readonly payload: ChildStatusEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "subscription.remove_requested";
+      readonly payload: SubscriptionRemovedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "subscription.removed";
@@ -688,6 +716,8 @@ export interface EditAskInput {
 export interface AnswerAskInput {
   readonly selected: string[];
   readonly text?: string;
+  /** The ask's `edited_at` value when the human reviewed the current wording. */
+  readonly expected_edited_at: string | null;
 }
 
 export interface ResolveAskInput {
@@ -942,4 +972,6 @@ export const SubscriptionRemovedEventPayloadSchema = z.object({
   session_id: z.string().optional(),
   by: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
   topics: z.array(z.string()).optional(),
+  pending: z.boolean().optional(),
+  request_event_id: z.number().int().positive().optional(),
 });

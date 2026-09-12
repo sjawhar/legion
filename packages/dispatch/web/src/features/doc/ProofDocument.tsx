@@ -328,7 +328,11 @@ export function ProofDocument({
   });
   const answerBlockAsk = useMutation({
     mutationFn: ({ ask, selected, text }: { ask: Ask; selected: string[]; text?: string }) =>
-      api.answerAsk(ask.id, { selected, ...(text === undefined ? {} : { text }) }),
+      api.answerAsk(ask.id, {
+        selected,
+        ...(text === undefined ? {} : { text }),
+        expected_edited_at: ask.edited_at,
+      }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id, "text"] });

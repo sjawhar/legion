@@ -42,12 +42,13 @@ human unsubscribed a session from the dashboard) reaches both the issue's own
 topic and the removed session's agent topic directly; only the session the
 payload names renders it and drops the matching local NATS subscription
 (so the dead-connection recovery path does not resurrect it) — every other
-subscriber ignores it.
-`dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
+subscriber ignores it. `dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
 
 `dispatch_doc_edit` may retype an identified paragraph into any schema-declared typed block with
 `{ op: "retype", block, type, attributes }`. A question about a document is written as an `ask`
-block through that tool or a `:::ask` directive, not as an issue-level `dispatch_ask`.
+block through that tool or a `:::ask` directive, not as an issue-level `dispatch_ask`. The extension
+passes the host tool AbortSignal to every Dispatch execution; the shared client also imposes a
+60-second HTTP deadline.
 
 ## Where to look
 
@@ -58,7 +59,7 @@ block through that tool or a `:::ask` directive, not as an issue-level `dispatch
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
-| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the thirteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, pass the live session id/title to `executeDispatchTool`, and subscribe from a successful result's `details.topic`. |
+| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the thirteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, pass the live session id/title and host AbortSignal to `executeDispatchTool`, and subscribe from a successful result's `details.topic`. |
 | Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon appends each as `--append-system-prompt` |
 | Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 

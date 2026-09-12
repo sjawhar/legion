@@ -215,7 +215,7 @@ export type EnvoyClient = {
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const apiToken = process.env["ENVOY_TOKEN"];
+  const { ENVOY_TOKEN: apiToken } = process.env;
 
   const request = async (path: string, init: RequestInit): Promise<string> => {
     const url = `${baseUrl}${path}`;

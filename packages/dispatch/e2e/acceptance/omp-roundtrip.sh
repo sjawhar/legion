@@ -206,7 +206,7 @@ if [[ "$mode" == E4 ]]; then
     -X POST \
     -H 'Content-Type: application/json' \
     -H 'X-Dispatch-User: sjawhar' \
-    --data "{\"selected\":[\"$answer_option\"]}" \
+    --data "{\"selected\":[\"$answer_option\"],\"expected_edited_at\":null}" \
     "$DISPATCH_URL/api/v1/asks/$ask_id/answer" >/dev/null
   await_steer 'ask.answered'
   printf 'E4 passed: ask %s answered as %s; transcript %s\n' "$ask_id" "$answer_option" "$transcript"

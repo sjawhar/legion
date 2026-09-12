@@ -47,5 +47,6 @@ the native Dispatch tool suite:
   array (empty when no attempts exist). `message.delivery` and `message.answered` event payloads
   carry the attempt status and correlated reply that the Conversation card coalesces; add a
   delivery mode in the contract before any server or adapter accepts it.
+- `AnswerAskInput.expected_edited_at` is required and carries the nullable ask revision a human reviewed. Dispatch events include project/configuration events and the two-stage subscription removal (`subscription.remove_requested` with `pending: true`, then `subscription.removed` with its `request_event_id`); clients must advance their event cursor over the pending command without treating it as a completed removal.
 - Keep examples synchronized with the real receiver output (Slack team IDs,
   GitHub owner/repo segments, and native Dispatch keys).

@@ -13,8 +13,7 @@ production build from `web/dist`.
 - `features/issue/IssueLabels.tsx` edits issue-header labels with project-label suggestions; `IssueList.tsx` filters project issues by every selected label through URL-backed, repeatable `?label=` parameters.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
   browser API boundary.
-- `web/src/api/sse.ts` opens the issue event stream and invalidates TanStack
-  Query cache entries for the affected issue.
+- `web/src/api/sse.ts` opens the workspace event stream. Its shared cache-key vocabulary refreshes issue, ask/thread, comment, artifact-reference, project-document, subscriber, and settings data for the matching event; reconnect invalidates every live-data family before the UI renders stale data.
 - `web/src/main.tsx` installs React Router and the shared Query client.
 - `web/src/features/search/` owns the global palette, rail `Search` control, and `Ctrl/Cmd+K` shortcut. It groups hits by their issue or standalone project-document owner; document-owned hits use the document name and `/projects/:key/documents/:slug` route, adding an ask or comment query parameter for discussion hits. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node.
 
@@ -28,8 +27,10 @@ Answering and asking for clarification are different acts on an ask card (`featu
 options, free text is an explicit **Other** choice - the last row of the option list, which reveals the `Your answer` field;
 a question-shaped Other response presents an inline default action to send it as clarification (keeping the ask open) or to answer
 with it anyway. A chosen Other is recorded as `{selected: [], text}` (single) or `{selected, text}` (multiple) and renders under an
-`Other` label once answered. An ask with no options keeps the free-text field alone. Clarifying: the reply thread under an open ask
-is labelled `Ask for clarification` / `Send` (answered asks keep `Reply`) and says `Replying does not answer the question.` The Inbox
+`Other` label once answered. Every answer includes the nullable `edited_at` revision the human reviewed. If the server returns
+`ASK_CHANGED`, the card reloads the current question, preserves typed free text, clears the prior selection, and requires explicit
+reconfirmation. An ask with no options keeps the free-text field alone. Clarifying: the reply thread under an open ask is labelled
+`Ask for clarification` / `Send` (answered asks keep `Reply`) and says `Replying does not answer the question.` The Inbox
 partitions the server-ordered rows by `last_reply`: asks whose newest reply is a human's are listed under `Waiting on agents`
 with a `Waiting on <asker>` chip (the agent owes the next turn), everything else under `Needs you` with a `<agent> replied` chip
 when an agent spoke last; both headings appear only when the waiting section is non-empty. The card, its collapsed disclosure,

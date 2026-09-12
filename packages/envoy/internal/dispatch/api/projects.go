@@ -69,8 +69,14 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project key and name are required")
 		return
 	}
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
 	var project model.Project
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+	if err := tx.QueryRow(r.Context(), `
 		insert into projects (key, name) values ($1, $2) returning key, name, created_at
 	`, input.Key, input.Name).Scan(&project.Key, &project.Name, &project.CreatedAt); err != nil {
 		if isUniqueViolation(err) {
@@ -80,5 +86,15 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	event, err := s.appendEvent(r.Context(), tx, projectOwner(project.Key).event("project.created", actor, project))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.publish(event)
 	writeJSON(w, http.StatusCreated, project)
 }

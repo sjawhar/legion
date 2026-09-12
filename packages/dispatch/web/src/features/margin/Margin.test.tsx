@@ -549,7 +549,10 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
     expect((shipOption as HTMLInputElement).checked).toBe(true);
     fireEvent.click(within(needsYou).getByRole("button", { name: "Submit answer" }));
     await waitFor(() =>
-      expect(answerAsk).toHaveBeenCalledWith(unanchoredAsk.id, { selected: ["Ship"] })
+      expect(answerAsk).toHaveBeenCalledWith(unanchoredAsk.id, {
+        selected: ["Ship"],
+        expected_edited_at: null,
+      })
     );
   } finally {
     view.unmount();
@@ -596,11 +599,17 @@ test("Margin clears an answered anchored ask from Needs you without an event str
     fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
     fireEvent.click(within(needsYou).getByRole("button", { name: "Submit answer" }));
     await waitFor(() =>
-      expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, { selected: ["Ship"] })
+      expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, {
+        selected: ["Ship"],
+        expected_edited_at: null,
+      })
     );
     await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
     expect(screen.getByRole("button", { name: "Open review panel (0 open asks)" })).toBeTruthy();
-    expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, { selected: ["Ship"] });
+    expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, {
+      selected: ["Ship"],
+      expected_edited_at: null,
+    });
   } finally {
     view.unmount();
     answerAsk.mockRestore();
