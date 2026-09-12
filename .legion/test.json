@@ -1,0 +1,144 @@
+{
+  "issue": "LEGION-21",
+  "pr": {
+    "number": 962,
+    "url": "https://github.com/sjawhar/legion/pull/962",
+    "branch": "legion/LEGION-21",
+    "base": "main"
+  },
+  "testedHead": {
+    "code": "6a55bd6d13b6",
+    "prHead": "020677bf2746 (adds only .legion/implement.json on top of 6a55bd6d)",
+    "baseAtTest": "8f6fad367099 (chore: release pi-envoy v1.4.3); main has since advanced to 95b93e0bb0d9 (#958, envoy-only)"
+  },
+  "verdict": "FAIL",
+  "failingAcceptance": [
+    5
+  ],
+  "passingAcceptance": [
+    1,
+    2,
+    3,
+    4,
+    6,
+    7
+  ],
+  "ci": {
+    "prHead": "020677bf2746",
+    "status": "red",
+    "failing": [
+      "test (packages/daemon, LEGION_E2E=1 LEGION_TMUX_LIVE=1): 879 pass / 1 fail — https://github.com/sjawhar/legion/actions/runs/34680316695/job/103517665904 and https://github.com/sjawhar/legion/actions/runs/34680301471/job/103517627552"
+    ],
+    "passing": [
+      "changes",
+      "claude-envoy-bridge",
+      "contracts",
+      "dispatch",
+      "envoy-client",
+      "envoy-go",
+      "envoy-plugin",
+      "lint",
+      "pi-envoy",
+      "pr-title",
+      "typecheck"
+    ],
+    "mainAtSameTime": "pr-and-main.yaml green on main at 95b93e0bb0d9 / 97219cbda94a / 15d92603987d (gh run list --branch main)"
+  },
+  "failure": {
+    "acceptance": 5,
+    "test": "ProcessManager > probes a real tmux pane as alive, detects its death, and resurrects it once (packages/daemon/src/daemon/__tests__/processes.test.ts:5522-5568; it.skipIf(process.env.LEGION_TMUX_LIVE !== \"1\"), so it runs only in CI and in a LEGION_TMUX_LIVE=1 shell)",
+    "command": "cd packages/daemon && LEGION_TMUX_LIVE=1 bun test src/daemon/__tests__/processes.test.ts --test-name-pattern 'probes a real tmux pane as alive'",
+    "actual": "error: expect(received).toBe(expected) / Expected: \"dead\" / Received: \"alive\" at processes.test.ts:5558:45 — reproduced 3/3 locally at 6a55bd6d (third run also hit `tmux new-session failed (exit 1): duplicate session: legion-omp`, the leak described below); same assertion and line in the CI job log. Full suite: `cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test` -> 879 pass, 1 fail, Ran 880 tests across 54 files.",
+    "expected": "probe(root) returns \"dead\" after `tmux -L legion-<project> kill-pane -t <windowId>`; the full daemon suite green (acceptance 5: every existing daemon test passes with only the enumerated edits).",
+    "rootCause": "Test-harness regression in this branch, not the runtime. processes.test.ts `manager()` (lines 295-297) constructs `new TmuxRuntime({ tmux: { run: deps.run, socket: \"legion-omp\" }, project: \"omp\", ... })` with the socket/session and project hardcoded. Before the branch, ProcessManager derived them from state (`this.tmux = { run: deps.run, socket: \\`legion-${deps.state.project}\\` }`). The two live-tmux tests (processes.test.ts:5472 and :5522) create `project = smoke<Date.now()>` and drive `tmux -L legion-<project>` themselves for kill-pane/kill-session/list-windows, so the runtime spawns into tmux server `legion-omp` while the test kills panes on a server that does not exist: (a) `probe` stays alive -> the failing assertion; (b) the sibling test 'creates the first live root without a default bash window' now passes vacuously (its list-windows hits the non-existent server, so `.not.toContain(\"bash\")` is trivially true); (c) every run leaks a real `legion-omp` tmux server whose windows run `sleep 999` (observed after one full-suite run + 3 repro runs: `tmux -L legion-omp list-windows -a` showed 5 windows named legion-42, panes %1-%5, @legion_owner=legion-omp; cleaned up with `tmux -L legion-omp kill-server`). The fix belongs in the test helper (derive socket `legion-${state.project}` and `project: state.project`), i.e. inside the enumerated `manager()/workerCapFixture build a TmuxRuntime` edit; no production code change is indicated by this failure.",
+    "note": "CI runs the daemon suite with LEGION_E2E=1 LEGION_TMUX_LIVE=1 (.github/workflows/pr-and-main.yaml:93-98); a plain `bun test packages/daemon` skips these live cases, which is why the implementer's local run was green."
+  },
+  "acceptance": {
+    "1": {
+      "verdict": "PASS",
+      "commands": [
+        "bun test packages/daemon/src/daemon/__tests__/runtime.contract.test.ts -> 44 pass, 0 fail, 115 expect() calls, Ran 44 tests across 1 file (incl. 'ProcessManager stays runtime-agnostic' x11: never references tmux. / prepareSocket / writePaneSecret / launchShimmedProcess / workerClient( / recordedWindowId / rewriteIssueWindowId / probedWindowId / reconcileTmuxWindows; never branches on locator.runtime; imports no tmux or secret-writing module)",
+        "grep -cE 'tmux\\.|prepareSocket|writePaneSecret|launchShimmedProcess|workerClient\\(|recordedWindowId|rewriteIssueWindowId|probedWindowId|reconcileTmuxWindows|connectWorkerRpc|readProcessCmdline' packages/daemon/src/daemon/processes.ts -> 0 (each symbol individually 0)",
+        "grep -nE '^import' processes.ts -> no ./tmux, no writeSecretFile import; imports { awaitShutdown, boundedWait, DAEMON_CLI_ENTRYPOINT, Locator, locatorHandles, ProcessStopFailed, probeWorker, Runtime, sameProcess, shellPath } from ./runtime",
+        "grep -nE '^export' runtime.ts -> DAEMON_CLI_ENTRYPOINT, TmuxWindowLocator, K8sLocator, TmuxLocator, Locator, RoleResources, SpawnSpec, ProbeResult, Runtime, ProcessStopFailed, sameProcess, locatorHandles, boundedWait, awaitShutdown, probeWorker, shellPath",
+        "ProcessManager methods present (grep '^  (async )?<name>\\('): admit:355 releaseSlot:431 spawnWorker:440 workerReady:647 markProcessDead:946 reportRootExit:969 closeTree:1009 beginLinger:1686 expireLinger:1704 handleException:1708 resumeWorker:1751"
+      ],
+      "shapes": "Runtime {spawn(kind, spec): Promise<Locator>; probe(locator): Promise<ProbeResult{status: alive|dead|unknown; pid?}>; connect(locator, timeoutMs?): Promise<WorkerRpcClient>; stop(locator, timeoutMs, {skipGraceful?}); reconcileOrphans(known: ReadonlySet<string>, graceMs)} — identical to root spec section 1. SpawnSpec {issue?: IssueKey (the accepted deviation), role: LegionRole|'controller', workspaceDir, env: Record<string, string|undefined>, innerCommand, resources?: RoleResources, secrets: Record<string,string>}. Locator = ({runtime:'tmux'} & TmuxWindowLocator) | ({runtime:'kubernetes'} & K8sLocator). K8sLocator {namespace, podName, podUid, pvcName, ompSessionFile?} — as declared. ProcessManager holds `private readonly runtime: Runtime` from `deps.runtime` (constructor)."
+    },
+    "2": {
+      "verdict": "PASS",
+      "commands": [
+        "grep -nE 'locator\\.runtime|runtime ===' packages/daemon/src/daemon/processes.ts -> no output, exit 1",
+        "runtime.contract.test.ts 'processes.ts never branches on locator.runtime' pass"
+      ],
+      "note": "The only runtime-discriminant reads outside the runtimes are runtime.ts's own helpers (sameProcess, locatorHandles) and api/state.ts's redactLocator (exhaustive switch, projection only), as the plan declared."
+    },
+    "3": {
+      "verdict": "PASS",
+      "commands": [
+        "bun test packages/daemon/src/daemon/__tests__/legion-state.test.ts -> 35 pass, 0 fail (incl. 'migrates v23 state to v24 by tagging every persisted locator with runtime: \"tmux\"', 'rejects a v24 locator that carries no runtime discriminant', 'migrates ... through v18, v19, v20, v21, v22, v23, and v24')",
+        "Real migration (driver /tmp/legion21-test/migrate/migrate.ts, `cd packages/daemon && bun /tmp/legion21-test/migrate/migrate.ts`) on a read-only copy of the dogfood /home/ubuntu/.local/state/legion/sjawhar-legion/state.json (never touched) in /tmp/legion21-test/migrate/scratch/: source version=23 locators=34 tagged=0 -> loadState: version=24 locators=34 tmux=34 other=0 (trees-with-locator=13, claims-with-locator=20, controllerLocator.runtime=tmux); state.json.v23.bak byte-identical to source: true (66902 bytes); saveState+loadState round-trip: version=24, 34 locators, on-disk all-tagged=true",
+        "Negative control: delete `runtime` from one tree locator in the saved v24 file -> loadState throws `Invalid Legion state: Invalid discriminator value. Expected 'tmux' | 'kubernetes'` (loud, no default)"
+      ]
+    },
+    "4": {
+      "verdict": "PASS",
+      "commands": [
+        "bun test packages/daemon/src/daemon/__tests__/config.test.ts -> 44 pass, 0 fail (runtime, daemon_url, and bind: defaults; kubernetes YAML; rejects runtime other than tmux|kubernetes naming the source; requires daemon_url under kubernetes; rejects invalid daemon_url from either source and normalizes a trailing slash; rejects non-loopback bind under tmux from either source; rejects empty bind; YAML daemon_url beats LEGION_DAEMON_URL; keys recognized by the YAML loader)",
+        "Real CLI (scratch configs /tmp/legion21-test/negative/*.yaml, project sjawhar/2121, shell without LEGION_DAEMON_URL): `bun run packages/daemon/src/cli/index.ts start sjawhar/2121 --config bind.yaml` (bind: 0.0.0.0, default runtime) -> exit 1 `error: bind must be 127.0.0.1 unless runtime is kubernetes`; k8s-nourl.yaml (runtime: kubernetes, no daemon_url) -> exit 1 `error: daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)`; k8s.yaml (runtime: kubernetes + daemon_url + bind 0.0.0.0) -> exit 1 `error: runtime: kubernetes is not implemented yet`; state_dir /tmp/legion21-test/negative/state not created after the kubernetes refusal",
+        "Live rig panes (rig legion.yaml daemon_url: http://127.0.0.1:19370; this tester pane's own LEGION_DAEMON_URL is http://127.0.0.1:13370): `tmux -L legion-sjawhar24 list-panes -a -F '#{pane_id} #{pane_pid}'` then only the LEGION_DAEMON_URL= entry of /proc/<pane_pid>/environ -> controller %1 pid 3576196: http://127.0.0.1:19370; root architect LEGSMOKE-30 %2 pid 3761590: http://127.0.0.1:19370; root architect LEGSMOKE-31 %3 pid 4074954: http://127.0.0.1:19370; planner LEGSMOKE-31 %4 pid 4132433: http://127.0.0.1:19370 — all three former hardcode sites (spawnController, spawnTree, launchWorker) deliver config.daemonUrl. Secrets in those environs are LEGION_BOOT_TOKEN_FILE / DISPATCH_TOKEN_FILE only (no *_TOKEN= values)."
+      ]
+    },
+    "5": {
+      "verdict": "FAIL",
+      "commands": [
+        "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test (CI-equivalent) -> 879 pass, 1 fail, Ran 880 tests across 54 files [26.55s]; the one failure is described under `failure` above",
+        "bun test packages/contracts -> 90 pass, 0 fail, Ran 90 tests across 8 files",
+        "packages/daemon/node_modules/.bin/tsc --noEmit -p packages/daemon | packages/contracts | packages/pi-envoy -> rc=0 each",
+        "packages/daemon/node_modules/.bin/biome check packages/daemon/src packages/contracts/src packages/pi-envoy/src -> Checked 169 files in 375ms. No fixes applied.",
+        "Smoke rig on tmux (SMOKE_DIR=/tmp/legion21-test/rig, SMOKE_PROJECT=sjawhar/24, SMOKE_REPO=sjawhar/legion-smoke, SMOKE_WEBHOOK_MODE=envoy, root LEGSMOKE-30, child LEGSMOKE-31, LEGION_OMP_PATH=rpcfix OMP, OMP_PROFILE/PI_PROFILE=legion21-smoke rebuilt from 6a55bd6d, LEGION_TMUX_PATH=/tmp/legion21-test/tmux-wrapper.sh argv tracer around the real tmux; started via `secrets ENVOY_GITHUB_WEBHOOK_SECRET -- bash -c 'GITHUB_WEBHOOK_SECRET=$ENVOY_GITHUB_WEBHOOK_SECRET exec bash scripts/smoke/up.sh'` from an env scrubbed of every LEGION_*/DISPATCH_* pane variable): RIG READY; GREEN Legion daemon {version:24}; CHECKPOINT 1 OK: Dispatch tracks LEGSMOKE-30 past triage; controller locator is live; CHECKPOINT 2 OK: Dispatch reports LEGSMOKE-30 in_progress; architect locator is live; CHECKPOINT 3 OK: posted spec artifact, open design gate, and child issue observed; [daemon restarted on legion.gateoff.yaml (gates.design: off) -> state.gates.LEGSMOKE-30.designApproved = 'gate-off', architect released LEGSMOKE-31 -> todo -> admitted, no new panes opened by the restart]; CHECKPOINT 4 OK: a released child is tracked by admission or tree state; CHECKPOINT 13 OK: 3 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24",
+        "Checkpoint 13 negative control: `tmux -L legion-sjawhar24 set-environment -g LEGION_BOOT_TOKEN planted-by-tester` -> `CHECKPOINT 13 FAILED: private tmux server global environment carries LEGION_BOOT_TOKEN` (exit 1); `set-environment -gu LEGION_BOOT_TOKEN` -> CHECKPOINT 13 OK again"
+      ],
+      "behaviouralNarrowingObserved": "Not reachable on the rig (a persist failure after spawnRoot cannot be induced on the real surface); pinned by processes.test.ts 'kills the just-spawned pane before propagating a saveState failure...' (kill-pane [\"%1\"]) which passes in the suite above.",
+      "movedStopCodeOnRealProcesses": [
+        "Window sharing (tmux argv tracer /tmp/legion21-test/rig/tmux-argv.log): 08:21:16 `new-window -P -F ... -t legion-sjawhar24 -n legsmoke-31 -e LEGION_TREE= -e LEGION_ISSUE= -e LEGION_ROLE= -e LEGION_ROOT_WORKSPACE= ...` (LEGSMOKE-31 root -> @3/%3), 08:22:18 `split-window -t @3 -P -F '#{pane_id} #{pane_pid}' -e LEGION_TREE= ...` (LEGSMOKE-31 planner -> %4) then `select-layout -t @3 tiled`; `tmux list-panes -a` showed @3 legsmoke-31 %3 4074954 and @3 legsmoke-31 %4 4132433 — a second worker on the same issue splits into the issue's window; the controller's -e pairs end with LEGION_CONTROLLER_SECRET_FILE (the accepted order deviation).",
+        "Graceful stop over a real shim (branch TmuxRuntime.stop driven directly against the live planner pane by /tmp/legion21-test/stop-planner.ts while the rig daemon was down; 10 s budget): probe before {alive, pid 4132433}; stop resolved after 1426ms; probe after {dead}; kill-pane count: 0 — the shutdown frame made OMP exit, the shim closed its socket (planner-1fcea564.sock removed) and the pane %4 disappeared on its own; no kill-pane.",
+        "Timeout path (same driver on the LEGSMOKE-31 root pane %3 with a 1 ms budget): tmux argv issued by the runtime = `list-panes -t %3 ...` (probe), `kill-pane -t %3`, `list-panes -t %3 ...` (probe) -> stop resolved after 9ms, probe after {dead}, window @3 gone; kill-pane count: 1 (exactly once).",
+        "Daemon closeTree via linger expiry (LEGSMOKE-31 parked to icebox -> tree lingering; with the daemon stopped, lingerUntil in the persisted state edited to the past; daemon restarted): 09:21:28 `kill-pane -t %3` and `kill-pane -t %4` — exactly one per recorded locator, both already gone (PANE_GONE_STDERR tolerated), then LEGSMOKE-31 removed from trees and both claims (legsmoke-31-architect, legsmoke-31-planner) deleted from state.roles."
+      ]
+    },
+    "6": {
+      "verdict": "PASS",
+      "commands": [
+        "bun test packages/daemon/src/daemon/__tests__/runtime.contract.test.ts: 'Runtime contract: FakeRuntime >' 6 cases and 'Runtime contract: TmuxRuntime >' 6 cases — the same six names under both harnesses (spawn returns a locator of this runtime that probe reports alive; connect returns a client whose negotiate resolves; stop with skipGraceful never dials and leaves the process dead; graceful stop sends exactly one shutdown frame and still ends dead when closed never settles; reconcileOrphans keeps a process whose handles are known and reaps one whose are not; sameProcess identifies a locator with itself and never with another spawn) — plus 16 TmuxRuntime-specific cases, 11 source-grep gates, 5 helper cases; 44 total"
+      ]
+    },
+    "7": {
+      "verdict": "PASS",
+      "commands": [
+        "bun test packages/pi-envoy/src/legion/daemon-api-version.test.ts -> 1 pass (LEGION_DAEMON_API_VERSION === package.json legion.daemonApiVersion === 1)",
+        "bun test packages/daemon/src/daemon/__tests__/index.test.ts -> 25 pass, 0 fail (incl. 'refuses to start when the installed pi-legion-envoy declares no daemon API contract version, before loading state or opening NATS', '... declares a different daemon API contract version ...', '... manifest cannot be read', 'accepts an installed pi-legion-envoy that omp actually loads, reading its manifest exactly once for the contract gate', 'refuses to start when runtime is kubernetes, before acquiring the instance lock or anything else')",
+        "Negative control on the real CLI against the dogfood profile (read-only; OMP_PROFILE=PI_PROFILE=legion, scratch state_dir /tmp/legion21-test/a7-negative/state, port 19371, project sjawhar/2121): `bun run packages/daemon/src/cli/index.ts start sjawhar/2121 --config /tmp/legion21-test/a7-negative/legion.yaml` -> exit 1 after the pi.agents probe: `error: [legion] pi-legion-envoy at /home/ubuntu/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json (package 1.3.0) speaks daemon API contract none; this daemon requires 1. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.` — no state.json created (scratch dir held only the pre-gate `secrets/` and `bin/` writes; removed afterwards), no port bound.",
+        "Positive control: the rig daemon booted on profile legion21-smoke whose installed @sjawhar/pi-legion-envoy is the branch build (package.json version 1.4.3-legion21.6a55bd6d, legion.daemonApiVersion 1; dist rebuilt from 6a55bd6d with `bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils` + skills copy — byte-identical to the implementer's 07:09 build) and reached RIG READY / checkpoints 1-4."
+      ]
+    }
+  },
+  "preexistingFindings": [
+    "Boot ordering (also on main 8f6fad36, unchanged by this PR): with a worker claim whose shim socket is gone at boot, reconnectWorkers -> markWorkerDeadLocked -> retireWorkerLocator -> revokeRoleClaim -> deps.revokeSessionCapability -> `api.revokeSessionCapability` throws `TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')` because index.ts calls processManager.reconnectWorkers() (main: index.ts:503) before `api = startLegionApi(...)` (main: :635). Logged as '[legion] worker reconnection failed'; the dead claim's locator is not retired at boot (the throw precedes stopProcess/locator clear). Observed on the rig at 09:20 after the planner pane had exited; the linger sweep later cleaned it up. Remediation: run reconnectWorkers after api exists, or make the revokeSessionCapability dep tolerate boot ordering.",
+    "Daemon boot probes under host load (pre-existing defaultRunner 30 s kill, state/fetch.ts:55-61): with the box at load 150-1200 (many concurrent agents, D-state processes), `secrets ... -- omp models --no-extensions --extension <probe> --json` took 15m49s wall (4.9 s CPU) and the daemon refused with `[legion] Configured OMP invocation does not expose pi.agents` (empty detail, classified definitive) on 3 of 5 rig-daemon starts; the same command succeeded whenever the 1-min load was < ~100. Not a branch regression; noting because it made the rig's daemon restarts slow to land."
+  ],
+  "environment": {
+    "box": "sami-agents, load average 50-1237 during the run (58-87 processes in D state); the interactive bash tool was unavailable for ~40 min so unit/rig steps ran through the Python kernel via subprocess",
+    "dogfood": "never touched: dogfood daemon, its state_dir (read-only copy of state.json only), ~/.omp/profiles/legion (read-only manifest read by the A7 negative control)",
+    "cleanup": "rig torn down with scripts/smoke/down.sh (RIG DOWN; private server legion-sjawhar24 gone; NATS container stopped; ports 19370/19020/14222 free); leaked test server `legion-omp` from the live-tmux tests killed; smoke issues LEGSMOKE-29/30/31 set to icebox; A7 scratch state dir removed",
+    "artifacts": "/tmp/legion21-test/{a1-*,a3-*,a4-*,a5-*,a7-*,live-probe-x3}.log, ci-test-job.log, processes.diff, other.diff, migrate/, negative/, a7-negative/, pi-legion-envoy/ (rebuilt plugin), rig/ (legion.yaml, legion.gateoff.yaml, daemon.log*, tmux-argv.log, checkpoint-*.log, up.log), stop-planner.ts + stop-planner.log + stop-architect31.log, tmux-wrapper.sh, start-daemon.sh"
+  },
+  "workerPaneNotes": [
+    "Grant workaround used for legion gh / jj git push / legion handoff complete: /tmp/legion21-grant-trap.sh (docs/solutions/legion/worker-pane-shell-gotchas.md section 1), `; grant_release` after each command.",
+    "Up.sh's root issue must be created while the rig daemon and bridge are already live (the daemon only learns of a root through the live issue.created event; resync heals only issues already in state) — a root pre-created before up.sh (LEGSMOKE-29) is never seen; create it with force:true after RIG READY and record it at ${SMOKE_DIR}/root-issue.",
+    "The rig's tmux server socket lives under TMUX_TMPDIR=/home/ubuntu/.tmux/sockets (set by up.sh's environment via the mise/dotfiles shim); a bare `tmux -L legion-sjawhar24` from a shell without that variable looks in /tmp/tmux-1000 and reports 'error connecting ... No such file or directory'."
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T09:25:12.205Z"
+}
