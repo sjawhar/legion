@@ -356,8 +356,8 @@ export default function envoyExtension(pi: PiApi): void {
    * listener's soft-claim rule is the arbiter: a 409 (a different live holder) ends
    * re-assertion for good — the newer holder is correct, so the local claim is dropped exactly
    * as a refused automatic reclaim drops it (`setEnvoyRole`), with no transcript entry either
-   * way. A regain (`"reclaimed"`), or the first healthy tick after a registry outage during
-   * which the listener may have answered "no holder" for a claim that survived
+   * way. A regain (`"reclaimed"`), or the first healthy tick after a failed registration,
+   * during which the listener may have answered "no holder" for a claim that survived
    * (`"reregistered"`), fires legion.ts's hook so the role's daemon ready call runs again. The
    * listener calls here propagate to the heartbeat's warn-once path; the hook runs detached
    * from that chain (see below).
@@ -431,6 +431,8 @@ export default function envoyExtension(pi: PiApi): void {
     // Set only by a failed registration, never by a failed role check afterwards: the listener
     // answers "no holder" for a session whose registry entry lapsed, not for a role read that
     // failed, and only the former warrants a `"reregistered"` regain on the next healthy tick.
+    // Cleared only once a whole tick — registration and re-assertion — has succeeded, so a
+    // recovery tick whose role read errors still owes the regain to the next healthy one.
     let registrationFailed = false;
     let healing = false;
     context.setInterval(() => {
@@ -448,16 +450,14 @@ export default function envoyExtension(pi: PiApi): void {
       const afterOutage = registrationFailed;
       void (drifted ? establishSession(context) : registerSession())
         .then(
-          () => {
-            registrationFailed = false;
-            return drifted ? undefined : reassertRole(afterOutage, context);
-          },
+          () => (drifted ? undefined : reassertRole(afterOutage, context)),
           (error: unknown) => {
             registrationFailed = true;
             throw error;
           }
         )
         .then(() => {
+          registrationFailed = false;
           heartbeatOutageNotified = false;
         })
         .catch((error) => {
