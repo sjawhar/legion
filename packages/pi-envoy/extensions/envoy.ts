@@ -87,13 +87,27 @@ export type RoleRegainReason = "reclaimed" | "reregistered";
 
 type LegionRoleRegained = (role: string, reason: RoleRegainReason) => Promise<void>;
 
+/**
+ * One bound `envoyExtension(pi)` instance: its claim entry point and a live read of the session
+ * id it currently serves. OMP re-binds every extension factory for each in-process `task`
+ * subagent, so a process holds one instance per live agent session, and a claim for the pane's
+ * session must reach the pane's instance — the one whose heartbeat re-asserts the role — not
+ * whichever instance bound last (a subagent's, whose own heartbeat would then see the pane's
+ * id as drift and hand the role to the subagent's session).
+ */
+type LegionRoleClaimInstance = {
+  readonly claim: LegionRoleClaim;
+  readonly sessionID: () => string;
+};
+
 type LegionRoleClaimReady = {
-  readonly promise: Promise<LegionRoleClaim>;
-  readonly resolve: (claim: LegionRoleClaim | PromiseLike<LegionRoleClaim>) => void;
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
 };
 
 type LegionRoleClaimBridge = {
-  claim: LegionRoleClaim | undefined;
+  /** Every live instance in bind order; an instance removes itself on `session_shutdown`. */
+  readonly instances: LegionRoleClaimInstance[];
   readonly ready: LegionRoleClaimReady;
   /**
    * legion.ts's regain hook. One slot, like `claim`, but several legion.ts instances share a
@@ -109,7 +123,7 @@ interface GlobalLegionRoleClaimBridgeStore {
 }
 
 // A process-wide symbol bridges legion.ts's `claimEnvoyRole` import to the
-// one envoyExtension(pi) instance OMP actually ran, since each manifest entry
+// envoyExtension(pi) instances OMP actually ran, since each manifest entry
 // loads as its own module instance with its own module-scope state.
 const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.pi-envoy.role-claim-bridge");
 
@@ -119,21 +133,38 @@ function legionRoleClaimBridge(): LegionRoleClaimBridge {
   if (bridge) return bridge;
 
   const createdBridge: LegionRoleClaimBridge = {
-    claim: undefined,
-    ready: Promise.withResolvers<LegionRoleClaim>(),
+    instances: [],
+    ready: Promise.withResolvers<void>(),
     regained: undefined,
   };
   store[LEGION_ROLE_CLAIM_BRIDGE] = createdBridge;
   return createdBridge;
 }
 
+/**
+ * Claims `role` for `sessionID` through the envoy instance currently serving that session — the
+ * one whose `session_start`/rebind set its id to `sessionID`, so its heartbeat is the one that
+ * re-asserts the claim afterwards. With several instances on the same id (a fixture that binds
+ * one per test) the most recently bound wins. A target no instance serves yet falls back to the
+ * most recently bound instance, which establishes the session itself.
+ */
 export async function claimEnvoyRole(
   sessionID: string,
   role: string,
   context?: SessionContext
 ): Promise<void> {
   const bridge = legionRoleClaimBridge();
-  await (bridge.claim ?? (await bridge.ready.promise))(sessionID, role, context);
+  if (bridge.instances.length === 0) await bridge.ready.promise;
+  let instance = bridge.instances.at(-1);
+  for (let index = bridge.instances.length - 1; index >= 0; index -= 1) {
+    const candidate = bridge.instances[index];
+    if (candidate?.sessionID() === sessionID) {
+      instance = candidate;
+      break;
+    }
+  }
+  if (instance === undefined) throw new Error("Envoy has no bound instance for a role claim");
+  await instance.claim(sessionID, role, context);
 }
 
 /**
@@ -752,8 +783,9 @@ export default function envoyExtension(pi: PiApi): void {
     await registerSession();
     await setEnvoyRole(role);
   };
-  bridge.claim = claim;
-  bridge.ready.resolve(claim);
+  const claimInstance: LegionRoleClaimInstance = { claim, sessionID: () => sessionID };
+  bridge.instances.push(claimInstance);
+  bridge.ready.resolve();
 
   pi.on("session_start", async (_event, context) => {
     if (dispatchConfig.error !== null) {
@@ -850,6 +882,8 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    const bound = bridge.instances.indexOf(claimInstance);
+    if (bound !== -1) bridge.instances.splice(bound, 1);
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {

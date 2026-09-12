@@ -321,8 +321,12 @@ export default function legionExtension(pi: PiApi): void {
     controllerTranscript = ompSessionFile;
     onEnvoyRoleRegained(async (role, reason) => {
       if (role !== token) return;
+      // Read live, not captured: a `/new` typed into the pane moves the claim to a new session id
+      // (`reclaimControllerAfterSessionChange`), and a tick racing that re-claim must report the
+      // id the pane holds now. No transcript: the daemon keeps the file it recorded when a later
+      // claim omits the field, and a takeover session must never become the pane's resume target.
       await rerunReadyAfterRegain("controller/ready", role, reason, () =>
-        daemon.controllerReady({ secret, sessionId: sessionID })
+        daemon.controllerReady({ secret, sessionId: controllerSessionID ?? sessionID })
       );
     });
   };

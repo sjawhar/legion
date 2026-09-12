@@ -797,6 +797,16 @@ describe("Legion OMP extension", () => {
     );
     const ready = {
       path: "/legion/v1/controller/ready",
+      body: {
+        secret: "controller-secret",
+        sessionId: "ses_controller",
+        ompSessionFile: "/tmp/session.jsonl",
+      },
+    };
+    // The re-run carries no transcript: the daemon keeps the file it recorded when a later claim
+    // omits the field, and a regain must never re-point the pane's resume target.
+    const readyAgain = {
+      path: "/legion/v1/controller/ready",
       body: { secret: "controller-secret", sessionId: "ses_controller" },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -812,7 +822,7 @@ describe("Legion OMP extension", () => {
     listenerHoldsClaim = false;
     intervals[0]?.();
     await secondReady.promise;
-    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, readyAgain]);
     expect(
       requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
     ).toEqual([
@@ -871,6 +881,14 @@ describe("Legion OMP extension", () => {
     );
     const ready = {
       path: "/legion/v1/controller/ready",
+      body: {
+        secret: "controller-secret",
+        sessionId: "ses_controller_rebind",
+        ompSessionFile: "/tmp/session.jsonl",
+      },
+    };
+    const readyAgain = {
+      path: "/legion/v1/controller/ready",
       body: { secret: "controller-secret", sessionId: "ses_controller_rebind" },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -888,7 +906,7 @@ describe("Legion OMP extension", () => {
     listenerHoldsClaim = false;
     intervals[0]?.();
     await secondReady.promise;
-    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, readyAgain]);
     expect(
       requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
     ).toEqual([
@@ -2043,18 +2061,34 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_CONTROLLER = "1";
     process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    const token = "legion-omp-controller";
+    // The listener's answer to the heartbeat's role read; flipped to "no holder" below.
+    let listenerHoldsClaim = true;
+    const regainReady = Promise.withResolvers<void>();
     globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
       requests.push({ path: url.pathname, body });
       if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
-      if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/controller/ready") {
+        if (requests.filter((request) => request.path === url.pathname).length === 3) {
+          regainReady.resolve();
+        }
+        return Response.json({});
+      }
       if (url.pathname === "/legion/v1/grants") {
         return Response.json({
           grantId: `grant-for-${body?.sessionId}`,
           expiresAt: "2099-01-01T00:00:00Z",
         });
       }
+      if (url.pathname === `/v1/roles/${token}`) {
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${token}` }, { status: 404 });
+        }
+        return Response.json({ role: token, holder: "ses_pane_second", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") listenerHoldsClaim = true;
       return Response.json({
         session_id: body?.session_id,
         machine_id: "machine",
@@ -2070,11 +2104,26 @@ describe("Legion OMP extension", () => {
     if (sessionStart === undefined || sessionSwitch === undefined || toolCall === undefined) {
       throw new Error("controller lifecycle handlers were not registered");
     }
-    await sessionStart({}, sessionContext("ses_pane_first", "/tmp/first.jsonl"));
+    // One SessionManager per pane, exactly as OMP hands it out: `/new` mutates the manager the
+    // boot-time contexts (and the heartbeat closure) already hold, so the live id is read through
+    // it, never frozen in a context object.
+    let liveSessionID = "ses_pane_first";
+    let liveSessionFile = "/tmp/first.jsonl";
+    const intervals: (() => void)[] = [];
+    const pane: SessionContext = {
+      ...sessionContext("ses_pane_first"),
+      sessionManager: {
+        getSessionId: () => liveSessionID,
+        getSessionFile: () => liveSessionFile,
+        ensureOnDisk: async () => undefined,
+      },
+      setInterval: (callback) => intervals.push(callback),
+    };
+    await sessionStart({}, pane);
 
     // A tree navigation that leaves the session id and transcript as they were re-claims nothing:
     // every /controller/ready runs a forced resync and must not be posted for nothing.
-    await sessionSwitch({ reason: "fork" }, sessionContext("ses_pane_first", "/tmp/first.jsonl"));
+    await sessionSwitch({ reason: "fork" }, pane);
     // A task-spawned subagent inside the pane loads its own instance of this module with the
     // pane's environment; its switch events must never take the controller role or record the
     // subagent's transcript as the pane's.
@@ -2096,7 +2145,9 @@ describe("Legion OMP extension", () => {
     ]);
 
     // Sami types /new into the pane: OMP moves it to a fresh session id and transcript.
-    const switched = sessionContext("ses_pane_second", "/tmp/second.jsonl");
+    liveSessionID = "ses_pane_second";
+    liveSessionFile = "/tmp/second.jsonl";
+    const switched = pane;
     await sessionSwitch({ reason: "new" }, switched);
 
     expect(requests.filter((request) => request.path === "/legion/v1/controller/ready")).toEqual([
@@ -2119,7 +2170,27 @@ describe("Legion OMP extension", () => {
     ]);
     expect(requests.filter((request) => request.path === "/v1/roles/set").at(-1)).toEqual({
       path: "/v1/roles/set",
-      body: { session_id: "ses_pane_second", role: "legion-omp-controller" },
+      body: { session_id: "ses_pane_second", role: token },
+    });
+
+    // The listener later loses sight of the pane (a reaped claim, a listener restart): the
+    // heartbeat's re-assertion must follow the switch — soft-claim and re-run controller/ready
+    // for the session the pane holds now, not the one the boot claimed, and without a transcript,
+    // so the daemon keeps /tmp/second.jsonl as the file it would resume. Every bound envoy
+    // instance heartbeats on its own timer, and the bridge routes a claim to the instance bound
+    // last (the subagent's, here), so every registered tick fires.
+    listenerHoldsClaim = false;
+    for (const tick of intervals) tick();
+    await regainReady.promise;
+    expect(
+      requests.filter((request) => request.path === "/legion/v1/controller/ready").at(-1)
+    ).toEqual({
+      path: "/legion/v1/controller/ready",
+      body: { secret: "controller-secret", sessionId: "ses_pane_second" },
+    });
+    expect(requests.filter((request) => request.path === "/v1/roles/set").at(-1)).toEqual({
+      path: "/v1/roles/set",
+      body: { session_id: "ses_pane_second", role: token, soft: true },
     });
 
     const result = await toolCall(
