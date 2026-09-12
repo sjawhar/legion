@@ -2014,7 +2014,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("a 409 on re-assertion drops the local claim, warns once, and ends re-assertion for that role", async () => {
-    const role = "pr-queue";
+    const role = "release-captain";
     const roleClaims: Record<string, unknown>[] = [];
     let roleReads = 0;
     globalThis.fetch = async (input, init) => {
