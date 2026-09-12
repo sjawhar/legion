@@ -22,13 +22,25 @@ exec legion gh -- "$@"
   return workerBin;
 }
 
-export function workerGhEnvironment(grantId: string, stateDir: string, workerBin: string): string {
-  return [
-    `export LEGION_GRANT=${shellLiteral(grantId)}`,
-    "unset GH_TOKEN",
-    "unset GITHUB_TOKEN",
-    "unset GH_HOST",
-    `export GH_CONFIG_DIR=${shellLiteral(path.join(stateDir, "gh"))}`,
-    `export PATH=${shellLiteral(workerBin)}${path.delimiter}$PATH`,
-  ].join("\n");
+/**
+ * The per-command environment a worker's bash call runs under: its freshly minted grant, no
+ * ambient GitHub token or host (an empty value is absent to gh), the isolated gh config
+ * directory, and the `gh` shim first on PATH. Delivered through the bash tool's `env` argument —
+ * never as command text, which the host writes back into the model's message and the model then
+ * imitates with stale or made-up ids.
+ */
+export function workerGhEnvironment(
+  grantId: string,
+  stateDir: string,
+  workerBin: string,
+  basePath: string | undefined
+): Record<string, string> {
+  return {
+    LEGION_GRANT: grantId,
+    GH_TOKEN: "",
+    GITHUB_TOKEN: "",
+    GH_HOST: "",
+    GH_CONFIG_DIR: path.join(stateDir, "gh"),
+    PATH: basePath ? `${workerBin}${path.delimiter}${basePath}` : workerBin,
+  };
 }
