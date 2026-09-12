@@ -6,16 +6,20 @@ import type { Agent } from "../../api/types";
 
 const EMPTY_AGENTS: readonly Agent[] = [];
 
-export function useAgents(enabled: boolean): {
+export function useAgents(
+  enabled: boolean,
+  refreshWhileOpen = false
+): {
   agents: readonly Agent[];
+  error: string | undefined;
   isError: boolean;
   titles: ReadonlyMap<string, string>;
 } {
-  const { data, isError } = useQuery({
+  const { data, error, isError } = useQuery({
     enabled,
     queryFn: () => api.listAgents(),
     queryKey: ["agents"],
-    refetchInterval: enabled ? 30_000 : false,
+    refetchInterval: refreshWhileOpen ? 15_000 : false,
     retry: false,
     staleTime: 10_000,
   });
@@ -25,5 +29,13 @@ export function useAgents(enabled: boolean): {
     [agents]
   );
 
-  return useMemo(() => ({ agents, isError, titles }), [agents, isError, titles]);
+  return useMemo(
+    () => ({
+      agents,
+      error: error instanceof Error ? error.message : isError ? "network error" : undefined,
+      isError,
+      titles,
+    }),
+    [agents, error, isError, titles]
+  );
 }

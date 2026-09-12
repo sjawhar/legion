@@ -341,7 +341,7 @@ func TestRunRoutesHumanReplyToMessageAuthor(t *testing.T) {
 		Type:     "message.created",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.MessageEventPayload{
-			Message:   model.Message{ID: replyID, IssueKey: "T-1", Body: "Looks great, ship it.", ReplyTo: &rootID},
+			Message:   model.Message{ID: replyID, IssueKey: "T-1", Body: "Looks great, ship it.", InReplyTo: &rootID},
 			ReplyBody: "Draft done.",
 		},
 	})
@@ -723,6 +723,33 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 	}
 }
 
+func TestRunPublishesTargetedMessageToIssueSubscribersOnly(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	route := "role:legion-controller-x"
+	target := "session:ses_target"
+	seedIssue(t, database, "T-1", &route)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{
+			ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Target this update", Target: &target,
+		},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "targeted issue publication", func() bool {
+		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if items[0].Topic != "notifications.dispatch.issue.T-1.message.created" {
+		t.Fatalf("targeted message topic = %q, want issue topic", items[0].Topic)
+	}
+}
+
 func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()
@@ -1070,7 +1097,7 @@ func seedMessage(t *testing.T, database *store.Store, issueKey string, author mo
 	}
 	var id string
 	if err := database.Pool.QueryRow(context.Background(), `
-		insert into messages (issue_key, author, body, reply_to) values ($1, $2, $3, $4) returning id::text
+		insert into messages (issue_key, author, body, in_reply_to) values ($1, $2, $3, $4) returning id::text
 	`, issueKey, authorJSON, body, replyTo).Scan(&id); err != nil {
 		t.Fatalf("create message: %v", err)
 	}

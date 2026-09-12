@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import {
@@ -70,9 +70,12 @@ type TestPi = {
     handler: (event: unknown, context: SessionContext) => Promise<unknown>
   ) => void;
   readonly sendMessage: (message: { readonly content: string }, options: unknown) => void;
+  readonly askEphemeral?: (input: {
+    readonly prompt: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<{ readonly replyText: string }>;
   readonly appendEntry: PiApi["appendEntry"];
 };
-
 type Subscription = {
   readonly unsubscribe: () => void;
   readonly [Symbol.asyncIterator]: () => AsyncIterator<{
@@ -99,6 +102,11 @@ const natsState = {
   drainHangs: false,
   drainStarted: false,
 };
+
+const targetedDispatchPayload = readFileSync(
+  new URL("../../contracts/fixtures/dispatch-targeted-delivery.json", import.meta.url),
+  "utf8"
+);
 
 const clipboardState = {
   copiedSessionIDs: [] as string[],
@@ -312,6 +320,40 @@ function forwardedRoleEnvelope(role: string, summary: string, dedupeKey: string)
   });
 }
 
+function targetedDispatchEnvelope(
+  mode: "aside" | "btw" | "steer",
+  dedupeKey: string
+): string {
+  return JSON.stringify({
+    dedupe_key: dedupeKey,
+    event_id: `dispatch-${dedupeKey}`,
+    issued_at: 1,
+	    payload: JSON.stringify({
+	      event: {
+	        actor: { id: "alice", kind: "user" },
+	        issue_key: "CORE-1",
+        payload: {
+          author: { id: "alice", kind: "user" },
+          body: `Delivery ${mode} ${dedupeKey}`,
+          created_at: "2026-09-12T00:00:00Z",
+          deliveries: [],
+          id: `message-${dedupeKey}`,
+          in_reply_to: null,
+          issue_key: "CORE-1",
+          target: "session:ses_delivery",
+        },
+	        type: "message.created",
+	      },
+	      delivery: { attempt: 1, mode },
+	    }),
+    payload_summary: `Delivery ${mode} ${dedupeKey}`,
+    source: "dispatch",
+    source_event_id: "1",
+    topic: "notifications.agent.ses_delivery",
+    trace_id: dedupeKey,
+  });
+}
+
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
@@ -457,6 +499,7 @@ describe("envoy OMP extension", () => {
           title: "",
           driving: false,
           self_subscribed: true,
+          capabilities: ["aside"],
         },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
@@ -1810,9 +1853,213 @@ describe("envoy OMP extension", () => {
         title: "",
         driving: false,
         self_subscribed: true,
+        capabilities: ["aside"],
       },
     });
   });
+  test("answers a targeted BTW delivery ephemerally and registers the capability", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const registrations: unknown[] = [];
+    const replies: unknown[] = [];
+    const replyPosted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/interests/subscribe") {
+        registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
+      }
+      if (path === "/api/v1/messages/message-1/reply") {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        replyPosted.resolve();
+      }
+      return response({
+        session_id: "ses_target",
+        machine_id: "test",
+        dir: "/tmp",
+        topics: ["notifications.agent.ses_target"],
+      });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw");
+    const fixture = createPi();
+    const asked: string[] = [];
+
+    envoyExtension({
+      ...fixture.pi,
+      askEphemeral: async ({ prompt }) => {
+        asked.push(prompt);
+        return { replyText: "Yes, ship it." };
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_target"));
+    const agent = natsState.controls.get("notifications.agent.ses_target");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "dispatch-btw",
+        source: "dispatch",
+        source_event_id: "1",
+        topic: "notifications.agent.ses_target",
+        dedupe_key: "dispatch-btw",
+        issued_at: 1,
+        payload_summary: "Can this ship?",
+        payload: targetedDispatchPayload,
+        trace_id: "dispatch-btw",
+      })
+    );
+    await replyPosted.promise;
+
+    expect(asked).toEqual(["Can this ship?"]);
+    expect(fixture.deliveries).toEqual([]);
+    expect(replies).toEqual([
+      {
+        actor: { kind: "session", id: "ses_target" },
+        attempt: 1,
+        body: "Yes, ship it.",
+      },
+    ]);
+    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw"] }]);
+  });
+
+  test("delivers targeted aside and steer frames through their requested primary-turn modes", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-modes");
+    const fixture = createPi();
+    const delivered = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (fixture.deliveries.length === 2) delivered.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer"));
+    await delivered.promise;
+
+    expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual([
+      { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "steer", triggerTurn: true },
+    ]);
+  });
+
+  test("deduplicates targeted Dispatch frames by dedupe key", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-dedupe");
+    const fixture = createPi();
+    const distinctDelivery = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (fixture.deliveries.length === 2) distinctDelivery.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(targetedDispatchEnvelope("steer", "targeted-duplicate"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-duplicate"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-distinct"));
+    await distinctDelivery.promise;
+
+    expect(fixture.deliveries).toHaveLength(2);
+    expect(fixture.deliveries[0]?.content).toContain("targeted-duplicate");
+    expect(fixture.deliveries[1]?.content).toContain("targeted-distinct");
+  });
+
+  test("reports an ephemeral delivery rejection to Dispatch without steering it", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const replies: unknown[] = [];
+    const posted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      if (new URL(input.toString()).pathname === "/api/v1/messages/message-targeted-rejection/reply") {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        posted.resolve();
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-rejection");
+    const fixture = createPi();
+    envoyExtension({
+      ...fixture.pi,
+      askEphemeral: async () => {
+        throw new Error("No active model on session");
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(targetedDispatchEnvelope("btw", "targeted-rejection"));
+    await posted.promise;
+
+    expect(replies).toEqual([
+      {
+        actor: { id: "ses_delivery", kind: "session" },
+        attempt: 1,
+        error: "No active model on session",
+      },
+    ]);
+    expect(fixture.deliveries).toEqual([]);
+  });
+
+  test("fails closed for a malformed targeted frame and reports the error to Dispatch", async () => {
+	    process.env.DISPATCH_URL = "http://dispatch.test";
+	    process.env.DISPATCH_TOKEN = "dispatch-token";
+	    const replies: unknown[] = [];
+	    const posted = Promise.withResolvers<void>();
+	    globalThis.fetch = async (input, init) => {
+	      if (new URL(input.toString()).pathname === "/api/v1/messages/message-malformed/reply") {
+	        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+	        posted.resolve();
+	      }
+	      return response({});
+	    };
+	    const { default: envoyExtension } = await import("./envoy.ts?targeted-malformed");
+	    const fixture = createPi();
+	    envoyExtension(fixture.pi);
+	    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+	    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+	    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+	    agent.push(
+	      JSON.stringify({
+	        event_id: "dispatch-malformed",
+	        source: "dispatch",
+	        source_event_id: "1",
+	        topic: "notifications.agent.ses_delivery",
+	        dedupe_key: "dispatch-malformed",
+	        issued_at: 1,
+	        payload_summary: "Can this ship?",
+	        payload: JSON.stringify({
+          event: {
+            actor: { id: "alice", kind: "user" },
+            issue_key: "CORE-1",
+            payload: { body: "Can this ship?", id: "message-malformed" },
+            type: "message.created",
+          },
+	          delivery: { attempt: 1, mode: "btw" },
+	        }),
+	        trace_id: "dispatch-malformed",
+	      })
+	    );
+	
+    await posted.promise;
+	    expect(fixture.deliveries).toEqual([]);
+	    expect(replies).toEqual([
+	      {
+	        actor: { id: "ses_delivery", kind: "session" },
+	        attempt: 1,
+	        error: "Invalid Dispatch targeted delivery frame",
+	      },
+	    ]);
+	  });
   test("registers every session and starts its heartbeat on session start", async () => {
     const registrations: unknown[] = [];
     globalThis.fetch = async (input, init) => {

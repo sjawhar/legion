@@ -195,3 +195,67 @@ func TestUnsubscribeReportsUnavailableListener(t *testing.T) {
 		t.Fatalf("500: err = %v, want ErrUnavailable", err)
 	}
 }
+func TestRoleAndSendPreserveTheListenerDeliveryContract(t *testing.T) {
+	var sent map[string]any
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/legion-planner":
+			_, _ = w.Write([]byte(`{"role":"legion-planner","holder":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","capabilities":["aside","btw"],"last_seen":42}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+				t.Fatalf("decode delivery: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"event_id":"envelope-1","recipient":"s1"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+
+	holder, err := New(listener.URL).Role(context.Background(), "legion-planner")
+	if err != nil {
+		t.Fatalf("get role: %v", err)
+	}
+	if holder.SessionID != "s1" || holder.Title != "planner" || !reflect.DeepEqual(holder.Capabilities, []string{"aside", "btw"}) {
+		t.Fatalf("holder = %#v", holder)
+	}
+	result, err := New(listener.URL).Send(context.Background(), SendInput{
+		TargetSession:  "s1",
+		Message:        "Can this ship?",
+		Payload:        json.RawMessage(`{"event":{"type":"message.created"},"delivery":{"attempt":1,"mode":"btw"}}`),
+		IdempotencyKey: "message-1:1",
+		Urgency:        "high",
+		ExpectsReply:   "required",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if result.EnvelopeID != "envelope-1" {
+		t.Fatalf("envelope id = %q", result.EnvelopeID)
+	}
+	if sent["target_session"] != "s1" || sent["source"] != "dispatch" || sent["message"] != "Can this ship?" ||
+		sent["idempotency_key"] != "message-1:1" || sent["expects_reply"] != "required" || sent["urgency"] != "high" {
+		t.Fatalf("send payload = %#v", sent)
+	}
+	payload, ok := sent["payload"].(string)
+	if !ok {
+		t.Fatalf("send payload = %#v, want JSON string delivery frame", sent)
+	}
+	if payload != `{"event":{"type":"message.created"},"delivery":{"attempt":1,"mode":"btw"}}` {
+		t.Fatalf("payload = %q", payload)
+	}
+}
+
+func TestRolePreservesListenerNotFoundText(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"no holder for role legion-planner"}`))
+	}))
+	defer listener.Close()
+
+	_, err := New(listener.URL).Role(context.Background(), "legion-planner")
+	if err == nil || err.Error() != "no holder for role legion-planner" {
+		t.Fatalf("role error = %v, want listener error text", err)
+	}
+}

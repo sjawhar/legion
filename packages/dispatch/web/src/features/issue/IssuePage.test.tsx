@@ -586,7 +586,7 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
     );
 
     try {
-      fireEvent.click(await screen.findByText("No route — messages stay on the issue"));
+      fireEvent.click(await screen.findByText("Messages default to no route"));
       const routeInput = await screen.findByLabelText("Route");
       fireEvent.change(routeInput, { target: { value: "role:not-saved-draft" } });
       await screen.findByDisplayValue("role:not-saved-draft");
@@ -599,7 +599,7 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
       // CORE-1's unsaved draft onto CORE-2's page instead of showing CORE-2's
       // own route.
       expect(screen.queryByDisplayValue("role:not-saved-draft")).toBeNull();
-      expect(await screen.findByText("Messages also reach role:second-issue-route")).toBeDefined();
+      expect(await screen.findByText("Messages default to role:second-issue-route")).toBeDefined();
     } finally {
       view.unmount();
     }

@@ -5,11 +5,12 @@ import "github.com/sjawhar/envoy/internal/session"
 // subscribeBody is the POST /v1/interests/subscribe payload sent by each
 // agent session's envoy extension, on subscribe and on every heartbeat.
 type subscribeBody struct {
-	SessionID string   `json:"session_id"`
-	Dir       string   `json:"dir"`
-	Topics    []string `json:"topics"`
-	Port      int      `json:"port"`
-	Title     string   `json:"title"`
+	SessionID    string   `json:"session_id"`
+	Dir          string   `json:"dir"`
+	Topics       []string `json:"topics"`
+	Port         int      `json:"port"`
+	Title        string   `json:"title"`
+	Capabilities []string `json:"capabilities"`
 	// Driving reports that this process is the one actually driving the session,
 	// rather than a process that merely has it loaded from shared on-disk state.
 	// Absent (older plugins) means "not driving", which is the safe default: a
@@ -24,6 +25,7 @@ func sessionEntryFromSubscribe(body subscribeBody, machineID string) session.Ses
 		MachineID:      machineID,
 		Dir:            body.Dir,
 		Title:          body.Title,
+		Capabilities:   append([]string{}, body.Capabilities...),
 		Driving:        body.Driving,
 		SelfSubscribed: body.SelfSubscribed,
 	}

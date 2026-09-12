@@ -39,6 +39,22 @@ type Session struct {
 	LastSeen     int64    `json:"last_seen"`
 }
 
+// SendInput is a targeted Dispatch delivery through the listener.
+type SendInput struct {
+	TargetSession  string
+	Message        string
+	Payload        json.RawMessage
+	IdempotencyKey string
+	Urgency        string
+	ExpectsReply   string
+}
+
+// SendResult identifies the listener envelope emitted for a successful delivery.
+type SendResult struct {
+	EnvelopeID string
+	Recipient  string
+}
+
 // Client reads live session metadata from the Envoy listener.
 type Client struct {
 	baseURL    string
@@ -199,4 +215,92 @@ func (c *Client) Unsubscribe(ctx context.Context, sessionID string, topics []str
 		decoded.Removed = []string{}
 	}
 	return decoded.Removed, nil
+}
+
+// Role resolves a live role holder and returns its current session metadata.
+func (c *Client) Role(ctx context.Context, role string) (Session, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/roles/"+url.PathEscape(role), nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("%w: build GET /v1/roles/%s request: %v", ErrUnavailable, role, err)
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return Session{}, fmt.Errorf("%w: GET /v1/roles/%s: %v", ErrUnavailable, role, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return Session{}, listenerResponseError(response)
+	}
+	var responseBody struct {
+		Holder string `json:"holder"`
+		Session
+	}
+	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
+		return Session{}, fmt.Errorf("%w: decode GET /v1/roles/%s response: %v", ErrUnavailable, role, err)
+	}
+	responseBody.SessionID = responseBody.Holder
+	if responseBody.Capabilities == nil {
+		responseBody.Capabilities = []string{}
+	}
+	if responseBody.Roles == nil {
+		responseBody.Roles = []string{role}
+	}
+	return responseBody.Session, nil
+}
+
+// Send delivers a Dispatch frame to an already-resolved live session.
+func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) {
+	body, err := json.Marshal(struct {
+		TargetSession  string `json:"target_session"`
+		Source         string `json:"source"`
+		Message        string `json:"message"`
+		Payload        string `json:"payload"`
+		IdempotencyKey string `json:"idempotency_key"`
+		Urgency        string `json:"urgency,omitempty"`
+		ExpectsReply   string `json:"expects_reply,omitempty"`
+	}{
+		TargetSession:  input.TargetSession,
+		Source:         "dispatch",
+		Message:        input.Message,
+		Payload:        string(input.Payload),
+		IdempotencyKey: input.IdempotencyKey,
+		Urgency:        input.Urgency,
+		ExpectsReply:   input.ExpectsReply,
+	})
+	if err != nil {
+		return SendResult{}, fmt.Errorf("encode POST /v1/messages/send body: %w", err)
+	}
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, c.baseURL+"/v1/messages/send", bytes.NewReader(body),
+	)
+	if err != nil {
+		return SendResult{}, fmt.Errorf("%w: build POST /v1/messages/send request: %v", ErrUnavailable, err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return SendResult{}, fmt.Errorf("%w: POST /v1/messages/send: %v", ErrUnavailable, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return SendResult{}, listenerResponseError(response)
+	}
+	var result struct {
+		EnvelopeID string `json:"event_id"`
+		Recipient  string `json:"recipient"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return SendResult{}, fmt.Errorf("%w: decode POST /v1/messages/send response: %v", ErrUnavailable, err)
+	}
+	return SendResult{EnvelopeID: result.EnvelopeID, Recipient: result.Recipient}, nil
+}
+
+func listenerResponseError(response *http.Response) error {
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err == nil && body.Error != "" {
+		return errors.New(body.Error)
+	}
+	return fmt.Errorf("%w: listener returned %d", ErrUnavailable, response.StatusCode)
 }

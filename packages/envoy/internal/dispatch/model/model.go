@@ -380,22 +380,47 @@ type CommentEventPayload struct {
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 }
 
-// Message is a short issue update, optionally threaded under another message (ReplyTo).
+// Message is a short issue update, optionally threaded under another message.
 type Message struct {
-	ID        string    `json:"id"`
-	IssueKey  string    `json:"issue_key"`
-	Author    Actor     `json:"author"`
-	Body      string    `json:"body"`
-	ReplyTo   *string   `json:"reply_to"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string            `json:"id"`
+	IssueKey   string            `json:"issue_key"`
+	Author     Actor             `json:"author"`
+	Body       string            `json:"body"`
+	Target     *string           `json:"target"`
+	InReplyTo  *string           `json:"in_reply_to"`
+	CreatedAt  time.Time         `json:"created_at"`
+	Deliveries []MessageDelivery `json:"deliveries"`
+}
+
+// MessageDelivery records one human-requested attempt to reach a live agent.
+type MessageDelivery struct {
+	MessageID  string    `json:"message_id"`
+	Attempt    int       `json:"attempt"`
+	Delivery   string    `json:"delivery"`
+	SessionID  string    `json:"session_id"`
+	EnvelopeID *string   `json:"envelope_id"`
+	State      string    `json:"state"`
+	Error      *string   `json:"error"`
+	ReplyID    *string   `json:"reply_id"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // MessageEventPayload wraps a Message with the reply target's body preview (first 160
-// characters, ReplyBody) so a message.created event carrying ReplyTo can render "re: <preview>"
-// without a second lookup. ReplyBody is empty when the message does not reply to another message.
+// characters, ReplyBody) so a reply can render "re: <preview>" without a second lookup.
 type MessageEventPayload struct {
 	Message
 	ReplyBody string `json:"reply_body,omitempty"`
+}
+
+// MessageDeliveryEventPayload is the user-visible result of one target delivery attempt.
+type MessageDeliveryEventPayload struct {
+	MessageID string `json:"message_id"`
+	Attempt   int    `json:"attempt"`
+	Delivery  string `json:"delivery"`
+	SessionID string `json:"session_id"`
+	Title     string `json:"title"`
+	State     string `json:"state"`
+	Error     string `json:"error,omitempty"`
 }
 
 // ReferencedBy identifies a post or artifact that mentions an artifact.
@@ -492,7 +517,7 @@ func IsIssueStatus(status string) bool {
 
 var (
 	roleRoutePattern    = regexp.MustCompile(`^role:([a-z0-9-]+)$`)
-	sessionRoutePattern = regexp.MustCompile(`^session:([0-9a-f-]{16,})$`)
+	sessionRoutePattern = regexp.MustCompile(`^session:([A-Za-z0-9_-]+)$`)
 )
 
 // ParseRoute validates and decomposes one supported issue delivery route.

@@ -110,7 +110,7 @@ describe("executeDispatchTool", () => {
     expect(execCalls).toBe(0);
   });
 
-  test("posts a message reply_to as a bare id or a dispatch://.../message/<id> reference, and cites the result", async () => {
+  test("posts a message in_reply_to as a bare id or a dispatch://.../message/<id> reference, and cites the result", async () => {
     const bodies: unknown[] = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const target = new URL(String(url));
@@ -123,7 +123,7 @@ describe("executeDispatchTool", () => {
 
     const bareIDResult = await executeDispatchTool({
       tool: "dispatch_message",
-      args: { issue: "DSP-42", body: "Sounds good", reply_to: "message-1" },
+      args: { issue: "DSP-42", body: "Sounds good", in_reply_to: "message-1" },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -136,7 +136,7 @@ describe("executeDispatchTool", () => {
       args: {
         issue: "DSP-42",
         body: "Sounds good",
-        reply_to: "dispatch://DSP-42/message/message-1",
+        in_reply_to: "dispatch://DSP-42/message/message-1",
       },
       cwd: "/workspace",
       host: "omp",
@@ -147,8 +147,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(bodies).toMatchObject([
-      { body: "Sounds good", reply_to: "message-1" },
-      { body: "Sounds good", reply_to: "message-1" },
+      { body: "Sounds good", in_reply_to: "message-1" },
+      { body: "Sounds good", in_reply_to: "message-1" },
     ]);
     expect(bareIDResult.text).toBe(
       "Posted message message-2 (dispatch://DSP-42/message/message-2)"
@@ -156,7 +156,7 @@ describe("executeDispatchTool", () => {
     expect(refResult.text).toBe("Posted message message-2 (dispatch://DSP-42/message/message-2)");
   });
 
-  test("rejects a message reply_to referencing a non-message dispatch reference", async () => {
+  test("rejects a message in_reply_to referencing a non-message dispatch reference", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
     }) as unknown as typeof fetch;
@@ -167,7 +167,7 @@ describe("executeDispatchTool", () => {
         args: {
           issue: "DSP-42",
           body: "Sounds good",
-          reply_to: "dispatch://DSP-42/comment/comment-1",
+          in_reply_to: "dispatch://DSP-42/comment/comment-1",
         },
         cwd: "/workspace",
         host: "omp",
@@ -177,7 +177,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      /reply_to must be a bare message id or a dispatch:\/\/\.\.\.\/message\/<id> reference/
+      /in_reply_to must be a bare message id or a dispatch:\/\/\.\.\.\/message\/<id> reference/
     );
   });
 
@@ -1770,7 +1770,7 @@ describe("executeDispatchTool", () => {
             issue_key: "DSP-42",
             author: { kind: "session", id: "writer-1" },
             body: "Ship the build tonight.",
-            reply_to: null,
+            in_reply_to: null,
             created_at: "2026-09-09T00:00:00Z",
           },
           replies: [
@@ -1779,7 +1779,7 @@ describe("executeDispatchTool", () => {
               issue_key: "DSP-42",
               author: { kind: "user", id: "sami" },
               body: "Sounds good.",
-              reply_to: "message-42",
+              in_reply_to: "message-42",
               created_at: "2026-09-09T00:01:00Z",
             },
           ],

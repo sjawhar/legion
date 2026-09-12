@@ -277,18 +277,44 @@ export interface CommentEventPayload extends Comment {
   readonly ask_state?: Ask["state"];
 }
 
+export type MessageDeliveryMode = "btw" | "aside" | "steer";
+
+export interface MessageDelivery {
+  readonly message_id: string;
+  readonly attempt: number;
+  readonly delivery: MessageDeliveryMode;
+  readonly session_id: string;
+  readonly envelope_id: string | null;
+  readonly state: "sent" | "failed";
+  readonly error: string | null;
+  readonly reply_id: string | null;
+  readonly created_at: string;
+}
+
 export interface Message {
   readonly id: string;
   readonly issue_key: string;
   readonly author: Actor;
   readonly body: string;
-  readonly reply_to: string | null;
+  readonly target: string | null;
+  readonly in_reply_to: string | null;
+  readonly deliveries: MessageDelivery[];
   readonly created_at: string;
 }
 
 export interface MessageEventPayload extends Message {
-  /** First 160 characters of the reply target's body (Message.reply_to); empty otherwise. */
+  /** First 160 characters of the reply target's body; empty otherwise. */
   readonly reply_body?: string;
+}
+
+export interface MessageDeliveryEventPayload {
+  readonly message_id: string;
+  readonly attempt: number;
+  readonly delivery: MessageDeliveryMode;
+  readonly session_id: string;
+  readonly title: string;
+  readonly state: "sent" | "failed";
+  readonly error?: string;
 }
 
 export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
@@ -521,6 +547,14 @@ export type DispatchEvent =
       readonly payload: MessageEventPayload;
     })
   | (DispatchEventBase & {
+      readonly type: "message.delivery";
+      readonly payload: MessageDeliveryEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "message.answered";
+      readonly payload: MessageEventPayload;
+    })
+  | (DispatchEventBase & {
       readonly type: "child.status";
       readonly payload: ChildStatusEventPayload;
     })
@@ -631,7 +665,10 @@ export interface EditCommentInput {
 
 export interface CreateMessageInput {
   readonly body: string;
-  readonly reply_to?: string;
+  readonly in_reply_to?: string;
+  readonly target?: string;
+  readonly delivery?: MessageDeliveryMode;
+  readonly urgency?: "low" | "med" | "high" | "blocking";
   readonly actor?: Actor;
 }
 
@@ -833,9 +870,20 @@ export const CommentEventPayloadSchema = z.object({
 export const MessageEventPayloadSchema = z.object({
   id: z.string().optional(),
   body: z.string().optional(),
-  reply_to: z.string().nullish(),
+  target: z.string().nullish(),
+  in_reply_to: z.string().nullish(),
   reply_body: z.string().optional(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
+});
+
+export const MessageDeliveryEventPayloadSchema = z.object({
+  message_id: z.string().optional(),
+  attempt: z.number().int().positive().optional(),
+  delivery: z.enum(["btw", "aside", "steer"]).optional(),
+  session_id: z.string().optional(),
+  title: z.string().optional(),
+  state: z.enum(["sent", "failed"]).optional(),
+  error: z.string().optional(),
 });
 
 export const ChildStatusEventPayloadSchema = z.object({

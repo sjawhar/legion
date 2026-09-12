@@ -1,4 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
+import { setLiveSessions } from "./agents";
 
 import {
   createAsk,
@@ -214,6 +215,51 @@ test("a project document has no horizontal overflow, 44px controls, and a Commen
       await expect(page.getByRole("tab", { name: "Comments" })).toBeVisible();
       await expect(page.getByRole("tab", { name: "Pinned" })).toHaveCount(0);
     }
+  } finally {
+    await alice.close();
+  }
+});
+
+test("the agent picker is a bottom sheet with touch-sized controls on iPhone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the bottom-sheet contract applies on iPhone");
+  await setLiveSessions([
+    {
+      capabilities: ["aside", "btw"],
+      dir: "/w/legion",
+      last_seen: 1_700_000_000_000,
+      roles: ["legion-planner"],
+      session_id: "phone-planner",
+      title: "planner",
+    },
+  ]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Phone recipient picker" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await page.getByRole("button", { name: "Choose recipient" }).click();
+    const picker = page.getByRole("dialog", { name: "Recipient picker" });
+    await expect(picker).toBeVisible();
+    const box = await picker.boundingBox();
+    const viewport = await page.evaluate(() => ({
+      height: window.innerHeight,
+      width: window.innerWidth,
+    }));
+    expect(box).not.toBeNull();
+    expect((box?.y ?? 0) + (box?.height ?? 0)).toBeGreaterThanOrEqual(viewport.height - 1);
+    expect(box?.width ?? 0).toBeGreaterThanOrEqual(viewport.width - 1);
+    for (const control of await picker.locator("button:visible, input:visible").all()) {
+      const controlBox = await control.boundingBox();
+      expect(controlBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth
+      )
+    ).toBe(true);
   } finally {
     await alice.close();
   }

@@ -32,6 +32,7 @@ import type {
   IssueReferences,
   IssueSummary,
   Message,
+  MessageDelivery,
   MessageRead,
   Project,
   RepoProject,
@@ -322,6 +323,12 @@ export class DispatchApiClient {
 
   createMessage(key: string, input: CreateMessageInput): Promise<Message> {
     return this.post<Message>(`/api/v1/issues/${pathSegment(key)}/messages`, input);
+  }
+
+  createMessageDelivery(id: string, delivery: "btw" | "aside" | "steer"): Promise<MessageDelivery> {
+    return this.post<MessageDelivery>(`/api/v1/messages/${pathSegment(id)}/deliveries`, {
+      delivery,
+    });
   }
 
   getMessage(key: string, id: string): Promise<MessageRead> {

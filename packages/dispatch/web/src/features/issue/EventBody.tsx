@@ -67,7 +67,11 @@ export function EventBody({
   if (isAskEvent(event)) {
     return <AskEventBody event={event} onRendered={onRendered} />;
   }
-  if (event.type === "message.created" || event.type === "comment.created") {
+  if (
+    event.type === "message.created" ||
+    event.type === "message.answered" ||
+    event.type === "comment.created"
+  ) {
     return <MarkdownBody markdown={event.payload.body} onRendered={onRendered} />;
   }
   return <p className={`font-medium ${textPrimaryOnSurface}`}>{eventDescription(event)}</p>;

@@ -360,6 +360,7 @@ type sessionInfo struct {
 	Dir            string   `json:"dir"`
 	Port           int      `json:"port"`
 	Title          string   `json:"title"`
+	Capabilities   []string `json:"capabilities"`
 	SelfSubscribed bool     `json:"self_subscribed"`
 	Topics         []string `json:"topics"`
 	Roles          []string `json:"roles"`
@@ -398,6 +399,7 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 				Dir:            entry.Dir,
 				Port:           entry.Port,
 				Title:          entry.Title,
+				Capabilities:   append([]string{}, entry.Capabilities...),
 				SelfSubscribed: entry.SelfSubscribed,
 				UpdatedAt:      entry.UpdatedAt,
 				LastSeen:       entry.UpdatedAt,
@@ -575,9 +577,13 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"role":      role,
-			"holder":    holder,
-			"last_seen": entry.UpdatedAt,
+			"role":         role,
+			"holder":       holder,
+			"title":        entry.Title,
+			"dir":          entry.Dir,
+			"machine_id":   entry.MachineID,
+			"capabilities": append([]string{}, entry.Capabilities...),
+			"last_seen":    entry.UpdatedAt,
 		})
 	}
 }

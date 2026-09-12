@@ -16,11 +16,12 @@ import (
 const SessionBucket = "envoy_sessions"
 
 type SessionEntry struct {
-	Port      int    `json:"port"`
-	MachineID string `json:"machine_id"`
-	Dir       string `json:"dir"`
-	Title     string `json:"title"`
-	UpdatedAt int64  `json:"updated_at"`
+	Port         int      `json:"port"`
+	MachineID    string   `json:"machine_id"`
+	Dir          string   `json:"dir"`
+	Title        string   `json:"title"`
+	Capabilities []string `json:"capabilities"`
+	UpdatedAt    int64    `json:"updated_at"`
 	// Driving reports whether the claiming process is the one actually driving
 	// this session (its explicit -s target or a session it owns), as opposed to a
 	// process that merely has the session loaded from shared on-disk state.

@@ -22,6 +22,7 @@ const SessionWireSchema = z.object({
   title: z.string(),
   topics: z.array(z.string()),
   roles: z.array(z.string()).optional(),
+  capabilities: z.array(z.string()).optional(),
   self_subscribed: z.boolean(),
   last_seen: z.number().int().optional(),
 });
@@ -68,6 +69,7 @@ export type SubscribeInput = {
   readonly topics: readonly string[];
   readonly port: number;
   readonly title: string;
+  readonly capabilities?: readonly string[];
   readonly driving: boolean;
   readonly selfSubscribed?: boolean;
 };
@@ -269,6 +271,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             topics: expandSubscriptionTopics(input.topics),
             port: input.port,
             title: input.title,
+            ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
             driving: input.driving,
             ...(input.selfSubscribed === undefined
               ? {}

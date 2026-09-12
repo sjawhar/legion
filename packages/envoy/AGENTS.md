@@ -78,24 +78,38 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
 | Endpoint | Method | Contract |
 | --- | --- | --- |
-| `/v1/messages/send` | POST | Sends to a live `target_session`. The response is the envelope plus `recipient` with the full target session ID. |
+| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID. |
 | `/v1/messages/publish` | POST | Publishes a non-agent topic. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. |
-| `/v1/roles/<role>` | GET | Returns the live role holder and its `last_seen`, or 404 when no holder is live. |
+| `/v1/roles/<role>` | GET | Returns the live role holder, including its capabilities and `last_seen`, or 404 when no holder is live. |
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
-| `/v1/interests/subscribe` | POST | Persists session topics and route metadata. The response can include `warnings` when a GitHub repository has no retained events. |
+| `/v1/interests/subscribe` | POST | Persists session topics, route metadata, and optional delivery `capabilities`; registrations without capabilities persist `[]`. The response can include `warnings` when a GitHub repository has no retained events. |
 | `/v1/interests/unsubscribe` | POST | Removes the supplied topics and returns them in `removed`. |
-| `/v1/sessions` | GET | Lists live sessions; optional case-sensitive substring filters are `dir` and `title`. Rows include `roles` and `last_seen`. |
+| `/v1/sessions` | GET | Lists live sessions; optional case-sensitive substring filters are `dir` and `title`. Rows include `roles`, `capabilities`, and `last_seen`. |
 | `/v1/interests/` | GET | Lists persisted interests. |
 | `/v1/interests/<session_id>` | GET, DELETE | Gets or removes a session's persisted interests. |
 | `/v1/registry/<session_id>` | GET | Gets a live session registry entry. |
 | `/v1/sessions/<session_id>` | DELETE | Removes a live session registration. |
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`,
-`expects_reply`, and `expires_at`. `urgency` is `low`, `med`, `high`, or
-`blocking`; `expects_reply` is `none`, `optional`, or `required`. Every `/v1`
-4xx/5xx response, including the startup readiness gate, is JSON:
-`{"error":"<message>","expected":["field"]}`. `expected` appears when the
-caller must provide a field.
+`expects_reply`, and `expires_at`; empty optional fields are omitted. `urgency` is `low`,
+`med`, `high`, or `blocking`; `expects_reply` is `none`, `optional`, or `required`. Every
+`/v1` 4xx/5xx response, including the startup readiness gate, is JSON:
+`{"error":"<message>","expected":["field"]}`. `expected` appears when the caller must
+provide a field.
+
+## Targeted Dispatch messages
+
+Humans can create an issue message with `target: "session:<id>"` or `target: "role:<name>"` and
+`delivery: "btw" | "aside" | "steer"`. Dispatch resolves a role holder and checks the selected
+session's capabilities for every attempt, then makes the synchronous listener send; `POST
+/api/v1/messages/{id}/deliveries` creates an explicit retry attempt. The targeted session alone
+uses `POST /api/v1/messages/{id}/reply` for the attempt's automatic BTW response; an ordinary
+agent reply uses `dispatch_message({ in_reply_to })` on the same open issue.
+
+The issue stream retains the targeted `message.created`, `message.delivery`, and
+`message.answered` events for the Conversation card. The outbox always publishes the base issue
+topic envelope, but targeted `message.created` skips bound-route and author fan-out because the
+synchronous listener call records the sent or failed attempt instead of blind republishing.
 
 When `ENVOY_API_TOKEN` is set, `/v1` requires its matching bearer token, and a non-loopback listener refuses to start without it unless `ENVOY_API_ALLOW_UNAUTHENTICATED=1` is the temporary Fargate transition flag.
 

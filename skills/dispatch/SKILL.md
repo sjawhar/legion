@@ -284,6 +284,24 @@ dispatch_message({ issue, body })
 It returns `details` `{ issue, topic, message }`. `body` is capped at 2,000 characters. A message is not a decision
 (`dispatch_ask`) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
 
+### Targeted agent messages
+
+A human can target the issue message at a live Envoy session or role as **BTW**, **Aside**, or
+**Steer**. The incoming Dispatch frame names the issue and includes a `reply_with` instruction;
+reply on the same open issue with the existing tool, never a new targeted send:
+
+```ts
+dispatch_message({
+  issue: "CORE-1",
+  in_reply_to: "<targeted-message-id>",
+  body: "The requested answer.",
+})
+```
+
+`in_reply_to` correlates the answer under the human's message in its Conversation card. A BTW
+delivery can post its answer automatically; use this call when the frame asks the primary agent to
+reply. Agent bearers cannot set `target` or `delivery`.
+
 ## What comes back
 
 A write result's `details.topic` subscribes the host to its owner, and the first such subscription on an issue or document also tells

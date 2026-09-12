@@ -1,13 +1,12 @@
-import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Event, UserIssueState, UserState } from "../../api/types";
+import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
 import {
   checkboxAccent,
   dangerText,
-  inputClasses,
   linkHoverText,
   linkText,
   newDividerLine,
@@ -19,6 +18,8 @@ import {
   surfaceMutedHoverBg,
   surfaceMutedStrongBg,
   textMutedOnCanvas,
+  textMutedOnSurface,
+  textPrimaryOnSurface,
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -55,8 +56,9 @@ interface FailedStateOperations {
 
 interface ConversationTabProps {
   focusItemId?: string;
-  issueKey: string;
   isClosed: boolean;
+  issueKey: string;
+  route?: string | null;
   state: UserState | undefined;
   visible: boolean;
 }
@@ -125,7 +127,7 @@ function MessageTurn({
   pinned: boolean;
   register: (element: HTMLElement | null) => void;
 }): ReactNode {
-  const replyTo = item.kind === "message" ? item.event.payload.reply_to : null;
+  const replyTo = item.kind === "message" ? item.event.payload.in_reply_to : null;
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -160,10 +162,111 @@ function MessageTurn({
   );
 }
 
+function TargetedMessageTurn({
+  agents,
+  current,
+  isClosed,
+  item,
+  register,
+  titles,
+}: {
+  agents: readonly Agent[];
+  current: boolean;
+  isClosed: boolean;
+  item: Extract<ConversationItem, { kind: "targeted-message" }>;
+  register: (element: HTMLElement | null) => void;
+  titles: ReadonlyMap<string, string>;
+}): ReactNode {
+  const queryClient = useQueryClient();
+  const retry = useMutation({
+    mutationFn: (delivery: "btw" | "steer") =>
+      api.createMessageDelivery(item.event.payload.id, delivery),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: ["events", item.event.issue_key] }),
+  });
+  const delivery = item.deliveries.at(-1);
+  const target =
+    delivery === undefined
+      ? undefined
+      : agents.find((agent) => agent.session_id === delivery.payload.session_id);
+  const title = delivery?.payload.title || target?.title || item.event.payload.target || "agent";
+  const failed = delivery?.payload.state === "failed";
+  const isBtw = delivery?.payload.delivery === "btw";
+  const canBtw = target?.capabilities.includes("btw") !== false;
+  const answer = item.answer;
+  const answerAuthor =
+    answer === undefined
+      ? undefined
+      : resolveAuthor(answer.payload.author ?? answer.actor, titles).label;
+
+  return (
+    <li
+      aria-current={current ? "true" : undefined}
+      className={`my-2 rounded-lg border p-3 ${surfaceMutedHoverBg} ${secondaryButtonBorder}`}
+      data-event-seq={item.lastSeq}
+      data-turn={item.id}
+      ref={register}
+    >
+      <EventBody event={item.event} />
+      <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
+        {answer !== undefined
+          ? `Answered by ${answerAuthor}`
+          : failed
+            ? `Failed: ${delivery?.payload.error ?? "delivery failed"}`
+            : isBtw
+              ? `Asking ${title} (BTW) ·`
+              : `Sent to ${title} (${delivery?.payload.delivery ?? "steer"})`}
+        {answer === undefined && isBtw && !failed ? (
+          <Timestamp at={delivery?.created_at ?? item.at} />
+        ) : null}
+      </p>
+      {answer === undefined ? null : (
+        <div className="mt-2">
+          <EventBody event={answer} />
+        </div>
+      )}
+      {item.deliveries.length > 1 ? (
+        <div className={`mt-2 flex flex-col gap-1 text-xs ${textMutedOnSurface}`}>
+          {item.deliveries.slice(0, -1).map((attempt) => (
+            <span key={attempt.id}>
+              Attempt {attempt.payload.attempt}:{" "}
+              {attempt.payload.state === "failed"
+                ? `Failed: ${attempt.payload.error ?? "delivery failed"}`
+                : `Sent to ${attempt.payload.title} (${attempt.payload.delivery})`}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {answer === undefined && !isClosed ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
+            disabled={retry.isPending || !canBtw}
+            onClick={() => retry.mutate("btw")}
+            title={canBtw ? undefined : `${title} does not advertise BTW`}
+            type="button"
+          >
+            Ask BTW again
+          </button>
+          <button
+            className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
+            disabled={retry.isPending}
+            onClick={() => retry.mutate("steer")}
+            type="button"
+          >
+            Send normally
+          </button>
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
 export function ConversationTab({
   focusItemId,
   isClosed,
   issueKey,
+  route,
   state,
   visible,
 }: ConversationTabProps): ReactNode {
@@ -193,6 +296,7 @@ export function ConversationTab({
   const [showActivity, setShowActivity] = useShowActivity();
   const shown = useMemo(() => visibleConversationItems(items, showActivity), [items, showActivity]);
   const [ownSendCount, setOwnSendCount] = useState(0);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const itemSeqs = useMemo(
     () => shown.flatMap((item) => ("lastSeq" in item ? [item.lastSeq] : [])),
     [shown]
@@ -205,7 +309,8 @@ export function ConversationTab({
             (item) =>
               (item.kind === "ask" && item.ask.id === focusItemId) ||
               (item.kind === "comment" && item.event.payload.id === focusItemId) ||
-              (item.kind === "message" && item.event.payload.id === focusItemId)
+              ((item.kind === "message" || item.kind === "targeted-message") &&
+                item.event.payload.id === focusItemId)
           )?.id,
     [focusItemId, shown]
   );
@@ -214,7 +319,7 @@ export function ConversationTab({
     itemSeqs,
     ownSendCount,
   });
-  const { agents, titles } = useAgents(visible);
+  const { agents, error: envoyError, titles } = useAgents(visible, pickerOpen);
   const observedTurnKey = useMemo(
     () =>
       shown
@@ -485,25 +590,12 @@ export function ConversationTab({
       ) : null}
       {isClosed ? null : (
         <ConversationComposer
+          agents={agents}
           issueKey={issueKey}
+          onPickerOpenChange={setPickerOpen}
+          envoyError={envoyError}
           onSent={() => setOwnSendCount((count) => count + 1)}
-          recipientSlot={
-            <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-              To
-              <select
-                aria-label="Recipient"
-                className={`min-h-11 max-w-48 rounded-lg border px-3 text-sm ${inputClasses(true)}`}
-                defaultValue=""
-              >
-                <option value="">No recipient</option>
-                {agents.map((agent) => (
-                  <option key={agent.session_id} value={agent.session_id}>
-                    {agent.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          }
+          route={route}
         />
       )}
       <div className="flex items-center justify-end">
@@ -548,6 +640,19 @@ export function ConversationTab({
               op: isPinnedEvent(dismissed, item.pinEventId) ? "unpin" : "pin",
             }));
 
+          if (item.kind === "targeted-message") {
+            return (
+              <TargetedMessageTurn
+                agents={agents}
+                current={item.id === targetTurnId}
+                isClosed={isClosed}
+                item={item}
+                key={item.id}
+                register={registerObserved}
+                titles={titles}
+              />
+            );
+          }
           if (item.kind === "message" || item.kind === "comment") {
             return (
               <MessageTurn

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -282,7 +283,7 @@ func TestSessionRegistry_RewatchRestartsStoppedWatcher(t *testing.T) {
 	}
 	waitFor(t, 5*time.Second, func() bool {
 		got, err := registry.Get("ses_after_rewatch")
-		return err == nil && got == entry
+		return err == nil && reflect.DeepEqual(got, entry)
 	})
 }
 
