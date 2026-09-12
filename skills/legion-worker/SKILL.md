@@ -94,7 +94,8 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 Read only files that precede the assigned phase. Every handoff is validated when it is read:
 `validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the file, and the
 ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that fails validation as missing.
-Fields outside the declared shape stay on disk for the next worker but the daemon ignores them.
+Undeclared fields pass validation untouched and reach the next worker; a declared field of the
+wrong type fails the whole file, so `legion handoff read` returns null for that phase.
 Write the phase-specific fields the next phase and the architect need, consistent with what
 predecessor phases already wrote. The durable copy lives in
 `$LEGION_WORKSPACE/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior

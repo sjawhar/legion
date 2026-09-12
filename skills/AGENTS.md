@@ -9,6 +9,7 @@ event intake, process lifecycle, credentials, and role delivery.
 ```
 skills/
 ├── dispatch/            # Writing specs, asks, comments, and artifacts on native Dispatch
+├── envoy/               # Envoy subscriptions, agent-to-agent messages, and topic formats
 ├── legion-architect/    # Tree ownership, decomposition, gates, and scheduling
 ├── legion-controller/   # Derived-verdict control-plane operation
 ├── legion-oracle/       # Repository-grounded research
