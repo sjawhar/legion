@@ -1,0 +1,133 @@
+{
+  "issue": "LEGION-22",
+  "branch": "legion/LEGION-22",
+  "pr": {
+    "number": 967,
+    "url": "https://github.com/sjawhar/legion/pull/967"
+  },
+  "headSha": "f9e6d93d66b77820d2c56865b9f319f44bc4c7e2",
+  "codeSha": "fb3c2310793b",
+  "baseSha": "7add4d03",
+  "specVersion": 3,
+  "verdict": "PASS",
+  "summary": "All six acceptance criteria and every Errors-table row verified independently at f9e6d93d (code fb3c2310): unit/E2E suites, the E2E run 3x with no flake, the five socket-mode shim cases byte-unchanged vs main, the UTF-8 regression failing pre-fix and passing at head, and a fresh smoke rig run from this branch (root LEGSMOKE-37, child LEGSMOKE-38) passing checkpoints 1-4 and 13 with by-hand negative controls (four rejection reasons, occupied worker_stream_port) and a positive control (real CLI --connect shim with a daemon-minted planner token) against the real daemon on 19371.",
+  "postedArtifacts": {
+    "commitStatus": {
+      "context": "tester",
+      "state": "success",
+      "sha": "f9e6d93d66b77820d2c56865b9f319f44bc4c7e2",
+      "id": 54042432953,
+      "note": "POST repos/sjawhar/legion/check-runs returned 403 'Resource not accessible by integration' (the App behind the tester grant lacks checks:write) so the verdict is a commit status; creator shows legion-implementer[bot] although github-apps.ts maps test -> review App - pre-existing routing, not touched by this PR"
+    },
+    "prComment": "https://github.com/sjawhar/legion/pull/967#issuecomment-5645524714",
+    "prBodyE2E": "rewritten in place (surfaces, negative controls, head sha)"
+  },
+  "criteria": {
+    "1": {
+      "verdict": "PASS",
+      "commands": [
+        "bun test packages/daemon/src/cli/__tests__/worker-shim.test.ts",
+        "jj -R $LEGION_WORKSPACE diff --from main --to @ --git packages/daemon/src/cli/__tests__/worker-shim.test.ts"
+      ],
+      "observed": "17 pass / 0 fail / 66 expect(); diff hunks @@ -1,10 (imports), @@ -24,6 (insertion before describe cmdWorkerShim), @@ -189,6 (insertion after it, before afterAll); only two removed lines, both imports; five socket-mode cases byte-unchanged (main file 194 lines)"
+    },
+    "2": {
+      "verdict": "PASS",
+      "commands": [
+        "worker-shim.test.ts cases 'backs off 200ms -> 5s...' and 'survives the daemon listener being killed and restarted...'",
+        "bun test packages/daemon/src/daemon/__tests__/worker-stream-e2e.test.ts (x3)"
+      ],
+      "observed": "sleeps == [200,400,800,1600,3200,5000,5000], pre-ack close continues at 5000, post-ack drop restarts at 200, spawns == 0 before first ack; kill/restart: first.seen [1,2,3], second.seen [4,5,6,7], hellos 1 on restarted daemon, spawns 1; E2E 3 pass / 0 fail / 12 expect() at 1144 ms, 1043 ms, 1052 ms - no flake"
+    },
+    "3": {
+      "verdict": "PASS",
+      "commands": [
+        "bun test packages/daemon/src/daemon/__tests__/worker-rpc.test.ts",
+        "bun test packages/daemon/src/daemon/__tests__/worker-stream-listener.test.ts"
+      ],
+      "observed": "worker-rpc 21 pass (10 cases x unix + tcp + UTF-8 regression); listener 12 pass / 47 expect(); first listener case: hello + agent_start in one write -> hello_ack, registrations.get(token) === client, runState running, negotiate resolves"
+    },
+    "4": {
+      "verdict": "PASS",
+      "commands": [
+        "listener it.each rejection rows + stale generation + already-bound",
+        "printf 'not json\\n' | nc 127.0.0.1 19371",
+        "printf '{\"type\":\"hello\",\"bootToken\":\"tok-never-minted\"}\\n' | nc 127.0.0.1 19371",
+        "head -c 5000 /dev/zero | tr '\\0' a | nc 127.0.0.1 19371",
+        "printf '{\"type\":\"hello\"}\\n' | nc 127.0.0.1 19371",
+        "curl -fsS http://127.0.0.1:19370/legion/v1/state | sha256sum (before/after each)"
+      ],
+      "observed": "each: nc exit 0 (daemon closed), exactly one new daemon.log line '[legion] worker-stream: rejected hello (not json|unknown boot token|hello too long|malformed hello)', state sha256 ed6ebb0673366461 before and after (byte-identical)"
+    },
+    "5": {
+      "verdict": "PASS",
+      "commands": [
+        "bun test packages/daemon",
+        "smoke: up.sh (SMOKE_DIR=/tmp/legion22-smoke/rig SMOKE_WEBHOOK_MODE=envoy), create-root (force:true) after bridge ready, watch-checkpoints 1-4 (gate-off restart before 4) then 13, down.sh"
+      ],
+      "observed": "855 pass / 5 skip / 0 fail (860 tests, 55 files, 25.4 s); CHECKPOINT 1 OK 11:01:02Z, 2 OK 11:01:02Z, 3 OK 11:05:53Z, 4 OK 11:06:25Z (gate-off restart on f9e6d93d66b7), 13 OK 11:06:25Z; every daemon boot logged 'legion worker stream listening on 127.0.0.1:19371'; RIG DOWN, 19370/19371/19020/14222 free, tmux server gone, NATS container removed"
+    },
+    "6": {
+      "verdict": "PASS",
+      "commands": [
+        "worker-stream-listener.test.ts 'awaitRegistration rejects on its own fake-clock timeout and clears the timer when the hello lands first'"
+      ],
+      "observed": "injected setTimeout/clearTimeout; recorded timer delayMs 30000 fired -> rejects 'worker stream for legion-acme-LEGION-9-planner did not register within 30000ms'; second waiter resolved by a real hello -> cleared == [timers[1]]"
+    }
+  },
+  "errorsTable": {
+    "socketPlusConnect": "legion worker-shim: --socket and --connect are mutually exclusive; pass exactly one (exit 1, no spawn)",
+    "bootTokenFileWithSocket": "legion worker-shim: --boot-token-file is only valid with --connect (exit 1, no spawn; names --boot-token-file and --connect rather than --socket - wording nit only)",
+    "tokenUnreadable": "--boot-token-file <path> is unreadable: ENOENT ... / EACCES ... (exit 1, no spawn)",
+    "tokenBlank": "--boot-token-file <path> is blank (exit 1, no spawn)",
+    "daemonUnreachable": "unavailable (Failed to connect); retrying in 200ms, 400ms, 800ms, 1600ms, 3200ms; nothing spawned within 4 s",
+    "portInUse": "nc -l -k 127.0.0.1 19371 before up.sh: daemon.log 'error: worker_stream_port 19371 on 127.0.0.1 is unavailable: Failed to listen at 127.0.0.1', daemon exited, 19370 released; up.sh 'error: Legion daemon exited'; index.test.ts case passes"
+  },
+  "utf8Fix": {
+    "verdict": "PASS",
+    "method": "worker-rpc.ts replaced with its 773f44ae version (test file at head), then restored from fb3c2310 (sha256 fc4cf4d4... equal before/after)",
+    "preFix": "bun test worker-rpc.test.ts -t multi-byte -> 1 fail: expected note '€', received '���'",
+    "atHead": "1 pass"
+  },
+  "config": {
+    "verdict": "PASS",
+    "command": "bun test packages/daemon/src/daemon/__tests__/config.test.ts -t 'worker_stream_port|workerStreamPort'",
+    "observed": "2 pass (YAML > env > port+1 default; rejects 70000, 0, non-port env value, equal to port, port+1 == 65536)"
+  },
+  "gates": {
+    "biome": "cd packages/daemon && bunx biome check src/ -> Checked 139 files, No fixes applied",
+    "tsc": "cd packages/daemon && bunx tsc --noEmit -> clean",
+    "bunTest": "bun test packages/daemon -> 855 pass / 5 skip / 0 fail"
+  },
+  "positiveControlOnRealDaemon": "bun packages/daemon/src/cli/index.ts worker-shim --connect tcp://127.0.0.1:19371 --boot-token-file /tmp/legion22-smoke/rig/daemon/secrets/legion-sjawhar24-legsmoke-38-planner -- sh -c '...; exec bun fake-omp-rpc.ts': ESTAB 127.0.0.1:56064 <-> :19371 between shim pid and daemon pid, fake-omp-rpc child under the shim, no daemon log line; second dial same token -> '[legion] worker-stream: rejected hello (already bound to a live stream)', state unchanged; after stopping the shim a third dial received {\"type\":\"hello_ack\"} and stayed open until the client closed",
+  "smokeRig": {
+    "dir": "/tmp/legion22-smoke/rig (fresh; implementer's run archived at /tmp/legion22-smoke/rig.implementer-run)",
+    "coordinates": "SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 SMOKE_WEBHOOK_MODE=envoy OMP_PROFILE=legion LEGION_OMP_PATH=.../omp-18.1.15-sami.9bff2014-rpcfix; ports 19370/19371 daemon, 19020 listener, 14222 NATS",
+    "rootIssue": "LEGSMOKE-37 (created with force:true after bridge ready; up.sh's own ensure_root_issue 409'd POSSIBLE_DUPLICATE, the known rig bug); child LEGSMOKE-38; both set to icebox after teardown",
+    "boots": [
+      "10:49Z first boot (rejection controls, root created 10:51Z; clone killed by runner timeout -> launchFailures 1, queued)",
+      "11:00:43Z gate-on restart with GIT_CONFIG_GLOBAL workaround (clone ok, checkpoints 1-3)",
+      "11:05:54Z gate-off restart (checkpoints 4, 13)"
+    ],
+    "checkpointsLog": "/tmp/legion22-smoke/checkpoints.log",
+    "daemonLogs": [
+      "/tmp/legion22-smoke/daemon.log.port-occupied-attempt",
+      "/tmp/legion22-smoke/rig/daemon.log.before-110043",
+      "/tmp/legion22-smoke/rig/daemon.log.before-110554",
+      "/tmp/legion22-smoke/rig/daemon.log"
+    ],
+    "scripts": "/tmp/legion22-smoke/{up-wrapper.sh,create-root-tester.sh,restart-daemon-gateon.sh,watch-tester.sh,watch-checkpoints.sh,restart-daemon.sh,down via up-wrapper.sh down.sh}"
+  },
+  "flakes": "none observed: E2E 3/3 runs green; full suite green once; smoke checkpoints passed on first evaluation after each phase",
+  "observationsNotFailures": [
+    "Rig daemon logs 'failed to connect controller|architect shim socket on ready: ... negotiate_protocol timed out after 5000ms' on every boot; identical lines in the implementer's archived run; same best-effort path exists on main (processes.ts markControllerReady); worker-rpc negotiates over a real unix socket in-suite and checkpoints 1-4 passed -> pre-existing rig behaviour, not a transport-split regression.",
+    "Environment: this box's global git helper '!gh auth git-credential' currently hangs 30-90 s (gh blocks on the D-Bus secret service), so the rig daemon's first jj git clone was killed at the 30 s runner timeout (launchFailures 1, tree queued); restarted the rig daemon with GIT_CONFIG_GLOBAL=/tmp/legion22-smoke/gitconfig (helper-free copy of ~/.gitconfig, same workaround the LEGION-21 tester used) after removing the half-written clone dir; the clone then succeeded and admission reconciliation re-spawned the tree on boot.",
+    "The smoke rig is single-occupancy (shared ports, shared LEGSMOKE project, shared private tmux server); waited for the LEGION-21 tester's rig to tear down (10:47:37Z) before starting.",
+    "Tester grant's gh identity cannot create check runs (403) and the commit status it created is attributed to legion-implementer[bot]; github-apps.ts MODE_TO_ROLE maps test -> review. Not changed by this PR.",
+    "Spec Errors row '--boot-token-file with --socket -> CLI error naming both flags': the message names --boot-token-file and --connect, not --socket. Behaviour (error, exit 1 before spawn) is correct; wording nit for the reviewer's Fast-follow line if wanted."
+  ],
+  "forMerger": "config.bind swap (index.ts listener hostname + two log lines) once #962 is on main, per implement.json rebaseNotesForMerger; unchanged by this phase.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T11:13:03.642Z"
+}
