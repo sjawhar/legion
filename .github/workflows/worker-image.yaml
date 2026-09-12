@@ -44,7 +44,7 @@ on:
 permissions:
   contents: write # gh release edit
   packages: write # ghcr.io push
-  id-token: write # depot/setup-action OIDC; aws-actions/configure-aws-credentials OIDC
+  id-token: write # solely for the optional ECR mirror's aws-actions/configure-aws-credentials OIDC
 
 jobs:
   build:
@@ -64,16 +64,6 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ env.BUILT_SHA }}
-
-      - name: Require the Depot project variable
-        env:
-          DEPOT_PROJECT_ID: ${{ vars.DEPOT_PROJECT_ID }}
-        run: |
-          if [ -z "$DEPOT_PROJECT_ID" ]; then
-            echo "::error::Repository variable DEPOT_PROJECT_ID is unset; the worker image builds on Depot and needs a project (root decision 3 on LEGION-19)."
-            echo "**Worker image not built** — repository variable \`DEPOT_PROJECT_ID\` is unset." >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
 
       - name: Compute tags
         id: meta
@@ -100,13 +90,7 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: depot/setup-action@v1
-        id: depot
-        with:
-          oidc: true
-          # Pinned, not latest: a new depot CLI can briefly lag on one distribution channel and break
-          # the build (agent-c's experience with dl.depot.dev vs public.ecr.aws/depot/cli); bump deliberately.
-          version: "2.102.7"
+      - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
         with:
@@ -116,15 +100,15 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: depot/build-push-action@v1
+        uses: docker/build-push-action@v6
         with:
-          project: ${{ vars.DEPOT_PROJECT_ID }}
           context: .
           file: packages/daemon/docker/worker.Dockerfile
           # The OMP fork release ships linux-x64 (and darwin-arm64) only.
           platforms: linux/amd64
           push: true
-          lint: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
           labels: |
@@ -132,17 +116,6 @@ jobs:
             org.opencontainers.image.version=${{ steps.meta.outputs.version_label }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
-
-      - name: Depot failure remedy
-        if: failure() && (steps.depot.outcome == 'failure' || steps.build.outcome == 'failure')
-        env:
-          DEPOT_PROJECT_ID: ${{ vars.DEPOT_PROJECT_ID }}
-        run: |
-          {
-            echo "### Worker image build failed"
-            echo
-            echo "If the log shows a Depot authentication / OIDC error: add a GitHub trust relationship for \`${GITHUB_REPOSITORY}\` on Depot project \`${DEPOT_PROJECT_ID}\` (Depot dashboard → project → Settings → Trust Relationships; https://depot.dev/docs/cli/authentication#oidc-trust-relationships), then re-run the failed jobs (\`gh run rerun ${GITHUB_RUN_ID} --failed --repo ${GITHUB_REPOSITORY}\` — \`--failed\` keeps the \`cli\` job's recorded outputs; a whole-run rerun of a release.yaml call re-executes \`cli\` against its own tag and empties \`cli_version\`) or push the branch again."
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record digest
         env:

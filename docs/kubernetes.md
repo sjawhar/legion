@@ -55,8 +55,10 @@ Runs from any other ref publish the `sha-` tag only and never touch a release.
 
 ### How it is built — and the iteration rule
 
-`.github/workflows/worker-image.yaml` builds on Depot (`depot/setup-action` with GitHub OIDC — no static
-Depot token — and `depot/build-push-action`, project `vars.DEPOT_PROJECT_ID`). It runs (1) from
+`.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
++ `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
+cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
+— no third-party builder, no project variable, no extra credential. It runs (1) from
 `release.yaml` after the `cli` job on every `main` push that touches the daemon or plugin, (2) on every head
 of a pull request against `main` whose diff touches `packages/daemon/docker/**`, the OMP pin
 (`packages/daemon/src/daemon/omp-pin.ts`), or the workflow itself — building the PR head and publishing
@@ -67,27 +69,18 @@ PR head never loses it; a `push` trigger filters on the pushed commits alone and
 unguarded. The workflow's `id-token`/`packages`/`contents` permissions apply to same-repo pull requests (this
 repository takes no fork PRs, whose token would be read-only).
 
-**The image is built only by this workflow, on Depot.** Never build it on a workstation — no `docker build`,
-`docker buildx`, `docker compose build`, or `depot build`: an unrelated buildx job took the sami-agents host
-to load 646 on 2026-09-12 and the Legion daemon with it. Iterate by pushing the PR branch (trigger 2) or,
-once merged, dispatching (trigger 3); check the Dockerfile and workflow statically (`hadolint`, `actionlint`
-where installed) and run `bun test` for the TypeScript. Pulling and running the published image locally is
-fine.
+**The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
+— no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the sami-agents
+host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is not a workstation). Iterate by
+pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
+statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
+running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
+(`--failed` keeps the `cli` job's recorded outputs; a whole-run rerun of a `release.yaml` call re-executes
+`cli` against its own tag and empties `cli_version`) or by pushing the branch again.
 
-Two build prerequisites only a human can create, both one-time and both outside this repository (root
-decision 3 on LEGION-19); a missing one is a finding for the architect, never something a worker creates:
-
-- **`DEPOT_PROJECT_ID` repository variable** on `sjawhar/legion`. Unset ⇒ the workflow refuses at its first
-  step and says so in the summary.
-- **Depot trust relationship.** The first build from `sjawhar/legion` fails at `depot/setup-action` until the
-  Depot project's settings list a GitHub trust relationship for `sjawhar/legion`. The failed run's summary
-  carries this remedy: add the relationship, then `gh run rerun <run-id> --failed` (`--failed` keeps the
-  `cli` job's recorded outputs; a whole-run rerun of a `release.yaml` call re-executes `cli` against its own
-  tag and empties `cli_version`) or push the branch again.
-
-After the first push there is one more human action: if the `legion-worker` GHCR package came out private,
-an anonymous `docker pull` fails until its visibility is set to public — a package-settings action on GitHub
-with no API.
+The build has no prerequisites outside this repository. After the first push there is one human action: if
+the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is
+set to public — a package-settings action on GitHub with no API.
 
 ### ECR mirror
 
