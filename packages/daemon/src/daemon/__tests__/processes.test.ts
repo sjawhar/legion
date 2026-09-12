@@ -3845,6 +3845,7 @@ describe("ProcessManager", () => {
     // respawn ever removes it) and its locator records the transcript to resume.
     state.roles[controllerToken("omp")] = { role: "controller", sessionId: "ses-incarnation-1" };
     state.controllerLocator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
@@ -3883,12 +3884,16 @@ describe("ProcessManager", () => {
 
     // Incarnation 1 is dead: the daemon resumes it as incarnation 2 (pane %2) and arms a deadline.
     await processes.ensureController();
-    expect(managedState.controllerLocator?.tmuxPaneId).toBe("%2");
+    const paneOf = () =>
+      managedState.controllerLocator?.runtime === "tmux"
+        ? managedState.controllerLocator.tmuxPaneId
+        : undefined;
+    expect(paneOf()).toBe("%2");
     expect(managedState.roles[controllerToken("omp")]).toBeUndefined();
     // Incarnation 2 dies during boot, before it ever posts /controller/ready.
     deadPanes.add("%2");
     sleepGate.resolve();
-    await flushEventLoopUntil(() => managedState.controllerLocator?.tmuxPaneId === "%3", 20_000);
+    await flushEventLoopUntil(() => paneOf() === "%3", 20_000);
 
     const spawnCommands = commands.filter((command) => command[3] === "new-window");
     expect(spawnCommands).toHaveLength(2);
@@ -3897,6 +3902,7 @@ describe("ProcessManager", () => {
       false
     );
     expect(managedState.controllerLocator).toEqual({
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@52",
       tmuxPaneId: "%3",
@@ -3904,68 +3910,56 @@ describe("ProcessManager", () => {
     });
   });
 
-  it("kills a resumed controller pane that stays alive without re-claiming once the registration deadline fires, then resumes the same transcript", async () => {
+  it("keeps the dead controller's locator, transcript, and claim when the tmux launch fails, and resumes the same file on the next call", async () => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "controller-session.jsonl");
     await writeFile(sessionFile, "", "utf8");
     const state = newLegionState("omp", 1);
-    state.roles[controllerToken("omp")] = { role: "controller", sessionId: "ses-incarnation-1" };
-    state.controllerLocator = {
+    const staleClaim = { role: "controller" as const, sessionId: "ses-incarnation-1" };
+    const deadLocator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
       ompSessionFile: sessionFile,
     };
-    const sleepGate = Promise.withResolvers<void>();
-    let sleepCalls = 0;
-    const deadPanes = new Set<string>(["%1"]);
-    let spawns = 0;
-    const commands: string[][] = [];
-    const { manager: processes, state: managedState } = manager(state, {
+    state.roles[controllerToken("omp")] = { ...staleClaim };
+    state.controllerLocator = { ...deadLocator };
+    let tmuxDown = true;
+    let mints = 0;
+    const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
-      sleep: async () => {
-        sleepCalls += 1;
-        if (sleepCalls === 1) {
-          await sleepGate.promise;
-          return;
-        }
-        await new Promise<void>(() => {});
-      },
+      mintControllerCapability: async () => `controller-secret-${++mints}`,
       run: async (command) => {
         commands.push(command);
-        if (command[3] === "list-panes") {
-          const target = command[command.indexOf("-t") + 1];
-          return deadPanes.has(target) ? { stdout: "", exitCode: 1 } : livePanes(command);
-        }
+        if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
         if (command[3] === "new-window") {
-          spawns += 1;
-          return { stdout: `@5${spawns} %${spawns + 1} 8765${spawns}\n`, exitCode: 0 };
-        }
-        if (command[0] === "tmux" && command[3] === "kill-pane") {
-          deadPanes.add(command[command.indexOf("-t") + 1]);
-          return { stdout: "", exitCode: 0 };
+          return tmuxDown
+            ? { stdout: "", stderr: "no server running", exitCode: 1 }
+            : { stdout: "@50 %7 24680\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },
     });
 
-    await processes.ensureController();
-    expect(managedState.controllerLocator?.tmuxPaneId).toBe("%2");
-    // Incarnation 2 stays alive but hangs during boot: it never posts /controller/ready.
-    sleepGate.resolve();
-    await flushEventLoopUntil(() => managedState.controllerLocator?.tmuxPaneId === "%3", 20_000);
+    // The tmux server is not there: the launch fails after the resume decision and the mint.
+    await expect(processes.ensureController()).rejects.toThrow("tmux new-window failed");
+    expect(state.controllerLocator).toEqual(deadLocator);
+    expect(state.roles[controllerToken("omp")]).toEqual(staleClaim);
+    expect(mints).toBe(1);
 
-    const killed = commands.filter(
-      (command) => command[0] === "tmux" && command[3] === "kill-pane"
-    );
-    expect(killed.map((command) => command[command.indexOf("-t") + 1])).toEqual(["%2"]);
+    // The server is back: the same transcript is resumed, not a fresh start.
+    tmuxDown = false;
+    await processes.ensureController();
     const spawnCommands = commands.filter((command) => command[3] === "new-window");
     expect(spawnCommands).toHaveLength(2);
     expect(spawnCommands[1]?.at(-1)).toContain(`--resume=${sessionFile}`);
-    expect(managedState.controllerLocator).toEqual({
+    expect(state.roles[controllerToken("omp")]).toBeUndefined();
+    expect(state.controllerLocator).toEqual({
+      runtime: "tmux",
       tmuxSession: "legion-omp",
-      tmuxWindowId: "@52",
-      tmuxPaneId: "%3",
+      tmuxWindowId: "@50",
+      tmuxPaneId: "%7",
       ompSessionFile: sessionFile,
     });
   });

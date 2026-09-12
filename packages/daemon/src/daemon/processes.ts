@@ -2463,16 +2463,20 @@ export class ProcessManager {
    * no `legion worker-shim`, no socket: the pane is a live TUI Sami can attach to. Resumes
    * `resumeSessionFile` (the `ompSessionFile` the previous pane reported on `/controller/ready`)
    * so a respawn keeps the conversation; no recorded file starts fresh and logs it. A recorded
-   * file that has gone missing refuses (same-agent invariant) *before* anything is mutated: the
+   * file that has gone missing refuses (same-agent invariant) before anything is mutated: the
    * dead pane's locator, and with it the recorded file, stays exactly as it was and the
    * controller capability is not rotated, so every later call refuses again with the same
    * honest log instead of silently starting fresh — the controller has no launch-failure counter
-   * and never escalates; an operator restores the file or clears the locator. */
+   * and never escalates; an operator restores the file or clears the locator (stop the daemon,
+   * delete `controllerLocator` from the state file, start it). The previous incarnation is
+   * retired only once its replacement's pane exists: the locator swap and the claim deletion
+   * happen together, synchronously, after `openWindow` resolves, so a launch that fails at tmux
+   * leaves locator and claim untouched with only the capability rotated (harmless: the pane it
+   * authorised is dead) and the next call resumes the same file. */
   private async spawnController(resumeSessionFile: string | undefined): Promise<void> {
     const controllerDir = path.join(this.deps.config.stateDir, "controller");
     const promptPath = path.join(EXTENSION_PACKAGE, "roles", "controller-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
-    await this.writeOmpConfig(controllerDir);
     const token = controllerToken(this.deps.state.project);
     if (resumeSessionFile === undefined) {
       console.info("[legion] starting the controller fresh: no OMP session file is recorded");
@@ -2482,22 +2486,16 @@ export class ProcessManager {
       resumeSessionFile,
       "resurrecting the controller"
     );
-    // Only past the resume decision is the previous incarnation retired: its locator is
-    // dropped, its role claim is deleted, and the capability is rotated. The claim is the
-    // registration-deadline guard's evidence that the *current* pane reached
-    // `/controller/ready`; leaving the dead incarnation's claim in place would make every later
-    // deadline see "claimed" and do nothing, so a resumed pane that hangs or dies during boot
-    // would never be recovered. The new pane puts the claim back through `/controller/ready` —
-    // the only path that ever writes it.
-    delete this.deps.state.controllerLocator;
-    delete this.deps.state.roles[token];
-    const controllerSecret = await this.deps.mintControllerCapability();
+    await this.writeOmpConfig(controllerDir);
     // Interactive: no `--mode rpc`. The tmux runtime opens this command in the pane directly, with
     // no `legion worker-shim` and no socket (see `TmuxRuntime.spawnController`).
     const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
-    // Held until the locator is in state (or the launch failed) — see `holdProcessSecret`.
+    // Held from before the mint's own persist until the locator is in state (or the launch
+    // failed) — see `holdProcessSecret`. Taken first so no await in between leaves the
+    // controller's secret file covered by neither a locator nor a hold.
     const releaseSecret = this.holdProcessSecret(token);
     try {
+      const controllerSecret = await this.deps.mintControllerCapability();
       // Tracked before the runtime writes it — see `spawnTree`.
       this.processSecretFiles.add(token);
       const env = {
@@ -2520,8 +2518,16 @@ export class ProcessManager {
         innerCommand,
         secrets: { LEGION_CONTROLLER_SECRET: controllerSecret },
       });
-      // Carried onto the fresh locator so a `/controller/ready` that omits the field (an older
-      // plugin) does not lose the file the next respawn needs.
+      // The previous incarnation is retired here, in one synchronous step now that its
+      // replacement exists. Its role claim goes with its locator: the claim is the
+      // registration-deadline guard's evidence that the *current* pane reached
+      // `/controller/ready`, and leaving a dead incarnation's claim in place would make every
+      // later deadline see "claimed" and do nothing, so a resumed pane that hangs or dies during
+      // boot would never be recovered. The new pane puts the claim back through
+      // `/controller/ready` — the only path that ever writes it. `ompSessionFile` is carried onto
+      // the fresh locator so a `/controller/ready` that omits the field (an older plugin) does
+      // not lose the file the next respawn needs.
+      delete this.deps.state.roles[token];
       this.deps.state.controllerLocator = {
         ...locator,
         ...(resumeSessionFile === undefined ? {} : { ompSessionFile: resumeSessionFile }),

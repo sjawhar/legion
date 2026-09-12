@@ -1577,8 +1577,26 @@ describe("Legion HTTP API", () => {
     expect(completed.body).toEqual({ error: "A controller grant cannot complete a phase" });
     expect(publications).toEqual([]);
   });
-  it("revokes outstanding controller grants when the controller capability is rotated for a respawn", async () => {
+  it("revokes outstanding controller grants when the controller capability is rotated for a respawn, leaving phase-worker grants alone", async () => {
     await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const architectGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+    expect(architectGrant.status).toBe(200);
     const controllerGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
       sessionId: "ses_controller",
       secret: controllerSecret,
@@ -1594,6 +1612,10 @@ describe("Legion HTTP API", () => {
     });
     expect(stale.response.status).toBe(403);
     expect(tokenRoles).toEqual([]);
+    // The architect's grant was minted by a different capability and outlives the rotation.
+    const survivor = await json("/legion/v1/gh-token", { grantId: architectGrant.body.grantId });
+    expect(survivor.response.status).toBe(200);
+    expect(tokenRoles).toEqual(["implement"]);
   });
   it("rejects gh-token/git-credential with 403 when the minting session's capability is revoked while the GitHub lease is in flight", async () => {
     const reachedLease = Promise.withResolvers<void>();

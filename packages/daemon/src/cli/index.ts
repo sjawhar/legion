@@ -122,9 +122,10 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
     const body = await response.text();
     // Only the daemon's own authority refusal earns the "publish READY" wording: an expired or
     // unknown grant on a merge invocation is a redemption failure like any other, and telling the
-    // controller to publish READY to itself would be wrong.
+    // controller to publish READY to itself would be wrong. The daemon's body says the same thing
+    // as this sentence, so it is not appended here; the generic branch keeps the raw body.
     if (merge && response.status === 403 && body.includes(MERGE_AUTHORITY_REFUSED)) {
-      throw new CliError(`this grant cannot merge; publish READY to the controller: ${body}`);
+      throw new CliError("this grant cannot merge; publish READY to the controller");
     }
     throw new CliError(`Unable to redeem LEGION_GRANT (${response.status}): ${body}`);
   }

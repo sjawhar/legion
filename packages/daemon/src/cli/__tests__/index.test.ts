@@ -107,8 +107,7 @@ describe("legion gh", () => {
       })
     ).rejects.toEqual(
       expect.objectContaining({
-        message:
-          'this grant cannot merge; publish READY to the controller: {"error":"Only the controller may merge; publish READY to the controller"}',
+        message: "this grant cannot merge; publish READY to the controller",
         code: 1,
       })
     );
