@@ -145,12 +145,89 @@ fi
   printf 'expected explicit-forward availability error\n' >&2
   exit 1
 }
-[[ "$(webhook_ingress_block_reason)" == "SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints that require live delivery are blocked; resync-driven checkpoints 1-4 remain usable" ]] || {
-  printf 'expected exact no-webhook blocked reason\n' >&2
+[[ "$(webhook_ingress_block_reason)" == "SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode" ]] || {
+  printf 'expected the none-mode block reason to name the missing Dispatch issue-event feed and envoy for checkpoints 1-4 and 12\n' >&2
   exit 1
 }
 
 printf 'PASS: selects webhook ingress mode without silently falling back\n'
+
+fake_omp="${fake_bin}/omp"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_omp"
+chmod +x "$fake_omp"
+[[ "$(LEGION_OMP_PATH="$fake_omp" resolve_omp_path)" == "$fake_omp" ]] || {
+  printf 'expected an explicit executable LEGION_OMP_PATH to pass through unchanged\n' >&2
+  exit 1
+}
+# A valid LEGION_OMP_PATH must win before HOME is ever read: under set -u an unset HOME would
+# otherwise surface as `HOME: unbound variable` even though no default path is needed.
+[[ "$(env -u HOME -u XDG_STATE_HOME LEGION_OMP_PATH="$fake_omp" bash -uc 'source "$1"; resolve_omp_path' _ "$source_file" 2>&1)" == "$fake_omp" ]] || {
+  printf 'expected a valid LEGION_OMP_PATH to resolve without reading HOME\n' >&2
+  exit 1
+}
+if (LEGION_OMP_PATH="${fake_bin}/missing-omp" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected a missing LEGION_OMP_PATH to fail\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"LEGION_OMP_PATH is not an absolute executable file: ${fake_bin}/missing-omp"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+# Each guard must fail for its own reason, so each case satisfies every other guard:
+# an existing, executable file reached by a relative path (only the leading-slash test can
+# reject it), and an existing absolute file with no execute bit (only -x can).
+if (cd "$fake_bin" && LEGION_OMP_PATH="omp" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected a relative LEGION_OMP_PATH to fail even when the file exists and is executable\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'LEGION_OMP_PATH is not an absolute executable file: omp'* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+fake_omp_noexec="${fake_bin}/omp-noexec"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_omp_noexec"
+chmod -x "$fake_omp_noexec"
+if (LEGION_OMP_PATH="$fake_omp_noexec" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected a non-executable LEGION_OMP_PATH to fail\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"LEGION_OMP_PATH is not an absolute executable file: ${fake_omp_noexec}"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+fake_state_home="${fake_bin}/xdg-state"
+default_omp="${fake_state_home}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"
+mkdir -p "$(dirname "$default_omp")"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$default_omp"
+chmod +x "$default_omp"
+[[ "$(unset LEGION_OMP_PATH; XDG_STATE_HOME="$fake_state_home" resolve_omp_path)" == "$default_omp" ]] || {
+  printf 'expected an unset LEGION_OMP_PATH to resolve to the production rpc-fix build under XDG_STATE_HOME\n' >&2
+  exit 1
+}
+# The default build present but not executable: the -x guard on the default path, not -f.
+chmod -x "$default_omp"
+if (unset LEGION_OMP_PATH; XDG_STATE_HOME="$fake_state_home" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected preflight to fail when the default build is not executable\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"${default_omp} is missing or not executable"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+chmod +x "$default_omp"
+if (unset LEGION_OMP_PATH; XDG_STATE_HOME="${fake_bin}/no-state" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected preflight to fail when neither LEGION_OMP_PATH nor the default build exists\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"${fake_bin}/no-state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix is missing or not executable"* &&
+  "$(<"$assertion_file")" == *'export LEGION_OMP_PATH='* &&
+  "$(<"$assertion_file")" == *"bump omp_pin and remove resolve_omp_path's default branch"* &&
+  "$(<"$assertion_file")" == *'fix/rpc-extension-send-rejection'* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+
+printf 'PASS: resolves the OMP build from LEGION_OMP_PATH or the production rpc-fix default, failing closed otherwise\n'
 
 printf '200' >"$response_file"
 if ! (assert_webhook_round_trip) >"$assertion_file" 2>&1; then
@@ -217,6 +294,43 @@ SMOKE_PROJECT="acme/1" write_daemon_config
 }
 
 printf 'PASS: unset SMOKE_OMP_LAUNCH_PREFIX defaults to the secrets wrapper prefix\n'
+
+# Acceptance 1 (LEGION-10): the real daemon loader accepts the file write_daemon_config emits.
+# `--check-config` never resolves secrets (config.ts `resolveSecrets: false`) and the generated
+# file sets no dispatch_url -- but resolveDaemonConfig also reads DISPATCH_URL from the
+# environment and then demands DISPATCH_TOKEN, so scrub both (and the retired alias) to keep the
+# case independent of whatever shell runs this harness.
+readonly daemon_cli="${project_root}/packages/daemon/src/cli/index.ts"
+SMOKE_PROJECT="acme/1" write_daemon_config
+if ! env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_MCP_URL \
+  bun run "$daemon_cli" start acme/1 --config "${SMOKE_DIR}/legion.yaml" --check-config >"$assertion_file" 2>&1; then
+  printf 'expected the daemon loader to accept the generated config; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'Config OK'* ]] || {
+  printf 'expected "Config OK" from --check-config; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+}
+printf 'PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)\n'
+
+# The pre-#941 gates block: `merge: human` under `gates:` is exactly what the loader must refuse.
+# Anchored on the `gates:` line itself, not on the design gate's value, which the rig changes
+# independently (root-issues before #971, off since).
+sed 's/^gates:$/gates:\n  merge: human/' "${SMOKE_DIR}/legion.yaml" >"${SMOKE_DIR}/legion-gates-merge.yaml"
+grep -Fxq '  merge: human' "${SMOKE_DIR}/legion-gates-merge.yaml" || {
+  printf 'fixture error: the gates.merge line was not inserted\n' >&2
+  exit 1
+}
+if env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_MCP_URL \
+  bun run "$daemon_cli" start acme/1 --config "${SMOKE_DIR}/legion-gates-merge.yaml" --check-config >"$assertion_file" 2>"$warning_file"; then
+  printf 'expected loader to reject gates.merge\n' >&2
+  exit 1
+fi
+[[ "$(<"$warning_file")" == *'gates.merge is not a Legion setting'* ]] || {
+  printf 'expected "gates.merge is not a Legion setting" on stderr; stderr:\n%s\n' "$(<"$warning_file")" >&2
+  exit 1
+}
+printf 'PASS: the real daemon loader rejects the pre-#941 gates.merge block\n'
 
 export DISPATCH_URL="http://dispatch.test"
 export DISPATCH_TOKEN="test-dispatch-token"
@@ -305,6 +419,7 @@ assert_port_free() { :; }
 ensure_nats() { printf 'ensure_nats\n' >>"$order_log"; }
 start_process() {
   printf 'start_process:%s\n' "$1" >>"$order_log"
+  printf '%s\n' "${@:2}" >"${SMOKE_DIR}/start_process.${1}.argv"
   : >"${SMOKE_DIR}/${1}.log"
 }
 wait_for_json() { printf 'wait_for_json:%s\n' "$1" >>"$order_log"; }
@@ -321,6 +436,36 @@ export DISPATCH_URL="http://dispatch.test"
 export DISPATCH_TOKEN="test-dispatch-token"
 export SMOKE_WEBHOOK_MODE="envoy"
 
+# Preflight fails closed before anything starts: a missing LEGION_OMP_PATH stops main() before
+# ensure_nats or any start_process call is reached (the stubs above log every such call).
+# resolve_omp_path fails inside `omp_path="$(...)"`, which only aborts main() under `set -e`, and
+# bash suppresses -e for anything run as an `if` condition -- so the probe runs as a plain
+# subshell that re-enables -e itself and reports its status through the substitution.
+: >"$order_log"
+preflight_status="$(set +e; (set -e; LEGION_OMP_PATH="${fake_bin}/missing-omp" main) >"$assertion_file" 2>&1; echo $?)"
+[[ "$preflight_status" != 0 ]] || {
+  printf 'expected main() to fail on a missing LEGION_OMP_PATH\n' >&2
+  exit 1
+}
+[[ "$(<"$assertion_file")" == *"LEGION_OMP_PATH is not an absolute executable file: ${fake_bin}/missing-omp"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+# `GREEN OMP build:` prints only after resolve_omp_path returned successfully. Its absence is what
+# proves the failed resolution stopped main() -- a `local omp_path="$(...)"` form would mask the
+# failure from set -e, print the line with an empty path, and only stop later for some other reason.
+[[ "$(<"$assertion_file")" != *'GREEN OMP build:'* ]] || {
+  printf 'expected main() to stop before printing the selected OMP build; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+}
+[[ ! -s "$order_log" ]] || {
+  printf 'expected no process to start when OMP preflight fails; order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+printf 'PASS: a missing OMP build stops up.sh in preflight before any process starts\n'
+
+export LEGION_OMP_PATH="$fake_omp"
+
 if ! main >"$main_output_file" 2>&1; then
   printf 'expected up.sh main() to succeed; output:\n%s\n' "$(<"$main_output_file")" >&2
   exit 1
@@ -330,6 +475,25 @@ fi
   printf 'expected up.sh main() to finish with RIG READY; output:\n%s\n' "$(<"$main_output_file")" >&2
   exit 1
 }
+[[ "$(<"$main_output_file")" == *"GREEN OMP build: ${fake_omp}"* ]] || {
+  printf 'expected up.sh to print the selected OMP build; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+grep -Fxq "LEGION_OMP_PATH=${fake_omp}" "${SMOKE_DIR}/start_process.daemon.argv" || {
+  printf 'expected the daemon start_process env block to carry LEGION_OMP_PATH; argv:\n%s\n' "$(<"${SMOKE_DIR}/start_process.daemon.argv")" >&2
+  exit 1
+}
+# Every start_process call recorded its argv (listener, daemon, envoy-bridge): exactly one file
+# may carry LEGION_OMP_PATH, and it is the daemon's.
+[[ "$(grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv)" == "${SMOKE_DIR}/start_process.daemon.argv" ]] || {
+  printf 'LEGION_OMP_PATH belongs in the daemon env block only; argv files carrying it:\n%s\n' "$(grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv || true)" >&2
+  exit 1
+}
+grep -Fxq "omp_invocation: mise x ${omp_pin} -- omp" "${SMOKE_DIR}/legion.yaml" || {
+  printf 'expected legion.yaml to keep the mise x <pin> -- omp invocation\n' >&2
+  exit 1
+}
+printf 'PASS: exports the resolved OMP build as LEGION_OMP_PATH for the daemon only and keeps omp_invocation pinned\n'
 
 daemon_ready_line="$(grep -n '^wait_for_json:Legion daemon$' "$order_log" | head -1 | cut -d: -f1)"
 bridge_ready_line="$(grep -n '^wait_for_envoy_bridge$' "$order_log" | head -1 | cut -d: -f1)"
@@ -354,5 +518,10 @@ jq -e '.actor.kind == "session" and (.actor.id | type == "string" and length > 0
   printf 'expected the root-issue creation request to carry actor.kind == "session"; body:\n%s\n' "$(<"$actor_body_file")" >&2
   exit 1
 }
+jq -e '.force == true' >/dev/null "$actor_body_file" || {
+  printf 'expected the root-issue creation body to carry force: true (Dispatch near-duplicate bypass); body:\n%s\n' "$(<"$actor_body_file")" >&2
+  exit 1
+}
+printf 'PASS: root-issue creation request forces past the Dispatch near-duplicate check\n'
 
 printf 'PASS: root-issue creation request carries a session actor for the bearer-authenticated POST\n'
