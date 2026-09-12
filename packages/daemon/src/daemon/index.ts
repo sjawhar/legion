@@ -20,7 +20,7 @@ import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
-import { GATE_OFF_APPROVAL, publishDesignApproved } from "./api/routes/issues";
+import { GATE_OFF_APPROVAL, satisfyGateOff } from "./api/routes/issues";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
@@ -441,24 +441,25 @@ async function startDaemonLocked(
   };
   // A gate registered while `gates.design` was `root-issues` (or by a daemon predating the
   // gate-off handling) is a human ask nobody may ever answer once the operator turns the gate off.
-  // Satisfy it here exactly as `handleGatesRegister` would have — marker plus wake — so an
-  // architect still parked on it (its pane outlives a daemon restart) proceeds, and a resumed
-  // one's catch-up shows `designApproved`. Only gates of active trees: a closed or lingering
-  // tree has no architect waiting, and a reopen re-registers its gate through the route anyway.
-  // Idempotent: only gates with no approval change.
+  // Satisfy it here exactly as `handleGatesRegister` would have — marker, wake, and the ask closed
+  // on Dispatch — so an architect still parked on it (its pane outlives a daemon restart)
+  // proceeds, a resumed one's catch-up shows `designApproved`, and the question leaves the human's
+  // inbox. Only gates of active trees: a closed or lingering tree has no architect waiting, and a
+  // reopen re-registers its gate through the route anyway. Idempotent: only gates with no approval
+  // change.
   if (config.gates.design === "off") {
-    const approved: IssueKey[] = [];
+    const approved: Array<{ issue: IssueKey; askId: string }> = [];
     for (const [issue, gate] of Object.entries(state.gates)) {
       if (gate.designAskId === undefined || gate.designApproved !== undefined) continue;
       const tree = rootForIssue(state, issue);
       if (!tree || state.trees[tree]?.status !== "active") continue;
       gate.designApproved = GATE_OFF_APPROVAL;
-      approved.push(issue);
+      approved.push({ issue, askId: gate.designAskId });
     }
     if (approved.length > 0) {
       await save();
-      for (const issue of approved) {
-        await publishDesignApproved(state, issue, deps.envoyPublish);
+      for (const { issue, askId } of approved) {
+        await satisfyGateOff(state, issue, askId, deps);
       }
     }
   }

@@ -15,7 +15,8 @@ export class DispatchHttpError extends Error {
 }
 
 /** The daemon's thin client for Dispatch's native-tool API: the lifecycle statuses it owns
- * (see events.ts/processes.ts) and the issue reads resync needs to detect drift. Every write
+ * (see events.ts/processes.ts), the issue reads resync needs to detect drift, and the close of a
+ * design-gate ask the daemon satisfied itself. Every write
  * carries the daemon's own actor identity (D4): `{kind:"session", id:"legion-daemon:<project>",
  * origin:{session_title}}` — `origin` nests inside the session actor per the contract
  * (`packages/contracts/src/dispatch-api.ts`'s `Actor` union), never a sibling of `actor`: the
@@ -32,6 +33,11 @@ export interface DispatchClient {
   getIssue(key: string): Promise<IssueDetails>;
   /** `PATCH /api/v1/issues/<key>` with `{status, actor: {kind, id, origin}}`. */
   setStatus(key: string, status: IssueStatus): Promise<void>;
+  /** `POST /api/v1/asks/<id>/resolve` with `{kind:"resolved", reason, actor}`: closes an open ask
+   * without answering it. Any session actor may resolve any open ask (`resolveAsk` in
+   * `packages/envoy/internal/dispatch/api/asks.go` requires an actor, not the author or a human);
+   * an already-answered or already-resolved ask is a 409. */
+  resolveAsk(id: string, reason: string): Promise<void>;
 }
 
 export interface DispatchClientOptions {
@@ -94,6 +100,13 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
     async setStatus(key, status) {
       await request("PATCH", `/api/v1/issues/${encodeURIComponent(key)}`, {
         status,
+        actor,
+      });
+    },
+    async resolveAsk(id, reason) {
+      await request("POST", `/api/v1/asks/${encodeURIComponent(id)}/resolve`, {
+        kind: "resolved",
+        reason,
         actor,
       });
     },

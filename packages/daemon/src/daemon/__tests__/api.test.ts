@@ -7,6 +7,7 @@ import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { secretHash, spawnCapabilityKey } from "../api/auth";
 import { EnvoyPublishError } from "../api/http";
+import { DispatchHttpError } from "../dispatch-client";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
 import { fakeDispatchClient } from "./ci-fixtures";
@@ -1088,13 +1089,19 @@ describe("Legion HTTP API", () => {
     expect(state.gates[child]).toEqual({ designAskId: "ask-2", designApproved: "ask-1" });
   });
 
-  it("with gates.design off, registering a gate approves it at once and wakes the architect", async () => {
+  it("with gates.design off, registering a gate approves it at once, wakes the architect, and closes the ask on Dispatch", async () => {
     const published: Array<{ topic: string; payload: string }> = [];
+    const resolved: Array<{ id: string; reason: string }> = [];
     await start({
       gates: { design: "off" },
       envoyPublish: async (topic, payload) => {
         published.push({ topic, payload });
       },
+      dispatchClient: fakeDispatchClient({
+        resolveAsk: async (id, reason) => {
+          resolved.push({ id, reason });
+        },
+      }),
     });
     const bootToken = await api?.mintBootToken(root, 3);
     if (!bootToken) throw new Error("root boot token was not minted");
@@ -1124,8 +1131,14 @@ describe("Legion HTTP API", () => {
         payload: JSON.stringify({ type: "design-approved" }),
       },
     ]);
+    expect(resolved).toEqual([
+      { id: "ask-1", reason: expect.stringContaining("gates.design: off") },
+    ]);
+    // The reason is written for the human who would otherwise have been asked.
+    expect(resolved[0]?.reason).toMatch(/no human answer is needed/);
 
-    // Re-registering an already-approved gate records the new ask id and wakes nobody twice.
+    // Re-registering an already-approved gate records the new ask id, wakes nobody twice, and
+    // leaves the new ask alone: the approval was never in question, and nothing else closes it.
     const again = await json("/legion/v1/gates/register", {
       tree: root,
       issue: root,
@@ -1135,6 +1148,49 @@ describe("Legion HTTP API", () => {
     expect(again.response.status).toBe(200);
     expect(state.gates[root]).toEqual({ designAskId: "ask-2", designApproved: "gate-off" });
     expect(published).toHaveLength(1);
+    expect(resolved).toHaveLength(1);
+  });
+
+  it("with gates.design off, a Dispatch failure closing the ask never fails the register", async () => {
+    const errors: string[] = [];
+    const consoleError = console.error;
+    console.error = (message: unknown) => {
+      errors.push(String(message));
+    };
+    try {
+      await start({
+        gates: { design: "off" },
+        envoyPublish: async () => {},
+        dispatchClient: fakeDispatchClient({
+          resolveAsk: async () => {
+            throw new DispatchHttpError(502, "dispatch is down");
+          },
+        }),
+      });
+      const bootToken = await api?.mintBootToken(root, 3);
+      if (!bootToken) throw new Error("root boot token was not minted");
+      const started = await json<{ secret: string }>("/legion/v1/process/started", {
+        tree: root,
+        generation: 3,
+        rootSessionId: "ses_root",
+        bootToken,
+        agentId: "root-agent",
+        ompSessionFile: "/tmp/root.json",
+      });
+      const registered = await json("/legion/v1/gates/register", {
+        tree: root,
+        issue: root,
+        askId: "ask-1",
+        sessionId: "ses_root",
+        secret: started.body.secret,
+      });
+      expect(registered.response.status).toBe(200);
+      expect(state.gates[root]).toEqual({ designAskId: "ask-1", designApproved: "gate-off" });
+      expect(errors).toEqual([expect.stringContaining("ask-1")]);
+      expect(errors[0]).toContain("dispatch is down");
+    } finally {
+      console.error = consoleError;
+    }
   });
 
   it("persists a minted controller capability before controller spawn can proceed", async () => {
