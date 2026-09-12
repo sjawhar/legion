@@ -21,6 +21,7 @@ import {
   newLegionState,
   type WorkerRoleClaim,
 } from "../legion-state";
+import { parseProcStatStartTicks } from "../proc-stat";
 import {
   addressingFragment,
   type ControlDirective,
@@ -32,10 +33,10 @@ import {
 } from "../processes";
 import type { Effect } from "../reducers";
 import { runResync } from "../resync";
-import type { Locator, TmuxLocator } from "../runtime";
+import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { fakeDispatchClient } from "./ci-fixtures";
-import { FakeRuntime, fakeWorkerRpcClient } from "./fake-runtime";
+import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
 
 const root = "LEGION-42";
 const child = "LEGION-43";
@@ -271,6 +272,7 @@ function tree(state: LegionState, issue: IssueKey = root, generation = 1) {
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
       ompSessionFile: "/state/trees/sjawhar-legion-42/.omp/session.json",
+      ...paneIdentity(),
     },
     status: "active",
     launchFailures: 0,
@@ -299,21 +301,33 @@ function liveRun(command: string[]): Promise<{ stdout: string; exitCode: number 
   return Promise.resolve({ stdout: "", exitCode: 0 });
 }
 
-/** Answers a `list-panes` liveness probe for a pane that is alive. `panePid`'s
- * `-F "#{pane_id} #{pane_pid}"` probe gets one `<pane_id> <pid>` row for the probed target — the
- * pane itself, or `%1` standing in for a window's first pane; any other `list-panes` format gets
- * a bare `<pid>` line, which `firstPaneId` rejects as a pane id (`/^%\d+$/`) and `windowAlive`
- * reads only as exit 0. */
+/** Answers a `list-panes -t <pane> -F "#{pane_id} #{pane_pid}"` liveness probe for a pane that is
+ * alive: one `<pane_id> <pid>` row for the probed pane. */
 function livePanes(command: string[], pid = 12345): { stdout: string; exitCode: number } {
-  if (!command.includes("#{pane_id} #{pane_pid}")) return { stdout: `${pid}\n`, exitCode: 0 };
   const target = command[command.indexOf("-t") + 1];
-  return { stdout: `${target.startsWith("%") ? target : "%1"} ${pid}\n`, exitCode: 0 };
+  return { stdout: `${target} ${pid}\n`, exitCode: 0 };
+}
+
+/** Start ticks the fixture's default `readProcessStat` reports for every pid, so a locator
+ * seeded with `paneIdentity()` verifies against the default fake tmux (pid 12345). */
+const DEFAULT_START_TICKS = 4242;
+
+/** A `/proc/<pid>/stat` line whose field 22 (starttime) is `startTicks`. */
+function procStat(pid: number, startTicks = DEFAULT_START_TICKS): string {
+  return `${pid} (sh) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 ${startTicks} 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n`;
+}
+
+/** The process identity a seeded locator needs to verify: `pid` must be what the test's fake
+ * `list-panes` reports for that pane and `startTicks` what its `readProcessStat` reports. */
+function paneIdentity(pid = 12345, startTicks = DEFAULT_START_TICKS) {
+  return { panePid: pid, paneStartTicks: startTicks };
 }
 
 /** Runtime-side overrides `manager()` threads into its `TmuxRuntime` rather than `ProcessManager`. */
 type RuntimeOverrides = {
   connectWorkerRpc: TmuxRuntimeDeps["connectWorkerRpc"];
   readProcessCmdline: (pid: number) => Promise<string>;
+  readProcessStat: (pid: number) => Promise<string>;
 };
 
 function manager(
@@ -332,7 +346,13 @@ function manager(
   const publications: Array<{ subject: string; json: string }> = [];
   const controlRequests: Array<{ subject: string; json: string }> = [];
   const revokedSessions: string[] = [];
-  const { run: requestedRun, connectWorkerRpc, readProcessCmdline, ...overrides } = options;
+  const {
+    run: requestedRun,
+    connectWorkerRpc,
+    readProcessCmdline,
+    readProcessStat,
+    ...overrides
+  } = options;
   let launchedAnyWindow = false;
   const commandRunner =
     requestedRun ??
@@ -344,12 +364,10 @@ function manager(
       if (
         command[0] === "tmux" &&
         command[3] === "list-panes" &&
-        (command.includes("#{pane_id}") || command.includes("#{pane_id} #{pane_pid}"))
+        command.includes("#{pane_id} #{pane_pid}")
       ) {
         if (!launchedAnyWindow) return { stdout: "", exitCode: 1 };
-        return command.includes("#{pane_id}")
-          ? { stdout: "%1\n", exitCode: 0 }
-          : livePanes(command);
+        return livePanes(command);
       }
       if (command[0] === "tmux" && command[3] === "split-window") {
         launchedAnyWindow = true;
@@ -435,8 +453,11 @@ function manager(
       now: deps.now,
       sleep: deps.sleep,
       readProcessCmdline: readProcessCmdline ?? (async () => "omp\0"),
+      // An explicit `readProcessStat: undefined` (the live-tmux test) selects the runtime's real
+      // `/proc/<pid>/stat` read; an absent key gets the fixture's fake.
+      readProcessStat:
+        "readProcessStat" in options ? readProcessStat : async (pid) => procStat(pid),
       issueLocators: (issue) => locatorsForIssue(state, issue),
-      persist: deps.saveState,
     });
   const processManager = new ProcessManager({ ...deps, runtime });
   liveManagers.push(processManager);
@@ -1268,6 +1289,7 @@ describe("ProcessManager", () => {
           await launchGate.promise;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1413,20 +1435,9 @@ describe("ProcessManager", () => {
           await releaseSecondLaunch.promise;
           return { stdout: "%2 54321\n", exitCode: 0 };
         }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return { stdout: "%1\n", exitCode: 0 };
-        }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id} #{pane_pid}")
-        ) {
-          return livePanes(command);
-        }
+        // Generation 1's pane is still its recorded process when generation 2 probes the window
+        // it opened, so generation 2 splits into it rather than opening a second window.
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -1472,7 +1483,7 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]).toMatchObject({
       generation: 2,
       status: "active",
-      locator: { tmuxWindowId: "@42", tmuxPaneId: "%2" },
+      locator: { tmuxWindowId: "@42", tmuxPaneId: "%2", panePid: 54321 },
     });
     expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
     // The surviving pane's boot token is still on disk, and it is generation 2's — the older
@@ -1533,6 +1544,7 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 1, stderr: "tmux: server not responding" };
         }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -2377,6 +2389,8 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") return { stdout: "@42 %1 4242\n", exitCode: 0 };
+        // The pane is still exactly the process the spawn just recorded, so the kill is allowed.
+        if (command[3] === "list-panes") return livePanes(command, 4242);
         if (command[3] === "kill-pane") {
           killedPanes.push(command[5] ?? "");
           return { stdout: "", exitCode: 0 };
@@ -2582,7 +2596,17 @@ describe("ProcessManager", () => {
     };
     state.phases[root] = { phase: "merger", sessionId: "ses_root_merger" };
     state.phases[child] = { phase: "reviewer", sessionId: "ses_child_reviewer" };
-    const { manager: processes, commands, publications } = manager(state);
+    const commands: string[][] = [];
+    const { manager: processes, publications } = manager(state, {
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
 
     await processes.beginLinger(root);
 
@@ -2601,8 +2625,8 @@ describe("ProcessManager", () => {
     expect(state.phases[root]).toBeUndefined();
     expect(state.phases[child]).toBeUndefined();
     expect(publications).toEqual([]);
-    // The default fixture's fake pane never reports a live pid, so `probe` sees the root as
-    // already dead and `stopProcess` skips straight to reaping its recorded pane.
+    // The root's pane is live and still the process its locator recorded, but its shim socket
+    // refuses, so `stopProcess` falls through to reaping that recorded pane.
     expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%0"]);
   });
 
@@ -2707,9 +2731,9 @@ describe("ProcessManager", () => {
     const shutdownCalls: string[] = [];
     const commands: string[][] = [];
     const { manager: processes } = manager(state, {
-      // `probe(root)` must find the recorded root pane alive so `closeTree`'s unilateral
-      // (non-self-report) leg actually attempts the root's own graceful stop instead of
-      // skipping straight to a kill on the assumption nothing is there.
+      // `probe(root)` must find the recorded root pane alive -- still its recorded process -- so
+      // `closeTree`'s unilateral (non-self-report) leg actually attempts the root's own graceful
+      // stop instead of skipping straight to a kill on the assumption nothing is there.
       run: async (command) => {
         commands.push(command);
         if (
@@ -2717,7 +2741,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2786,7 +2810,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2836,6 +2860,7 @@ describe("ProcessManager", () => {
         tmuxWindowId: "@99",
         tmuxPaneId: "%1",
         socketPath: "/state/workers/hung.sock",
+        ...paneIdentity(),
       },
     };
     state.roles[roleToken("omp", grandchild, "tester")] = {
@@ -2863,7 +2888,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2911,7 +2936,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2959,7 +2984,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "can't find pane: %0", exitCode: 1 };
@@ -2995,7 +3020,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -3055,7 +3080,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -3102,7 +3127,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -3154,7 +3179,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "lost server", exitCode: 1 };
@@ -3193,14 +3218,13 @@ describe("ProcessManager", () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes } = manager(state, {
       sleep: async () => {},
+      // The pane is still the recorded process, so the kill is attempted; its shim socket
+      // refuses, so nothing is stopped gracefully first.
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
       run: async (command) => {
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id} #{pane_pid}")
-        ) {
-          return { stdout: "", exitCode: 1 };
-        }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return {
             stdout: "",
@@ -3249,6 +3273,7 @@ describe("ProcessManager", () => {
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
         socketPath: "/state/workers/dead-tester.sock",
+        ...paneIdentity(),
       },
     };
     const commands: string[][] = [];
@@ -3264,6 +3289,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "lost server", exitCode: 1 };
         }
@@ -4560,6 +4586,7 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@42",
       tmuxPaneId: "%1",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
     });
     expect(publications).toEqual([]);
   });
@@ -4610,6 +4637,7 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
     };
     const sleepGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
@@ -4656,6 +4684,7 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
     };
     state.controllerLocator = { ...staleLocator };
     const sleepGate = Promise.withResolvers<void>();
@@ -4715,6 +4744,7 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@44",
       tmuxPaneId: "%3",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(65432),
     });
   });
 
@@ -4727,6 +4757,7 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
     };
     state.controllerLocator = { ...locator };
     const sleepGate = Promise.withResolvers<void>();
@@ -4768,6 +4799,7 @@ describe("ProcessManager", () => {
     const firstSleepGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
     let windowCount = 0;
+    const launchedPids = new Map<string, number>();
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       // Only the very first armed deadline (for the from-scratch spawn this test is about) is
@@ -4787,9 +4819,12 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[3] === "list-panes") return livePanes(command);
+        if (command[3] === "list-panes") {
+          return livePanes(command, launchedPids.get(command[command.indexOf("-t") + 1]));
+        }
         if (command[3] === "new-window") {
           windowCount += 1;
+          launchedPids.set(`%${windowCount}`, Number(`8765${windowCount}`));
           return { stdout: `@5${windowCount} %${windowCount} 8765${windowCount}\n`, exitCode: 0 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
@@ -4826,6 +4861,7 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
     };
     state.controllerLocator = { ...staleLocator };
     const staleSleepGate = Promise.withResolvers<void>();
@@ -4897,6 +4933,7 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
     };
     state.controllerLocator = { ...locator };
     const sleepGate = Promise.withResolvers<void>();
@@ -5072,6 +5109,7 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     let windowCount = 0;
     let paneAlive = true;
+    const launchedPids = new Map<string, number>();
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
@@ -5094,10 +5132,13 @@ describe("ProcessManager", () => {
         }
         if (command[3] === "new-window") {
           windowCount += 1;
+          launchedPids.set(`%${windowCount}`, Number(`1000${windowCount}`));
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return paneAlive
+            ? livePanes(command, launchedPids.get(command[command.indexOf("-t") + 1]))
+            : { stdout: "", exitCode: 1 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           // A real kill-pane actually kills the pane -- the resurrect that follows must see it
@@ -5782,6 +5823,7 @@ describe("ProcessManager", () => {
     let windowCount = 0;
     let killPaneShouldFail = true;
     let killPaneSucceeded = false;
+    const launchedPids = new Map<string, number>();
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
@@ -5808,10 +5850,13 @@ describe("ProcessManager", () => {
         }
         if (command[3] === "new-window") {
           windowCount += 1;
+          launchedPids.set(`%${windowCount}`, Number(`1000${windowCount}`));
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return killPaneSucceeded ? { stdout: "", exitCode: 1 } : livePanes(command);
+          return killPaneSucceeded
+            ? { stdout: "", exitCode: 1 }
+            : livePanes(command, launchedPids.get(command[command.indexOf("-t") + 1]));
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           if (killPaneShouldFail) {
@@ -6027,6 +6072,7 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
       socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
     };
     state.controllerLocator = { ...locator };
     const sleepGate = Promise.withResolvers<void>();
@@ -6434,11 +6480,18 @@ describe("ProcessManager", () => {
       const { manager: processes } = manager(state, {
         config: config(stateDir, { legionId: project }),
         readProcessCmdline: async () => "omp\0",
+        // The real `/proc/<pid>/stat` read, against the real `sleep` the pane runs.
+        readProcessStat: undefined,
         run: commandRunner,
       });
 
       try {
         await processes.spawnRoot(root);
+        const launched = tmuxFields(state.trees[root]?.locator);
+        if (!launched?.panePid) throw new Error("live root is missing its pane identity");
+        expect(launched.paneStartTicks).toBe(
+          parseProcStatStartTicks(await readFile(`/proc/${launched.panePid}/stat`, "utf8"))
+        );
         expect(await processes.probe(root)).toBe("alive");
         const firstWindowId = tmuxFields(state.trees[root]?.locator)?.tmuxWindowId;
         if (!firstWindowId) throw new Error("live root is missing its tmux window id");
@@ -6535,6 +6588,179 @@ describe("ProcessManager", () => {
     // The record of a possibly-live controller survives; nothing was spawned beside it.
     expect(state.controllerLocator).toBe(controllerLocator);
     expect(runtime.spawned).toEqual([]);
+  });
+
+  /** A FakeRuntime-backed tree whose root has spawned and confirmed ready, with the manager's own
+   * client for it already connected -- the shape every "handle now belongs to another process"
+   * case below starts from. */
+  async function fakeRuntimeTree(): Promise<{
+    processes: ProcessManager;
+    state: LegionState;
+    runtime: FakeRuntime;
+    locator: Locator;
+    client: FakeWorkerRpcClient;
+  }> {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.admission.active.push(root);
+    const clients: FakeWorkerRpcClient[] = [];
+    const runtime = new FakeRuntime({
+      clientFactory: () => {
+        const client = fakeWorkerRpcClient();
+        clients.push(client);
+        return client;
+      },
+    });
+    const { manager: processes } = manager(state, { config: config(stateDir), runtime });
+    await processes.spawnRoot(root);
+    processes.confirmRootReady(root, 1);
+    const locator = state.trees[root]?.locator;
+    if (!locator) throw new Error("spawned root has no locator");
+    await runtime.connect(locator);
+    const [client] = clients;
+    if (!client) throw new Error("connect created no client");
+    return { processes, state, runtime, locator, client };
+  }
+
+  it("closes a tree whose root's handle now belongs to another process: asks the recorded process to exit over its own socket, refuses the destroy step, clears the locator, and logs both identities once", async () => {
+    const { processes, state, runtime, locator, client } = await fakeRuntimeTree();
+    runtime.occupyHandle(locator, { detail: "pane %1 now runs pid 999 (recorded pid 1 start 2)" });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[] = [];
+    try {
+      await processes.closeTree(root);
+    } finally {
+      logged = errors.mock.calls.map((call) => call.map(String).join(" "));
+      errors.mockRestore();
+    }
+
+    // B2: the graceful ask still went out (the socket is role-scoped, so it reaches exactly the
+    // recorded process if it is alive at all), and the runtime was told not to destroy what now
+    // holds the handle.
+    expect(runtime.stopped).toEqual([
+      {
+        locator,
+        timeoutMs: 60_000,
+        options: { skipGraceful: false, refuseKill: true },
+        destroyed: false,
+      },
+    ]);
+    expect(client.runState).toBe("idle"); // the fake shim closed after its shutdown frame
+    expect(runtime.strangers.size).toBe(1); // the other process is still there
+    expect(state.trees[root]?.status).toBe("closed");
+    expect(state.trees[root]?.locator).toBeUndefined();
+    expect(logged.filter((line) => line.includes("treating LEGION-42's root as dead"))).toEqual([
+      "[legion] treating LEGION-42's root as dead: pane %1 now runs pid 999 (recorded pid 1 start 2)",
+    ]);
+  });
+
+  it("resurrects a root whose handle now belongs to another process: asks the recorded process to exit, never destroys the other one, resumes onto a fresh process, and logs the decision once", async () => {
+    const { processes, state, runtime, locator } = await fakeRuntimeTree();
+    runtime.occupyHandle(locator, { detail: "pane %1 now runs pid 999 (recorded pid 1 start 2)" });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[] = [];
+    try {
+      // Exactly the composition index.ts's `onProbe` runs on a resync tick.
+      if ((await processes.probe(root)) === "dead") await processes.resurrect(root);
+    } finally {
+      logged = errors.mock.calls.map((call) => call.map(String).join(" "));
+      errors.mockRestore();
+    }
+
+    expect(runtime.stopped.map((stop) => [stop.options, stop.destroyed])).toEqual([
+      [{ skipGraceful: false, refuseKill: true }, false],
+    ]);
+    expect(runtime.spawned.map((spawn) => spawn.kind)).toEqual(["root", "root"]);
+    expect(state.trees[root]?.locator).toBeDefined();
+    expect(state.trees[root]?.locator).not.toEqual(locator);
+    expect(await processes.probe(root)).toBe("alive");
+    expect(
+      logged.filter((line) => line.includes("treating LEGION-42's root as dead"))
+    ).toHaveLength(1);
+  });
+
+  it("replaces a controller whose handle now belongs to another process: asks the recorded controller to exit, refuses the destroy step, clears its locator, spawns a fresh one, and logs both identities once", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const runtime = new FakeRuntime();
+    const { manager: processes } = manager(state, { config: config(stateDir), runtime });
+    await processes.ensureController();
+    const first = state.controllerLocator;
+    if (!first) throw new Error("controller did not spawn");
+    await runtime.connect(first);
+    runtime.occupyHandle(first, { detail: "pane %9 now runs pid 777 (recorded pid 5 start 6)" });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[] = [];
+    try {
+      await processes.ensureController();
+    } finally {
+      logged = errors.mock.calls.map((call) => call.map(String).join(" "));
+      errors.mockRestore();
+    }
+
+    expect(runtime.stopped).toEqual([
+      { locator: first, timeoutMs: 10_000, options: { refuseKill: true }, destroyed: false },
+    ]);
+    expect(runtime.spawned.map((spawn) => spawn.kind)).toEqual(["controller", "controller"]);
+    expect(state.controllerLocator).toBeDefined();
+    expect(state.controllerLocator).not.toEqual(first);
+    expect(logged).toEqual([
+      "[legion] treating the controller as dead: pane %9 now runs pid 777 (recorded pid 5 start 6)",
+    ]);
+  });
+
+  it("retires an unconfirmed worker boot at the first watchdog interval once its handle belongs to another process and its socket refuses, destroying nothing", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", root, role);
+    let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
+    const runtime = new FakeRuntime({ sleep: async () => {} });
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerBootTimeoutSeconds: 1 }),
+      runtime,
+      now: () => currentTime,
+      sleep: async (ms) => {
+        currentTime += ms;
+        await onceEventLoop();
+      },
+    });
+
+    await processes.spawnWorker(root, root, role, "implement #41");
+    const booting = managedState.roles[token];
+    if (!booting || !("issue" in booting) || !booting.locator) throw new Error("no worker claim");
+    const workerLocator = booting.locator;
+    runtime.occupyHandle(workerLocator, { reachable: false });
+
+    // The retirement's own event: the same claim relaunched onto a fresh process (counted as
+    // one launch failure), not merely the counter ticking before the promotion has run.
+    await flushEventLoopUntil(() => {
+      const claim = managedState.roles[token];
+      return (
+        claim !== undefined &&
+        "issue" in claim &&
+        claim.launchFailures === 1 &&
+        claim.locator !== undefined &&
+        !sameProcess(claim.locator, workerLocator)
+      );
+    }, 50_000);
+
+    // Whatever now holds the retired boot's handle was never destroyed: the runtime's destroy
+    // step ran for no stop of that locator, and the fake still lists the occupant.
+    expect(
+      runtime.stopped.filter((stop) => sameProcess(stop.locator, workerLocator) && stop.destroyed)
+    ).toEqual([]);
+    expect(runtime.strangers.size).toBe(1);
+    // The retry relaunched the same role onto a fresh process, still carrying its assignment.
+    const relaunched = managedState.roles[token];
+    if (!relaunched || !("issue" in relaunched)) throw new Error("relaunched claim missing");
+    expect(relaunched.pendingAssignment).toBe("implement #41");
+    expect(relaunched.locator).toBeDefined();
+    expect(relaunched.locator).not.toEqual(workerLocator);
   });
 
   it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
@@ -6700,13 +6926,7 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%201 67890\n", exitCode: 0 };
         }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return { stdout: "%101\n", exitCode: 0 };
-        }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -6766,14 +6986,8 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%201 67890\n", exitCode: 0 };
         }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return windowsOpened > 0
-            ? { stdout: "%101\n", exitCode: 0 }
-            : { stdout: "", exitCode: 1 };
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          return windowsOpened > 0 ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -6828,6 +7042,7 @@ describe("ProcessManager", () => {
         tmuxWindowId: "@42",
         tmuxPaneId: "%0",
         socketPath: "/state/workers/architect.sock",
+        ...paneIdentity(),
       },
       status: "active",
       launchFailures: 0,
@@ -6851,7 +7066,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return livePanes(command, 4242);
+          return livePanes(command);
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -6924,6 +7139,7 @@ describe("ProcessManager", () => {
           await paneOpenGate.promise;
           return { stdout: "@99 %201 12345\n", exitCode: 0 };
         }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -7001,6 +7217,7 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", stderr: "lost server", exitCode: 1 };
         }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -7117,7 +7334,7 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root].status).toBe("closed");
   });
 
-  it("rewrites every claim's stale window id once a dead recorded window falls back to a fresh one", async () => {
+  it("opens a fresh window when every recorded pane is gone, leaves the stale locators naming their dead window, and splits later workers into the fresh window", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     await mkdir(workspace, { recursive: true });
@@ -7174,14 +7391,11 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 67890\n", exitCode: 0 };
         }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return command.includes("@42")
-            ? { stdout: "", exitCode: 1 }
-            : { stdout: "%201\n", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          // The panes recorded in the dead `@42` are gone; the fresh window's `%201` is live and
+          // still the process the tester's locator recorded.
+          const target = command[command.indexOf("-t") + 1];
+          return target === "%201" ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -7192,21 +7406,28 @@ describe("ProcessManager", () => {
     expect(
       commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
+    // The stale claims keep naming the window their panes lived in -- a locator's window id is
+    // never rewritten from the outside; each clears through its own probe.
     for (const token of [plannerToken, implementerToken]) {
       const claim = managedState.roles[token];
       if (!claim || !("issue" in claim)) throw new Error(`${token} claim disappeared`);
-      expect(tmuxFields(claim.locator)?.tmuxWindowId).toBe("@99");
+      expect(tmuxFields(claim.locator)?.tmuxWindowId).toBe("@42");
     }
+    const tester = managedState.roles[roleToken("omp", root, "tester")];
+    if (!tester || !("issue" in tester)) throw new Error("tester claim disappeared");
+    expect(tmuxFields(tester.locator)?.tmuxWindowId).toBe("@99");
 
     await processes.spawnWorker(root, root, "reviewer", "review #41");
 
+    // `@42`'s recorded panes still fail; the tester's fully-recorded pane in `@99` verifies, so
+    // the reviewer splits into `@99` rather than opening yet another window.
     expect(
       commands.filter((command) => command[0] === "tmux" && command[3] === "new-window")
     ).toHaveLength(1);
     const split = commands.find(
       (command) => command[0] === "tmux" && command[3] === "split-window"
     );
-    if (!split) throw new Error("fourth worker did not split into the rewritten window");
+    if (!split) throw new Error("fourth worker did not split into the fresh window");
     expect(split).toContain("@99");
   });
 
@@ -7377,6 +7598,7 @@ describe("ProcessManager", () => {
         tmuxPaneId: "%7",
         socketPath: "/state/workers/dead-tester.sock",
         ompSessionFile: path.join(stateDir, "prior-tester-session.json"),
+        ...paneIdentity(),
       },
     };
     const commands: string[][] = [];
@@ -7390,13 +7612,9 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return { stdout: "%301\n", exitCode: 0 };
-        }
+        // The dead-socket worker's pane itself is still running (its recorded process), which is
+        // what keeps `@42` a window this respawn may split into.
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -7442,6 +7660,7 @@ describe("ProcessManager", () => {
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
         socketPath: "/state/workers/planner.sock",
+        ...paneIdentity(),
       },
     };
     state.roles[testerToken] = {
@@ -7497,18 +7716,11 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[3] === "list-panes" && command.includes("%7")) {
-          return { stdout: "", exitCode: 1 };
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          return command.includes("%7") ? { stdout: "", exitCode: 1 } : livePanes(command);
         }
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
-        }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return { stdout: "%301\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -7592,6 +7804,7 @@ describe("ProcessManager", () => {
         tmuxPaneId: "%7",
         socketPath: "/state/workers/dead-tester.sock",
         ompSessionFile: path.join(stateDir, "prior-tester-session.json"),
+        ...paneIdentity(22222),
       },
     };
     const commands: string[][] = [];
@@ -7617,13 +7830,6 @@ describe("ProcessManager", () => {
         }
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
-        }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return { stdout: "%301\n", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -7783,6 +7989,7 @@ describe("ProcessManager", () => {
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
         socketPath: "/state/workers/dead-tester.sock",
+        ...paneIdentity(),
       },
     };
     const shutdownCalls: string[] = [];
@@ -7811,13 +8018,7 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return { stdout: "%7\n", exitCode: 0 };
-        }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -7863,6 +8064,7 @@ describe("ProcessManager", () => {
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
         socketPath: "/state/workers/tester.sock",
+        ...paneIdentity(),
       },
     };
     let expectedSessionId: string | undefined;
@@ -7879,13 +8081,7 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return { stdout: "%7\n", exitCode: 0 };
-        }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -8942,6 +9138,12 @@ describe("ProcessManager", () => {
     const commands: string[][] = [];
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir, { workerCap: 1 }),
+      // The just-opened tester never gets its shim listening before the close reaches it, so
+      // its retire falls through to the kill; the root closes gracefully over its own socket.
+      connectWorkerRpc: async (socketPath) => {
+        if (path.basename(socketPath).startsWith("tester-")) throw new Error("ECONNREFUSED");
+        return fakeWorkerRpcClient();
+      },
       run: async (command) => {
         commands.push(command);
         // The tester splits into the root's own already-alive window (from `tree()`), rather
@@ -8952,6 +9154,7 @@ describe("ProcessManager", () => {
           await launchGate.promise;
           return { stdout: "%1 12345\n", exitCode: 0 };
         }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -8983,12 +9186,7 @@ describe("ProcessManager", () => {
     // launch just opened was retired (killed), not left running unrecorded and forever
     // occupying a running-worker slot.
     expect(managedState.roles[roleToken("omp", root, "tester")]).toBeUndefined();
-    expect(
-      commands.some(
-        (command) =>
-          command[0] === "tmux" && (command[3] === "kill-pane" || command[3] === "kill-window")
-      )
-    ).toBeTrue();
+    expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
   });
 
   it("keeps closeTree from finishing while a QUEUE-PROMOTED launch is still in flight, not only a direct spawnWorker one", async () => {
@@ -9021,6 +9219,7 @@ describe("ProcessManager", () => {
           await launchGate.promise;
           return { stdout: "%1 12345\n", exitCode: 0 };
         }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -10269,6 +10468,7 @@ describe("ProcessManager", () => {
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
         socketPath: "/state/workers/dead-tester.sock",
+        ...paneIdentity(22222),
       },
     };
     const commands: string[][] = [];
@@ -10981,13 +11181,7 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
         }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          return { stdout: "%301\n", exitCode: 0 };
-        }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -11402,63 +11596,6 @@ describe("ProcessManager", () => {
     expect(killedPanes).toEqual(["%99"]);
   });
 
-  it("backfills a tree locator's missing pane id once probe confirms it alive, and a controller locator's once controllerAlive confirms it alive", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 1);
-    tree(state);
-    // `tree()`'s default now carries a `tmuxPaneId` (needed by the graceful-stop tests
-    // elsewhere in this file) -- reconstructed without it here to restore the pre-backfill
-    // state this test exercises (see the exemption test above for the same invariant asserted
-    // directly).
-    const rootLocator = recordedTmuxLocator(state);
-    const { tmuxPaneId: _rootPaneId, ...rootLocatorWithoutPaneId } = rootLocator;
-    const rootTree = state.trees[root];
-    if (!rootTree) throw new Error("test setup expects tree() to have recorded a root tree");
-    rootTree.locator = rootLocatorWithoutPaneId;
-    state.controllerLocator = {
-      runtime: "tmux",
-      tmuxSession: "legion-omp",
-      tmuxWindowId: "@43",
-      socketPath: "/state/controller.sock",
-    };
-    let saveStateCalls = 0;
-    const { manager: processes } = manager(state, {
-      config: config(stateDir),
-      saveState: async () => {
-        saveStateCalls += 1;
-      },
-      readProcessCmdline: async () => "omp\0",
-      run: async (command) => {
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id}")
-        ) {
-          const windowId = command[4] === "-t" ? command[5] : undefined;
-          if (windowId === "@42") return { stdout: "%42\n", exitCode: 0 };
-          if (windowId === "@43") return { stdout: "%43\n", exitCode: 0 };
-          return { stdout: "", exitCode: 1 };
-        }
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id} #{pane_pid}")
-        ) {
-          return livePanes(command, 4242);
-        }
-        if (command[0] === "kill") return { stdout: "", exitCode: 0 };
-        return { stdout: "", exitCode: 0 };
-      },
-    });
-
-    expect(await processes.probe(root)).toBe("alive");
-    expect(tmuxFields(state.trees[root]?.locator)?.tmuxPaneId).toBe("%42");
-
-    await processes.ensureController();
-    expect(state.controllerLocator?.tmuxPaneId).toBe("%43");
-    expect(saveStateCalls).toBeGreaterThanOrEqual(2);
-  });
-
   it("resurrects a dead active root during a resync probe tick, but leaves a live one alone", async () => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "architect-session.json");
@@ -11488,6 +11625,7 @@ describe("ProcessManager", () => {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@43",
         tmuxPaneId: "%1",
+        ...paneIdentity(),
       },
     };
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
@@ -11547,5 +11685,1011 @@ describe("ProcessManager", () => {
     expect(resurrectSpy).toHaveBeenCalledWith(root);
     expect(managedState.trees[root]).toMatchObject({ status: "active" });
     expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+  });
+
+  // `observed` is what the pane itself reports, distinct from the recorded identity every case
+  // shares (pid 12345, start 4242): another pid; the same pid with its own start ticks; or, when
+  // the process vanished between `list-panes` and the read, an unreadable `/proc` entry -- the
+  // only observable fact that case has.
+  const reissuedPaneCases: Array<
+    [string, { pid: number; startTicks: number | undefined; observed: RegExp }]
+  > = [
+    [
+      "another process took the pane id",
+      { pid: 777, startTicks: DEFAULT_START_TICKS, observed: /pid 777/ },
+    ],
+    [
+      "the same pid came back with a different start time",
+      { pid: 12345, startTicks: 999_999, observed: /pid 12345 .*999999/ },
+    ],
+    // The process vanished between `list-panes` and the `/proc` read: unknown is never alive.
+    [
+      "its /proc stat vanished after list-panes reported it",
+      { pid: 12345, startTicks: undefined, observed: /pid 12345 .*\/proc/ },
+    ],
+  ];
+  it.each(
+    reissuedPaneCases
+  )("probe reports a root dead when its recorded pane now runs another process (%s), and resurrecting it resumes the session without killing that pane", async (_case, reissued) => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state); // %0 in @42, recorded pid 12345 / DEFAULT_START_TICKS
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let log = "";
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      readProcessStat: async (pid) => {
+        if (pid !== reissued.pid) return procStat(pid);
+        if (reissued.startTicks === undefined) {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        }
+        return procStat(pid, reissued.startTicks);
+      },
+      // The stale root's shim socket refuses, so the stop falls straight through to the
+      // kill gate this test is about.
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") return { stdout: `%0 ${reissued.pid}\n`, exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@43 %5 555\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      expect(await processes.probe(root)).toBe("dead");
+      await processes.resurrect(root);
+    } finally {
+      log = errors.mock.calls.flat().join("\n");
+      errors.mockRestore();
+    }
+
+    expect(commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
+    const launch = commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
+    expect(launch?.at(-1)).toContain(`--resume=${sessionFile}`);
+    expect(state.trees[root].locator).toMatchObject({
+      tmuxWindowId: "@43",
+      tmuxPaneId: "%5",
+      panePid: 555,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+    // Both identities side by side: what the pane reports now, and what the locator recorded.
+    expect(log).toMatch(reissued.observed);
+    expect(log).toMatch(/recorded pid 12345 start 4242/);
+  });
+
+  it("treats a locator recorded before identity tracking as dead on its first probe -- even though its pane is live and running OMP -- logging that once and resuming the root onto a fresh, fully-recorded pane", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const { panePid: _pid, paneStartTicks: _ticks, ...legacy } = recordedTmuxLocator(state);
+    state.trees[root].locator = { ...legacy, ompSessionFile: sessionFile };
+    state.admission.active = [root];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command); // %0 alive, pid 12345, OMP
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@43 %5 555\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    try {
+      expect(await processes.probe(root)).toBe("dead");
+      expect(errors.mock.calls.flat().join("\n")).toMatch(/no recorded process identity/);
+      await processes.resurrect(root);
+    } finally {
+      errors.mockRestore();
+    }
+    expect(commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
+    expect(commands.find((c) => c[3] === "new-window")?.at(-1)).toContain(
+      `--resume=${sessionFile}`
+    );
+    expect(state.trees[root].locator).toMatchObject({
+      panePid: 555,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+  });
+
+  it("reconnectWorkers clears a stale unconfirmed claim whose pane id was reissued to a live sibling -- without killing that pane -- and the live claim's re-armed watchdog verifies its pane at the next interval", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const liveToken = roleToken("omp", root, "implementer");
+    const staleToken = roleToken("omp", root, "tester");
+    const sharedPane = {
+      runtime: "tmux" as const,
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@42",
+      tmuxPaneId: "%7",
+    };
+    state.roles[liveToken] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      pendingAssignment: "implement #41",
+      locator: {
+        ...sharedPane,
+        socketPath: "/state/workers/live.sock",
+        ...paneIdentity(2001, 5000),
+      },
+    };
+    state.roles[staleToken] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      pendingAssignment: "verify #41",
+      locator: {
+        ...sharedPane,
+        socketPath: "/state/workers/stale.sock",
+        ...paneIdentity(1001, 3000),
+      },
+    };
+    const stateDir = await temporaryDir();
+    const commands: string[][] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let log = "";
+    let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
+    const { manager: processes } = manager(
+      state,
+      {
+        config: config(stateDir, {
+          workerBootTimeoutSeconds: 1,
+          workerBootRegistrationDeadlineIntervals: 1_000,
+        }),
+        now: () => currentTime,
+        sleep: async (ms) => {
+          currentTime += ms;
+          await onceEventLoop();
+        },
+        readProcessStat: async (pid) => procStat(pid, pid === 2001 ? 5000 : 3000),
+        connectWorkerRpc: async (socketPath) => {
+          if (socketPath.endsWith("stale.sock")) throw new Error("ECONNREFUSED");
+          return fakeWorkerRpcClient();
+        },
+        run: async (command) => {
+          commands.push(command);
+          if (command[0] === "tmux" && command[3] === "list-panes") {
+            return { stdout: "%7 2001\n", exitCode: 0 };
+          }
+          return { stdout: "", exitCode: 0 };
+        },
+      },
+      { skipEnablePromotion: true }
+    );
+    try {
+      await processes.reconnectWorkers();
+      // One watchdog interval for the live claim: its pane verifies (pid 2001 / ticks 5000) so
+      // the watch re-arms instead of retiring -- observed through the re-arm log line.
+      const startTime = currentTime;
+      await flushEventLoopUntil(
+        () =>
+          currentTime - startTime >= 1_000 &&
+          errors.mock.calls.flat().join("\n").includes("re-arming the watch"),
+        20_000
+      );
+    } finally {
+      processes.dispose();
+      log = errors.mock.calls.flat().join("\n");
+      errors.mockRestore();
+    }
+
+    const stale = state.roles[staleToken];
+    const live = state.roles[liveToken];
+    if (!stale || !("issue" in stale) || !live || !("issue" in live)) {
+      throw new Error("claims missing");
+    }
+    expect(stale.locator).toBeUndefined(); // no longer counts toward the worker cap
+    expect(stale.launchFailures).toBe(1);
+    expect(state.workerAdmission.queue).toEqual([staleToken]);
+    expect(live.locator).toMatchObject({ tmuxPaneId: "%7", panePid: 2001 });
+    expect(commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
+    expect(log).toMatch(/recorded pid 1001 start 3000/);
+    expect(log).toMatch(/pid 2001/);
+  });
+
+  /** Shared by the two registration-deadline-on-a-reissued-pane tests below: a fake tmux whose
+   * `list-panes` answers each launched pane with ITS OWN launched pid (so a freshly-recorded
+   * identity verifies) until the test reissues a pane id to another process. `resurrected`
+   * settles on the `saveState` call that records the resurrected generation's fresh locator --
+   * the actual event those tests wait for. A tick-bounded `flushEventLoopUntil` guess would
+   * race `spawnRoot`'s real workspace/secret-file writes and time out under load instead. */
+  function reissuablePanes(
+    state: LegionState,
+    resurrectedGeneration: number,
+    commands: string[][],
+    sessionExists: boolean
+  ): {
+    panes: Map<string, number>;
+    windowCount: () => number;
+    run: (command: string[]) => Promise<{ stdout: string; exitCode: number }>;
+    resurrected: Promise<void>;
+    saveState: () => Promise<void>;
+  } {
+    const panes = new Map<string, number>();
+    let windows = 0;
+    let hasSession = sessionExists;
+    const resurrected = Promise.withResolvers<void>();
+    return {
+      panes,
+      windowCount: () => windows,
+      resurrected: resurrected.promise,
+      saveState: async () => {
+        const tree = state.trees[root];
+        const fresh = panes.get(tmuxFields(tree?.locator)?.tmuxPaneId ?? "");
+        if (
+          tree?.generation === resurrectedGeneration &&
+          tree.status === "active" &&
+          fresh !== undefined &&
+          tmuxFields(tree.locator)?.panePid === fresh
+        ) {
+          resurrected.resolve();
+        }
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: hasSession ? 0 : 1 };
+        if (command[3] === "new-session") {
+          hasSession = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[3] === "new-window") {
+          windows += 1;
+          panes.set(`%${windows}`, 10000 + windows);
+          return { stdout: `@4${windows} %${windows} ${10000 + windows}\n`, exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          const target = command[command.indexOf("-t") + 1];
+          const pid = panes.get(target);
+          return pid === undefined
+            ? { stdout: "", exitCode: 1 }
+            : { stdout: `${target} ${pid}\n`, exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
+          return { stdout: "", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    };
+  }
+
+  it("resurrects a root once, without killing the pane, when its registration deadline elapses on a pane id since reissued to another OMP process", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    let sleepCalls = 0;
+    const firstGate = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const tmuxFake = reissuablePanes(state, 2, commands, false);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      saveState: tmuxFake.saveState,
+      // Only the first armed deadline (generation 1) is under this test's control; the
+      // resurrect's own fresh spawn arms a second deadline (generation 2), which must stay
+      // pending so the assertions see exactly one retry cycle.
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await firstGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: tmuxFake.run,
+    });
+
+    try {
+      await processes.spawnRoot(root);
+      expect(tmuxFake.windowCount()).toBe(1);
+      expect(managedState.trees[root]?.locator).toMatchObject({
+        tmuxPaneId: "%1",
+        panePid: 10001,
+        paneStartTicks: DEFAULT_START_TICKS,
+      });
+
+      // The pane is still live and running OMP -- but it is another process now (the id was
+      // reissued), not the one this locator recorded.
+      tmuxFake.panes.set("%1", 777);
+      firstGate.resolve();
+      await tmuxFake.resurrected;
+    } finally {
+      errors.mockRestore();
+    }
+
+    expect(tmuxFake.windowCount()).toBe(2);
+    expect(managedState.trees[root]).toMatchObject({
+      generation: 2,
+      status: "active",
+      launchFailures: 1,
+    });
+    expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
+    expect(managedState.trees[root]?.locator).toMatchObject({
+      tmuxPaneId: "%2",
+      panePid: 10002,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+  });
+
+  it("reconnectRoots' re-armed deadline treats a restart-surviving locator whose pane id was reissued as dead: resumes the root once, never killing that pane", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = {
+      root,
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@41",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/architect.sock",
+        ompSessionFile: sessionFile,
+        ...paneIdentity(10001),
+      },
+      status: "active",
+      launchFailures: 0,
+      // No readyConfirmedAt: this tree never reached /process/ready before the restart.
+    };
+    const sleepGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    const commands: string[][] = [];
+    const tmuxFake = reissuablePanes(state, 2, commands, true);
+    // As a restart sees it: the recorded pane id is live, but it is some other role's OMP now.
+    tmuxFake.panes.set("%1", 777);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      saveState: tmuxFake.saveState,
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await sleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: tmuxFake.run,
+    });
+
+    try {
+      processes.reconnectRoots();
+      sleepGate.resolve();
+      await tmuxFake.resurrected;
+    } finally {
+      errors.mockRestore();
+    }
+
+    expect(tmuxFake.windowCount()).toBe(1);
+    expect(managedState.trees[root]).toMatchObject({
+      generation: 2,
+      status: "active",
+      launchFailures: 1,
+    });
+    expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
+    const launch = commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
+    expect(launch?.at(-1)).toContain(`--resume=${sessionFile}`);
+    // The fresh window's pane is `%1` again (ids restart) -- recorded with its own identity.
+    expect(managedState.trees[root]?.locator).toMatchObject({
+      tmuxWindowId: "@41",
+      tmuxPaneId: "%1",
+      panePid: 10001,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+  });
+
+  it("resurrects every located root with --resume, killing nothing, when the private tmux server was recreated under the daemon and reissued its pane ids", async () => {
+    const stateDir = await temporaryDir();
+    const second = "LEGION-77" as IssueKey;
+    const sessionFiles = {
+      [root]: path.join(stateDir, "root-session.json"),
+      [second]: path.join(stateDir, "second-session.json"),
+    };
+    await writeFile(sessionFiles[root], "{}", "utf8");
+    await writeFile(sessionFiles[second], "{}", "utf8");
+    const state = newLegionState("omp", 2);
+    tree(state);
+    tree(state, second);
+    for (const [issue, windowId, paneId, pid] of [
+      [root, "@42", "%0", 12345],
+      [second, "@43", "%1", 12346],
+    ] as const) {
+      const locator = recordedTmuxLocator(state, issue);
+      state.trees[issue].locator = {
+        ...locator,
+        tmuxWindowId: windowId,
+        tmuxPaneId: paneId,
+        ompSessionFile: sessionFiles[issue],
+        ...paneIdentity(pid),
+      };
+    }
+    // Server B, recreated under the daemon: `%0` now belongs to another role's live OMP; `%1`
+    // does not exist until the first fresh window claims it again (ids restart from 1).
+    const panes = new Map<string, number>([["%0", 999]]);
+    let windows = 0;
+    const commands: string[][] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") {
+          windows += 1;
+          panes.set(`%${windows}`, 5000 + windows);
+          return { stdout: `@${windows} %${windows} ${5000 + windows}\n`, exitCode: 0 };
+        }
+        if (command[3] === "list-panes") {
+          const target = command[command.indexOf("-t") + 1];
+          const pid = panes.get(target);
+          return pid === undefined
+            ? { stdout: "", exitCode: 1 }
+            : { stdout: `${target} ${pid}\n`, exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      // Exactly the composition index.ts's `onProbe` runs on every resync tick.
+      for (const issue of [root, second]) {
+        if ((await processes.probe(issue)) === "dead") await processes.resurrect(issue);
+      }
+    } finally {
+      errors.mockRestore();
+    }
+
+    expect(commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
+    const launches = commands.filter((c) => c[0] === "tmux" && c[3] === "new-window");
+    expect(launches).toHaveLength(2);
+    expect(launches[0]?.at(-1)).toContain(`--resume=${sessionFiles[root]}`);
+    expect(launches[1]?.at(-1)).toContain(`--resume=${sessionFiles[second]}`);
+    expect(state.trees[root]).toMatchObject({
+      generation: 2,
+      locator: { tmuxWindowId: "@1", tmuxPaneId: "%1", panePid: 5001, paneStartTicks: 4242 },
+    });
+    // The second root's stale `%1` had been reissued to the first root's fresh pane in between:
+    // still dead (pid 5001 is not 12346), still never killed.
+    expect(state.trees[second]).toMatchObject({
+      generation: 2,
+      locator: { tmuxWindowId: "@2", tmuxPaneId: "%2", panePid: 5002, paneStartTicks: 4242 },
+    });
+  });
+
+  it("never kills a pane whose process is not the one the locator recorded on tree close: treats it as already gone, clears the claim, and logs both identities", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const token = roleToken("omp", child, "implementer");
+    state.roles[token] = {
+      issue: child,
+      role: "implementer",
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@99",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/hung.sock",
+        ...paneIdentity(12345),
+      },
+    };
+    const commands: string[][] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let log = "";
+    const { manager: processes } = manager(state, {
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          const target = command[command.indexOf("-t") + 1];
+          // The root's own pane is still its recorded process; the worker's `%1` is not.
+          return target === "%1" ? { stdout: "%1 777\n", exitCode: 0 } : livePanes(command);
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async (socketPath) => {
+        // The worker's shim is unreachable, so its stop falls straight through to the kill gate;
+        // the root closes gracefully over its own socket.
+        if (socketPath === "/state/workers/hung.sock") throw new Error("ECONNREFUSED");
+        return fakeWorkerRpcClient();
+      },
+    });
+
+    try {
+      await processes.closeTree(root);
+    } finally {
+      log = errors.mock.calls.flat().join("\n");
+      errors.mockRestore();
+    }
+
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
+    expect(state.roles[token]).toBeUndefined(); // claim removed as for an already-gone pane
+    expect(state.trees[root]).toMatchObject({ status: "closed" });
+    // The observed identity names the pane and the pid it now runs, on one line.
+    expect(log).toMatch(/%1[^\n]*pid 777/);
+    expect(log).toMatch(/recorded pid 12345 start 4242/);
+  });
+
+  function windowReuseFixture(paneRows: string) {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    tree(state); // root `@42`/`%0`, identity 12345
+    state.roles[roleToken("omp", root, "planner")] = {
+      issue: root,
+      role: "planner",
+      generation: 1,
+      sessionId: "ses_planner",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/planner.sock",
+        ...paneIdentity(12346),
+      },
+    };
+    const commands: string[][] = [];
+    const run = async (command: string[]) => {
+      commands.push(command);
+      if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+      if (command[3] === "list-panes") return { stdout: paneRows, exitCode: 0 };
+      if (command[3] === "new-window") return { stdout: "@99 %201 12345\n", exitCode: 0 };
+      if (command[3] === "split-window") return { stdout: "%202 67890\n", exitCode: 0 };
+      return { stdout: "", exitCode: 0 };
+    };
+    return { state, commands, run };
+  }
+
+  it("opens a fresh window for a new worker when the issue's recorded window is live but none of its recorded panes is still the process its locator recorded", async () => {
+    const stateDir = await temporaryDir();
+    // Both recorded panes in `@42` now report other processes: the ids were reissued.
+    const { state, commands, run } = windowReuseFixture("%0 900\n%1 901\n");
+    const { manager: processes } = manager(state, { config: config(stateDir), run });
+
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    expect(commands.some((c) => c[0] === "tmux" && c[3] === "new-window")).toBeTrue();
+    expect(commands.some((c) => c[0] === "tmux" && c[3] === "split-window")).toBeFalse();
+    expect(commands.some((c) => c[0] === "tmux" && c[3] === "select-layout")).toBeFalse();
+    const tester = state.roles[roleToken("omp", root, "tester")];
+    if (!tester || !("issue" in tester)) throw new Error("tester claim missing");
+    expect(tester.locator).toMatchObject({
+      tmuxWindowId: "@99",
+      tmuxPaneId: "%201",
+      panePid: 12345,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+  });
+
+  it("splits a new worker into the issue's recorded window when a recorded pane in it still verifies as its recorded process", async () => {
+    const stateDir = await temporaryDir();
+    const { state, commands, run } = windowReuseFixture("%0 12345\n%1 12346\n");
+    const { manager: processes } = manager(state, { config: config(stateDir), run });
+
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    const split = commands.find((c) => c[0] === "tmux" && c[3] === "split-window");
+    expect(split).toContain("@42");
+    expect(commands.some((c) => c[0] === "tmux" && c[3] === "new-window")).toBeFalse();
+    const tester = state.roles[roleToken("omp", root, "tester")];
+    if (!tester || !("issue" in tester)) throw new Error("tester claim missing");
+    expect(tester.locator).toMatchObject({
+      tmuxWindowId: "@42",
+      tmuxPaneId: "%202",
+      panePid: 67890,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+  });
+
+  it("retires an unconfirmed boot at the first watchdog interval -- never re-arming -- once its pane id has been reissued to another OMP process and its socket refuses", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    const stateDir = await temporaryDir();
+    let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
+    let reissued = false;
+    const commands: string[][] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes, state: managedState } = manager(
+      state,
+      {
+        config: config(stateDir, {
+          workerBootTimeoutSeconds: 1,
+          workerBootRegistrationDeadlineIntervals: 1_000,
+        }),
+        now: () => currentTime,
+        sleep: async (ms) => {
+          currentTime += ms;
+          await onceEventLoop();
+        },
+        connectWorkerRpc: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+        run: async (command) => {
+          commands.push(command);
+          if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+          if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+          if (command[3] === "list-panes") {
+            return reissued ? { stdout: "%1 777\n", exitCode: 0 } : livePanes(command);
+          }
+          return { stdout: "", exitCode: 0 };
+        },
+      },
+      { skipEnablePromotion: true }
+    );
+
+    try {
+      await processes.spawnWorker(root, child, role, "do the work");
+      const launched = managedState.roles[token];
+      if (!launched || !("issue" in launched)) throw new Error("claim missing");
+      expect(launched.locator).toMatchObject({ tmuxPaneId: "%1", panePid: 12345 });
+
+      // Between launch and the first interval, the pane id came to belong to another OMP.
+      reissued = true;
+      const startTime = currentTime;
+      await flushEventLoopUntil(() => {
+        const claim = managedState.roles[token];
+        return claim !== undefined && "issue" in claim && claim.locator === undefined;
+      }, 20_000);
+      // Retired within the first interval, not re-armed for a second one.
+      expect(currentTime - startTime).toBeLessThan(2_000);
+    } finally {
+      errors.mockRestore();
+    }
+
+    const retired = managedState.roles[token];
+    if (!retired || !("issue" in retired)) throw new Error("claim missing");
+    expect(retired.locator).toBeUndefined();
+    expect(retired.launchFailures).toBe(1);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
+  });
+
+  it("fails a root launch through the ordinary launch-failure rollback when the pane's process is already gone before its identity can be recorded", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.admission.active.push(root);
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      readProcessStat: async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+    });
+
+    await expect(processes.spawnRoot(root)).rejects.toThrow(
+      /exited before its process identity could be recorded/
+    );
+
+    expect(state.trees[root]).toEqual({
+      root,
+      generation: 0,
+      status: "queued",
+      launchFailures: 1,
+    });
+    expect(state.admission).toEqual({ cap: 1, active: [], queue: [root] });
+  });
+
+  it("fails a worker launch through the ordinary launch-failure path when the pane's process is already gone before its identity can be recorded", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      readProcessStat: async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+    });
+
+    await expect(processes.spawnWorker(root, root, "tester", "verify #41")).rejects.toThrow(
+      /exited before its process identity could be recorded/
+    );
+
+    const claim = state.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim missing");
+    expect(claim.launchFailures).toBe(1);
+    expect(claim.locator).toBeUndefined();
+  });
+
+  /** A controller locator on pane `%1` recorded as pid 12345, where `%1` now reports pid 777;
+   * `new-window` hands out a fresh controller pane `@44`/`%3`/3333. `connectWorkerRpc` decides
+   * which `stopProcess` branch the stale controller's stop takes. */
+  async function reissuedControllerFixture(
+    connectWorkerRpc: TmuxRuntimeDeps["connectWorkerRpc"]
+  ): Promise<{
+    processes: ProcessManager;
+    state: LegionState;
+    commands: string[][];
+    socketPath: string;
+    run(): Promise<string>;
+  }> {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const socketPath = path.join(stateDir, "workers", "controller.sock");
+    state.controllerLocator = {
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath,
+      ...paneIdentity(12345),
+    };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc,
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") return { stdout: "%1 777\n", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@44 %3 3333\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    return {
+      processes,
+      state: managedState,
+      commands,
+      socketPath,
+      // Runs `ensureController` under a console.error spy and returns everything it logged.
+      async run() {
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          await processes.ensureController();
+          return errors.mock.calls.flat().join("\n");
+        } finally {
+          errors.mockRestore();
+        }
+      },
+    };
+  }
+
+  it("never kills a controller pane whose id was reissued to another OMP process when its recorded process is unreachable: the identity gate treats it as already gone, logs both identities, and a fresh controller spawns", async () => {
+    // The recorded controller's socket refuses, so its stop skips the graceful branch and falls
+    // straight through to the kill -- which only the identity gate stands in front of.
+    const fixture = await reissuedControllerFixture(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+
+    const log = await fixture.run();
+
+    expect(fixture.commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
+    const launch = fixture.commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
+    expect(launch).toContain("controller");
+    expect(fixture.state.controllerLocator).toMatchObject({
+      tmuxWindowId: "@44",
+      tmuxPaneId: "%3",
+      panePid: 3333,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+    expect(log).toMatch(/pid 777/);
+    expect(log).toMatch(/recorded pid 12345 start 4242/);
+  });
+
+  it("asks the recorded controller process to shut down over its own socket before replacing a locator whose pane id was reissued, spawning a fresh controller once it closes", async () => {
+    const shutdowns: string[] = [];
+    const fixture = await reissuedControllerFixture(async (connected: string) => {
+      const client = fakeWorkerRpcClient();
+      const shutdown = client.shutdown;
+      client.shutdown = () => {
+        shutdowns.push(connected);
+        shutdown();
+      };
+      return client;
+    });
+
+    const log = await fixture.run();
+
+    // The recorded process was asked to shut down over its own (per-role) socket and closed
+    // gracefully, so nothing was left for the kill gate to decide.
+    expect(shutdowns).toEqual([fixture.socketPath]);
+    expect(fixture.commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
+    expect(fixture.commands.find((c) => c[0] === "tmux" && c[3] === "new-window")).toContain(
+      "controller"
+    );
+    expect(fixture.state.controllerLocator).toMatchObject({
+      tmuxWindowId: "@44",
+      tmuxPaneId: "%3",
+      panePid: 3333,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+    expect(log).toMatch(/pid 777/);
+    expect(log).toMatch(/recorded pid 12345 start 4242/);
+  });
+
+  /** A deployed daemon's state as the v24 upgrade first sees it: every locator live, running
+   * OMP, and identity-less. The root lives in `@42`/`%0`; when `withWorker` is set an
+   * implementer claim lives beside it in `@42`/`%3`. The fake tmux answers every probed pane as
+   * alive (pid 12345, OMP), hands out `@43`/`%5`/555 for a fresh window and `%6`/666 for a split,
+   * and reports both windows as this daemon's own with activity long past the sweep's grace.
+   * Every shim socket connects and closes gracefully on `shutdown`. */
+  async function legacyLiveTreeFixture(withWorker: boolean): Promise<{
+    processes: ProcessManager;
+    state: LegionState;
+    commands: string[][];
+    sessionFile: string;
+    implementerToken: string;
+    shutdowns: string[];
+  }> {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    tree(state);
+    const { panePid: _pid, paneStartTicks: _ticks, ...legacyRoot } = recordedTmuxLocator(state);
+    state.trees[root].locator = { ...legacyRoot, ompSessionFile: sessionFile };
+    state.trees[root].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
+    const implementerToken = roleToken("omp", root, "implementer");
+    if (withWorker) {
+      state.roles[implementerToken] = {
+        issue: root,
+        role: "implementer",
+        generation: 1,
+        sessionId: "ses_implementer",
+        readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@42",
+          tmuxPaneId: "%3",
+          socketPath: "/state/workers/implementer.sock",
+        },
+      };
+    }
+    const shutdowns: string[] = [];
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async (socketPath) => {
+        const client = fakeWorkerRpcClient();
+        const shutdown = client.shutdown;
+        client.shutdown = () => {
+          shutdowns.push(socketPath);
+          shutdown();
+        };
+        return client;
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@43 %5 555\n", exitCode: 0 };
+        if (command[3] === "split-window") return { stdout: "%6 666\n", exitCode: 0 };
+        if (command[3] === "list-windows") {
+          return { stdout: "@42\tlegion-omp\t0\n@43\tlegion-omp\t0\n", exitCode: 0 };
+        }
+        if (command[3] === "list-panes" && command[4] === "-a") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") {
+          const target = command[command.indexOf("-t") + 1];
+          const fresh: Record<string, number> = { "%5": 555, "%6": 666 };
+          return livePanes(command, fresh[target] ?? 12345);
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    return { processes, state: managedState, commands, sessionFile, implementerToken, shutdowns };
+  }
+
+  it("resurrecting a legacy root beside a live legacy worker leaves that worker's window id untouched, resumes the root in a fresh window, and the sweep never kills the window the worker still lives in", async () => {
+    const { processes, state, commands, sessionFile, implementerToken } =
+      await legacyLiveTreeFixture(true);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      // Exactly the composition index.ts's `onProbe` runs on a resync tick.
+      if ((await processes.probe(root)) === "dead") await processes.resurrect(root);
+      await processes.reconcileOrphans(0);
+    } finally {
+      errors.mockRestore();
+    }
+
+    // The root resumed onto a fresh, fully-recorded pane ...
+    const launch = commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
+    expect(launch?.at(-1)).toContain(`--resume=${sessionFile}`);
+    expect(state.trees[root].locator).toMatchObject({
+      tmuxWindowId: "@43",
+      tmuxPaneId: "%5",
+      panePid: 555,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+    // ... while the live legacy worker still records the window its pane actually lives in.
+    const implementer = state.roles[implementerToken];
+    if (!implementer || !("issue" in implementer)) throw new Error("implementer claim missing");
+    expect(implementer.locator).toMatchObject({ tmuxWindowId: "@42", tmuxPaneId: "%3" });
+    // `@42` stays a known window, so the sweep -- grace already elapsed -- reaps nothing.
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-window")).toEqual([]);
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
+  });
+
+  it("spawning a worker on a live legacy tree opens a fresh window without repointing the legacy root, later workers split into that fresh window, and the sweep never kills the legacy root's window", async () => {
+    const { processes, state, commands } = await legacyLiveTreeFixture(false);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await processes.spawnWorker(root, root, "tester", "verify #41");
+      await processes.spawnWorker(root, root, "planner", "plan #41");
+      await processes.reconcileOrphans(0);
+    } finally {
+      errors.mockRestore();
+    }
+
+    // The legacy root still records the window its pane actually lives in.
+    expect(state.trees[root].locator).toMatchObject({ tmuxWindowId: "@42", tmuxPaneId: "%0" });
+    // The tester could verify no recorded pane in `@42`, so it opened `@43`; the planner found
+    // the tester's fully-recorded pane there and split into it.
+    const tester = state.roles[roleToken("omp", root, "tester")];
+    const planner = state.roles[roleToken("omp", root, "planner")];
+    if (!tester || !("issue" in tester) || !planner || !("issue" in planner)) {
+      throw new Error("worker claims missing");
+    }
+    expect(tester.locator).toMatchObject({ tmuxWindowId: "@43", tmuxPaneId: "%5", panePid: 555 });
+    expect(planner.locator).toMatchObject({ tmuxWindowId: "@43", tmuxPaneId: "%6", panePid: 666 });
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "new-window")).toHaveLength(1);
+    expect(commands.find((c) => c[0] === "tmux" && c[3] === "split-window")).toContain("@43");
+    // `@42` stays a known window, so the sweep -- grace already elapsed -- reaps nothing.
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-window")).toEqual([]);
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
+  });
+
+  it("closing a tree whose live legacy root has no recorded identity still asks that root to shut down over its own socket, kills nothing, and closes the tree", async () => {
+    const { processes, state, commands, shutdowns } = await legacyLiveTreeFixture(false);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await processes.closeTree(root);
+    } finally {
+      errors.mockRestore();
+    }
+
+    expect(shutdowns).toEqual(["/state/workers/architect.sock"]);
+    expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
+    expect(state.trees[root]).toMatchObject({ status: "closed" });
+    expect(state.trees[root].locator).toBeUndefined();
   });
 });

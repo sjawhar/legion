@@ -33,7 +33,9 @@ export interface WorkerBootWatchdogDeps {
    * `WorkerBootWatchdog`'s own doc comment. */
   registrationDeadlineIntervals(): number;
   now(): number;
-  /** `Runtime.probe` — is the watched locator's own process still there? */
+  /** `Runtime.probe` — is the watched locator's own recorded process still there? A handle now
+   * occupied by some other process (`dead`/`not-recorded-process`) is not, exactly like a gone
+   * one: only the socket probe can then keep the watch alive. */
   probe(locator: Locator): Promise<ProbeResult>;
   /** `ProcessManager.clientFor` — connects through the manager's per-token cache, so a
    * connection this watchdog establishes is cached and wired like any other. */
@@ -66,8 +68,9 @@ export interface WorkerBootWatchdogDeps {
  * opened it yet) and, once connected, races the client's `closed` promise against the rest of
  * the interval — the fast path for a socket that closes well before the interval elapses.
  * Whichever way the interval ends, if `/worker/ready` has not confirmed this exact generation,
- * the watchdog probes before acting (`probeAlive`): a process that is both gone and refusing a
- * connection is dead, handled immediately by `retireUnconfirmedBoot` (retire, count a launch
+ * the watchdog probes before acting (`probeAlive`): a recorded process that is gone — or whose
+ * handle now belongs to some other process — and whose socket refuses a connection is dead,
+ * handled immediately by `retireUnconfirmedBoot` (retire, count a launch
  * failure, retry or give up at the threshold). A live process or a reachable socket re-arms the
  * watch for another interval instead — but only up to `registrationDeadlineIntervals` consecutive
  * times: a process that keeps answering forever without ever completing its ready path has not

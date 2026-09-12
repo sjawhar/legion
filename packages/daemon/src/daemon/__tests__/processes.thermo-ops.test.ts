@@ -97,8 +97,10 @@ function manager(
     },
     workerRpcTimeoutMs: () => deps.config.workerRpcTimeoutSeconds * 1000,
     now: deps.now,
+    // No real process exists behind the fake tmux's pids, but every launched pane records one.
+    readProcessStat: async (pid) =>
+      `${pid} (sh) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 4242 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n`,
     issueLocators: (issue) => locatorsForIssue(state, issue),
-    persist: deps.saveState,
   });
   const processManager = new ProcessManager({ ...deps, runtime });
   // Models a booted daemon: the boot probes have passed and the launch hold is released.

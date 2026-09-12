@@ -86,7 +86,7 @@ function baseDeps(overrides: Partial<WorkerBootWatchdogDeps> = {}): WorkerBootWa
     registrationDeadlineIntervals: () => 1_000,
     workerRpcTimeoutMs: () => 5_000,
     now: () => Date.now(),
-    probe: async () => ({ status: "dead" }),
+    probe: async () => ({ status: "dead", reason: "gone" }),
     connect: async () => {
       throw new Error("no client configured for this test");
     },
@@ -115,7 +115,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           // Confirmed dead on the very next probe after the socket closes, so the watch
           // retires in one step rather than re-arming (isolating this test to the
           // closed-wins-the-race cleanup, not a second interval's own timers).
-          probe: async () => ({ status: "dead" }),
+          probe: async () => ({ status: "dead", reason: "gone" }),
           retireUnconfirmedBoot: async () => {
             retired.push(token);
           },
@@ -148,7 +148,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           connect: async () => {
             throw new Error("shim not listening");
           },
-          probe: async () => ({ status: "dead" }),
+          probe: async () => ({ status: "dead", reason: "gone" }),
           retireUnconfirmedBoot: async () => {
             retired.push(token);
           },
@@ -283,7 +283,17 @@ describe("WorkerBootWatchdog registration deadline", () => {
 });
 
 describe("WorkerBootWatchdog liveness probe", () => {
-  it("retires a boot only after the runtime reports it dead and its socket refuses a connection", async () => {
+  it.each([
+    ["gone", { status: "dead", reason: "gone" } as const],
+    [
+      "not the recorded process",
+      {
+        status: "dead",
+        reason: "not-recorded-process",
+        detail: "pane %7 now runs pid 999 (recorded pid 12345 start 4242)",
+      } as const,
+    ],
+  ])("retires a boot only after the runtime reports it dead (%s) and its socket refuses a connection", async (_case, verdict) => {
     const events: string[] = [];
     const watchdog = new WorkerBootWatchdog(
       baseDeps({
@@ -292,7 +302,7 @@ describe("WorkerBootWatchdog liveness probe", () => {
         yield: async () => {},
         probe: async (probed) => {
           events.push(`probe:${probed.runtime === "tmux" ? probed.tmuxPaneId : probed.podUid}`);
-          return { status: "dead" };
+          return verdict;
         },
         connect: async () => {
           events.push("connect");
@@ -307,9 +317,9 @@ describe("WorkerBootWatchdog liveness probe", () => {
     watchdog.arm(root, child, role, token, locator, 1);
     for (let i = 0; i < 200 && !events.includes("retire"); i += 1) await Promise.resolve();
 
-    // `probeAlive` asks the runtime about the watched locator itself, then — finding it dead —
-    // falls through to the socket probe (refused) and retires the boot. The connect-retry loop's
-    // own attempts precede the probe; only the tail after it is ordered here.
+    // `probeAlive` asks the runtime about the watched locator itself, then — finding it dead
+    // either way — falls through to the socket probe (refused) and retires the boot. The
+    // connect-retry loop's own attempts precede the probe; only the tail after it is ordered.
     expect(events.slice(events.indexOf("probe:%7"))).toEqual(["probe:%7", "connect", "retire"]);
   });
 });

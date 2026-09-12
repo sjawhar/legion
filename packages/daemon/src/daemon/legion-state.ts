@@ -179,7 +179,7 @@ export interface ControllerPendingNotice {
 }
 
 export interface LegionState {
-  version: 26;
+  version: 27;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -246,6 +246,11 @@ const TmuxLocatorSchema = z
     tmuxSession: z.string(),
     tmuxWindowId: z.string(),
     tmuxPaneId: z.string().optional(),
+    /** The pane's root pid and that process's `/proc/<pid>/stat` start ticks, recorded by
+     * `TmuxRuntime` at launch: the identity a pane must still carry to be trusted as this
+     * locator's process (`runtime.ts`'s `TmuxLocator`). Absent only on a legacy locator. */
+    panePid: z.number().int().positive().optional(),
+    paneStartTicks: z.number().int().nonnegative().optional(),
     socketPath: z.string().optional(),
     ompSessionFile: z.string().optional(),
   })
@@ -378,7 +383,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(26),
+    version: z.literal(27),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -438,7 +443,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 26,
+    version: 27,
     project,
     issues: {},
     trees: {},
@@ -986,6 +991,19 @@ function migrateV25State(state: unknown): unknown {
   return { ...rest, version: 26, roles: migratedRoles };
 }
 
+/** v26 -> v27: a tmux locator gains its recorded process identity (`panePid`,
+ * `paneStartTicks`), both optional in the schema because a locator written before this version
+ * has none -- and never gets one: `TmuxRuntime` verifies a pane only against an identity it
+ * recorded at launch, so a legacy locator probes dead on its first probe and is resurrected onto
+ * a fully-recorded one. Nothing to rewrite; the bump records that every locator saved from here
+ * on carries the fields when its runtime wrote it. Sits after LEGION-37's v25 -> v26
+ * (`pendingAssignment` classification) above: a deployed daemon already persists version 26 under
+ * that meaning, so this step must be the one that takes it to 27. */
+function migrateV26State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 26) return state;
+  return { ...state, version: 27 };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1025,13 +1043,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV23State,
     migrateV24State,
     migrateV25State,
+    migrateV26State,
   ];
   const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 26) {
+  if (version !== 27) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 
