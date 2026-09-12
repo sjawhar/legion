@@ -221,6 +221,9 @@ function config(stateDir: string): DaemonConfig {
     project: "acme1",
     legionId: "acme/1",
     port: 0,
+    runtime: "tmux",
+    daemonUrl: "http://127.0.0.1:0",
+    bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
@@ -1873,6 +1876,39 @@ describe("startDaemon", () => {
       await daemon.stop();
     } finally {
       occupied.stop(true);
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to start when runtime is kubernetes, before acquiring the instance lock or anything else", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig: DaemonConfig = {
+      ...config(stateDir),
+      runtime: "kubernetes",
+      daemonUrl: "http://legion-daemon:13370",
+      bind: "0.0.0.0",
+    };
+    let lockAcquired = false;
+    let environmentResolved = false;
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            acquireInstanceLock: async () => {
+              lockAcquired = true;
+              throw new Error("the instance lock must not be acquired for an unsupported runtime");
+            },
+            resolveDaemonEnvironment: async () => {
+              environmentResolved = true;
+              return daemonEnvironment;
+            },
+            dispatchClient: fakeDispatchClient(),
+          },
+        })
+      ).rejects.toThrow("runtime: kubernetes is not implemented yet");
+      expect(lockAcquired).toBeFalse();
+      expect(environmentResolved).toBeFalse();
+    } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
   });

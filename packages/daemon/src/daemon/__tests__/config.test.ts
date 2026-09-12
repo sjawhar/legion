@@ -758,7 +758,123 @@ describe("daemon config", () => {
 
   it("rejects unknown config keys instead of silently tolerating drift", () => {
     expect(() =>
-      loadConfigFromFile(["project: acme/7", "runtime: opencode"].join("\n"), "/tmp/legion-config")
-    ).toThrow('Unknown config key "runtime"');
+      loadConfigFromFile(["project: acme/7", "backend: opencode"].join("\n"), "/tmp/legion-config")
+    ).toThrow('Unknown config key "backend"');
+  });
+
+  describe("runtime, daemon_url, and bind", () => {
+    const yaml = (...lines: string[]) =>
+      loadConfigFromFile(
+        ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join("\n"),
+        "/tmp/legion-config"
+      );
+    const overrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+
+    it("defaults to the tmux runtime, a loopback daemon_url on the configured port, and a loopback bind", () => {
+      const { config } = resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_DAEMON_PORT: "14000" },
+        cliOverrides: overrides,
+      });
+      expect(config.runtime).toBe("tmux");
+      expect(config.daemonUrl).toBe("http://127.0.0.1:14000");
+      expect(config.bind).toBe("127.0.0.1");
+    });
+
+    it("resolves all three from YAML for a kubernetes deployment", () => {
+      const { config } = resolveDaemonConfig({
+        configFile: yaml(
+          "runtime: kubernetes",
+          "daemon_url: http://legion-daemon.legion.svc:13370",
+          "bind: 0.0.0.0"
+        ),
+        env: requiredEnv,
+        cliOverrides: overrides,
+      });
+      expect(config.runtime).toBe("kubernetes");
+      expect(config.daemonUrl).toBe("http://legion-daemon.legion.svc:13370");
+      expect(config.bind).toBe("0.0.0.0");
+    });
+
+    it("rejects a runtime other than tmux or kubernetes, naming the source", () => {
+      expect(() => yaml("runtime: docker")).toThrow("runtime must be 'tmux' or 'kubernetes'");
+      expect(() =>
+        resolveDaemonConfig({
+          env: { ...requiredEnv, LEGION_RUNTIME: "docker" },
+          cliOverrides: overrides,
+        })
+      ).toThrow("LEGION_RUNTIME must be 'tmux' or 'kubernetes'");
+    });
+
+    it("requires daemon_url under the kubernetes runtime", () => {
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: yaml("runtime: kubernetes", "bind: 0.0.0.0"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        })
+      ).toThrow("daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)");
+    });
+
+    it("rejects an invalid daemon_url from either source and normalizes a trailing slash", () => {
+      expect(() => yaml("daemon_url: not a url")).toThrow("daemon_url must be a valid URL");
+      expect(() =>
+        resolveDaemonConfig({
+          env: { ...requiredEnv, LEGION_DAEMON_URL: "nope" },
+          cliOverrides: overrides,
+        })
+      ).toThrow("LEGION_DAEMON_URL must be a valid URL");
+      const { config } = resolveDaemonConfig({
+        configFile: yaml("daemon_url: http://h:1/"),
+        env: requiredEnv,
+        cliOverrides: overrides,
+      });
+      expect(config.daemonUrl).toBe("http://h:1");
+    });
+
+    it("rejects a non-loopback bind under the tmux runtime, from either source", () => {
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: yaml("bind: 0.0.0.0"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        })
+      ).toThrow("bind must be 127.0.0.1 unless runtime is kubernetes");
+      expect(() =>
+        resolveDaemonConfig({
+          env: { ...requiredEnv, LEGION_BIND: "0.0.0.0" },
+          cliOverrides: overrides,
+        })
+      ).toThrow("bind must be 127.0.0.1 unless runtime is kubernetes");
+    });
+
+    it("rejects an empty bind", () => {
+      expect(() => yaml('bind: ""')).toThrow("bind must not be empty");
+    });
+
+    it("lets a YAML daemon_url beat LEGION_DAEMON_URL, so a daemon started from inside a Legion pane never inherits the outer daemon's URL", () => {
+      const { config } = resolveDaemonConfig({
+        configFile: yaml("daemon_url: http://127.0.0.1:14100"),
+        env: { ...requiredEnv, LEGION_DAEMON_URL: "http://127.0.0.1:13370" },
+        cliOverrides: overrides,
+      });
+      expect(config.daemonUrl).toBe("http://127.0.0.1:14100");
+      const { config: fromEnv } = resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_DAEMON_URL: "http://127.0.0.1:13370" },
+        cliOverrides: overrides,
+      });
+      expect(fromEnv.daemonUrl).toBe("http://127.0.0.1:13370");
+    });
+
+    it("recognizes the three keys in the YAML loader shape", () => {
+      expect(
+        yaml("runtime: tmux", "daemon_url: http://127.0.0.1:14100", "bind: 127.0.0.1").fields
+      ).toMatchObject({
+        runtime: "tmux",
+        daemonUrl: "http://127.0.0.1:14100",
+        bind: "127.0.0.1",
+      });
+    });
   });
 });

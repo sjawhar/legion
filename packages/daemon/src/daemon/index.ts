@@ -182,6 +182,11 @@ export async function startDaemon(
   config: DaemonConfig,
   options: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
+  // Refused before the instance lock or anything else is acquired. LEGION-24 replaces this with
+  // runtime selection; until then only the tmux runtime exists.
+  if (config.runtime === "kubernetes") {
+    throw new Error("runtime: kubernetes is not implemented yet");
+  }
   const owner = repoOwner(config.repo);
   const deps = { ...defaultDependencies(config, options.deps), ...options.deps };
   // At most one daemon runs per project: two sharing a durable JetStream
@@ -459,7 +464,7 @@ async function startDaemonLocked(
   api = startLegionApi(
     {
       port: config.port,
-      hostname: "127.0.0.1",
+      hostname: config.bind,
       repo: config.repo,
       gates: config.gates,
     },

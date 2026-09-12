@@ -16,10 +16,24 @@ export interface GitHubAppRoleConfig {
 
 export type GitHubAppsConfig = Partial<Record<GitHubAppRole, GitHubAppRoleConfig>>;
 
+export const RUNTIMES = ["tmux", "kubernetes"] as const;
+export type RuntimeName = (typeof RUNTIMES)[number];
+
 export interface DaemonConfig {
   project: string;
   legionId: string;
   port: number;
+  /** Which `Runtime` (`runtime.ts`) starts, probes, and stops Legion processes: `tmux` (the
+   * default: panes on the daemon's private tmux server) or `kubernetes` (pods; refuses startup
+   * until the Kubernetes runtime lands). */
+  runtime: RuntimeName;
+  /** The daemon API URL every spawned process is told (`LEGION_DAEMON_URL`), normalized with no
+   * trailing slash. Defaults to `http://127.0.0.1:<port>` under tmux; required under kubernetes,
+   * where a pod cannot reach the daemon's loopback. */
+  daemonUrl: string;
+  /** The API listen address. `127.0.0.1` unless `runtime` is kubernetes, where the in-cluster
+   * daemon must be reachable by its pods. */
+  bind: string;
   envoyUrl: string;
   /**
    * Optional dispatch service base URL (no `/mcp` suffix), passed through to
@@ -132,6 +146,7 @@ type ConfigSchema = {
 type ValueSource = "cli" | "config" | "env" | "default";
 
 const DEFAULT_PORT = 13370;
+const DEFAULT_BIND = "127.0.0.1";
 const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 const DEFAULT_ADMISSION_CAP = 4;
 const DEFAULT_WORKER_CAP = 10;
@@ -148,6 +163,9 @@ const DEFAULT_WORKER_RPC_TIMEOUT_SECONDS = 5;
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
   port: null,
+  runtime: null,
+  daemon_url: null,
+  bind: null,
   envoy_url: null,
   // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_url
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
@@ -352,6 +370,14 @@ function parseShellWords(value: string | undefined, field: string): string[] | u
 function requireNonEmpty(value: string, field: string): string {
   if (value.trim().length === 0) throw new Error(`${field} must not be empty`);
   return value;
+}
+
+function parseRuntime(value: string | undefined, field: string): RuntimeName | undefined {
+  if (value === undefined) return undefined;
+  if (!RUNTIMES.some((runtime) => runtime === value)) {
+    throw new Error(`${field} must be 'tmux' or 'kubernetes'`);
+  }
+  return value as RuntimeName;
 }
 
 function validateUrl(value: string, field: string): string {
@@ -573,6 +599,12 @@ export function loadConfigFromFile(
     if (port > 65535) throw new Error("port must be at most 65535");
     fields.port = port;
   }
+  const runtime = parseRuntime(readString(config.runtime, "runtime"), "runtime");
+  if (runtime !== undefined) fields.runtime = runtime;
+  const daemonUrl = readString(config.daemon_url, "daemon_url");
+  if (daemonUrl !== undefined) fields.daemonUrl = validateUrl(daemonUrl, "daemon_url");
+  const bind = readString(config.bind, "bind");
+  if (bind !== undefined) fields.bind = requireNonEmpty(bind, "bind");
   const envoyUrl = readString(config.envoy_url, "envoy_url");
   if (envoyUrl !== undefined) fields.envoyUrl = validateUrl(envoyUrl, "envoy_url");
   if (config.dispatch_mcp_url !== undefined) {
@@ -674,6 +706,45 @@ export function resolveDaemonConfig(
   );
   if (!Number.isSafeInteger(port.value) || port.value > 65535) {
     throw new Error("LEGION_DAEMON_PORT must be a valid TCP port");
+  }
+  const runtime = resolveValue<RuntimeName>(
+    opts.cliOverrides?.runtime,
+    parseRuntime(fileString(fields, "runtime"), "runtime"),
+    parseRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME"),
+    "tmux"
+  );
+  // `LEGION_DAEMON_URL` is both this env key and the variable every Legion pane carries, so a
+  // daemon started from inside a pane inherits the OUTER daemon's URL from its environment: a
+  // file/cli `daemon_url` (which `resolveValue` ranks above env) is how such a daemon keeps its
+  // own processes registering with itself. The loopback default needs the resolved port, so it
+  // is applied here rather than passed through `resolveValue`.
+  const daemonUrl = resolveValue(
+    opts.cliOverrides?.daemonUrl,
+    fileString(fields, "daemonUrl"),
+    env.LEGION_DAEMON_URL,
+    undefined
+  );
+  let resolvedDaemonUrl: string;
+  if (daemonUrl.value === undefined) {
+    if (runtime.value === "kubernetes") {
+      throw new Error(
+        "daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)"
+      );
+    }
+    resolvedDaemonUrl = `http://127.0.0.1:${port.value}`;
+  } else {
+    const field = daemonUrl.source === "env" ? "LEGION_DAEMON_URL" : "daemon_url";
+    resolvedDaemonUrl = normalizeBaseUrl(validateUrl(daemonUrl.value, field), field);
+  }
+  const bind = resolveValue(
+    opts.cliOverrides?.bind,
+    fileString(fields, "bind"),
+    env.LEGION_BIND,
+    DEFAULT_BIND
+  );
+  requireNonEmpty(bind.value, bind.source === "env" ? "LEGION_BIND" : "bind");
+  if (runtime.value !== "kubernetes" && bind.value !== DEFAULT_BIND) {
+    throw new Error("bind must be 127.0.0.1 unless runtime is kubernetes");
   }
   const envoyUrl = resolveValue(
     opts.cliOverrides?.envoyUrl,
@@ -916,6 +987,9 @@ export function resolveDaemonConfig(
       project,
       legionId: legionId.value,
       port: port.value,
+      runtime: runtime.value,
+      daemonUrl: resolvedDaemonUrl,
+      bind: bind.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
       dispatchUrl: resolvedDispatchUrl,
       dispatchToken,
