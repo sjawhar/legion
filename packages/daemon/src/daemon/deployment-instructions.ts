@@ -5,7 +5,7 @@ import path from "node:path";
  * boot and re-materialized under a one-line header, that every launched pane appends as its last
  * `--append-system-prompt "$(cat <this file>)"` fragment (`processes.ts`). Panes read this copy,
  * never the operator's path — they get exactly what boot validated. */
-export const DEPLOYMENT_INSTRUCTIONS_FILE = "deployment-instructions.md";
+const DEPLOYMENT_INSTRUCTIONS_FILE = "deployment-instructions.md";
 
 /** Reads `instructionsPath` and writes `# Deployment instructions (<legionId>)\n\n<content>` to
  * `<stateDir>/deployment-instructions.md`, returning that path. `legionId` is the `project` value
