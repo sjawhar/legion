@@ -170,6 +170,7 @@
   },
   "notRun": "The real up.sh was not run against this machine (tester's job per the assignment). forward mode was not run (no personal GitHub login).",
   "testerNotes": [
+    "ROUND 2 (2026-09-12, after review round 1): see the `round2` section — head is c7284e17 (merge of main into the branch); re-run the three harnesses there (expect 14 / 13 / 3) and note the two up.sh/checkpoints.sh output changes listed under round2.behaviourChangesForTester.",
     "Follow plan.json testerE2E E1-E7 as written; nothing in it is invalidated. Use a fresh SMOKE_DIR so ${SMOKE_DIR}/root-issue is absent, `unset LEGION_OMP_PATH` first (the worker pane exports one), SMOKE_PROJECT=sjawhar/24.",
     "Expected none-mode checkpoint line, exactly: `CHECKPOINT <n> SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy` then exit 3, for n in 1 2 3 4 12; checkpoint 13 OK (needs no DISPATCH_TOKEN).",
     "down.sh prints `STOPPED <name> (pid ...)` / `(pgid ...)` ONLY when a process ignored TERM for 10 s and was KILLed; a process that exits on TERM is stopped silently. Do not read a missing STOPPED line as a teardown failure — verify with the tmux/docker/ss checks in E4 instead. (plan.json E4's `expect` lists STOPPED lines; they appear only if the daemon/listener take >10 s to exit.)",
@@ -178,7 +179,178 @@
     "PR #957 body: CI line filled (Tests run 34677545352, all four jobs green at 8f0b120d); E2E section is yours; Thermo line says a thermo pass applies (shell + tests, not docs-only).",
     "Grants: `legion gh`/`jj git push` occasionally answered `Unable to redeem LEGION_GRANT (403)` when a tool call carried a stale second LEGION_GRANT export; a clean retry succeeded every time."
   ],
+  "round2": {
+    "trigger": "Review round 1 CHANGES_REQUESTED at ecea43a8 (https://github.com/sjawhar/legion/pull/957#pullrequestreview-5187408453); spec now v14 (two rulings: fail loudly on no recorded mode; the remedy is bump omp_pin AND remove the default branch).",
+    "base": "d03531e8 (the reviewer's local review.json commit, pushed by this round)",
+    "commits": [
+      {
+        "sha": "86dbc054e486",
+        "threads": [
+          "r3997052390",
+          "r3997052391"
+        ],
+        "message": "test(smoke): up.test.sh exercises every resolve_omp_path guard and rejects a masked preflight failure",
+        "files": [
+          "scripts/smoke/up.test.sh"
+        ],
+        "alsoCleanup": [
+          "asserts `omp_invocation: mise x ${omp_pin} -- omp` instead of the literal pin string",
+          "one `grep -l` over every start_process.*.argv file proves LEGION_OMP_PATH reaches the daemon only"
+        ]
+      },
+      {
+        "sha": "1cfc3ae4f175",
+        "threads": [
+          "r3997052392"
+        ],
+        "message": "test(smoke): down.test.sh forward stand-in is a two-process group and never leaks on a fixture failure",
+        "files": [
+          "scripts/smoke/down.test.sh"
+        ],
+        "alsoCleanup": [
+          "records $! after the setsid line and kills it in cleanup"
+        ]
+      },
+      {
+        "sha": "327895b2df45",
+        "threads": [
+          "r3997052394"
+        ],
+        "message": "test(smoke): checkpoints.test.sh runs every GitHub-fed checkpoint under none and checkpoint 8 by its own gate",
+        "files": [
+          "scripts/smoke/checkpoints.test.sh"
+        ]
+      },
+      {
+        "sha": "3a1af42a5d4d",
+        "threads": [
+          "r3997052395"
+        ],
+        "message": "fix(smoke): checkpoints.sh stops when no webhook mode was recorded or exported instead of guessing forward",
+        "files": [
+          "scripts/smoke/checkpoints.sh",
+          "scripts/smoke/checkpoints.test.sh",
+          "scripts/smoke/README.md"
+        ]
+      },
+      {
+        "sha": "342f3d0650b3",
+        "threads": [
+          "r3997052397"
+        ],
+        "message": "fix(smoke): the missing-OMP-build remedy names both edits that retire the default; HOME is read only when the default is needed; the none reason names checkpoints 8 and 13",
+        "files": [
+          "scripts/smoke/up.sh",
+          "scripts/smoke/up.test.sh",
+          "scripts/smoke/README.md"
+        ],
+        "alsoCleanup": [
+          "default_path computed only on the unset-LEGION_OMP_PATH branch (HOME-unset under set -u no longer fires for a valid override; new harness case)",
+          "none reason ends `checkpoints 8 and 13 are not gated by the mode`; up.test.sh verbatim assertion updated"
+        ]
+      },
+      {
+        "sha": "81120b5ded36",
+        "threads": [
+          "r3997052400"
+        ],
+        "message": "docs(smoke): the forward-mode sentence leads straight into the daemon command it introduces",
+        "files": [
+          "scripts/smoke/README.md"
+        ]
+      },
+      {
+        "sha": "c7284e17db1e",
+        "threads": [],
+        "message": "merge main into legion/LEGION-10: take #971 (gates.design off, checkpoint 3 reads the resolved ask); the case-B fixture anchors on gates: instead of the design value",
+        "files": [
+          "scripts/smoke/checkpoints.test.sh (conflict resolution: my envoy-record lines + main's fixture with designApproved gate-off)",
+          "scripts/smoke/up.test.sh (case-B sed anchors on `^gates:$`)"
+        ],
+        "why": "After 81120b5d was pushed GitHub reported mergeStateStatus DIRTY and created no workflow run: main had merged pull request #971 (\"fix(daemon): a gate-off design ask is closed on Dispatch, never left in a human's inbox\"), which edits README.md, checkpoints.sh, checkpoints.test.sh and up.sh under scripts/smoke/ — including the `gates:` block (design: root-issues -> off). A rebase would have rewritten every sha the seven thread replies and the PR body cite, so main was merged into the branch instead; existing shas are unchanged."
+      }
+    ],
+    "mutationChecks": {
+      "at": "81120b5d (final scripts before the merge; the merge changed only the two harness fixtures) and re-run green on the merged tree",
+      "results": [
+        "up.sh drop `== /*` leading-slash guard -> up.test.sh rc=1 at `expected a relative LEGION_OMP_PATH to fail even when the file exists and is executable`",
+        "up.sh drop `-x \"$LEGION_OMP_PATH\"` -> rc=1 at `expected a non-executable LEGION_OMP_PATH to fail`",
+        "up.sh drop `-x \"$default_path\"` -> rc=1 at `expected preflight to fail when the default build is not executable`",
+        "up.sh `local omp_path=\"$(resolve_omp_path)\"` -> rc=1 at `expected main() to stop before printing the selected OMP build` (output shows `GREEN OMP build: ` with an empty path, then the unrelated cd failure — the reviewer's exact scenario)",
+        "down.sh pid-only kill (kill/kill -0/kill -KILL on \"$pgid\" instead of \"-$pgid\") -> down.test.sh rc=1 at `expected down.sh to kill the whole recorded webhook-forward process group; survivors: <pid> <pgid> sleep`",
+        "checkpoints.sh drop 10 from `5 | 6 | 7 | 9 | 10 | 11` -> checkpoints.test.sh rc=1 at checkpoint 10",
+        "checkpoints.sh add 8 to that arm -> rc=1 at `expected checkpoint 8 under none to report only its branch-protection reason`",
+        "checkpoints.sh restore the `forward` guess in stored_webhook_mode -> rc=1 at `expected the no-recorded-mode message and exit 1; got 3: CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=forward: ...`",
+        "down.test.sh fixture failure forced (leader check false) -> exits 1 with `fixture error`, no `sleep 300` left running",
+        "unmodified scripts: every harness green after each mutation was reverted (cmp against saved originals)"
+      ]
+    },
+    "harnessCounts": {
+      "at": "c7284e17 (merged head)",
+      "syntax": "bash -n clean on up.sh, checkpoints.sh, down.sh, up.test.sh, checkpoints.test.sh, down.test.sh",
+      "up.test.sh": 14,
+      "checkpoints.test.sh": 13,
+      "down.test.sh": 3,
+      "note": "up.test.sh count is unchanged at 14 because the new guard cases and the HOME case live inside existing PASS blocks; checkpoints.test.sh gained the no-recorded-mode PASS."
+    },
+    "threadDispositions": [
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052390",
+        "fix": "86dbc054",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3997108352",
+        "resolved": true
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052391",
+        "fix": "86dbc054",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3997108676",
+        "resolved": true
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052392",
+        "fix": "1cfc3ae4",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3997108758",
+        "resolved": true
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052394",
+        "fix": "327895b2",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3997108843",
+        "resolved": true
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052395",
+        "fix": "3a1af42a",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3997108947",
+        "resolved": true
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052397",
+        "fix": "342f3d06",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3997109065",
+        "resolved": true
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052400",
+        "fix": "81120b5d",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3997109148",
+        "resolved": true
+      }
+    ],
+    "prBodyEdits": "Threads line -> 7 resolved / 0 unresolved with one line per thread; CI line -> the run at c7284e17; two factual corrections to my own Change bullets (the retire-the-default sentence, and one sentence on the no-recorded-mode stop) and one Proof line for this round. Thermo and the tester's E2E sections are byte-identical. CI line names run 34710735990 at c7284e17 and explains why 81120b5d received no run.",
+    "behaviourChangesForTester": [
+      "checkpoints.sh with no ${SMOKE_DIR}/webhook-mode and no SMOKE_WEBHOOK_MODE now exits 1 with `CHECKPOINT <n> FAILED: no recorded webhook mode at <path>; run up.sh, or export SMOKE_WEBHOOK_MODE=envoy|forward|none` (was: silently assumed forward). A recorded rig is unaffected.",
+      "up.sh none-mode line now ends `checkpoints 8 and 13 are not gated by the mode` (was `checkpoint 13 remains usable`); the E2E quote in the PR body is from the earlier head and will differ by that tail.",
+      "up.sh missing-default message now names both retirement edits (see 342f3d06).",
+      "The rig's generated legion.yaml now has `gates.design: off` and checkpoint 3 expects a resolved ask — that is main's #971, not this PR; the merge only made the fixtures agree with it."
+    ],
+    "toolingNotes": [
+      "The bash tool backend was unreachable for part of this round; commits were made from the eval kernel with the session's jj attribution overlay recreated at /home/ubuntu/.cache/omp/jj/omp-attribution-01a09417-d368-7000-b2ec-d1bd4ec7171d.toml (same `Omp-Session` trailer the extension writes) and bash run with --norc --noprofile because a dotfile resets JJ_CONFIG. Every commit carries the trailer (checked on 1cfc3ae4).",
+      "Grant hygiene: any second `export LEGION_GRANT=` block pasted into a bash call overrides the injected one and yields `Unable to redeem LEGION_GRANT (403)`; grant-bearing commands were run through `tool.bash` from the kernel with programmatically built command text."
+    ],
+    "ci": "Tests run 34710735990 (https://github.com/sjawhar/legion/actions/runs/34710735990): pr-title, lint, typecheck, test all success at c7284e17"
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T06:15:26.825Z"
+  "completed": "2026-09-12T18:19:12.395Z"
 }
