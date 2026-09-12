@@ -184,9 +184,10 @@ command takes the pull request URL, or `--repo <owner>/<repo>` taken from it, be
 session's working directory has no git remote to resolve a bare number against:
 
 ```text
-legion gh -- pr view <pr url> --json headRefOid,mergeable,body
+legion gh -- pr view <pr url> --json headRefOid,mergeable,body,files
 legion gh -- pr checks <pr url> --required --json name,state,bucket,link
 legion gh -- api repos/<owner>/<repo>/rules/branches/<base branch> --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]'
+legion gh -- api repos/<owner>/<repo>/branches/<base branch> --jq '.protection.required_status_checks.contexts'
 legion gh -- api graphql -f query='query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved}}}}}' -F owner=<owner> -F repo=<repo> -F n=<n>
 legion gh -- api repos/<owner>/<repo>/compare/<verified sha>...<approved sha> --jq '{status, files: [.files[].filename]}'
 legion gh -- api repos/<owner>/<repo>/compare/<approved sha>...<current sha> --jq '{status, files: [.files[].filename]}'
@@ -194,28 +195,54 @@ legion gh -- api repos/<owner>/<repo>/compare/<approved sha>...<current sha> --j
 
 1. **head**: `headRefOid` equals the `<current sha>` in the READY. Any other head is a different
    pull request as far as this READY is concerned.
-2. **checks**: `pr checks --required` succeeds (exit 0) with a non-empty list in which every
-   row's `bucket` is `pass`. That is the only green. A `pending` row is not green; a `fail` row
-   never merges (see Flake). The command never returns an empty list: when nothing has reported
-   at the head yet it exits 1 with `no checks reported on the '<branch>' branch`, and when checks
-   exist but none is required it exits 1 with `no required checks reported on the '<branch>'
-   branch` — a freshly pushed head has no check runs for a few seconds, and a head that conflicts
-   with the base never gets any. Either exit is **pending**, never green: subscribe to
-   `pr.<n>.checks` exactly as for a running check and re-run the gates on that wake. Two
-   exceptions, both read from the repository, never from the absence of rows:
-   - A repository that genuinely requires no checks: the `rules/branches/<base branch>` query
-     above returning `[]` is what lets this gate hold with no check rows.
-   - A private repository on GitHub's free plan cannot define required checks at all: that same
-     query answers HTTP 403 with a body saying
-     `Upgrade to GitHub Pro or make this repository public to enable this feature`. Match that
-     sentence exactly — any other 403 is a permission error and stays an error, never "no
-     required checks". Under it, gate 2 requires every check reported on the head to be green
-     instead: `legion gh -- pr checks <pr url> --json name,state,bucket,link` (without
-     `--required`) exits 0 with at least one row and every row's `bucket` is `pass`. A `pending`
-     row is pending, a `fail` row never merges, and no rows (the exit-1 `no checks reported`)
-     stays pending exactly as above. This is stricter than "no required checks, merge", and
-     GitHub still enforces whatever protection the repository does have at `pr merge` time, so a
-     wrong read costs a refused merge reported to the architect, never an unprotected one.
+2. **checks**: `pr checks --required --json …` exits 0 with at least one row, and every row's
+   `bucket` is `pass` or `skipping`. That is the only green. The five buckets the CLI emits
+   (`gh pr checks --help`): `pass` and `skipping` are green — a job skipped by its `if:` (this
+   repository's `Legion Envoy and Contracts` workflow skips six jobs through `needs.changes` on
+   most pull requests, and GitHub treats a skipped job as satisfying a required check);
+   `pending` is pending; `fail` and `cancel` never merge (the Flake rule applies to both). Exit
+   codes, as the pinned CLI (2.98.0) really behaves, verified live on this repository: with
+   `--json` the command exits 0 whenever rows exist, whatever their buckets — a `pending` row
+   and a `fail` row both came back with exit 0 — so the buckets decide, never the exit code.
+   Exit 1 comes only with no rows: `no checks reported on the '<branch>' branch` when nothing
+   has reported at the head yet (a freshly pushed head has no check runs for a few seconds, and
+   a head that conflicts with the base never gets any), or `no required checks reported on the
+   '<branch>' branch` when checks exist but none is required. Either message is **pending**,
+   never green: subscribe to `pr.<n>.checks` exactly as for a running check and re-run the gates
+   on that wake. (Without `--json` the CLI exits 8 for pending rows and 1 for a failing row or no
+   rows; you never run it that way — the rows are what you read.) Two exceptions, both read
+   from the repository, never from the absence of rows:
+   - A repository that genuinely requires no checks. Required checks live in two places, and
+     both must be empty: the `rules/branches/<base branch>` query above (rulesets) returns `[]`
+     **and** the `branches/<base branch>` query above (the classic branch-protection summary,
+     which the implement App can read; the admin endpoint
+     `branches/<base>/protection/required_status_checks` answers HTTP 403
+     `Resource not accessible by integration` under your credentials on every repository and
+     is not used) returns `[]`. Only then does the `no required checks reported` exit let this
+     gate hold with no check rows. Live answers under this pane's `gh`: `sjawhar/legion` —
+     rulesets `["lint","typecheck","test"]`, classic summary `[]` (it uses rulesets, so the
+     exception never applies there); a repository whose required checks are classic protection
+     answers `[]` for rulesets and the check names in the classic summary (GitHub's documented
+     shape; neither repository this skill was verified against uses classic protection).
+   - A private repository on GitHub's free plan cannot define required checks at all: the
+     rulesets query answers HTTP 403 with the body
+     `{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.", …}`
+     (`gh` prints it as `gh: Upgrade to GitHub Pro or make this repository public to enable this
+     feature. (HTTP 403)`; verified live on `sjawhar/legion-smoke`, whose classic summary is
+     `[]` too). Match the `message` field **containing** the phrase
+     `make this repository public to enable this feature` — the stable tail; the head names the
+     plan (`Upgrade to GitHub Pro` for a user-owned repository, observed; `Upgrade to GitHub
+     Team` for an organization-owned one, per GitHub's documentation, not observed here) and
+     the sentence ends with a period inside a JSON wrapper, so literal equality never matches.
+     Any other 403 — `Resource not accessible by integration` included — is a permission error
+     and stays an error, never "no required checks". Under this exception gate 2 requires every
+     check reported on the head to be green instead: `legion gh -- pr checks <pr url> --json
+     name,state,bucket,link` (without `--required`) exits 0 with at least one row and every
+     row's `bucket` is `pass` or `skipping`. A `pending` row is pending, a `fail` or `cancel`
+     row never merges, and no rows (the exit-1 `no checks reported`) stays pending exactly as
+     above. This is stricter than "no required checks, merge", and GitHub still enforces
+     whatever protection the repository does have at `pr merge` time, so a wrong read costs a
+     refused merge reported to the architect, never an unprotected one.
 3. **threads**: zero unresolved review threads (the count of `isResolved: false` is 0).
 4. **mergeable**: `mergeable` is not `CONFLICTING` and not `UNKNOWN`.
 5. **cleanup only**: `compare/<verified sha>...<approved sha>` reports `status` `identical` or
@@ -231,7 +258,11 @@ legion gh -- api repos/<owner>/<repo>/compare/<approved sha>...<current sha> --j
    audited; approval lands one commit later on the cleanup head; so the block names the verified
    sha, never the approved or the current one. Line by line: the `CI` line names a run and
    reports success at one sha; the `Thermo` line names the same sha and a verdict, unless the
-   pull request is docs-only, in which case the template omits that line entirely; the `E2E`
+   pull request is docs-only, in which case the template omits that line entirely — docs-only
+   is a fact you read, never one you take from the omission itself: every `path` in the `files`
+   list of the `pr view` command above starts with `docs/` or ends with `.md`
+   (`--jq '[.files[].path | select((startswith("docs/") or endswith(".md")) | not)]'` is `[]`);
+   a missing `Thermo` line on any other pull request fails this gate; the `E2E`
    line names the same sha and has a `Negative control` line — those lines agreeing on one sha
    is what defines the verified sha; the `Threads` line reports `0 unresolved` (its per-thread
    lines name fixing commits, never the head — do not look for a sha there); the `Fast-follow`
@@ -252,10 +283,10 @@ admin-merge without an explicit deployment grant from Sami for that specific mer
 thread count, the `mergeable` value, the offending paths from the compare). Do not merge, do not
 retry on a timer. The architect fixes through the phases.
 
-**Flake.** A required check that failed for a reason unrelated to the change (a runner outage,
-a rate limit, a known-flaky job) may be rerun once:
-`legion gh -- run rerun <run-id> --failed --repo <owner>/<repo>`, the run id taken from the
-failing row's `link` (`https://github.com/<owner>/<repo>/actions/runs/<run-id>/job/<job-id>`).
+**Flake.** A required check that failed or was cancelled (`bucket` `fail` or `cancel`) for a
+reason unrelated to the change (a runner outage, a rate limit, a known-flaky job) may be rerun
+once: `legion gh -- run rerun <run-id> --failed --repo <owner>/<repo>`, the run id taken from
+the failing row's `link` (`https://github.com/<owner>/<repo>/actions/runs/<run-id>/job/<job-id>`).
 Then stop. The rerun's result reaches you as a `pr.<n>.checks` wake; re-run the gates then.
 A second failure is a failed gate, reported as above.
 
@@ -265,9 +296,9 @@ reason — the CI queue is long and slow, and an unnecessary rebase clogs it for
 request. `mergeable == UNKNOWN` means GitHub has not finished computing it: do not merge, do
 not poll; re-read on the next `pr.<n>.checks` wake.
 
-**Pending READY.** A READY that cannot merge yet only because checks are still running, none
-has reported at the head yet (gate 2's `no checks reported` exit), a flake rerun was issued, or
-`mergeable` is `UNKNOWN` is pending. Subscribe to that pull request's
+**Pending READY.** A READY that cannot merge yet only because checks are still running (a
+`pending` row), none has reported at the head yet (gate 2's `no checks reported` exit), a flake
+rerun was issued, or `mergeable` is `UNKNOWN` is pending. Subscribe to that pull request's
 events so its settlement wakes you:
 
 ```text
