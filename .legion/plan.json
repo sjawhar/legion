@@ -1,0 +1,416 @@
+{
+  "issue": "LEGION-21",
+  "title": "W1a Runtime boundary: ProcessManager talks to an injected Runtime; tmux becomes one implementation",
+  "taskCount": 7,
+  "independentTasks": 0,
+  "workflowRecommendation": "One implementer, tasks 1-7 strictly in order; each task ends at a commit boundary where `bun test packages/daemon` and `bunx tsc --noEmit` are green (task 2 is the only one that touches processes.ts before the cutover, and only by two literal `runtime: \"tmux\"` insertions). Run targeted tests per task; run the full suite, tsc, biome, and the smoke rig only in task 7.",
+  "authority": {
+    "spec": "dispatch://LEGION-21/spec (issue spec, no open decisions) + dispatch://LEGION-19/spec sections 0 and 1 (root spec; fixes the interface)",
+    "headAnalyzed": "3d035027c6f4 (chore: release pi-envoy v1.4.1) — all line numbers below refer to this head; re-grep before editing if the file changed",
+    "planLocation": "This file only — the root spec (section 7) forbids plan documents in the repo for this tree."
+  },
+  "goal": "Pure refactor: packages/daemon/src/daemon/processes.ts keeps every lifecycle method and talks to an injected `Runtime`; every tmux-specific operation moves to a new `TmuxRuntime`; state locators gain a `runtime` discriminant (state v24); config gains `runtime`/`daemon_url`/`bind`. Tmux behaviour (which panes open, which tmux argv runs, which sockets are dialed, in which order) is unchanged; the one deliberate behavioural narrowing is listed under deviations[2].",
+  "globalConstraints": [
+    "Runtime interface, SpawnSpec, Locator, K8sLocator are declared exactly as root spec section 1 (see interfaces.runtimeTs) — the single typing deviation is `SpawnSpec.issue` being optional (deviations[1]).",
+    "ProcessManager never references `tmux.`, `prepareSocket`, `writePaneSecret`, `launchShimmedProcess`, `workerClient(`, `recordedWindowId`, `rewriteIssueWindowId`, `probedWindowId`, `reconcileTmuxWindows`, never matches /locator\\.runtime|runtime ===/, never imports ./tmux or writeSecretFile. The contract test greps for all of these as plain substrings (task 4); scrub comments too — the substring `tmux.` must not appear even in prose: write 'the tmux runtime', not 'tmux.ts', and never end a sentence with the word tmux followed by a period. Likewise `connectWorkerRpc`/`readProcessCmdline` must vanish from processes.ts prose (the doc comment at 2863-2867 mentions `connectWorkerRpc`).",
+    "Every existing `it(...)` body in packages/daemon stays as it is except the edits enumerated in testEdits (type-only `runtime: \"tmux\"` on fixture literals, the `reconcileTmuxWindows`->`reconcileOrphans` rename at 5 call sites, config fixtures gaining 3 fields, the kill-window->kill-pane expectation in one test, the api.test.ts `runtime` expectations that ARE acceptance 4, and the watchdog unit test whose dependency shape is what changes).",
+    "Promise-reaction order in the stop path is load-bearing (see designDecisions.stop). Move code verbatim; do not reorder `client.shutdown()`, the timer creation, and the race.",
+    "No `worker_stream_port` key, no edits to cli/worker-shim.ts, worker-stream-listener.ts, or worker-rpc.ts (LEGION-22 owns them). `probeWorkerSocket`'s unused `socketPath` parameter is absorbed by `probeWorker` in runtime.ts instead.",
+    "Repo conventions: Biome (double quotes, semicolons, 100 cols), `node:` imports, `type` imports, no barrel files, interfaces for object shapes, tests co-located in __tests__/. jj, not git: `jj -R \"$LEGION_WORKSPACE\" new` before each task, `jj describe -m` per task."
+  ],
+  "designDecisions": {
+    "ownership": "Runtime = how a process is started, probed, reached, stopped, and swept (tmux: window/pane/socket/secret-file delivery). ProcessManager = lifecycle: admission, generations, claims, launch-failure accounting, grants, linger/close, the per-token RPC client cache and its `onIdle`/`closed` wiring, and secret-file LIFETIME (hold/prune). Secret DELIVERY (0600 file + `*_FILE` env) is the runtime's.",
+    "connect": "`Runtime.connect(locator, timeoutMs?)` is a raw dial (tmux: `connectWorkerRpc(locator.socketPath, timeoutMs)`; it never negotiates and never caches). ProcessManager keeps today's per-token cache/dedup/negotiate/wire logic verbatim as `clientFor(token, locator)` (the renamed `workerClient`), calling `this.runtime.connect(locator, this.workerRpcTimeoutMs)` where it called `this.deps.connectWorkerRpc(socketPath, ...)`. Reason: `onWorkerClientClosed` is registered on `client.closed` at connect time and its stale-close guard (`this.workerClients.get(token) !== client`) is what suppresses it when a stop force-closes the client; both must stay in ProcessManager or the microtask ordering below breaks.",
+    "stop": "ProcessManager.stopProcess(token, locator, timeoutMs, options) keeps the graceful shutdown over ITS OWN cached client (today's lines 2792-2809 verbatim: `awaitShutdown(cached, timeoutMs, deps.sleep)`; evict from `workerClients` if still that client; return if confirmed; else `cached.close()` and continue with `{skipGraceful: true}`), then delegates `await this.runtime.stop(locator, timeoutMs, options)`. TmuxRuntime.stop is today's `stopClient` fresh-dial branch (`connectWorkerRpc` without negotiate, `undefined` on failure) + the same graceful race + the kill-pane (lines 2811-2820). Why: today's timeout path evicts the cached client from `workerClients` BETWEEN the race and `client.close()`; that eviction is what makes the `closed` reaction a no-op, and it can only happen where the cache lives. Today's graceful-confirmed path lets that reaction run a reconnect attempt (registered at connect time, it precedes the race's own reaction on the same promise) — also preserved because the cached-client race stays in ProcessManager. A `ProcessStopFailed` (runtime-level, locator-scoped) is rethrown by the wrapper as `StopFailed(token, sameMessage)`; every other error passes through unchanged (the 'missing a pane id' plain Error stays a plain Error).",
+    "probe": "`Runtime.probe(locator)` returns `{status: alive|dead|unknown, pid?}`. TmuxRuntime.probe = today's `probe` body (panePid -> isOmpPane -> pane-id backfill + `deps.persist()`). ProcessManager.probe(treeKey) keeps its `\"alive\" | \"dead\"` signature: `dead` for a missing locator, the runtime's verdict otherwise, and THROWS on `unknown` (`Runtime probe reported an unknown status for <treeKey>; ProcessManager has no unknown-status policy`) — tmux never reports it; the k8s runtime (LEGION-24) defines the policy when it can produce it. `controllerAlive` keeps its state mutation (`delete state.controllerLocator` on a non-alive verdict) in ProcessManager and delegates the probe.",
+    "windowSharing": "Lives entirely in TmuxRuntime: `issueLaunchQueue` + `serialize`, `issueWindowIds`, `recordedWindowId`, `rewriteIssueWindowId`, `probedWindowId`. The one thing it needs from state — the locators currently recorded for an issue, tree locator first (only when the issue is a tree root, i.e. `state.trees[issue]` exists, which is exactly `rootForIssue(issue) === issue`) then every claim with `claim.issue === issue` in `Object.values(state.roles)` order — arrives through the constructor dep `issueLocators(issue)`, implemented by the new exported `locatorsForIssue(state, issue)` in processes.ts. `rewriteIssueWindowId` mutates those (live) locator objects' `tmuxWindowId` in place exactly as today.",
+    "secrets": "`SpawnSpec.secrets` is name->value with exactly one entry per process (`LEGION_BOOT_TOKEN` for root/worker, `LEGION_CONTROLLER_SECRET` for the controller). TmuxRuntime writes it with `writeSecretFile(stateDir, <role token>, value)` — file name = `roleToken(project, issue, role)` or `controllerToken(project)`, byte-identical to today — and exports `<NAME>_FILE=<path>` as env pairs appended AFTER `spec.env`'s pairs. A second entry throws (`tmux runtime delivers exactly one secret per process`). ProcessManager keeps `holdPaneSecret`/`launchingSecrets`/`paneSecretFiles`/`liveSecretFiles`/`pruneSecretFiles`/`pruneWrittenSecretFiles`/`persist` unchanged, and does `this.paneSecretFiles.add(token)` immediately BEFORE calling `runtime.spawn` (today it happened inside writePaneSecret; tracking a name whose write then fails is a harmless no-op `rm --force` at the next prune).",
+    "identity": "Locator identity comparisons (today `a.tmuxPaneId === b.tmuxPaneId`) become `sameProcess(a, b)` from runtime.ts (tmux: same `tmuxPaneId`, including both undefined; kubernetes: same `podUid`; different runtimes: false). closeTreeLocked's `stoppedPaneIds` value snapshot becomes `stoppedLocators = new Map(batch.map(([token, claim]) => [token, { ...claim.locator }]))` (a shallow COPY, keeping today's snapshot semantics).",
+    "orphans": "`Runtime.reconcileOrphans(known: ReadonlySet<string>, graceMs)` as declared. ProcessManager builds `known` as the union of `locatorHandles(locator)` over every recorded locator (trees, worker claims, controller). `locatorHandles` (runtime.ts) is the per-runtime projection: tmux -> `[tmuxWindowId, tmuxPaneId ?? `${tmuxWindowId}/*`]` (the `/*` handle means 'exempt every pane of this window' — today's exemptWindows for a locator with a window id but no pane id); kubernetes -> `[podName]`. TmuxRuntime decodes: handles starting with `%` are known panes, handles ending in `/*` are exempt windows (suffix stripped), everything else is a known window. This reproduces lines 1259-1291 exactly, including the shared-window legacy case.",
+    "spawn": "ProcessManager builds `innerCommand` itself (statPrompt, computeResumeArgument, `withOmpLaunchPrefix(...) + resumeArgument + --mode rpc --append-system-prompt ...` exactly as lines 2393-2395 / 2624) and the plain env RECORD (no tmux pairs), then calls `runtime.spawn(kind, spec)`. TmuxRuntime.spawn does, in this order: prepareSocket (mkdir/rm), shimmedShellCommand, write the secret file, build `[...tmuxEnv(env), ...tmuxEnv(secretFileEnv), shellCommand]`, then (root/worker) `serialize(issueLaunchQueue, issue, probedWindowId -> splitWindow | openWindow(treeName(issue)) + rewriteIssueWindowId)` or (controller) `openWindow(session, \"controller\", ...)`. The tmux argv the tests pin (processes.test.ts 584-637) is byte-identical for root/worker; the controller's `-e` pair order changes (secret file pair last instead of third) — argv order of env pairs is not behaviour and the only test reading it (`tmuxWindowEnvironment`, 679-688) compares an object.",
+    "persistFailureReap": "spawnRoot's `SpawnPersistenceFailure` path (line 1377-1379, `tmux.killWindow(tree.locator.tmuxWindowId)`) becomes `await this.stopProcess(architectToken, tree.locator, this.workerStopTimeoutMs, { skipGraceful: true })` inside try/catch (log `[legion] failed to reap <root>'s unpersisted root process:`; today's killWindow ignored failures silently), then `throw new SpawnPersistenceFailure(error)` exactly as now. This is deviations[2].",
+    "unknownFieldReads": "The only Locator fields ProcessManager reads after the cutover are `ompSessionFile` (common to both union members, lifecycle data) and identity via `sameProcess`. Two log lines (2115, 2156) that interpolated `tmuxPaneId ?? tmuxWindowId` become `...root process for ${tree.root}:` with the locator object passed as an extra console.error argument.",
+    "socketlessLegacyLocators": "`markTreeReady`/`markControllerReady` today return silently when the locator has no `socketPath` (state predating the shim). After the cutover they return only when there is no locator at all; a tmux locator without a socket makes `TmuxRuntime.connect` throw `tmux locator <windowId> has no shim socket`, which both callers already catch-and-log (route `.catch` at api/routes/process.ts:92; try/catch in markControllerReady). deviations[4].",
+    "typesInterim": "Task 2 types the three state locator fields as `TmuxLocator` (runtime literal required) so processes.ts still compiles with its field reads; task 5 widens them to the `Locator` union together with the api/state.ts, contracts, and api/routes/workers.ts changes that the union forces."
+  },
+  "deviations": [
+    "runtime.ts exports, beyond the four declared types: `TmuxLocator`, `TmuxWindowLocator` and `K8sLocator` interfaces (moved here from legion-state.ts so legion-state.ts imports the union rather than the reverse), `RoleResources` (referenced by the declared SpawnSpec but never defined in the root spec — a minimal requests/limits shape per root spec section 3), `ProbeResult`, `ProcessStopFailed`, and pure helpers `sameProcess`, `locatorHandles`, `boundedWait`, `awaitShutdown`, `probeWorker`, `shellPath`, `DAEMON_CLI_ENTRYPOINT`. Justification: identity, orphan handles, and the graceful-stop race are needed by both ProcessManager and TmuxRuntime and neither may import the other.",
+    "`SpawnSpec.issue?: IssueKey` (optional) instead of required: the controller has no issue and the alternative is a fabricated key. TmuxRuntime throws `spawn <kind> requires spec.issue` for root/worker without one.",
+    "spawnRoot's persist-failure reap kills the just-spawned PANE (`runtime.stop(..., {skipGraceful: true})`), not the whole window. Today's `kill-window` also kills live sibling worker panes of the same issue when a resurrected root split into their window; the interface has no window concept and the narrower reap is the correct blast radius. Test 'kills the just-spawned window before propagating a saveState failure...' (processes.test.ts:2063-2102) changes to track `kill-pane` and expect `[\"%1\"]`. The architect must veto this in the first review round if byte-identical tmux argv is preferred over the narrower reap; the fallback is a sixth interface method `reap(locator)` (not planned).",
+    "A socket-less legacy tmux locator (pre-shim state) on markTreeReady/markControllerReady now produces a logged connect error instead of a silent return (see designDecisions.socketlessLegacyLocators). No test exercises this; v23 dogfood state carries sockets on every live locator.",
+    "Controller pane `-e` pair order: `LEGION_CONTROLLER_SECRET_FILE` moves from the 3rd pair to the last (secrets are delivered after env). Functionally identical; no test pins the order.",
+    "Worker locator strictness: the zod union's tmux member has `tmuxPaneId?`/`socketPath?` optional (today's `WorkerLocatorSchema` required both). Every locator the tmux runtime writes carries both; the runtime treats a missing pane id on stop as the same corrupt-record error as today (`... is missing a pane id`).",
+    "Files touched outside the spec's list, each forced: `packages/contracts/src/legion-daemon-api.ts` (+ its test) because `DaemonStateResponse` is a strictObject contract there and cannot carry `runtime` otherwise (acceptance 4); `packages/daemon/src/daemon/api/routes/workers.ts` lines 136 and 196 (pane-id identity -> `sameProcess`) because `claim.locator.tmuxPaneId` does not type-check against the union; `scripts/smoke/up.sh` `write_daemon_config` gains `daemon_url: http://127.0.0.1:${daemon_port}` (see risks[5]); `packages/daemon/src/daemon/AGENTS.md` Files table rows for the two new modules and the three new config keys."
+  ],
+  "interfaces": {
+    "runtimeTs": [
+      "// packages/daemon/src/daemon/runtime.ts",
+      "import path from \"node:path\";",
+      "import type { IssueKey, LegionRole } from \"@legion/contracts\";",
+      "import { createCancellableSleep } from \"./cancellable-sleep\";",
+      "import { probeWorkerSocket, type SocketProbeResult, type WorkerRpcClient } from \"./worker-rpc\";",
+      "",
+      "export const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, \"../cli/index.ts\"); // moved from processes.ts:46",
+      "",
+      "export interface TmuxWindowLocator { tmuxSession: string; tmuxWindowId: string; tmuxPaneId?: string; socketPath?: string; ompSessionFile?: string; } // moved from legion-state.ts:61-67",
+      "export interface K8sLocator { namespace: string; podName: string; podUid: string; pvcName: string; ompSessionFile?: string; }",
+      "export type TmuxLocator = { runtime: \"tmux\" } & TmuxWindowLocator;",
+      "export type Locator = TmuxLocator | ({ runtime: \"kubernetes\" } & K8sLocator);",
+      "",
+      "/** Root spec section 3 profile shape; unused by the tmux runtime. */",
+      "export interface RoleResources { requests: { cpu: string; memory: string; ephemeralStorage: string }; limits: { cpu: string; memory: string; ephemeralStorage: string }; }",
+      "",
+      "export type SpawnSpec = {",
+      "  /** Absent only for kind \"controller\". */",
+      "  issue?: IssueKey;",
+      "  role: LegionRole | \"controller\";",
+      "  workspaceDir: string;",
+      "  env: Record<string, string | undefined>;",
+      "  innerCommand: string;",
+      "  resources?: RoleResources;",
+      "  /** name -> value; the runtime decides delivery (tmux: 0600 `<stateDir>/secrets/<role token>` + `<NAME>_FILE` env). */",
+      "  secrets: Record<string, string>;",
+      "};",
+      "",
+      "export interface ProbeResult { status: \"alive\" | \"dead\" | \"unknown\"; pid?: number; }",
+      "",
+      "export interface Runtime {",
+      "  spawn(kind: \"root\" | \"worker\" | \"controller\", spec: SpawnSpec): Promise<Locator>;",
+      "  probe(locator: Locator): Promise<ProbeResult>;",
+      "  connect(locator: Locator, timeoutMs?: number): Promise<WorkerRpcClient>;",
+      "  stop(locator: Locator, timeoutMs: number, options?: { skipGraceful?: boolean }): Promise<void>;",
+      "  reconcileOrphans(known: ReadonlySet<string>, graceMs: number): Promise<void>;",
+      "}",
+      "",
+      "/** A runtime could not confirm a process stopped (tmux: a real kill-pane failure). ProcessManager rethrows it as `StopFailed(token, message)`. */",
+      "export class ProcessStopFailed extends Error { constructor(readonly locator: Locator, message: string) { super(message); this.name = \"ProcessStopFailed\"; } }",
+      "",
+      "export function sameProcess(a: Locator | undefined, b: Locator | undefined): boolean {",
+      "  if (a === undefined || b === undefined) return a === b;",
+      "  if (a.runtime === \"tmux\") return b.runtime === \"tmux\" && a.tmuxPaneId === b.tmuxPaneId;",
+      "  return b.runtime === \"kubernetes\" && a.podUid === b.podUid;",
+      "}",
+      "",
+      "/** Handles `Runtime.reconcileOrphans` recognizes as known. tmux: the window id plus either the pane id or `<windowId>/*` (no recorded pane id: exempt every pane of that window). kubernetes: the pod name. */",
+      "export function locatorHandles(locator: Locator): readonly string[] {",
+      "  if (locator.runtime === \"tmux\") return [locator.tmuxWindowId, locator.tmuxPaneId ?? `${locator.tmuxWindowId}/*`];",
+      "  return [locator.podName];",
+      "}",
+      "",
+      "/** processes.ts:2738-2744 `stopTimeout`, shared. */",
+      "export function boundedWait(ms: number, sleep?: (ms: number) => Promise<void>): { timedOut: Promise<boolean>; cancel: () => void } {",
+      "  if (sleep) return { timedOut: sleep(ms).then(() => true), cancel: () => {} };",
+      "  const timer = createCancellableSleep();",
+      "  return { timedOut: timer.sleep(ms).then(() => true), cancel: () => timer.cancel() };",
+      "}",
+      "",
+      "/** processes.ts:2797-2806 verbatim: shutdown frame, THEN the wait is created, THEN the race. Returns true when `closed` settled cleanly before the timeout (a rejection counts as unconfirmed, exactly as today). */",
+      "export async function awaitShutdown(client: WorkerRpcClient, timeoutMs: number, sleep?: (ms: number) => Promise<void>): Promise<boolean> {",
+      "  client.shutdown();",
+      "  const { timedOut, cancel } = boundedWait(timeoutMs, sleep);",
+      "  const unconfirmed = await Promise.race([client.closed.then(() => false, () => true), timedOut]);",
+      "  cancel();",
+      "  return !unconfirmed;",
+      "}",
+      "",
+      "/** `probeWorkerSocket` over a locator-bound connect: its `socketPath` parameter only ever reaches `connect`, which ignores it here. worker-rpc.ts is LEGION-22's file; this wrapper is the one place that wart lives. */",
+      "export function probeWorker(connect: () => Promise<WorkerRpcClient>, timeoutMs: number): Promise<SocketProbeResult> {",
+      "  return probeWorkerSocket(connect, \"\", timeoutMs);",
+      "}",
+      "",
+      "export function shellPath(value: string): string { /* processes.ts:167-169 verbatim */ }"
+    ],
+    "tmuxRuntimeDeps": [
+      "// packages/daemon/src/daemon/runtime-tmux.ts",
+      "export interface TmuxRuntimeDeps {",
+      "  /** The private server (`{ run, socket: `legion-${project}` }`); `socket` doubles as the session name and the `@legion_owner` value. */",
+      "  tmux: TmuxServer;",
+      "  project: string;            // roleToken/controllerToken for secret-file names",
+      "  stateDir: string;           // <stateDir>/workers/<name>.sock, <stateDir>/secrets/<token>",
+      "  connectWorkerRpc(socketPath: string, timeoutMs?: number): Promise<WorkerRpcClient>;",
+      "  workerRpcTimeoutMs(): number;   // stop's own no-negotiate dial",
+      "  now(): number;              // reconcileOrphans grace",
+      "  issueLocators(issue: IssueKey): readonly Locator[];   // window sharing",
+      "  persist(): Promise<void>;   // after a pane-id backfill in probe",
+      "  readProcessCmdline?(pid: number): Promise<string>;",
+      "  sleep?(ms: number): Promise<void>;",
+      "}",
+      "export class TmuxRuntime implements Runtime { constructor(private readonly deps: TmuxRuntimeDeps) {} ... }",
+      "// module-private, moved from processes.ts: PANE_GONE_STDERR (38-43), MAX_TMUX_WINDOW_NAME_LENGTH (121), treeName (130-136), workerSocketBasename (144-147), tmuxEnv (186-190), serialize (383-398), issueLaunchQueue (220), issueWindowIds (230), recordedWindowId/rewriteIssueWindowId/probedWindowId (2197-2232), shimmedShellCommand (2357-2363), prepareSocket (2365-2370), the tmux half of launchShimmedProcess (2396-2429), isOmpPane (2722-2732), the fresh-dial half of stopClient (2759-2763) and stopProcess (2811-2820), the probe body (1693-1704), reconcileTmuxWindows (1250-1292)"
+    ],
+    "processManagerDeps": [
+      "ProcessManagerDeps: REMOVE `connectWorkerRpc` (line 95) and `readProcessCmdline` (line 98); ADD `runtime: Runtime`; KEEP `run` (workspace provisioning, line 2031), `sleep`, `yield`, `statPrompt`, everything else.",
+      "New public: `reconcileOrphans(graceMs = ORPHAN_RECONCILIATION_GRACE_MS)` (replaces `reconcileTmuxWindows`; same 120_000 default). New export: `locatorsForIssue(state: LegionState, issue: IssueKey): Locator[]`.",
+      "Private renames: `workerClient(token, socketPath)` -> `clientFor(token, locator: Locator)`; `stopTimeout` -> `boundedWait(ms, this.deps.sleep)` (imported); `probe(treeKey)` keeps name and `\"alive\" | \"dead\"` return."
+    ],
+    "watchdogDeps": [
+      "WorkerBootWatchdogDeps: REMOVE `tmux`, `isOmpPane`, `workerClient` (lines 38-40); ADD `probe(locator: Locator): Promise<ProbeResult>` and `connect(token: string, locator: Locator): Promise<WorkerRpcClient>`. `retireUnconfirmedBoot`'s and `arm`'s `locator` parameters are `Locator`. Imports: drop `./tmux`, `WorkerLocator`; import `type Locator, type ProbeResult, probeWorker` from ./runtime.",
+      "ProcessManager wires: `probe: (locator) => this.runtime.probe(locator)`, `connect: (token, locator) => this.clientFor(token, locator)` — through the cache, exactly as today's `workerClient` dep, so a connection the watchdog establishes is cached and wired like any other."
+    ],
+    "configFields": [
+      "DaemonConfig += `runtime: \"tmux\" | \"kubernetes\"` (default tmux), `daemonUrl: string` (what spawned processes are told; default `http://127.0.0.1:<port>` under tmux, required under kubernetes, normalized with no trailing slash), `bind: string` (API listen address; default 127.0.0.1).",
+      "legion.yaml keys `runtime`, `daemon_url`, `bind`; env `LEGION_RUNTIME`, `LEGION_DAEMON_URL`, `LEGION_BIND`; cliOverrides via `Partial<DaemonConfig>` as every other field; precedence cli > config > env > default through `resolveValue`.",
+      "Messages (exact): file `runtime must be 'tmux' or 'kubernetes'`; env `LEGION_RUNTIME must be 'tmux' or 'kubernetes'`; `daemon_url must be a valid URL` / `LEGION_DAEMON_URL must be a valid URL` (via validateUrl with that field name); `daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)`; `bind must not be empty`; `bind must be 127.0.0.1 unless runtime is kubernetes` (any source, checked after resolution)."
+    ]
+  },
+  "callSiteInventory": {
+    "note": "processes.ts at head 3d035027 (3022 lines). 'moves' = the code leaves ProcessManager for TmuxRuntime; 'becomes' = ProcessManager keeps the site with the stated replacement.",
+    "processesTs": [
+      "1-34 imports: drop createHash, readFile, `* as tmux`, writeSecretFile, probeWorkerSocket, WorkerLocator/TmuxWindowLocator; keep mkdir/writeFile (writeOmpConfig), rm (pruneWrittenSecretFiles), stat; add `import { awaitShutdown, boundedWait, DAEMON_CLI_ENTRYPOINT, type Locator, locatorHandles, ProcessStopFailed, probeWorker, type Runtime, sameProcess, shellPath, type SpawnSpec } from \"./runtime\"`",
+      "38-43 PANE_GONE_STDERR: moves",
+      "46 DAEMON_CLI_ENTRYPOINT: moves to runtime.ts (re-imported)",
+      "121-147 MAX_TMUX_WINDOW_NAME_LENGTH, treeName, workerSocketBasename: move",
+      "167-169 shellPath: moves to runtime.ts (re-imported; still used by computeResumeArgument 2019 and the innerCommand builders)",
+      "186-190 tmuxEnv: moves",
+      "191-199 daemonCredentialHelper: stays; rename its first parameter `runtime` -> `execPath` (name collision with the new concept; default unchanged)",
+      "216-217 workerClients/workerConnections: stay",
+      "220 issueLaunchQueue, 230 issueWindowIds: move",
+      "286 `tmux` field, 312 construction: move (index.ts builds the TmuxServer)",
+      "340-342 watchdog deps: become `probe: (locator) => this.runtime.probe(locator)`, `connect: (token, locator) => this.clientFor(token, locator)`",
+      "383-398 serialize: moves (only caller was 2405)",
+      "444 `this.reconcileTmuxWindows(0)`: becomes `await this.reconcileOrphans(0)`",
+      "538-543 probeWorkerSocket over workerClient: becomes `const probe = await probeWorker(() => this.clientFor(token, claim.locator), this.workerRpcTimeoutMs)` (drop the `socketPath` local)",
+      "725 `this.workerClient(token, claim.locator.socketPath)`: becomes `this.clientFor(token, claim.locator)`",
+      "758-762 markWorkerDeadLocked identity: `!sameProcess(current.locator, locator)`; parameter type Locator",
+      "791-792, 1114 type guards `WorkerRoleClaim & { locator: WorkerLocator }`: `& { locator: Locator }`",
+      "810-814 reconnectWorkers probe: `probeWorker(() => this.clientFor(token, probedLocator), this.workerRpcTimeoutMs)`",
+      "932-946 retireUnconfirmedBoot identity: `!sameProcess(claim.locator, locator)`; parameter type Locator",
+      "1097-1101 closeTree root leg: unchanged call shape (`this.probe(treeKey)`, `stopProcessSerialized(..., { skipGraceful: !alive })`)",
+      "1127-1129 stoppedPaneIds: becomes `const stoppedLocators = new Map(batch.map(([token, claim]) => [token, { ...claim.locator }]))`; 1151 becomes `sameProcess(current.locator, stoppedLocators.get(token))`",
+      "1226-1293 reconcileTmuxWindows: body moves to TmuxRuntime.reconcileOrphans; ProcessManager gains `async reconcileOrphans(graceMs = ORPHAN_RECONCILIATION_GRACE_MS) { const known = new Set<string>(); for (const locator of this.recordedLocators()) for (const handle of locatorHandles(locator)) known.add(handle); await this.runtime.reconcileOrphans(known, graceMs); }` with `recordedLocators()` = the 1252-1258 enumeration filtered to defined; rename constant TMUX_RECONCILIATION_GRACE_MS (122) -> ORPHAN_RECONCILIATION_GRACE_MS",
+      "1377-1379 killWindow on persist failure: becomes `try { await this.stopProcess(roleToken(project, issue, \"architect\"), tree.locator, this.workerStopTimeoutMs, { skipGraceful: true }); } catch (stopError) { console.error(`[legion] failed to reap ${issue}'s unpersisted root process:`, stopError); }` then the existing `throw new SpawnPersistenceFailure(error)`",
+      "1432, 1464 `this.stopTimeout(deadlineMs)`: `boundedWait(deadlineMs, this.deps.sleep)`",
+      "1671 `this.stopProcess(token, locator, ...)`: unchanged (controllerLocator is a Locator)",
+      "1683-1705 probe: body becomes `const tree = ...; const locator = tree?.locator; if (!locator) return \"dead\"; const result = await this.runtime.probe(locator); if (result.status === \"unknown\") throw new Error(`Runtime probe reported an unknown status for ${treeKey}; ProcessManager has no unknown-status policy`); return result.status;` — pane-id backfill + persist now happen inside TmuxRuntime.probe",
+      "1751-1758 markTreeReady: `const tree = this.requireTree(treeKey); if (!tree.locator) return; await this.clientFor(roleToken(project, treeKey, \"architect\"), tree.locator);`",
+      "2038-2098 spawnTree: `const env = { ...record as at 2052-2069 without tmuxEnv... }` (LEGION_DAEMON_URL: task 6 makes it `this.deps.config.daemonUrl`); then `await (this.deps.statPrompt ?? stat)(promptPath); const resumeArgument = await this.computeResumeArgument(tree.root, priorSessionFile, \"resurrecting\"); const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt \"$(cat ${shellPath(promptPath)})\" --append-system-prompt ${shellPath(addressingPrompt)}`; delete tree.readyConfirmedAt; this.paneSecretFiles.add(architectToken); const locator = await this.runtime.spawn(\"root\", { issue: tree.root, role: \"architect\", workspaceDir: workspace.workspaceDir, env, innerCommand, secrets: { LEGION_BOOT_TOKEN: bootToken } });` — keep the statPrompt/computeResumeArgument order (today both ran inside launchShimmedProcess, before prepareSocket) and keep `delete tree.readyConfirmedAt` immediately before the spawn call",
+      "2115, 2156 log lines: drop `paneId`; message `failed to retire a stale-generation root process for ${tree.root}:` / `failed to retire stale root process for ${tree.root}:`, pass `locator` as an extra argument",
+      "2197-2232 recordedWindowId/rewriteIssueWindowId/probedWindowId: move",
+      "2242-2275 workerClient: becomes clientFor(token, locator) with 2248 -> `await this.runtime.connect(locator, this.workerRpcTimeoutMs)`; everything else verbatim (negotiate, cache, onIdle, closed handler)",
+      "2337-2341 onWorkerClientClosed probe: `probeWorker(() => this.clientFor(token, locator), this.workerRpcTimeoutMs)`",
+      "2355-2430 shimmedShellCommand/prepareSocket/launchShimmedProcess: move (the prompt/resume/innerCommand part stays in the two callers as described)",
+      "2432-2495 launchWorker: env record without tmuxEnv (2472 -> config.daemonUrl in task 6); statPrompt + computeResumeArgument(issue, resumeSessionFile, \"respawning\") + innerCommand built inline; `this.paneSecretFiles.add(token)`; `const locator = await this.runtime.spawn(\"worker\", { issue, role, workspaceDir: workspace.workspaceDir, env, innerCommand, secrets: { LEGION_BOOT_TOKEN: bootToken } })`; 2507 `const freshLocator: Locator = { ...locator, ...(resumeSessionFile ? { ompSessionFile: resumeSessionFile } : {}) }`; 2589 arm(locator) unchanged",
+      "2618-2661 spawnController: `await (statPrompt ?? stat)(promptPath); await this.writeOmpConfig(controllerDir); const innerCommand = ...(2624 verbatim); const token = controllerToken(project); const releaseSecret = this.holdPaneSecret(token); try { this.paneSecretFiles.add(token); const env = { LEGION_CONTROLLER: \"1\", LEGION_ROLE: \"controller\", LEGION_DAEMON_URL: ..., LEGION_PROJECT, ENVOY_NATS_URL, ENVOY_URL, PATH, DISPATCH_URL, DISPATCH_TOKEN_FILE } (2632-2643 minus the secret file line); this.deps.state.controllerLocator = await this.runtime.spawn(\"controller\", { role: \"controller\", workspaceDir: controllerDir, env, innerCommand, secrets: { LEGION_CONTROLLER_SECRET: controllerSecret } }); } finally { releaseSecret(); } await this.persist();`",
+      "2670-2678 markControllerReady: `const locator = this.deps.state.controllerLocator; if (!locator) return; try { await this.clientFor(controllerToken(project), locator); } catch (error) { console.error(\"[legion] failed to connect controller shim socket on ready:\", error); }`",
+      "2722-2732 isOmpPane: moves",
+      "2738-2744 stopTimeout: replaced by boundedWait",
+      "2753-2764 stopClient: cached branch folds into stopProcess; fresh-dial branch moves into TmuxRuntime.stop",
+      "2786-2821 stopProcess: becomes the wrapper in designDecisions.stop: `const cached = options?.skipGraceful ? undefined : this.workerClients.get(token); if (cached) { const confirmed = await awaitShutdown(cached, timeoutMs, this.deps.sleep); if (this.workerClients.get(token) === cached) this.workerClients.delete(token); if (confirmed) return; cached.close(); options = { skipGraceful: true }; } try { await this.runtime.stop(locator, timeoutMs, options); } catch (error) { if (error instanceof ProcessStopFailed) throw new StopFailed(token, error.message); throw error; }`; parameter type `locator: Locator`; 2831-2840 stopProcessSerialized: type only",
+      "2848-2853 retireWorkerLocator: type only",
+      "2875-2897 controllerAlive: `const locator = state.controllerLocator; if (!locator) return false; const result = await this.runtime.probe(locator); if (result.status !== \"alive\") { delete this.deps.state.controllerLocator; return false; } return true;`",
+      "2944-2962 holdPaneSecret stays; writePaneSecret deleted (its `paneSecretFiles.add` moves to the three spawn callers)",
+      "2966-3021 liveSecretFiles/pruneSecretFiles/pruneWrittenSecretFiles/persist: stay unchanged"
+    ],
+    "watchdogTs": [
+      "2-4 imports; 38-40 deps; 52-57 retireUnconfirmedBoot locator type",
+      "176-193 probeAlive: `if ((await this.deps.probe(locator)).status === \"alive\") return true; const probe = await probeWorker(() => this.deps.connect(token, locator), this.deps.workerRpcTimeoutMs()); ...rest verbatim`",
+      "200 arm(locator: Locator); 236 `client = await this.deps.connect(token, locator)`"
+    ],
+    "indexTs": [
+      "45-51 imports: add `TmuxRuntime` from ./runtime-tmux and `locatorsForIssue` from ./processes",
+      "327-332 startDaemonLocked entry: first statement `if (config.runtime === \"kubernetes\") throw new Error(\"runtime: kubernetes is not implemented yet\");`",
+      "396-423: construct `const runtime = new TmuxRuntime({ tmux: { run: runner, socket: `legion-${config.project}` }, project: config.project, stateDir: config.stateDir, connectWorkerRpc: deps.connectWorkerRpc, workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000, now: deps.now, sleep: deps.sleep, readProcessCmdline: deps.readProcessCmdline, issueLocators: (issue) => locatorsForIssue(state, issue), persist: save });` before `new ProcessManager({...})`; pass `runtime`; drop `connectWorkerRpc: deps.connectWorkerRpc` (414) and `readProcessCmdline: deps.readProcessCmdline` (418); DaemonDependencies (65-84) keeps `connectWorkerRpc`, `readProcessCmdline`, `sleep` (they now feed the runtime) — retype them as `TmuxRuntimeDeps[\"connectWorkerRpc\"]` etc.",
+      "566-572 startLegionApi: `hostname: config.bind` (task 6)",
+      "623 `processManager.reconcileTmuxWindows()`: `processManager.reconcileOrphans()`"
+    ]
+  },
+  "testEdits": {
+    "fixtureLiteralSweep": "Add `runtime: \"tmux\",` as the first property of every locator object literal in packages/daemon/src/**/__tests__/*.ts that is assigned to a TreeState.locator, WorkerRoleClaim.locator, or controllerLocator (type-only; `bun test` would run without it but `bunx tsc --noEmit` includes tests). Population at head (`grep -n 'tmuxSession:'`): api.test.ts 77, 643, 650, 673, 708, 731(expectation), 823, 853, 1172, 1213, 1457, 1556, 1614, 1669, 1700, 1741, 1786, 1811, 1844; api.thermo-auth.test.ts 22; index.test.ts 535; legion-state.test.ts 24, 327, 397, 619, 684; processes.test.ts 193, 859, 1444, 1767(expectation), 1821(expectation), 2099(expectation), 2331(expectation), 2370(expectation), 2395, 2467, 2529, 2539, 2590, 2629(expectation), 2943, 3005, 3060, 3106, 3223, 7257, 8176, 8214, 8251, 8304 (and every other `locator: {` literal in that file — re-grep); processes.thermo-ops.test.ts 146; real-shutdown-e2e.test.ts 257, 388, 476; resync.test.ts 1295, 1319, 1340; worker-boot-watchdog.test.ts 21-26 (type becomes Locator); packages/contracts/src/legion-daemon-api.test.ts 79, 84, 94. `toMatchObject` expectations tolerate the extra key; `toEqual` expectations against a code-produced locator must include it (api.test.ts 717-721 and 731 are exactly acceptance 4's proof). Suggested codemod: ast_edit pattern `{ tmuxSession: $S, $$$REST }` -> `{ runtime: \"tmux\", tmuxSession: $S, $$$REST }` over the test globs, then review the diff; do NOT apply it to the dedicated v23->v24 migration fixtures (task 2 step 3), which must lack `runtime`.",
+    "renameSweep": "`processes.reconcileTmuxWindows(` -> `processes.reconcileOrphans(` at processes.test.ts 725, 1467, 9664, 9736 and processes.thermo-ops.test.ts 147 (task 4).",
+    "configFixtures": "`config()` helpers building a full DaemonConfig gain `runtime: \"tmux\", daemonUrl: \"http://127.0.0.1:<that fixture's port>\", bind: \"127.0.0.1\"`: processes.test.ts 158-186 (port 13999 -> daemonUrl http://127.0.0.1:13999 so the pinned `LEGION_DAEMON_URL=http://127.0.0.1:13999` argv at 607/683/696/5631 keeps passing), processes.thermo-ops.test.ts 16, real-shutdown-e2e.test.ts 152 (uses its `port` variable), ci-fixtures.ts 142 (port 13370), index.test.ts 223 (`port: 0` -> daemonUrl \"http://127.0.0.1:0\" is fine: nothing dials it in those tests). (task 6)",
+    "managerHelpers": "processes.test.ts `manager()` (237-360) and its sibling helper (370-380): build `deps` as today minus `connectWorkerRpc`/`readProcessCmdline`, then `const runtime = new TmuxRuntime({ tmux: { run: deps.run, socket: \"legion-omp\" }, project: \"omp\", stateDir: deps.config.stateDir, connectWorkerRpc: options.connectWorkerRpc ?? (async () => fakeWorkerRpcClient()), workerRpcTimeoutMs: () => deps.config.workerRpcTimeoutSeconds * 1000, now: deps.now, sleep: deps.sleep, readProcessCmdline: options.readProcessCmdline ?? (async () => \"omp\\0\"), issueLocators: (issue) => locatorsForIssue(state, issue), persist: deps.saveState })` and pass `runtime` in deps; keep the `options` parameter type as `Partial<ProcessManagerDeps & { connectWorkerRpc: TmuxRuntimeDeps[\"connectWorkerRpc\"]; readProcessCmdline: (pid: number) => Promise<string> }>` so every existing call site's override object type-checks unchanged. Same shape for processes.thermo-ops.test.ts 42-88 (`makeManager(stateDir, run)`), real-shutdown-e2e.test.ts 181-230 (`processManagerDeps(cfg, state, commands?)` gains optional `run`/`connectWorkerRpc` overrides so the inline spreads at 284-289 move into the helper call). (task 4)",
+    "killPaneExpectation": "processes.test.ts 2063-2102: title `kills the just-spawned pane before propagating a saveState failure...`; track `command[3] === \"kill-pane\"` into `killedPanes`; `expect(killedPanes).toEqual([\"%1\"])`; comment updated to say the pane is killed (deviations[2]). (task 4)",
+    "watchdogUnitTest": "worker-boot-watchdog.test.ts: `baseDeps` provides `probe: async () => ({ status: \"dead\" })` and `connect: async () => { throw new Error(\"no client configured for this test\") }`; each override of `isOmpPane`/`tmux`/`workerClient` becomes `probe`/`connect` (an alive pane = `probe: async () => ({ status: \"alive\", pid: 12345 })`; the `probeCount` test counts `probe` calls). The last test (308-358, per-pane pid parsing + `isOmpPane` per pid) is TmuxRuntime.probe behaviour: move it to runtime.contract.test.ts's TmuxRuntime block as `probe reads the watched pane's own pid from its window listing, never a sibling's` (fake run returning three `<pane> <pid>` rows; readProcessCmdline true only for the architect's pid; expect `dead` for the worker's locator and exactly one cmdline read for pid 3003090) and reduce the watchdog copy to `probe` returning dead then `connect` refusing -> `retire`. (task 4)",
+    "legionStateTests": "legion-state.test.ts: `stateWithTree()` locator (23-27) gains `runtime: \"tmux\"`; 106-108 title/`version` -> 24; 474 title and 488/606/661/729 `.toBe(23)` -> 24; 577 title `(and onward to v24)`; add the two v23->v24 tests of task 2 step 3. (task 2)",
+    "apiStateTests": "api.test.ts 717-721 `toEqual({ runtime: \"tmux\", tmuxSession, tmuxWindowId, tmuxPaneId })`, 731 likewise; add one assertion that the tree locator projection carries `runtime: \"tmux\"` and `ompSessionFile` and never `socketPath` (the fixture at 642-647 has a socketPath). contracts legion-daemon-api.test.ts: fixture locators gain `runtime: \"tmux\"`; the existing 'rejects socketPath' case (117-119) stays. (task 5)",
+    "indexTests": "index.test.ts: add `refuses to start when runtime is kubernetes` — `startDaemon({ ...daemonConfig, runtime: \"kubernetes\", daemonUrl: \"http://legion-daemon:13370\", bind: \"0.0.0.0\" }, deps)` rejects with `runtime: kubernetes is not implemented yet` before acquiring anything the test would have to clean up (assert `acquireInstanceLock` was not called, mirroring how the existing refusal tests assert ordering). (task 6)"
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "name": "Runtime boundary types and helpers, FakeRuntime, contract test skeleton",
+      "files": {
+        "create": [
+          "packages/daemon/src/daemon/runtime.ts",
+          "packages/daemon/src/daemon/__tests__/fake-runtime.ts",
+          "packages/daemon/src/daemon/__tests__/runtime.contract.test.ts"
+        ],
+        "modify": []
+      },
+      "produces": "Everything in interfaces.runtimeTs; `FakeRuntime` (see steps); the parameterized contract suite with only the FakeRuntime entry wired.",
+      "steps": [
+        "Write `runtime.ts` exactly as interfaces.runtimeTs (copy `shellPath` from processes.ts:167-169 and `DAEMON_CLI_ENTRYPOINT` from :46 — leave the originals in processes.ts until task 4). Every declared name is exported; no default export; no runtime imports beyond cancellable-sleep and worker-rpc.",
+        "Write `__tests__/fake-runtime.ts`: `export class FakeRuntime implements Runtime` with an in-memory process table keyed by a counter id; constructor `options: { clientFactory?: () => WorkerRpcClient; sleep?: (ms: number) => Promise<void> } = {}`. `spawn(kind, spec)` records `{kind, spec}` and returns `{ runtime: \"kubernetes\", namespace: \"fake\", podName: `${spec.role}-${id}`, podUid: `uid-${id}`, pvcName: \"fake-pvc\" }` (the OTHER union member, so nothing tmux-shaped can leak through a test); `probe` -> alive while in the table; `connect` -> the process's client, created once via `options.clientFactory` (default: a minimal fake with the same shape processes.test.ts's `fakeWorkerRpcClient` has — copy it into fake-runtime.ts and export it so processes.test.ts can import it in task 4 instead of keeping its own copy); `stop` records `{locator, timeoutMs, options}`, runs `awaitShutdown(client, timeoutMs, options.sleep)` when a client exists and `skipGraceful` is not set, then removes the process; `reconcileOrphans(known, graceMs)` records the call and removes every process whose `podName` is not in `known`. Expose `spawned`, `stopped`, `reconciled` arrays for assertions.",
+        "Write `runtime.contract.test.ts` with `describe.each` over harnesses `[[\"FakeRuntime\", fakeHarness]]` (task 3 appends the TmuxRuntime harness). A harness returns `{ runtime, expectSpawnedAlive(locator), makeSpec(role) }`. Cases: (a) `spawn` returns a locator whose `runtime` is the harness's and `probe` reports it alive; (b) `connect` returns a client whose `negotiate()` resolves; (c) `stop(locator, 50, { skipGraceful: true })` makes `probe` report dead and never dials (harness asserts zero connects); (d) graceful `stop` sends exactly one `shutdown` frame and, when `closed` never settles, still reports dead after the timeout (inject `sleep: async () => {}`); (e) `reconcileOrphans(new Set(locatorHandles(locator)), 0)` keeps the spawned process; `reconcileOrphans(new Set(), 0)` reaps it; (f) `sameProcess(l, l)` true, `sameProcess(l, spawnAnother())` false. Add a `describe(\"runtime helpers\")` block: `boundedWait` cancels its timer; `awaitShutdown` order (shutdown before the wait is created: use a client whose `shutdown` records a timestamp/sequence and a `sleep` that records when it is called); `probeWorker` forwards `connectError` / `stateAnswered` exactly like `probeWorkerSocket`.",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/runtime.contract.test.ts` — expected PASS. Nothing else changed."
+      ],
+      "commit": "feat(daemon): declare the Runtime boundary (runtime.ts) with a FakeRuntime contract suite",
+      "greenAfter": true
+    },
+    {
+      "id": 2,
+      "name": "State v24: runtime-tagged tmux locators, migration, fixture sweep",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/legion-state.ts",
+          "packages/daemon/src/daemon/processes.ts (two literals only: lines 2429 and 2651-2656 gain `runtime: \"tmux\"`; type imports switch to ./runtime)",
+          "packages/daemon/src/daemon/__tests__/legion-state.test.ts",
+          "every test file in testEdits.fixtureLiteralSweep except the contracts test (task 5)"
+        ]
+      },
+      "produces": "`LegionState.version: 24`; `TreeState.locator?: TmuxLocator`, `WorkerRoleClaim.locator?: TmuxLocator`, `controllerLocator?: TmuxLocator` (interim; task 5 widens); `migrateV23State`; `WorkerLocator`/`TmuxWindowLocator` no longer exported from legion-state.ts.",
+      "steps": [
+        "Test first (legion-state.test.ts): add `migrates v23 state to v24 by tagging every persisted locator with runtime: \"tmux\"` — write a `version: 23` file built from `stateWithTree()` whose tree locator, one worker claim locator (`{ tmuxSession, tmuxWindowId: \"@42\", tmuxPaneId: \"%1\", socketPath: \"/state/workers/implementer.sock\" }`), and `controllerLocator` all LACK `runtime`; `loadState` must return version 24 with `runtime: \"tmux\"` on all three and leave a `state.json.v23.bak`. Add `rejects a v24 locator that carries no runtime discriminant` — a `version: 24` file whose tree locator lacks `runtime` -> `loadState` rejects with /Invalid Legion state/. Apply testEdits.legionStateTests. Run `bun test packages/daemon/src/daemon/__tests__/legion-state.test.ts` — expected: the two new tests FAIL, existing ones pass.",
+        "legion-state.ts: delete interfaces `TmuxWindowLocator` (61-67) and `WorkerLocator` (110-116); `import type { TmuxLocator } from \"./runtime\"`; `TreeState.locator?: TmuxLocator` (72), `WorkerRoleClaim.locator?: TmuxLocator` (126), `controllerLocator?: TmuxLocator` (172-175); `version: 23` -> `24` at 168 and 408; one `TmuxLocatorSchema = z.object({ runtime: z.literal(\"tmux\"), tmuxSession: z.string(), tmuxWindowId: z.string(), tmuxPaneId: z.string().optional(), socketPath: z.string().optional(), ompSessionFile: z.string().optional() }).strict()` replacing the three inline schemas (236-245, 285-293, 346-354) and `WorkerLocatorSchema`; `version: z.literal(24)` at 340; `if (version !== 24)` at 877.",
+        "legion-state.ts: add `migrateV23State` after `migrateV22State` (doc comment: 'v23 -> v24: every persisted locator predates the runtime boundary and is a tmux one; tags TreeState.locator, each WorkerRoleClaim.locator, and controllerLocator with runtime: \"tmux\" so the discriminated Locator union can be strict'): `const tag = (locator: unknown) => recordValue(locator) ? { ...locator, runtime: \"tmux\" } : locator;` then map trees (`tree.locator !== undefined` -> `{ ...tree, locator: tag(tree.locator) }`), roles (`\"issue\" in claim && claim.locator !== undefined`), and `controllerLocator` when defined; return `{ ...rest, version: 24, trees, roles, controllerLocator? }`. Append it to the `migrations` array (855-871).",
+        "processes.ts minimal interim edit: import `type Locator, type TmuxLocator` from ./runtime where it imported `WorkerLocator`/`TmuxWindowLocator`; alias every former `WorkerLocator`/`TmuxWindowLocator` annotation to `TmuxLocator`; add `runtime: \"tmux\"` to the object literals at 2429 (`return { runtime: \"tmux\", tmuxSession: session, ... }`) and 2651 (`this.deps.state.controllerLocator = { runtime: \"tmux\", ... }`). Nothing else in processes.ts changes in this task. worker-boot-watchdog.ts: `WorkerLocator` -> `TmuxLocator` import/annotations only.",
+        "Apply testEdits.fixtureLiteralSweep to every daemon test file listed (not the contracts test yet). Do not touch the two new migration fixtures.",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/legion-state.test.ts` PASS; `bun test packages/daemon` PASS (fixtures now type-consistent; behaviour unchanged); `bunx tsc --noEmit -p packages/daemon` PASS."
+      ],
+      "commit": "feat(daemon): state v24 tags every persisted locator with runtime: tmux",
+      "greenAfter": true
+    },
+    {
+      "id": 3,
+      "name": "TmuxRuntime: the tmux implementation of Runtime",
+      "files": {
+        "create": [
+          "packages/daemon/src/daemon/runtime-tmux.ts"
+        ],
+        "modify": [
+          "packages/daemon/src/daemon/__tests__/runtime.contract.test.ts"
+        ]
+      },
+      "produces": "`TmuxRuntime` + `TmuxRuntimeDeps` (interfaces.tmuxRuntimeDeps). processes.ts is NOT edited in this task (the moved code is duplicated until task 4 deletes the originals — acceptable across two adjacent commits).",
+      "steps": [
+        "Test first: append the TmuxRuntime harness to `describe.each` in runtime.contract.test.ts. Harness: a recording fake `run` (answers `has-session` per a `sessionExists` flag, `new-window` -> `@42 %1 12345`, `split-window` -> `%2 12346`, `list-panes` with the `#{pane_id} #{pane_pid}` format -> `<target> 12345` while the pane is 'alive', `list-windows` per a recorded set, `kill-pane` -> exit 0 and mark dead, `kill -0` -> 0 while alive), a `connectWorkerRpc` fake returning fakeWorkerRpcClient (recording socket paths and counting dials), `readProcessCmdline: async () => \"omp\\0\"`, `sleep: async () => {}`, `now: () => 0`, `issueLocators` backed by a local array the harness pushes spawned locators into, `persist: async () => {}`, a tmpdir `stateDir`. Add TmuxRuntime-specific cases in a separate `describe(\"TmuxRuntime\")`: (1) `spawn(\"root\", ...)` argv equals the exact sequence processes.test.ts 570-637 pins (session bootstrap, `new-window -P -F ... -n legion-42 -e ... <shim command>`, bootstrap kill-window, `set-option -w`), the boot token lands 0600 at `<stateDir>/secrets/<roleToken>` and `LEGION_BOOT_TOKEN_FILE` is the LAST `-e` pair; (2) a second `spawn(\"worker\", ...)` for the same issue splits into the recorded window (`split-window -t @42`) and its locator shares `tmuxWindowId`; (3) when the recorded window is dead (`list-windows` no longer lists it) the next spawn opens a fresh window and every locator `issueLocators` returned now reads the new `tmuxWindowId` (rewriteIssueWindowId); (4) `spawn(\"controller\", ...)` opens window `controller`, names the socket `controller.sock`, writes `<stateDir>/secrets/legion-<project>-controller`, exports `LEGION_CONTROLLER_SECRET_FILE`; (5) `spawn` with two secrets throws /exactly one secret/; (6) `probe` on a locator without `tmuxPaneId` backfills it from `list-panes` and calls `persist` once; (7) the per-pane pid test moved from the watchdog suite (testEdits.watchdogUnitTest); (8) `stop` graceful: dials the socket WITHOUT negotiating (fake client's `negotiated` stays false), sends `shutdown`, and on a `closed` that never settles kills the pane; `stop` when the dial fails goes straight to `kill-pane`; `stop` on a locator without `socketPath` never dials; a `kill-pane` exit 1 with stderr `can't find pane` resolves, exit 1 with `tmux: server not responding` rejects with `ProcessStopFailed` whose message is `kill-pane %1 exited 1: tmux: server not responding`, and a missing pane id rejects with /missing a pane id/; (9) `connect` on a socket-less locator rejects with /has no shim socket/; (10) `reconcileOrphans`: with `known = new Set([\"@42\", \"%1\", \"@77/*\"])` and `now` past the grace, kills unknown owned windows (`kill-window`), kills unknown panes outside `@77`, and leaves every pane of `@77` alone (the exemption). Run the file — expected: TmuxRuntime cases FAIL (module missing).",
+        "Write runtime-tmux.ts by moving the code listed in interfaces.tmuxRuntimeDeps from processes.ts (copy verbatim, then substitute `this.deps.tmux`, `this.deps.stateDir`, `this.deps.project`, `this.deps.connectWorkerRpc`, `this.deps.workerRpcTimeoutMs()`, `this.deps.now()`, `this.deps.issueLocators(issue)`, `this.deps.persist()`, `this.deps.readProcessCmdline`, `this.deps.sleep`). Private `tmuxLocator(locator: Locator): TmuxLocator` narrows by throwing on `runtime === \"kubernetes\"` (`tmux runtime cannot operate a kubernetes locator`) and returning the locator otherwise. Methods: `spawn` (designDecisions.spawn; secret delivery per designDecisions.secrets; `recordedWindowId` = first `issueLocators(issue)` entry with runtime tmux's `tmuxWindowId`, else `issueWindowIds.get(issue)`; `rewriteIssueWindowId` sets `issueWindowIds` and rewrites `tmuxWindowId` on every tmux locator `issueLocators(issue)` returns), `probe` (designDecisions.probe), `connect` (`this.deps.connectWorkerRpc(l.socketPath, timeoutMs)`; throws when `socketPath` is undefined), `stop` (designDecisions.stop, runtime half: `const client = !options?.skipGraceful && l.socketPath ? await this.dialForShutdown(l.socketPath) : undefined; if (client) { const confirmed = await awaitShutdown(client, timeoutMs, this.deps.sleep); if (confirmed) return; client.close(); } if (!l.tmuxPaneId) throw new Error(`tmux locator for window ${l.tmuxWindowId} is missing a pane id`); const killed = await tmux.killPane(...); if (killed.exitCode !== 0 && !PANE_GONE_STDERR.test(killed.stderr ?? \"\")) throw new ProcessStopFailed(locator, `kill-pane ${l.tmuxPaneId} exited ${killed.exitCode}${killed.stderr ? `: ${killed.stderr}` : \"\"}`);`), `reconcileOrphans` (designDecisions.orphans decode + lines 1264-1292 verbatim with `session = owner = this.deps.tmux.socket`). Move the relevant doc comments with the code (PANE_GONE_STDERR, reconcile exemption rationale, stopClient's no-negotiate rationale, launchShimmedProcess's window-sharing rationale).",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/runtime.contract.test.ts` PASS; `bun test packages/daemon/src/daemon/__tests__/tmux.test.ts packages/daemon/src/daemon/__tests__/secrets.test.ts` PASS (tmux.ts/secrets.ts untouched — confirm no diff with `jj -R \"$LEGION_WORKSPACE\" diff --stat`)."
+      ],
+      "commit": "feat(daemon): TmuxRuntime implements Runtime over the private tmux server",
+      "greenAfter": true
+    },
+    {
+      "id": 4,
+      "name": "Cut ProcessManager and the boot watchdog over to the injected Runtime",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/processes.ts",
+          "packages/daemon/src/daemon/worker-boot-watchdog.ts",
+          "packages/daemon/src/daemon/index.ts",
+          "packages/daemon/src/daemon/__tests__/processes.test.ts (helpers, rename sweep, kill-pane expectation)",
+          "packages/daemon/src/daemon/__tests__/processes.thermo-ops.test.ts (helper, rename)",
+          "packages/daemon/src/daemon/__tests__/real-shutdown-e2e.test.ts (helper)",
+          "packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts (dependency shape)",
+          "packages/daemon/src/daemon/__tests__/runtime.contract.test.ts (source assertions)"
+        ]
+      },
+      "produces": "ProcessManager with `runtime: Runtime` (interfaces.processManagerDeps); watchdog deps (interfaces.watchdogDeps); index.ts wiring (callSiteInventory.indexTs minus the task-6 lines).",
+      "steps": [
+        "Test first: add the source-assertion block to runtime.contract.test.ts — read `packages/daemon/src/daemon/processes.ts` with `readFileSync`; `it.each([\"tmux.\", \"prepareSocket\", \"writePaneSecret\", \"launchShimmedProcess\", \"workerClient(\", \"recordedWindowId\", \"rewriteIssueWindowId\", \"probedWindowId\", \"reconcileTmuxWindows\"])(\"processes.ts never references %s\", (symbol) => expect(source.split(symbol).length - 1).toBe(0))`; `it(\"processes.ts never branches on locator.runtime\", () => expect(/locator\\.runtime|runtime ===/.test(source)).toBe(false))`; `it(\"processes.ts imports no tmux or secret-writing module\", () => expect(source).not.toMatch(/from \"\\.\\/tmux\"|writeSecretFile|connectWorkerRpc|readProcessCmdline/))`. Run — expected FAIL on every assertion.",
+        "Apply callSiteInventory.processesTs top to bottom, deleting each moved block. Keep every retained comment accurate: where a comment described panes/windows for code that now only knows processes, say 'process' (e.g. the class doc at 213 'Starts and supervises the trees and workers whose locators it records in Legion state, through the injected Runtime'). `ProcessManagerDeps` gets `runtime: Runtime` with a doc comment naming the boundary.",
+        "Add `export function locatorsForIssue(state: LegionState, issue: IssueKey): Locator[]` next to `addressingFragment`: `const locators: Locator[] = []; const tree = state.trees[issue]?.locator; if (tree) locators.push(tree); for (const claim of Object.values(state.roles)) if (\"issue\" in claim && claim.issue === issue && claim.locator) locators.push(claim.locator); return locators;` (order matters: designDecisions.windowSharing).",
+        "Apply callSiteInventory.watchdogTs.",
+        "Apply callSiteInventory.indexTs except the two task-6 lines (`bind`, kubernetes throw).",
+        "Apply testEdits.managerHelpers, testEdits.renameSweep, testEdits.killPaneExpectation, testEdits.watchdogUnitTest. processes.test.ts may now import `fakeWorkerRpcClient` from ./fake-runtime and drop its local copy (99-157) if the two are identical; otherwise keep the local one — do not change fake semantics.",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/runtime.contract.test.ts` PASS (source assertions now hold); `bun test packages/daemon/src/daemon/__tests__/processes.test.ts` PASS unchanged apart from the enumerated edits; `bun test packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts packages/daemon/src/daemon/__tests__/processes.thermo-ops.test.ts packages/daemon/src/daemon/__tests__/index.test.ts` PASS; `bunx tsc --noEmit -p packages/daemon` PASS. If any processes.test.ts case fails, the cause is an ordering change in the stop/connect path — compare against callSiteInventory line by line before touching the test.",
+        "Sanity: `jj -R \"$LEGION_WORKSPACE\" diff --stat` shows tmux.ts, secrets.ts, worker-rpc.ts, cli/worker-shim.ts untouched."
+      ],
+      "commit": "refactor(daemon): ProcessManager drives processes through the injected Runtime",
+      "greenAfter": true
+    },
+    {
+      "id": 5,
+      "name": "Widen persisted and projected locators to the Locator union",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/legion-state.ts",
+          "packages/daemon/src/daemon/api/state.ts",
+          "packages/daemon/src/daemon/api/routes/workers.ts",
+          "packages/contracts/src/legion-daemon-api.ts",
+          "packages/contracts/src/legion-daemon-api.test.ts",
+          "packages/daemon/src/daemon/__tests__/api.test.ts",
+          "packages/daemon/src/daemon/__tests__/legion-state.test.ts"
+        ]
+      },
+      "produces": "`TreeState.locator?: Locator`, `WorkerRoleClaim.locator?: Locator`, `controllerLocator?: Locator`; zod `LocatorSchema = z.discriminatedUnion(\"runtime\", [TmuxLocatorSchema, K8sLocatorSchema])`; `DaemonStateResponse` locators carry `runtime`.",
+      "steps": [
+        "Test first: legion-state.test.ts add `round-trips a kubernetes locator and rejects one missing a required field` (a v24 file with a worker claim locator `{ runtime: \"kubernetes\", namespace: \"legion\", podName: \"legion-legion-7-tester-g1\", podUid: \"uid\", pvcName: \"legion-legion-7\" }` loads; the same without `podUid` rejects). api.test.ts: testEdits.apiStateTests. contracts test: `runtime: \"tmux\"` on fixtures + a kubernetes locator accepted + `socketPath` still rejected. Run those three files — expected FAIL.",
+        "legion-state.ts: `import type { Locator } from \"./runtime\"`; the three fields -> `Locator`; add `K8sLocatorSchema` (strict: `runtime: z.literal(\"kubernetes\")`, `namespace`, `podName`, `podUid`, `pvcName` non-empty strings, `ompSessionFile` optional) and `LocatorSchema = z.discriminatedUnion(\"runtime\", [TmuxLocatorSchema, K8sLocatorSchema])`; use it at the three sites.",
+        "api/state.ts: add `redactLocator(locator: Locator, withSession: boolean)` with an exhaustive switch on `locator.runtime` — tmux -> `{ runtime, tmuxSession, tmuxWindowId, tmuxPaneId }`, kubernetes -> `{ runtime, namespace, podName, podUid, pvcName }`, plus `ompSessionFile` only when `withSession` (tree locators); never `socketPath`. Use it at 20-24 (false), 55-60 (true), 85-89 (false). (api/state.ts may branch on `runtime` — the no-branch rule is ProcessManager's.)",
+        "contracts legion-daemon-api.ts: `stateTmuxLocator = z.strictObject({ runtime: z.literal(\"tmux\"), tmuxSession, tmuxWindowId, tmuxPaneId? })`, `stateK8sLocator = z.strictObject({ runtime: z.literal(\"kubernetes\"), namespace, podName, podUid, pvcName })`, `stateLocator = z.discriminatedUnion(\"runtime\", [stateTmuxLocator, stateK8sLocator])`, `stateTreeLocator = z.discriminatedUnion(\"runtime\", [stateTmuxLocator.extend({ ompSessionFile: nonEmptyString.optional() }), stateK8sLocator.extend({ ompSessionFile: nonEmptyString.optional() })])`; wire at 57, 74, 93; update the comment at 34-37/79-81.",
+        "api/routes/workers.ts: `import { sameProcess } from \"../../runtime\"`; 136 `const capturedLocator = { ...claim.locator };`; 196 `!sameProcess(current.locator, capturedLocator)` (the surrounding `!current.locator` check stays).",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/legion-state.test.ts packages/daemon/src/daemon/__tests__/api.test.ts packages/daemon/src/daemon/__tests__/api.thermo-auth.test.ts packages/contracts` PASS; `bunx tsc --noEmit -p packages/daemon` and `-p packages/contracts` PASS; the contracts package's Go generation is untouched (legion-daemon-api.ts is not an envelope contract — confirm `scripts/gen-go.ts` does not read it)."
+      ],
+      "commit": "feat(daemon,contracts): persisted and projected locators are a runtime-discriminated union",
+      "greenAfter": true
+    },
+    {
+      "id": 6,
+      "name": "Config: runtime, daemon_url, bind; spawned processes learn config.daemonUrl",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/config.ts",
+          "packages/daemon/src/daemon/processes.ts (three env sites)",
+          "packages/daemon/src/daemon/index.ts (bind + kubernetes throw)",
+          "packages/daemon/src/daemon/__tests__/config.test.ts",
+          "packages/daemon/src/daemon/__tests__/index.test.ts",
+          "config fixtures listed in testEdits.configFixtures",
+          "scripts/smoke/up.sh (write_daemon_config: `daemon_url: http://127.0.0.1:${daemon_port}`)"
+        ]
+      },
+      "produces": "interfaces.configFields; `LEGION_DAEMON_URL` env for every spawned process = `config.daemonUrl`; API bound to `config.bind`; startup throws `runtime: kubernetes is not implemented yet`.",
+      "steps": [
+        "Test first (config.test.ts), one `it` per rule, each asserting the exact message from interfaces.configFields: defaults (`runtime: \"tmux\"`, `daemonUrl: \"http://127.0.0.1:14000\"` when `LEGION_DAEMON_PORT=14000`, `bind: \"127.0.0.1\"`); yaml `runtime: kubernetes` + `daemon_url: http://legion-daemon.legion.svc:13370` + `bind: 0.0.0.0` resolves all three; yaml `runtime: docker` -> `runtime must be 'tmux' or 'kubernetes'`; env `LEGION_RUNTIME=docker` -> `LEGION_RUNTIME must be 'tmux' or 'kubernetes'`; `runtime: kubernetes` without daemon_url -> `daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)`; yaml `daemon_url: not a url` -> `daemon_url must be a valid URL`; env `LEGION_DAEMON_URL=nope` -> `LEGION_DAEMON_URL must be a valid URL`; `daemon_url: http://h:1/` normalizes to `http://h:1`; yaml `bind: 0.0.0.0` under tmux -> `bind must be 127.0.0.1 unless runtime is kubernetes`; env `LEGION_BIND=0.0.0.0` under tmux -> same message; yaml `bind: \"\"` -> `bind must not be empty`; precedence: yaml `daemon_url` beats env `LEGION_DAEMON_URL` (this is what protects a rig started from a Legion pane — risks[5]); `--check-config`-style `loadConfigFromFile` recognizes the three keys (no 'Unknown config key'). Run — expected FAIL.",
+        "config.ts: `DaemonConfig` += the three fields with doc comments; `CONFIG_SCHEMA` += `runtime: null, daemon_url: null, bind: null`; `loadConfigFromFile`: `runtime` via readString then enum check, `daemon_url` via readString + `validateUrl(value, \"daemon_url\")`, `bind` via readString + `requireNonEmpty(value, \"bind\")`; `resolveDaemonConfig`: `const runtime = resolveValue(opts.cliOverrides?.runtime, fileString(fields, \"runtime\"), parseRuntime(env.LEGION_RUNTIME, \"LEGION_RUNTIME\"), \"tmux\")` (a `parseRuntime` helper validates the enum with the given field name), `const daemonUrl = resolveValue(opts.cliOverrides?.daemonUrl, fileString(fields, \"daemonUrl\"), env.LEGION_DAEMON_URL, undefined)`; if undefined and runtime is kubernetes throw the required message; else default `http://127.0.0.1:${port.value}`; validate/normalize with `normalizeBaseUrl(validateUrl(value, field), field)` where field is `daemon_url` for file/cli and `LEGION_DAEMON_URL` for env (use the `source` returned by resolveValue to pick the name); `const bind = resolveValue(opts.cliOverrides?.bind, fileString(fields, \"bind\"), env.LEGION_BIND, \"127.0.0.1\")`; `if (runtime.value !== \"kubernetes\" && bind.value !== \"127.0.0.1\") throw new Error(\"bind must be 127.0.0.1 unless runtime is kubernetes\")`; return the three fields.",
+        "processes.ts: the three `LEGION_DAEMON_URL: \\`http://127.0.0.1:${this.deps.config.port}\\`` env entries (spawnTree, launchWorker, spawnController — after task 4 they are plain record entries) become `LEGION_DAEMON_URL: this.deps.config.daemonUrl`. Grep: `grep -c '127.0.0.1' packages/daemon/src/daemon/processes.ts` must be 0.",
+        "index.ts: `hostname: config.bind` at the startLegionApi call; first statement of `startDaemonLocked`: `if (config.runtime === \"kubernetes\") throw new Error(\"runtime: kubernetes is not implemented yet\");` (LEGION-24 replaces this with runtime selection). Add the index.test.ts case from testEdits.indexTests.",
+        "Apply testEdits.configFixtures. scripts/smoke/up.sh `write_daemon_config`: add `daemon_url: http://127.0.0.1:${daemon_port}` right after the `port:` line.",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/config.test.ts packages/daemon/src/daemon/__tests__/index.test.ts packages/daemon/src/daemon/__tests__/processes.test.ts` PASS; `bunx tsc --noEmit -p packages/daemon` PASS. `grep -n 'http://127.0.0.1' packages/daemon/src/daemon/processes.ts` empty."
+      ],
+      "commit": "feat(daemon): runtime, daemon_url, and bind config; spawned processes get config.daemonUrl",
+      "greenAfter": true
+    },
+    {
+      "id": 7,
+      "name": "Docs rows and whole-tree verification",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/AGENTS.md"
+        ]
+      },
+      "steps": [
+        "AGENTS.md Files table: add `runtime.ts` ('The runtime boundary: `Runtime`, `SpawnSpec`, the `Locator` union (`TmuxLocator` | kubernetes `K8sLocator`), and the helpers both sides share (`sameProcess`, `locatorHandles`, `awaitShutdown`, `boundedWait`, `probeWorker`). `ProcessManager` holds one injected `Runtime` and never reads a runtime-specific locator field.') and `runtime-tmux.ts` ('`TmuxRuntime`: window/pane/socket/secret-file delivery over the private tmux server — one window per issue, panes split in; the window-sharing state lives here, not in the interface. `reconcileOrphans` is its `@legion_owner` window/pane sweep.'); amend the `processes.ts` row to say runtime operations go through the injected `Runtime`; amend the `DaemonConfig` bullet (line 50) with `runtime` (`tmux`|`kubernetes`, default tmux; `kubernetes` refuses startup until LEGION-24), `daemon_url` (default `http://127.0.0.1:<port>` under tmux, required under kubernetes; what every spawned process receives as `LEGION_DAEMON_URL`), and `bind` (`127.0.0.1` unless `runtime: kubernetes`).",
+        "Whole-tree checks, in this order, all from `$LEGION_WORKSPACE`: `bunx biome check packages/daemon/src packages/contracts/src` (fix formatting only); `bunx tsc --noEmit -p packages/daemon` and `-p packages/contracts`; `bun test packages/daemon`; `bun test packages/contracts`. Then the grep gate by hand: `grep -cE 'tmux\\.|prepareSocket|writePaneSecret|launchShimmedProcess|workerClient\\(|recordedWindowId|rewriteIssueWindowId|probedWindowId|reconcileTmuxWindows' packages/daemon/src/daemon/processes.ts` prints 0 and `grep -nE 'locator\\.runtime|runtime ===' packages/daemon/src/daemon/processes.ts` prints nothing.",
+        "Smoke on tmux (tester repeats it; implementer runs it once before opening the PR): from a shell that is NOT a Legion pane or with `env -u LEGION_DAEMON_URL -u LEGION_STATE_DIR`, `secrets DISPATCH_TOKEN GITHUB_WEBHOOK_SECRET -- bash scripts/smoke/up.sh` with this branch's daemon, then `secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh N` for N in 1 2 3 4 13. Checkpoint 1/2 read `controllerLocator.tmuxWindowId`/`tmuxPaneId` and `trees[root].locator.*` from state.json — the added `runtime` key does not affect them; also `jq '.controllerLocator.runtime, (.trees[]|.locator.runtime), (.roles[]|.locator.runtime?)' \"$SMOKE_DIR/daemon/state.json\"` prints only \"tmux\". Checkpoint 13 proves no secret leaked onto argv/env — the secret-file delivery moved but must still be a `*_FILE` pointer. Additionally restart the smoke daemon once against its own `state.json` to exercise `migrateV23State` on a real file if the rig was first brought up on main (`state.json.v23.bak` appears), and confirm `legion state` output shows `\"runtime\": \"tmux\"` on the locators.",
+        "Open the PR per the legion-worker skill (`legion/LEGION-21`, body with `Dispatch: LEGION-21`, the READY format), commit the `.legion/implement.json` handoff last."
+      ],
+      "commit": "docs(daemon): AGENTS rows for the runtime boundary",
+      "greenAfter": true
+    }
+  ],
+  "risks": [
+    "Stop-path promise ordering (designDecisions.stop). Symptom if broken: processes.test.ts cases counting `connectWorkerRpc` calls or expecting exactly one `kill-pane` (2440-2580, 7177-7245, 8142-8290) fail. The cached-client graceful race stays in ProcessManager and its eviction stays between the race and `close()`; the runtime only ever dials its own connection.",
+    "Window-sharing state (`issueLaunchQueue`, `issueWindowIds`, the recorded-locator scan and in-place `tmuxWindowId` rewrite) now lives in TmuxRuntime and reads state through `issueLocators`. Order (tree locator first, then claims in `Object.values(state.roles)` order) is what `recordedWindowId` picked today; a different order can pick a different window when locators disagree. `locatorsForIssue` encodes exactly today's order.",
+    "Boot watchdog probing: the watchdog used to call `tmux.panePid` + `isOmpPane` directly (no backfill). `TmuxRuntime.probe` also backfills a missing pane id and persists; worker locators always carry a pane id so this never triggers for the watchdog, but a test that hands the watchdog a pane-id-less locator would now see a `persist` call.",
+    "Locator field reads outside processes.ts were two: `api/routes/workers.ts` 136/196 (fixed with `sameProcess`) and `api/state.ts` (rewritten). `api/routes/process.ts:38` spreads a narrowed locator and needs no change. Everything else reads `ompSessionFile` or truthiness only.",
+    "`LEGION_DAEMON_URL` becomes a config env key AND is a per-pane env var. A daemon started from inside a Legion pane (this dogfood box; the smoke rig via up.sh, which does not `env -i`) would inherit the OUTER daemon's URL and tell its own panes to register there. Mitigated by (a) `resolveValue` precedence — the smoke `legion.yaml` now sets `daemon_url` explicitly, and the dogfood deployment's daemon is not launched from a pane — and (b) the tester instruction to start the rig from a non-pane shell or `env -u LEGION_DAEMON_URL`. The same class of hazard already exists for `LEGION_STATE_DIR` (up.sh sets it explicitly) and for the credential helper's own `LEGION_DAEMON_URL ?? port` fallback in cli/index.ts:62-65 (pre-existing; LEGION-25 must make the in-cluster daemon's own jj/git children resolve the right URL). Do not add `LEGION_DAEMON_URL` to `stripDispatchEnv` here: the pane env sets it explicitly, and stripping it from the runner env would change which URL `legion credential` resolves for a non-default-port daemon.",
+    "Test-fixture sweep volume (~60 literals across 10 files) is mechanical but easy to leave incomplete; `bunx tsc --noEmit -p packages/daemon` is the gate, not `bun test` (Bun strips types).",
+    "`persist` for the pane-id backfill is index.ts's `save` (saveState only), not ProcessManager's `persist()` (save + secret-file prune). A backfill changes no locator's presence, so the prune would have found nothing; processes.test.ts 9744-9799 counts `saveState` calls and the test helper passes the same fake as the runtime's `persist`, so counts match.",
+    "Concurrent LEGION-22 owns worker-rpc.ts/cli/worker-shim.ts. This plan never edits them; `probeWorker` in runtime.ts is the only place `probeWorkerSocket`'s socketPath parameter is papered over. If LEGION-22 changes `connectWorkerRpc`'s signature first, `TmuxRuntimeDeps.connectWorkerRpc` is the single adaptation point."
+  ],
+  "concerns": [
+    "deviations[2] (kill-pane instead of kill-window on a post-spawn persist failure) and deviations[1] (`SpawnSpec.issue?`) are the two places the architect may want to rule on before the implementer starts; both are one-line reversals if vetoed (a `reap(locator)` method / a placeholder issue key), everything else in the plan is unaffected.",
+    "Files outside the spec's list (deviations[7]) are each forced by the type change or by acceptance 4; none belongs to LEGION-22."
+  ],
+  "testerNotes": [
+    "Acceptance 1/2: `bun test packages/daemon/src/daemon/__tests__/runtime.contract.test.ts` (source assertions) plus the hand grep in task 7 step 2.",
+    "Acceptance 3: `bun test packages/daemon/src/daemon/__tests__/legion-state.test.ts` (the v23->v24 and the missing-discriminant cases) plus a real migration: copy the dogfood or smoke `state.json` (v23) into a scratch state_dir, start the branch daemon against it, observe `state.json.v23.bak` and `runtime: \"tmux\"` on every locator via `legion state`.",
+    "Acceptance 4: `bun test packages/daemon/src/daemon/__tests__/config.test.ts`; negative control on the real surface: a `legion.yaml` with `bind: 0.0.0.0` under the default runtime makes `legion start` refuse with exactly `bind must be 127.0.0.1 unless runtime is kubernetes`; `runtime: kubernetes` + `daemon_url` refuses with `runtime: kubernetes is not implemented yet`; then inspect a live pane's environment (`tmux -L legion-<slug> show-environment -t <pane>` or `/proc/<pid>/environ`) for `LEGION_DAEMON_URL` equal to the configured `daemon_url`.",
+    "Acceptance 5: `bun test packages/daemon` and smoke checkpoints 1-4 and 13 on tmux (task 7 step 3, including the pane-env caveat in risks[5]).",
+    "Acceptance 6: the contract suite runs every case for both `TmuxRuntime` and `FakeRuntime`; confirm with `bun test ... --test-name-pattern 'Runtime contract'` that both harness names appear."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-12T05:49:49.495Z"
+}
