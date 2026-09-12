@@ -188,7 +188,198 @@
     "PR body refreshed at the final head: CI/E2E lines name it, Threads lines disposition each of the 14 threads individually, Thermo line written by me after re-running both agents at that head, 'OMP' expanded.",
     "Then: I re-review the final head, have the implementer push the .legion/ deletion, and approve that head by name."
   ],
+  "round2": {
+    "reviewedHead": "df6646704ceabe90cff1a23fbe4927fb05ab0f07",
+    "headNote": "The architect's resume prompt gave the full sha as df6646704cea1e70e6f0ea1f8c1b37fcb3c9bde6; GitHub's actual head is df6646704ceabe90cff1a23fbe4927fb05ab0f07 (same first 12 characters). The review is pinned to GitHub's.",
+    "headComposition": "0f3edc92 (round-1 head) + review handoff 2a109026 + corrective pass d6c74c4e, b97d64b7, df3f417b, 7d6f2fb6, de5a130e, bc84d57b + implementer handoff f27af7ec + tester round-2 handoff 70114855 + third pass ef45db4e + implementer handoff df664670",
+    "review": {
+      "id": 5187581534,
+      "url": "https://github.com/sjawhar/legion/pull/961#pullrequestreview-5187581534",
+      "event": "REQUEST_CHANGES",
+      "inlineComments": 8,
+      "approvalWithheldByArchitectInstruction": true
+    },
+    "headStateAtReviewTime": {
+      "mergeable": "GitHub mergeable_state 'dirty' (CONFLICTING). git merge-tree main(d07086e1)...df664670: content conflicts in packages/daemon/src/cli/index.ts (line 13-17: main's `import { verifyLegionPluginLoaded, verifyOmpAgentsCapability } from \"../daemon/boot-probes\"` vs this branch's `import { MERGE_AUTHORITY_REFUSED } from \"../daemon/api/http\"`, adjacent import lines) and packages/daemon/src/daemon/AGENTS.md (lines 16-22, adjacent table rows). Every other overlapping file auto-merges, including skills/legion-worker/SKILL.md, skills/legion-controller/SKILL.md, skills/legion-architect/SKILL.md.",
+      "ci": "NO workflow run exists at df664670 or ef45db4e (check-suites: only the `claude` and `legion-reviewer` App suites, both queued/empty). GitHub skips pull_request workflows when the merge ref cannot be built. Last CI: 70114855 at 17:57Z, both workflows success. main received #967 (LEGION-22) at 18:01Z, #971 at 18:02Z, #966 (LEGION-23) at 18:22Z, #953 (LEGION-18) at 18:29Z.",
+      "legion18Merged": "PR #953 merged 18:29Z. Agreed rule: LEGION-16 rebases. Constraint A: jj diff main@origin..df664670 on skills/legion-worker/SKILL.md is one hunk (@@ -225,10 +225,14 @@), the merger bullet; main's bullet still says pr-queue, this branch's replaces it. main's controller skill already removed the stale 'not yet runnable' preamble (lines 12-14 on this branch), so that item resolves on rebase.",
+      "legion21": "PR #962 still OPEN (head d468c21f). Renumbering rule stands."
+    },
+    "roundOneResolutions": [
+      {
+        "id": "B1",
+        "status": "resolved, superseded by R2-B1",
+        "how": "bc84d57b: gate 6 rewritten field by field against the worker template; two-sha READY adopted. The rewrite introduced the approved-sha-vs-cleanup-head gap (R2-B1)."
+      },
+      {
+        "id": "B2",
+        "status": "resolved",
+        "how": "d6c74c4e: controllerAlive pure; spawnController resolves resume then clears; retire path respawns a dead pane. Tests at processes.test.ts 3793 (dead-before-ready + deadline) and 4071 (stuck-alive killed then resumed). Verified in code and by the tester on the rig (1b, 1c)."
+      },
+      {
+        "id": "S1",
+        "status": "resolved",
+        "how": "df3f417b: claimController(context, { reportTranscript }); slash command passes false; three extension tests updated; controller.ts comment states the rule. Deviation (explicit parameter instead of `\"setInterval\" in context`) accepted: a stated boolean is the better discriminator regardless of OMP's context shape (the implementer's claim that OMP's command context carries setInterval is [INFERENCE] unverified here; irrelevant to the choice)."
+      },
+      {
+        "id": "S2",
+        "status": "resolved",
+        "how": "df3f417b: session_switch/session_branch/session_tree re-run claimController for a controller process; test at legion.test.ts 1753. Handler-order convergence verified against envoy.ts claim/establishSession/reclaimHeldRoles; tester confirmed live (/new, /resume). Residual: missing checkSubagentSession guard (R2-S6)."
+      },
+      {
+        "id": "S3",
+        "status": "resolved for the missing-file case; residual launch-failure window is R2-S1",
+        "how": "d6c74c4e + b97d64b7: D1 kept per the architect; refusal is non-mutating and repeatable (test at processes.test.ts 3759 asserts two refusals, unchanged locator, zero mints); AGENTS.md says no counter, never escalates."
+      },
+      {
+        "id": "S4",
+        "status": "resolved",
+        "how": "bc84d57b: every gh command takes <pr url> or --repo; implementer ran them from /tmp; tester 3(c) PASS."
+      },
+      {
+        "id": "S4b",
+        "status": "resolved as asked; the replacement sentence about an empty list is wrong (R2-S2)",
+        "how": "bc84d57b: gh pr checks <pr url> --required --json name,state,bucket."
+      },
+      {
+        "id": "S5",
+        "status": "resolved; merger.md's uppercase example left contradicting (R2-S4)",
+        "how": "bc84d57b: templates removed; tokens read from legion state --json roles keys."
+      },
+      {
+        "id": "S6",
+        "status": "resolved",
+        "how": "bc84d57b: takeover env lists LEGION_STATE_DIR; warns against LEGION_CONTROLLER=1; tester 3(e) PASS."
+      },
+      {
+        "id": "S7",
+        "status": "resolved (two-sha shape, defined in merger.md, mirrored verbatim in worker bullet, architect 6.4, controller skill, smoke README)",
+        "how": "bc84d57b."
+      },
+      {
+        "id": "S8",
+        "status": "resolved",
+        "how": "7d6f2fb6: omitted-after-recorded step added (api.test.ts 791-804)."
+      },
+      {
+        "id": "C1",
+        "status": "resolved",
+        "how": "bc84d57b: all seven set_status calls are `legion status <KEY> <status>`."
+      },
+      {
+        "id": "C2",
+        "status": "resolved",
+        "how": "b97d64b7: upgrade runbook step added (AGENTS.md 121-128)."
+      },
+      {
+        "id": "N1-N7",
+        "status": "all seven addressed",
+        "how": "7d6f2fb6 (1,2,5), d6c74c4e (3), df3f417b (4), de5a130e (6,7). N1's replacement echoes the raw JSON body and doubles the sentence (R2 nit 2)."
+      },
+      {
+        "id": "PRBODY",
+        "status": "OMP expanded; CI/E2E still name f27af7ec; Threads line stale (R2 body note)"
+      }
+    ],
+    "newFindings": [
+      {
+        "id": "R2-B1",
+        "severity": "blocking",
+        "file": "skills/legion-controller/SKILL.md",
+        "line": 188,
+        "clause": "Spec Requirements ('Verification block complete at that head') read together with skills/legion-worker/SKILL.md reviewer bullet (approve the .legion/-deleted head by name); same class as round-one B1",
+        "finding": "Gate 6 requires CI/Thermo/E2E lines to name the APPROVED sha; the approved sha is the .legion/-deleted cleanup head which the tester never tested and the reviewer's thermo did not run at, so the E2E line can never truthfully name it. Every standard-flow PR fails gate 6 (this one included: E2E names f27af7ec). The sentence 'the tester fills it before retro' is also wrong (before review).",
+        "expected": "Check the block at the sha its lines name (verified sha; CI/Thermo/E2E agree); add compare/<verified>...<approved> identical|ahead with only .legion/ paths; fix the who-fills-when sentence; mirror in merger.md line 49 and architect step 6.4."
+      },
+      {
+        "id": "R2-S1",
+        "severity": "should-fix",
+        "file": "packages/daemon/src/daemon/processes.ts",
+        "line": 2657,
+        "clause": "Spec Errors ('respawns with --resume when a session file is recorded'); the doc comment's own 'before anything is mutated'; round-one S3",
+        "finding": "Locator+claim deleted and persisted (mint's save) before writePaneSecret/openWindow can throw; no rollback (spawnRoot has priorLocator restore). A tmux failure loses the transcript and the next call starts fresh with the misleading log. Also holdPaneSecret taken after the mint await, leaving the controller secret file prunable during it (harmless today).",
+        "expected": "Drop the locator delete (redundant with the assignment at 2689); move the claim delete to just before that assignment; take holdPaneSecret before the mint; update the ordering comment and AGENTS.md:46; test a failing new-window."
+      },
+      {
+        "id": "R2-S2",
+        "severity": "should-fix",
+        "file": "skills/legion-controller/SKILL.md",
+        "line": 181,
+        "clause": "Spec Requirements: required checks green; never merge on known red",
+        "finding": "gh pr checks --required never returns []; it exits 1 with 'no checks reported' / 'no required checks reported'. Live evidence: this PR at df664670 (conflicting head, no workflows). The sentence 'empty list -> gate holds' is a false green: it cannot distinguish none-required from none-reported-yet.",
+        "expected": "Non-zero exit is pending, never green; the only green is a non-empty list with every bucket pass; a repo with no required checks is established from branch protection (required_status_checks/contexts == [])."
+      },
+      {
+        "id": "R2-S3",
+        "severity": "should-fix (architect decision)",
+        "file": "skills/legion-controller/SKILL.md line 162; packages/pi-envoy/roles/merger.md line 49",
+        "line": 162,
+        "clause": "The skill's own 'the merger's report is a claim, never evidence'; spec gate list does not name a review check",
+        "finding": "Prose promises approval is checked at the approved sha; no gate reads a review; reviewDecision fetched and unused. A READY with a wrong approved sha passes all six gates.",
+        "expected": "Either add a gate (pulls/<n>/reviews APPROVED commit_id contains <approved sha>) or delete the promise in both files; drop unused reviewDecision."
+      },
+      {
+        "id": "R2-S4",
+        "severity": "should-fix",
+        "file": "skills/legion-controller/SKILL.md line 240; packages/pi-envoy/roles/merger.md lines 77-78",
+        "line": 240,
+        "clause": "contracts roleToken lower-cases the key",
+        "finding": "merger.md (in this PR) still shows `legion-acme-LEGION-41-architect`, contradicting the skill; 'escapes other characters' is wrong (roleToken rejects).",
+        "expected": "Fix the example in merger.md; 'rejects any other shape'."
+      },
+      {
+        "id": "R2-S5",
+        "severity": "should-fix",
+        "file": "skills/legion-controller/SKILL.md",
+        "line": 198,
+        "clause": "Skill line 161 'the current sha is the only head you may merge'",
+        "finding": "pr merge without --match-head-commit; a push between gate 1 and the merge is merged unverified.",
+        "expected": "--match-head-commit <current sha>; mirror in smoke README 114 and merger.md 49."
+      },
+      {
+        "id": "R2-S6",
+        "severity": "should-fix",
+        "file": "packages/pi-envoy/extensions/legion.ts",
+        "line": 289,
+        "clause": "session_start's own subagent guard rationale (line 541)",
+        "finding": "reclaimControllerAfterSessionChange lacks checkSubagentSession; a subagent receiving session_switch would hard-claim the controller role for its own id and record its transcript as the pane's. Defensive: unconfirmed whether OMP emits these events in subagents.",
+        "expected": "Guard first; extend the failure notice to say bash runs unwrapped until a re-claim succeeds."
+      },
+      {
+        "id": "R2-N1..N8",
+        "severity": "nit (fast-follow batch, anchored processes.ts:2659)",
+        "finding": "writeOmpConfig before computeResumeArgument; CLI doubled sentence + raw JSON on the authority branch; revocation-scope test gap; redundant processes.test 3924; 'retro only' vs 'head moved beyond retro' and detailsUrl vs link; AGENTS.md 'clears the locator' mechanism; same-id session_tree re-claim triggers a forced resync; takeover stranded after respawn (stale cached secret) and after /new."
+      },
+      {
+        "id": "R2-ATTR",
+        "severity": "should-fix (PR artifact, not code)",
+        "finding": "All fourteen implementer thread replies carry footer session \"\" (empty). Attribution defeated.",
+        "expected": "Corrective replies with the real session id."
+      },
+      {
+        "id": "R2-PRBODY",
+        "severity": "must be current at final head",
+        "finding": "Threads line '0 resolved, 0 unresolved' with 22 threads open; 'two observations' paragraph describes F1 which ef45db4e fixed; CI/E2E name f27af7ec.",
+        "expected": "Refresh at the final head; one disposition line per thread."
+      }
+    ],
+    "thermo": {
+      "ranAt": "df6646704ceabe90cff1a23fbe4927fb05ab0f07",
+      "deepReview": "No blocking. Should-fix adopted: R2-S1 (lossy window), R2-S2 (gh pr checks behaviour), R2-S3 (approval unverified). Nits adopted: R2-S5 (--match-head-commit, promoted to should-fix), R2-S6 (subagent guard, promoted), takeover stranding, stale preamble (resolves on rebase). Confirmed: /grants dual form, 403-before-lease, redaction unchanged, revoke-on-rotation semantics, computeResumeArgument EACCES leaves state untouched, session_switch convergence in both handler orders, CLI import surface unchanged, body.includes match has no false positive/negative.",
+      "codeQuality": "No blocking. Should-fix adopted: R2-S1, R2-S3, R2-S4; CLI raw-JSON echo taken as nit (my round-one nit asked for the raw-body convention). Nits adopted: revocation-scope test, redundant test 3924, writeOmpConfig ordering, vocabulary, AGENTS.md mechanism, failed re-claim notice. Confirmed: retire doc comment accurate, spawnController ordering comment correct against the code, MERGE_AUTHORITY_REFUSED home is right, -d on new-window correct, the four processes.test controller tests deterministic, session-switch test asserts the observable surface.",
+      "prBodyThermoLine": "Still not written: the head must change (rebase + corrective pass); I re-run both at the final head and write the line then."
+    },
+    "wouldHaveApproved": "NO. Even setting aside the conflict with main (no CI possible at this head), the LEGION-18 rebase, and the tester's held A5 iii/iv steps, this head would not have been approved: R2-B1 leaves the merge queue unable to merge any standard-flow pull request, exactly as round-one B1 did. The daemon and extension code is otherwise approvable modulo R2-S1 and R2-S6.",
+    "remainingBeforeApproval": [
+      "Rebase onto main (resolve cli/index.ts and daemon/AGENTS.md; LEGION-18 now in) so CI can run; renumber the migration if LEGION-21 lands first.",
+      "Corrective pass landing R2-B1, R2-S1..S6 (S3 is an architect decision either way), the fast-follow batch or an honest Fast-follow line, corrective thread replies with a real footer session id.",
+      "Tester: round-3 delta at the new head (the daemon path in R2-S1 and the skill wording in R2-B1/S2 change behaviour); A5 iii/iv when the pull-request hold lifts or Sami decides.",
+      "PR body refreshed at the final head: CI/E2E/Thermo lines name it; one disposition line per thread (22 today); Fast-follow line honest.",
+      "Then: I re-review the final head (both thermo agents once more), resolve the 22 threads individually, have the implementer push the .legion/ deletion, and approve that head by name."
+    ],
+    "reportedToArchitect": "envoy_publish to notifications.role.legion-sjawharlegion-legion-16-architect (see round2Report id in the transcript); legion handoff complete not attempted (active phase is the tester's; the architect said it would 409)."
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T15:38:20.137Z"
+  "completed": "2026-09-12T18:46:03.320Z"
 }
