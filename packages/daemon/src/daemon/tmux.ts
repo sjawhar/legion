@@ -170,21 +170,19 @@ export async function splitWindow(
   return { paneId, pid };
 }
 
-/** Reads the live pid of `target`'s pane — the pane itself for a pane id, or a window's first
- * pane for a window id — or `undefined` if it cannot be read. `list-panes -t` always lists the
- * target's whole window (a pane id resolves to its window; without `-a`/`-s` there is no
- * single-pane listing), so the pane-id column picks the row: a pane-id target absent from the
- * listing is gone, never approximated by a sibling's pid. */
-export async function panePid(server: TmuxServer, target: string): Promise<number | undefined> {
+/** Reads the live pid of pane `paneId`, or `undefined` if it cannot be read. `list-panes -t`
+ * always lists the target's whole window (a pane id resolves to its window; without `-a`/`-s`
+ * there is no single-pane listing), so the pane-id column picks the row: a pane id absent from
+ * the listing is gone, never approximated by a sibling's pid. */
+export async function panePid(server: TmuxServer, paneId: string): Promise<number | undefined> {
   const panes = await server.run(
-    argv(server, "list-panes", "-t", target, "-F", "#{pane_id} #{pane_pid}")
+    argv(server, "list-panes", "-t", paneId, "-F", "#{pane_id} #{pane_pid}")
   );
   if (panes.exitCode !== 0) return undefined;
-  const rows = panes.stdout
+  const row = panes.stdout
     .split(/\r?\n/)
     .map((line) => line.trim().split(/\s+/))
-    .filter((row) => row[0] !== "");
-  const row = /^%\d+$/.test(target) ? rows.find((r) => r[0] === target) : rows[0];
+    .find((r) => r[0] === paneId);
   const pid = Number(row?.[1]);
   return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
 }

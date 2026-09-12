@@ -4,7 +4,7 @@
 // for why an uncleared timer would otherwise accumulate without bound across a long-lived daemon
 // watching a persistently borderline-slow worker), the registration deadline, and the
 // pane-identity branch of `probeAlive`.
-import { describe, expect, it, vi } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { WorkerLocator } from "../legion-state";
 import {
@@ -308,32 +308,5 @@ describe("WorkerBootWatchdog pane identity", () => {
     // The interval's connect-retry loop calls workerClient repeatedly first; the decision at the
     // interval's end is pane -> socket -> retire.
     expect(calls.slice(-3)).toEqual(["pane:%7:4242:1234567", "socket", "retire"]);
-  });
-
-  it("retires an unconfirmed boot whose pane fails identity (a reissued pane id running another OMP) instead of re-arming, once its socket refuses", async () => {
-    const retired: string[] = [];
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const watchdog = new WorkerBootWatchdog(
-      baseDeps({
-        workerBootTimeoutSeconds: () => 0.01,
-        sleep: async () => {},
-        yield: async () => {},
-        paneProcessVerified: async () => false,
-        workerClient: async () => {
-          throw new Error("ECONNREFUSED");
-        },
-        retireUnconfirmedBoot: async (t) => {
-          retired.push(t);
-        },
-      })
-    );
-    try {
-      watchdog.arm(root, child, role, token, locator, 1);
-      for (let i = 0; i < 200 && retired.length === 0; i += 1) await Promise.resolve();
-      expect(retired).toEqual([token]);
-      expect(errors.mock.calls.flat().join("\n")).not.toMatch(/re-arming the watch/);
-    } finally {
-      errors.mockRestore();
-    }
   });
 });

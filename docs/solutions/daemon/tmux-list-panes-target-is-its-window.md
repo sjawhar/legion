@@ -58,24 +58,26 @@ server/session). Row order is layout order, not "the target first".
 Ask for the id alongside the fact and select the row by id:
 
 ```ts
-const panes = await server.run(argv(server, "list-panes", "-t", target, "-F", "#{pane_id} #{pane_pid}"));
+const panes = await server.run(argv(server, "list-panes", "-t", paneId, "-F", "#{pane_id} #{pane_pid}"));
 if (panes.exitCode !== 0) return undefined;
-const rows = panes.stdout.split(/\r?\n/).map((l) => l.trim().split(/\s+/)).filter((r) => r[0] !== "");
-const row = /^%\d+$/.test(target) ? rows.find((r) => r[0] === target) : rows[0];
+const row = panes.stdout.split(/\r?\n/).map((l) => l.trim().split(/\s+/)).find((r) => r[0] === paneId);
 ```
 
-- A pane-id target selects **its own** row with exact equality (`r[0] === target`; see
-  `docs/solutions/testing/mutation-proof-probe-tests.md` for why the test fixture must prove the equality is exact).
-- A window-id target keeps the **first** row. That is deliberate: `probe` backfills a pane-id-less locator's
-  `tmuxPaneId` from `firstPaneId`, which reads the same first line, so the pid and the backfilled id describe the
-  same pane.
-- A pane-id target absent from the listing is `undefined` — never approximated by a sibling's pid. tmux exits 1 for
-  an unknown pane (`can't find pane: %999999`), but a *known* pane's window listing can also simply not contain a
-  stale id; the row filter covers both.
+- The target is always a pane id (`verifyPaneProcess` is the one caller, and every locator it checks carries
+  `tmuxPaneId` -- one without a pane id has no process identity either and is dead before any tmux call). The row
+  is selected with exact equality (`r[0] === paneId`; see `docs/solutions/testing/mutation-proof-probe-tests.md` for
+  why the test fixture must prove the equality is exact). The pid it returns is only the first half of the check: the
+  caller then compares it, and the process's `/proc/<pid>/stat` start ticks, against the identity the locator
+  recorded at launch, so a reissued pane id never passes as the recorded process.
+- A pane id absent from the listing is `undefined` — never approximated by a sibling's pid. tmux exits 1 for an
+  unknown pane (`can't find pane: %999999`), but a *known* pane's window listing can also simply not contain a stale
+  id; the row filter covers both.
 
 Rejected at the design gate (do not re-open): `display-message -p -t <pane> '#{pane_pid}'` (kept out of the daemon —
-the live check uses it as the independent oracle to compare `panePid` against), `list-panes -a` with a global filter,
-and changing callers to always pass a pane id.
+the live check uses it as the independent oracle to compare `panePid` against), and `list-panes -a` with a global
+filter. Callers passing only pane ids was also rejected then, as a rule imposed on callers that still had window-only
+locators; it holds today by construction instead -- a locator's pane id and its process identity are recorded
+together at launch, and a locator lacking them is never probed through tmux at all.
 
 ## When you will meet this again
 

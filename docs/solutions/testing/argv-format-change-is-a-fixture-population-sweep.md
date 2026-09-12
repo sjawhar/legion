@@ -68,18 +68,19 @@ complete when the grep sweep is clean, not when the run is green.
 
    ```ts
    function livePanes(command: string[], pid = 12345): { stdout: string; exitCode: number } {
-     if (!command.includes("#{pane_id} #{pane_pid}")) return { stdout: `${pid}\n`, exitCode: 0 };
      const target = command[command.indexOf("-t") + 1];
      return { stdout: `${target.startsWith("%") ? target : "%1"} ${pid}\n`, exitCode: 0 };
    }
    ```
 
-   The helper answers the new probe with the probed target's own row (`%1` standing in for a window's first pane)
-   and leaves every other `list-panes` format on the reply it always had — `firstPaneId` still rejects a bare pid as
-   a pane id, `windowAlive` still reads exit 0 — so cutting a generic site over is `return livePanes(command)`.
-3. **Leave the unrelated population alone, by name.** Fixtures that always answer exit 1, that answer only the
-   `-F "#{pane_id}"` probes of `firstPaneId`/`windowAlive`, or that serve `list-panes -a` for `listUnknownPanes` are
-   a third list in the plan, so the implementer can account for every `list-panes` site rather than sample.
+   The helper answers the probe with the probed pane's own row, so cutting a generic site over is
+   `return livePanes(command)`. (When the daemon still probed some panes through `-F "#{pane_id}"`-only
+   formats -- the since-removed `firstPaneId` backfill and `windowAlive` -- the helper also kept those formats on
+   the bare-pid reply they always had; a helper like this should answer every format the parser of the day
+   distinguishes, and lose branches as the parser loses them.)
+3. **Leave the unrelated population alone, by name.** Fixtures that always answer exit 1, or that serve
+   `list-panes -a` for `listUnknownPanes`, are a third list in the plan, so the implementer can account for every
+   `list-panes` site rather than sample.
 4. **Sweep for leftovers with the same two greps after editing.** Every remaining `"12345\n"` must be a
    `new-window`/`split-window` reply or inside the helper; every remaining `#{pane_pid}"` must be the new whole
    element (or `new-window`'s three-column format).

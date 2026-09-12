@@ -27,10 +27,6 @@ describe("panePid", () => {
     ]);
   });
 
-  it("returns the first pane's pid for a window id", async () => {
-    expect(await panePid(server({ stdout: rows, exitCode: 0 }), "@1464")).toBe(2363427);
-  });
-
   it("is undefined when tmux exits non-zero, whatever it printed", async () => {
     expect(await panePid(server({ stdout: rows, exitCode: 1 }), "%1533")).toBeUndefined();
   });
