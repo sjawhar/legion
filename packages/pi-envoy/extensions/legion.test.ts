@@ -795,7 +795,8 @@ describe("Legion OMP extension", () => {
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
     expect(requests.filter((request) => request.path === "/v1/roles/set")).toHaveLength(1);
 
-    // The listener lost the claim (tonight's incident): the next tick reclaims and drains.
+    // The listener no longer names this session: the next tick soft-claims and re-runs
+    // controller/ready.
     listenerHoldsClaim = false;
     intervals[0]?.();
     await secondReady.promise;
@@ -805,6 +806,82 @@ describe("Legion OMP extension", () => {
     ).toEqual([
       { session_id: "ses_controller", role: token },
       { session_id: "ses_controller", role: token, soft: true },
+    ]);
+  });
+  test("a controller's regain hook survives a task subagent's in-process extension re-bind", async () => {
+    // OMP binds every extension factory again for each in-process `task` subagent, so a second
+    // legionExtension(pi) — with no Legion identity — runs in the controller's process. It must
+    // not replace the controller's regain listener on the process-wide bridge slot.
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const token = "legion-omp-controller";
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    let listenerHoldsClaim = true;
+    const secondReady = Promise.withResolvers<void>();
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+      if (url.pathname === "/legion/v1/controller/ready") {
+        if (requests.filter((request) => request.path === url.pathname).length === 2) {
+          secondReady.resolve();
+        }
+        return Response.json({});
+      }
+      if (url.pathname === `/v1/roles/${token}`) {
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${token}` }, { status: 404 });
+        }
+        return Response.json({ role: token, holder: "ses_controller_rebind", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") listenerHoldsClaim = true;
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const controller = createPi();
+    legionExtension(controller.pi);
+    const controllerStart = controller.handlers.get("session_start");
+    if (controllerStart === undefined) throw new Error("controller handlers were not registered");
+    const intervals: (() => void)[] = [];
+    await controllerStart(
+      {},
+      {
+        ...sessionContext("ses_controller_rebind"),
+        setInterval: (callback) => intervals.push(callback),
+      }
+    );
+    const ready = {
+      path: "/legion/v1/controller/ready",
+      body: { secret: "controller-secret", sessionId: "ses_controller_rebind" },
+    };
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+
+    // The controller runs a `task`: a fresh extension instance binds and its subagent session
+    // starts in this same process, exactly as OMP does it.
+    const subagent = createPi();
+    legionExtension(subagent.pi);
+    const subagentStart = subagent.handlers.get("session_start");
+    if (subagentStart === undefined) throw new Error("subagent handlers were not registered");
+    const { childFile } = await createSubagentTranscriptPaths();
+    await subagentStart({}, sessionContext("ses_controller_subagent", childFile));
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await secondReady.promise;
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(
+      requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
+    ).toEqual([
+      { session_id: "ses_controller_rebind", role: token },
+      { session_id: "ses_controller_rebind", role: token, soft: true },
     ]);
   });
   test("a root architect that regains its role re-runs process/ready so the overseer catch-up replays", async () => {
