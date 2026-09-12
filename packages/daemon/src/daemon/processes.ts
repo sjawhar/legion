@@ -12,7 +12,7 @@ import {
   sanitizeToken,
 } from "@legion/contracts";
 import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
-import type { CommandRunnerOptions } from "../state/fetch";
+import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { createCancellableSleep } from "./cancellable-sleep";
@@ -80,7 +80,12 @@ export interface ProcessManagerDeps {
   run(
     cmd: string[],
     options?: CommandRunnerOptions
-  ): Promise<{ stdout: string; stderr?: string; exitCode: number }>;
+  ): Promise<{
+    stdout: string;
+    stderr?: string;
+    exitCode: number;
+    timedOut?: CommandResult["timedOut"];
+  }>;
   natsPublish(subject: string, json: string): void;
   natsRequest(subject: string, json: string): Promise<string>;
   mintControllerCapability(): Promise<string>;
@@ -2103,6 +2108,7 @@ export class ProcessManager {
       stateDir: this.deps.config.stateDir,
       provisioningToken: async () => await this.deps.provisioningToken(owner),
       credentialHelper: this.deps.credentialHelper,
+      commandTimeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
       run: async (command, options) => {
         const result = await this.deps.run(command, options);
         return { ...result, stderr: result.stderr ?? "" };

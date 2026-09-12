@@ -485,6 +485,7 @@ describe("ProcessManager", () => {
         | {
             readonly cwd?: string;
             readonly env?: Readonly<Record<string, string>>;
+            readonly timeoutMs?: number;
           }
         | undefined;
     }> = [];
@@ -638,9 +639,11 @@ describe("ProcessManager", () => {
       ["tmux", "-L", "legion-omp", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "-L", "legion-omp", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
     ]);
+    // Every provisioning command carries the configured slow budget (300 s), not the runner's
+    // generic default.
     expect(workspaceCalls).toContainEqual({
       command: ["jj", "bookmark", "set", "legion/LEGION-42", "--allow-backwards"],
-      opts: { cwd: workspace },
+      opts: { cwd: workspace, timeoutMs: 300_000 },
     });
     expect(workspaceCalls).toContainEqual({
       command: ["jj", "git", "fetch", "-R", repo],
@@ -650,6 +653,7 @@ describe("ProcessManager", () => {
           GIT_TERMINAL_PROMPT: "0",
           LEGION_PROVISIONING_TOKEN: "daemon-installation-token",
         },
+        timeoutMs: 300_000,
       },
     });
   });
