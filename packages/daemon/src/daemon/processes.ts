@@ -1319,6 +1319,9 @@ export class ProcessManager {
    * unclaimed once that wait elapses, retires the stuck process and spawns a fresh one in its place.
    */
   async ensureController(): Promise<void> {
+    // Read before the probe: `controllerAlive()` clears the locator — and with it the recorded
+    // session file — when the pane is dead, and that file is exactly what the respawn resumes.
+    const resumeSessionFile = this.deps.state.controllerLocator?.ompSessionFile;
     if (await this.controllerAlive()) {
       const locator = this.deps.state.controllerLocator;
       if (this.deps.state.roles[controllerToken(this.deps.state.project)]) {
@@ -1332,7 +1335,7 @@ export class ProcessManager {
     if (!this.controllerSpawn) {
       this.controllerSpawn = (async () => {
         const controllerSecret = await this.deps.mintControllerCapability();
-        await this.spawnController(controllerSecret);
+        await this.spawnController(controllerSecret, resumeSessionFile);
         const freshLocator = this.deps.state.controllerLocator;
         if (freshLocator) this.armControllerRegistrationDeadline(freshLocator);
       })().finally(() => {
@@ -1575,11 +1578,13 @@ export class ProcessManager {
    * a `/controller/ready` landing during that probe's own await must still win over this
    * stale-timeout decision, never be raced by it. A `state.controllerLocator` that no longer
    * matches `locator` by reference is the same "superseded" case caught above, checked again
-   * directly against live state for good measure. On a failed stop/kill, logs and leaves the
-   * locator exactly as it was -- clearing it and spawning a second controller over a process that
-   * never actually stopped would orphan that process with nothing tracking it; a later
-   * `ensureController` call re-observes this same stuck locator and re-arms a fresh wait for it
-   * instead.
+   * directly against live state for good measure. The controller pane has no shim socket to ask,
+   * so the stop is the direct pane kill. On a failed kill, logs and leaves the locator exactly as
+   * it was -- clearing it and spawning a second controller over a process that never actually
+   * stopped would orphan that process with nothing tracking it; a later `ensureController` call
+   * re-observes this same stuck locator and re-arms a fresh wait for it instead. On a
+   * successful kill the locator is left in place too: `ensureController`'s own probe finds the
+   * pane dead, clears it, and resumes the session file it recorded.
    */
   private async retireAndRespawnStuckController(
     locator: NonNullable<LegionState["controllerLocator"]>
@@ -1593,7 +1598,7 @@ export class ProcessManager {
     if (!stillAlive) return;
     if (this.deps.state.controllerLocator !== locator) return;
     try {
-      await this.stopProcess(token, locator, this.workerStopTimeoutMs);
+      await this.stopProcess(token, locator, this.workerStopTimeoutMs, { skipGraceful: true });
     } catch (error) {
       console.error(
         "[legion] failed to stop a stuck controller process; leaving it in place rather than orphaning it:",
@@ -1601,7 +1606,6 @@ export class ProcessManager {
       );
       return;
     }
-    delete this.deps.state.controllerLocator;
     await this.ensureController();
   }
 
@@ -2450,13 +2454,31 @@ export class ProcessManager {
     }
   }
 
-  private async spawnController(controllerSecret: string): Promise<void> {
+  /** Opens the controller's tmux window running an interactive OMP session — no `--mode rpc`,
+   * no `legion worker-shim`, no socket: the pane is a live TUI Sami can attach to. Resumes
+   * `resumeSessionFile` (the `ompSessionFile` the previous pane reported on `/controller/ready`)
+   * so a respawn keeps the conversation; a recorded-but-missing file throws (same-agent
+   * invariant, exactly as roots and workers), and no recorded file starts fresh and logs it. */
+  private async spawnController(
+    controllerSecret: string,
+    resumeSessionFile: string | undefined
+  ): Promise<void> {
     const controllerDir = path.join(this.deps.config.stateDir, "controller");
     const promptPath = path.join(EXTENSION_PACKAGE, "roles", "controller-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
     await this.writeOmpConfig(controllerDir);
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
     const token = controllerToken(this.deps.state.project);
+    if (resumeSessionFile === undefined) {
+      console.info("[legion] starting the controller fresh: no OMP session file is recorded");
+    }
+    const resumeArgument = await this.computeResumeArgument(
+      token,
+      resumeSessionFile,
+      "resurrecting the controller"
+    );
+    // Interactive: no `--mode rpc`. The tmux runtime opens this command in the pane directly, with
+    // no `legion worker-shim` and no socket (see `TmuxRuntime.spawnController`).
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
     // Held until the locator is in state (or the launch failed) — see `holdProcessSecret`.
     const releaseSecret = this.holdProcessSecret(token);
     try {
@@ -2467,40 +2489,31 @@ export class ProcessManager {
         LEGION_ROLE: "controller",
         LEGION_DAEMON_URL: this.deps.config.daemonUrl,
         LEGION_PROJECT: this.deps.state.project,
+        // The gh shim the extension installs lives under `<stateDir>/worker-bin` and reads this.
+        LEGION_STATE_DIR: this.deps.config.stateDir,
         ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
         ENVOY_URL: this.deps.config.envoyUrl,
         PATH: this.deps.processPath,
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
-      this.deps.state.controllerLocator = await this.runtime.spawn("controller", {
+      const locator = await this.runtime.spawn("controller", {
         role: "controller",
         workspaceDir: controllerDir,
         env,
         innerCommand,
         secrets: { LEGION_CONTROLLER_SECRET: controllerSecret },
       });
+      // Carried onto the fresh locator so a `/controller/ready` that omits the field (an older
+      // plugin) does not lose the file the next respawn needs.
+      this.deps.state.controllerLocator = {
+        ...locator,
+        ...(resumeSessionFile === undefined ? {} : { ompSessionFile: resumeSessionFile }),
+      };
     } finally {
       releaseSecret();
     }
     await this.persist();
-  }
-
-  /** Connects the controller's shim socket on `/controller/ready`, exactly as `markTreeReady`
-   * does for the root architect, so the shim's pre-connect backlog drains. Best-effort: a shim
-   * connect failure (listener race, stale socket, RPC timeout) must never block
-   * `/controller/ready` from accepting the role — the daemon holds no events to replay here
-   * either; the connection is retried on the next `spawnWorker`/`workerReady`/reconnect attempt
-   * that touches this socket.
-   */
-  async markControllerReady(): Promise<void> {
-    const locator = this.deps.state.controllerLocator;
-    if (!locator) return;
-    try {
-      await this.clientFor(controllerToken(this.deps.state.project), locator);
-    } catch (error) {
-      console.error("[legion] failed to connect controller shim socket on ready:", error);
-    }
   }
 
   private async writeOmpConfig(directory: string): Promise<void> {
@@ -2626,8 +2639,8 @@ export class ProcessManager {
   /** The daemon-configured `worker_rpc_timeout_seconds` (default 5), in milliseconds -- the
    * timeout every runtime dial and `probeWorker` call in this file uses for a single
    * worker RPC request (`negotiate_protocol`/`get_state`), including the background
-   * connect `markTreeReady`/`workerReady`/`markControllerReady` kick off after
-   * `/process/ready`/`/worker/ready`/`/controller/ready` already responded. */
+   * connect `markTreeReady`/`workerReady` kick off after `/process/ready`/`/worker/ready`
+   * already responded. */
   private get workerRpcTimeoutMs(): number {
     return this.deps.config.workerRpcTimeoutSeconds * 1000;
   }

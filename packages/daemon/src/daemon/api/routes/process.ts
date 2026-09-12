@@ -88,7 +88,7 @@ export async function handleProcessReady(
   // load (the daemon negotiates with an RPC loop that can never answer before this response
   // returns). Record readiness and respond immediately instead; the connect happens in the
   // background, retried on the next touch (spawnWorker/workerReady/probe) if it fails —
-  // exactly `markControllerReady`'s existing best-effort contract, extended here.
+  // the same best-effort contract `workerReady` follows.
   Promise.resolve(ctx.deps.processManager.markTreeReady(tree)).catch((error) => {
     console.error(`[legion] failed to connect architect shim socket on ready for ${tree}:`, error);
   });

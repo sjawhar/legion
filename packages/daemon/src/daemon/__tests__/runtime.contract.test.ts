@@ -504,11 +504,10 @@ describe("TmuxRuntime", () => {
     expect(harness.server.commands.filter((c) => c[3] === "new-window")).toHaveLength(2);
   });
 
-  it("spawns the controller into its own window with the controller socket and secret file", async () => {
+  it("spawns the controller into its own window running the inner command bare — no worker-shim, no socket — with its secret file", async () => {
     const harness = await tmuxHarness();
     const locator = await harness.runtime.spawn("controller", harness.makeSpec("controller"));
     const secretFile = path.join(harness.stateDir, "secrets", "legion-omp-controller");
-    const socketPath = socketFor(harness.stateDir, "controller");
     const window = harness.server.commands.find((c) => c[3] === "new-window");
     expect(window).toEqual(
       tmuxArgv(
@@ -524,16 +523,20 @@ describe("TmuxRuntime", () => {
         "LEGION_ROLE=controller",
         "-e",
         `LEGION_CONTROLLER_SECRET_FILE=${secretFile}`,
-        shimCommand("/work", socketPath, "omp --mode rpc")
+        "cd /work && omp --mode rpc"
       )
     );
+    // An interactive OMP terminal session: nothing listens for the daemon, so the locator carries
+    // no socket and no socket file was prepared.
     expect(locator).toEqual({
       runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: "%1",
-      socketPath,
     });
+    expect(
+      await stat(socketFor(harness.stateDir, "controller")).catch(() => undefined)
+    ).toBeUndefined();
     expect(await readFile(secretFile, "utf8")).toBe("controller-secret");
     expect((await stat(secretFile)).mode & 0o777).toBe(0o600);
   });

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -45,7 +45,6 @@ describe("Legion HTTP API", () => {
     generation: number;
   }>;
   let treeReadyConnected: IssueKey[];
-  let controllerConnected: boolean;
   let workerReadyConnected: boolean;
   let confirmRootReadyCalls: Array<{ tree: IssueKey; generation: number }>;
   let now: number;
@@ -61,7 +60,6 @@ describe("Legion HTTP API", () => {
     spawnedWorkers = [];
     workerReadyCalls = [];
     treeReadyConnected = [];
-    controllerConnected = false;
     workerReadyConnected = false;
     confirmRootReadyCalls = [];
     now = 1_700_000_000_000;
@@ -117,7 +115,6 @@ describe("Legion HTTP API", () => {
     spawnWorkerImpl?: LegionApiDeps["processManager"]["spawnWorker"];
     mutateLiveRoleClaimImpl?: LegionApiDeps["processManager"]["mutateLiveRoleClaim"];
     markTreeReadyImpl?: LegionApiDeps["processManager"]["markTreeReady"];
-    markControllerReadyImpl?: LegionApiDeps["processManager"]["markControllerReady"];
     workerReadyImpl?: LegionApiDeps["processManager"]["workerReady"];
     dispatchClient?: LegionApiDeps["dispatchClient"];
   }) {
@@ -159,7 +156,6 @@ describe("Legion HTTP API", () => {
         confirmRootReady: (tree, generation) => {
           confirmRootReadyCalls.push({ tree, generation });
         },
-        markControllerReady: options?.markControllerReadyImpl ?? (() => {}),
         cancelBootWatchdog: () => {},
         spawnWorker:
           options?.spawnWorkerImpl ??
@@ -653,7 +649,7 @@ describe("Legion HTTP API", () => {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
-      socketPath: "/tmp/legion/controller.sock",
+      ompSessionFile: "/tmp/controller.jsonl",
     };
     state.gates[root] = { designAskId: "ask-1", designApproved: "ask-1" };
     state.pendingStatusWrites[child] = { status: "in_progress", statusAtRecord: "todo" };
@@ -733,6 +729,7 @@ describe("Legion HTTP API", () => {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
+      ompSessionFile: "/tmp/controller.jsonl",
     });
     expect(body.roles).toMatchObject({
       [controllerToken(state.project)]: { role: "controller", sessionId: "ses_controller" },
@@ -775,32 +772,78 @@ describe("Legion HTTP API", () => {
     expect(leakedKeys).toEqual([]);
   });
 
-  it("responds to controller/ready before its own shim connects, delivering the connect afterward", async () => {
-    const shimGate = Promise.withResolvers<void>();
-    let connected: Promise<void> | undefined;
+  it("records the controller's OMP session file on /controller/ready and leaves it unset when omitted", async () => {
+    state.controllerLocator = {
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+    };
+    let readyCalls = 0;
     await start({
-      markControllerReadyImpl: () => {
-        connected = (async () => {
-          await shimGate.promise;
-          controllerConnected = true;
-        })();
-        return connected;
+      onControllerReady: async () => {
+        readyCalls += 1;
       },
     });
 
-    // Same shape as /process/ready: the response returns before the (best-effort)
-    // markControllerReady connect below settles, so a slow/failing shim connect can never add
-    // RPC-timeout latency to the controller's own ready call.
-    const ready = await json("/legion/v1/controller/ready", {
+    const withoutFile = await json("/legion/v1/controller/ready", {
       secret: controllerSecret,
       sessionId: "ses_controller",
     });
-    expect(ready.response.status).toBe(200);
-    expect(controllerConnected).toBe(false);
+    expect(withoutFile.response.status).toBe(200);
+    expect(state.controllerLocator).toEqual({
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+    });
+    expect(state.roles[controllerToken(state.project)]).toEqual({
+      role: "controller",
+      sessionId: "ses_controller",
+    });
+    expect(readyCalls).toBe(1);
 
-    shimGate.resolve();
-    await connected;
-    expect(controllerConnected).toBe(true);
+    const withFile = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_controller",
+      ompSessionFile: "/tmp/controller.jsonl",
+    });
+    expect(withFile.response.status).toBe(200);
+    expect(state.controllerLocator).toEqual({
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+      ompSessionFile: "/tmp/controller.jsonl",
+    });
+    expect(readyCalls).toBe(2);
+
+    const wrongSecret = await json("/legion/v1/controller/ready", {
+      secret: "wrong",
+      sessionId: "ses_controller",
+      ompSessionFile: "/tmp/other.jsonl",
+    });
+    expect(wrongSecret.response.status).toBe(403);
+    expect(wrongSecret.body).toEqual({ error: "Invalid controller capability" });
+    expect(state.controllerLocator?.ompSessionFile).toBe("/tmp/controller.jsonl");
+  });
+
+  it("accepts an OMP session file on /controller/ready when no controller pane is recorded, without inventing a locator", async () => {
+    delete state.controllerLocator;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await start();
+      const ready = await json("/legion/v1/controller/ready", {
+        secret: controllerSecret,
+        sessionId: "ses_controller",
+        ompSessionFile: "/tmp/controller.jsonl",
+      });
+      expect(ready.response.status).toBe(200);
+      expect(state.controllerLocator).toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("no controller pane is recorded"));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("retries controller startup redelivery after a failed ready callback", async () => {
