@@ -145,7 +145,7 @@ fi
   printf 'expected explicit-forward availability error\n' >&2
   exit 1
 }
-[[ "$(webhook_ingress_block_reason)" == "SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoint 13 remains usable" ]] || {
+[[ "$(webhook_ingress_block_reason)" == "SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode" ]] || {
   printf 'expected the none-mode block reason to name the missing Dispatch issue-event feed and envoy for checkpoints 1-4 and 12\n' >&2
   exit 1
 }
@@ -157,6 +157,12 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_omp"
 chmod +x "$fake_omp"
 [[ "$(LEGION_OMP_PATH="$fake_omp" resolve_omp_path)" == "$fake_omp" ]] || {
   printf 'expected an explicit executable LEGION_OMP_PATH to pass through unchanged\n' >&2
+  exit 1
+}
+# A valid LEGION_OMP_PATH must win before HOME is ever read: under set -u an unset HOME would
+# otherwise surface as `HOME: unbound variable` even though no default path is needed.
+[[ "$(env -u HOME -u XDG_STATE_HOME LEGION_OMP_PATH="$fake_omp" bash -uc 'source "$1"; resolve_omp_path' _ "$source_file" 2>&1)" == "$fake_omp" ]] || {
+  printf 'expected a valid LEGION_OMP_PATH to resolve without reading HOME\n' >&2
   exit 1
 }
 if (LEGION_OMP_PATH="${fake_bin}/missing-omp" resolve_omp_path) >"$assertion_file" 2>&1; then
@@ -215,7 +221,7 @@ if (unset LEGION_OMP_PATH; XDG_STATE_HOME="${fake_bin}/no-state" resolve_omp_pat
 fi
 [[ "$(<"$assertion_file")" == *"${fake_bin}/no-state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix is missing or not executable"* &&
   "$(<"$assertion_file")" == *'export LEGION_OMP_PATH='* &&
-  "$(<"$assertion_file")" == *'bump omp_pin'* &&
+  "$(<"$assertion_file")" == *"bump omp_pin and remove resolve_omp_path's default branch"* &&
   "$(<"$assertion_file")" == *'fix/rpc-extension-send-rejection'* ]] || {
   cat "$assertion_file" >&2
   exit 1
