@@ -48,6 +48,26 @@ func TestSessionsMapsListenerRowsAndDefaultsMissingSlices(t *testing.T) {
 	}
 }
 
+func TestSessionsSendsEnvoyToken(t *testing.T) {
+	t.Setenv("ENVOY_TOKEN", "listener-token")
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
+			t.Errorf("Authorization = %q, want Bearer listener-token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer listener.Close()
+
+	sessions, err := New(listener.URL).Sessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions = %#v, want no sessions", sessions)
+	}
+}
+
 func TestSessionsReportsUnavailableListener(t *testing.T) {
 	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
