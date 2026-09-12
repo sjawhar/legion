@@ -1,0 +1,96 @@
+{
+  "liveProofArtifacts": "/tmp/legion14-live/ (run-resync.ts driver, resync-before.ts, resync-fixed.ts candidate, state copies, before/after reports)",
+  "issue": "LEGION-14",
+  "spec": {
+    "ref": "dispatch://LEGION-14/spec",
+    "version": 2,
+    "designGateAsk": "b4af41f5"
+  },
+  "planDoc": "docs/plans/2026-09-12-resync-queued-root-anomaly.md",
+  "branchBase": {
+    "changeId": "ktqlulks",
+    "commit": "7db2cd8357ca",
+    "description": "chore: release cli v1.1.2 [skip ci]"
+  },
+  "filesToChange": [
+    "packages/daemon/src/daemon/resync.ts",
+    "packages/daemon/src/daemon/__tests__/resync.test.ts"
+  ],
+  "tasks": [
+    {
+      "id": 1,
+      "owner": "implementer",
+      "title": "Regression tests and the gate fix",
+      "summary": "Add four tests after resync.test.ts:183 (queued roots under a saturated cap -> no anomaly; dead tree -> zero-owner-tree; queue entry with no tree -> zero-owner-tree; launch-failed tree -> exactly one launch-failed). Confirm 2 fail / 2 pass pre-fix. Then in resync.ts delete hasActiveTree (lines 62-71), extend the reportRootAnomalies docstring (241-245), and replace the gate at 278-284 with a direct trees[node.key]?.status check that skips active|queued|launch-failed. Detail string unchanged. tsc + biome on the daemon package, then one commit with explicit paths, bookmark -r @-, push, PR with 'Dispatch: LEGION-14'."
+    },
+    {
+      "id": 2,
+      "owner": "tester",
+      "title": "Live proof over this rig's real daemon state",
+      "summary": "Run the /tmp/legion14-live/run-resync.ts driver (verbatim in the plan doc; cwd MUST be packages/daemon) over /tmp copies of $LEGION_STATE_DIR/state.json.v22.bak (incident-window snapshot: queued roots LEGION-10, LEGION-11) and $LEGION_STATE_DIR/state.json, with the pre-fix module (jj file show -r \"${FIX}-\" + sed import rewrite) and the workspace module. Expected v22: 2 zero-owner-tree -> 0; current: unchanged minus queued roots (0 -> 0 at plan time, queue held only LEGION-19 children). Negative control: v22 copy with trees[LEGION-10].status=dead -> exactly zero-owner-tree:LEGION-10. Never load a $LEGION_STATE_DIR path directly (loadState writes <file>.v22.bak beside a v22 input); never restart the daemon."
+    }
+  ],
+  "fix": {
+    "gate": "const treeStatus = deps.state.trees[node.key]?.status; if (treeStatus === \"active\" || treeStatus === \"queued\" || treeStatus === \"launch-failed\") continue;",
+    "removes": "hasActiveTree (resync.ts:62-71)",
+    "leavesUntouched": [
+      "hasTree",
+      "triage branch",
+      "launch-failed loop (286-297)",
+      "probeActiveRoots",
+      "controller"
+    ],
+    "consultsAdmissionMembership": false,
+    "detailStringUnchanged": true
+  },
+  "tests": [
+    "does not report a queued root as zero-owner-tree while the admission cap is saturated",
+    "reports a todo root whose tree is dead as zero-owner-tree",
+    "reports a todo root queued for admission without a tree entry as zero-owner-tree",
+    "reports a todo root whose tree launch failed once, as launch-failed only"
+  ],
+  "observedByPlanner": {
+    "baselineResyncTestFile": "32 pass, 0 fail (279 s wall under load)",
+    "newTestsPreFix": "2 fail (queued roots reported; launch-failed doubled), 2 pass",
+    "newTestsOnFixedCopy": "4 pass",
+    "liveV22PreFix": [
+      "zero-owner-tree:LEGION-10",
+      "zero-owner-tree:LEGION-11"
+    ],
+    "liveV22Fixed": [],
+    "liveCurrentPreFix": [],
+    "liveCurrentFixed": [],
+    "liveNegativeControlDeadLEGION10Fixed": [
+      "zero-owner-tree:LEGION-10"
+    ],
+    "probeEffectsUnchanged": {
+      "v22": 1,
+      "current": 12
+    },
+    "stateDirUntouched": [
+      "state.json",
+      "state.json.v21.bak",
+      "state.json.v22.bak"
+    ]
+  },
+  "deviationsFromSpec": [
+    {
+      "specText": "hasActiveTree keeps its current meaning for callers that need a live architect",
+      "verifiedFact": "hasActiveTree has exactly one caller, resync.ts:278 (grep over packages/daemon/src); packages/daemon/tsconfig.json sets noUnusedLocals: true, so an uncalled hasActiveTree fails tsc",
+      "decision": "hasActiveTree is deleted, not widened; no other caller exists so no other semantics change. The gate reads trees[key].status directly because reportRootAnomalies already skips every child at line 250, so the parent-chain walk never advanced for this caller.",
+      "scopeImpact": "none"
+    }
+  ],
+  "observations": [
+    ".omp/config.yml (empty, extension-provisioned, not gitignored) sits in the working copy; every phase must commit with explicit paths and set the bookmark with -r @-, or jj git push refuses the undescribed commit. Same as LEGION-9's plan recorded.",
+    "The skill's bare `jj bookmark set legion/<KEY>` recipe targets @ and would hit this; the plan pins -r @- (add --allow-backwards only if jj refuses).",
+    "Rig load average 285 on 32 cores at plan time: resync.test.ts alone takes ~5 min, each driver run 15-60 s wall at <1 s CPU, each jj command 20-45 s. Budget timeouts accordingly.",
+    "Run bun test on this rig as `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test` (pane env carries DISPATCH_URL without DISPATCH_TOKEN; cli --check-config test refuses otherwise). Pre-existing, unrelated, green in CI.",
+    "bun install --frozen-lockfile was run by the planner at the workspace root (workspace had no node_modules; gitignored).",
+    "The current state.json queue holds only LEGION-22/LEGION-23, both children of LEGION-19 (skipped at line 250), so the current snapshot cannot exhibit the bug; state.json.v22.bak from 2026-09-11 23:04Z (inside the controller's observed wake window) does and is the live-proof input.",
+    "bun started from a non-project directory (/tmp) stalls ~30 s on module resolution; run the driver with cwd = packages/daemon."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-12T04:51:28.436Z"
+}
