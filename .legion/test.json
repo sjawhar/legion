@@ -1,15 +1,16 @@
 {
-  "spec": "dispatch://LEGION-23/spec version 6; parent dispatch://LEGION-19/spec §4, §5",
-  "round": 1,
-  "roundScope": "everything provable before the image exists; spec acceptance 1–2 against a published digest are round 2 (blocked on the Depot prerequisites, root decision 3 on LEGION-19)",
+  "spec": "dispatch://LEGION-23/spec version 8 (round 1 was written against version 6); parent dispatch://LEGION-19/spec §4, §5",
+  "round": "1b",
+  "roundScope": "round 1 (head 4214c77e) proved everything reachable before the image exists; round 1b re-verifies only what the implementer's correction round touched (push → pull_request trigger, spec v8) at head bfae571e. Spec acceptance 1–2 against a published digest and the tmux smoke checkpoints remain round 2.",
   "pr": {
     "number": 966,
     "url": "https://github.com/sjawhar/legion/pull/966",
     "branch": "legion/LEGION-23",
-    "headTested": "4214c77ef532a80c337fbd3c72734534d6861bba",
-    "headVerified": "jj git fetch → legion/LEGION-23@origin = 4214c77ef532; gh pr view 966 headRefOid = 4214c77ef532; check-runs at that head: lint/pr-title/test/typecheck all success (the Worker Image workflow did not run for it: the handoff commit touches only .legion/, outside the push-trigger paths)"
+    "headTested": "bfae571ef4681e15c21a778c8d22f096e54829d8",
+    "headTestedRound1": "4214c77ef532a80c337fbd3c72734534d6861bba",
+    "headVerified": "jj git fetch → legion/LEGION-23@origin = bfae571e (`implement: record handoff (correction round 1)`), preceded by 48f57335 (`ci(worker-image): build on pull_request so the check follows every PR head`); check-runs at bfae571e: build failure (Worker Image 34689268178), lint/pr-title/test/typecheck success (Tests 34689343090 and 34689268168)"
   },
-  "verdict": "PASS for every spec acceptance line provable this round (2 logic, 3 failure path, 4, 5) plus the OMP-pin single-source requirement and the tmux-runtime regression gate; acceptance 1 and 2's in-image checks and 3's success path are BLOCKED-prerequisites with exact round-2 commands below. No defect found in this PR. One material finding for the architect (not a PR defect): the OMP build the image bakes lacks the headless rpc send-rejection fix — see findingsForArchitect[0].",
+  "verdict": "Round 1b: PASS on items 1–4 of the correction verification — the diff is scoped exactly as stated, the pull_request contract is what spec v8 asks for (statically and in the four tag-shape simulations), the gap found in round 1 is closed (both PR heads including the handoff-only one carry the failing `build` check, checkout is the PR head), and the docs describe the new trigger with no residual branch-push claim. Item 5 (smoke checkpoints 1–4/13) remains BLOCKED: PR #957 is still open and LEGION-22's rig holds the fixed resources. Round-1 verdict otherwise stands: no defect in this PR; acceptance 1–2 in-image and 3's success path are BLOCKED-prerequisites.",
   "perAcceptance": {
     "1 image contents": {
       "status": "BLOCKED-prerequisites",
@@ -33,12 +34,12 @@
       ]
     },
     "3 worker-image.yaml: Depot, tags, summary digest, release body, ECR gating": {
-      "status": "PASS (failure path + static) / BLOCKED-prerequisites (success path, release-body append)",
-      "provedNow": "see items.3",
+      "status": "PASS (failure path on both pull_request heads + static, spec v8) / BLOCKED-prerequisites (success path, release-body append)",
+      "provedNow": "round 1: items.3 (push run 34687034827, static review of the v6 contract); round 1b: correctionRound1[\"2 workflowContract\"] and [\"3 gapClosed\"] — pull_request runs 34688909353 (48f57335) and 34689268178 (bfae571e) fail at step 3 on DEPOT_PROJECT_ID with the PR head checked out; the failing `build` check is attached to the current PR head",
       "round2": [
-        "legion gh -- run list --repo sjawhar/legion --workflow worker-image.yaml --branch legion/LEGION-23   # after re-push or `gh run rerun 34687034827 --repo sjawhar/legion`",
+        "legion gh -- run list --repo sjawhar/legion --workflow worker-image.yaml --branch legion/LEGION-23   # after the next push to the PR branch (pull_request synchronize) or `gh run rerun <latest pull_request run id> --repo sjawhar/legion`",
         "legion gh -- run view <run-id> --repo sjawhar/legion --json jobs --jq '.jobs[].steps[] | \"\\(.number) \\(.name): \\(.conclusion)\"'   # expect Record digest success; ECR steps skipped; summary (run page) shows `ghcr.io/sjawhar/legion-worker@sha256:…`, tag `sha-<12>` only, and `ECR mirror skipped: <var> unset` ×3",
-        "docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:sha-<12 hex of the run's commit>   # digest equals the summary's",
+        "docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:sha-<12 hex of the PR HEAD, not the merge commit>   # digest equals the summary's; the config label org.opencontainers.image.revision equals the PR head",
         "legion gh -- api repos/sjawhar/legion/packages 2>/dev/null; legion gh -- api 'orgs/sjawhar/packages/container/legion-worker' --jq .visibility 2>/dev/null || echo 'visibility not readable by the App token; anonymous pull is the test'",
         "release-body append: only on the first main run after merge that releases the CLI — `legion gh -- release view cli-v<version> --repo sjawhar/legion --json body -q .body | grep -A2 '## Worker image'`",
         "Depot-trust failure path (only reachable while DEPOT_PROJECT_ID is set but the trust relationship is missing): the run's summary must carry `### Worker image build failed` with the trust-relationship remedy and `gh run rerun <id>`"
@@ -148,14 +149,20 @@
         "round2": [
           "once LEGION-10 has landed and no other rig holds legion-smoke-nats/14222/19020: cd $LEGION_WORKSPACE && export SMOKE_REPO=<sandbox> SMOKE_PROJECT=<owner/n> SMOKE_WEBHOOK_MODE=envoy DISPATCH_URL=http://localhost:8766 && secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 DISPATCH_TOKEN -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh'",
           "secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh 1 … 4; bash scripts/smoke/checkpoints.sh 13; bash scripts/smoke/down.sh"
-        ]
+        ],
+        "round1bStatus": {
+          "status": "BLOCKED (both closure preconditions fail)",
+          "pr957": "OPEN, not merged (`gh pr view 957` → state OPEN, mergedAt null, head dcabf1ec846e); main@origin = 7add4d03 (`chore: release pi-envoy v1.5.0`), whose scripts/smoke/up.sh has no `resolve_omp_path` — main's rig still cannot boot here per LEGION-10's own spec (409 POSSIBLE_DUPLICATE on root-issue creation; pinned OMP controller crash).",
+          "resources": "at 10:50:00Z: container `legion-smoke-nats` running, recreated 2026-09-12T10:48:54Z (LEGION-21's instance from round 1 is gone; this one is LEGION-22's); 127.0.0.1:19020 held by envoy-listener pid 4091623 (`…/workspaces/sjawhar/legion/legion-22/packages/envoy/out/envoy-listener`); 14222 bound by the container; daemon pid 4126678 (`…/legion-22/packages/daemon/src/cli/index.ts start sjawhar/24 --config /tmp/legion22-smoke/rig/legion.yaml`) and envoy-bridge pid 4134225 from the same workspace. Host load average 33.8 (1 min) / 137 (5 and 15 min).",
+          "round2": "unchanged from items.7.smokeRig.round2: once #957 is on main and no rig holds legion-smoke-nats/14222/19020, run up.sh in envoy mode from this workspace (rebased onto that main), checkpoints 1–4 with `secrets DISPATCH_TOKEN --`, checkpoint 13 bare, then down.sh"
+        }
       }
     }
   },
   "defects": [],
   "findingsForArchitect": [
     "OMP pin content (not a PR defect; the single-source design makes the fix a one-line bump): the image bakes `LEGION_OMP_PATH=/opt/omp/bin/omp` = release 18.1.15-sami.20260908-220934, and every worker the image runs is `legion worker-shim` → `omp --mode rpc`. That release lacks sjawhar/oh-my-pi@0e57a6ca (`fix(rpc): observe extension send rejections when no prompt scope is active` — an extension send that starts no turn crashes a headless rpc session with an unhandled rejection). Verified: raw runtime-init.ts at v18.1.15-sami.20260908-220934, v18.1.15-sami.20260910-172022 and the newest release v18.1.18-sami.20260912-032540 (published 2026-09-12T03:53Z) all contain the pre-fix `send did not invoke the agent` line and none contains `invokingTask.catch(() => {})`; `gh api compare <tag>...0e57a6ca` → diverged, ahead_by=1 for all three; branch fix/rpc-extension-send-rejection still points at 0e57a6ca. The dogfood daemon on this box runs a hand-built `~/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix` instead of the pin (this pane's shim cmdline), and LEGION-10 makes the smoke rig do the same via LEGION_OMP_PATH. So the first published image will carry an OMP known to crash headless workers on the path production had to patch. Recommended: land 0e57a6ca on `sami`, cut a fork release, bump OMP_FORK_PIN in omp-pin.ts (one line) before LEGION-24 runs pods from the image — or accept the image as pipeline-proof only until then.",
-    "PR #966's current head 4214c77e has no failing check: the Worker Image run (failing by design) is attached to 7da0801e, and the handoff commit did not match the push-trigger paths. implement.json's 'PR stays red until the prerequisites exist' no longer holds; the merge queue would not be blocked by the image workflow.",
+    "RESOLVED in correction round 1 (spec v8, commit 48f57335): the push trigger was replaced by pull_request; PR #966's head bfae571e now carries the failing `build` check (run 34689268178). Round-1 text: PR #966's head 4214c77e had no failing check because the Worker Image push run was attached to 7da0801e and the handoff commit did not match the push-trigger paths.",
     "LEGION-12 reproduced in this pane, with a sharper characterisation: the bash tool injects 1–3 `export LEGION_GRANT=` blocks per call (the count varied call to call); only the FIRST injected grant of a call redeems (`legion gh` → real App token; GitHub's own 403 on /user proves redemption), every later one 403s at the daemon (`Unable to redeem LEGION_GRANT`) although auth.ts grants are 60 s TTL and not single-use — so the later blocks are minted against something the daemon does not know (a duplicate hook instance?). The implementer's DEBUG-trap workaround did not fire here: the injected preamble is executed without triggering the persistent shell's DEBUG trap (trap -p DEBUG shows it installed; it fires for my own lines). Workaround used: two-call pattern — one call mints, the next call (within the 60 s TTL) hardcodes the previous call's first grant.",
     "Test-suite hygiene, pre-existing (LEGION-13 territory): `legion start --check-config` test needs `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE` in a Legion pane — confirmed, ran the suite that way."
   ],
@@ -165,7 +172,36 @@
     "smoke checkpoints 1–4 and 13 — see items.7.smokeRig"
   ],
   "cleanup": "throwaway artifacts: /tmp/l23-test-repro.sh, /tmp/l23-test-repro.log, /tmp/l23-test-LaalTI (scratch repo copy, compiled CLI, packed plugin, two fresh HOMEs, isolated daemon state dir), /tmp/l23-probe-imageref.ts, /tmp/l23-removed.txt, /tmp/l23-moved.txt, /tmp/l23-rpcfix.patch, /tmp/l23-pr-body.md — removed after the handoff commit; no source file edited; nothing created on Depot/GitHub/AWS (no variable, project, trust policy, workflow run, release edit); the docker daemon pulled hadolint/hadolint and debian:bookworm-slim (published images run, nothing built)",
+  "completedRound1": "2026-09-12T10:30:02.060Z",
+  "correctionRound1": {
+    "specDelta": "v8 Acceptance 3: `pull_request` trigger against main filtered to the three paths, built commit = PR head named by the sha- tag; Design row: `pull_request` (base main, image paths, checkout and tag the PR head sha); new Rejected row: `push` trigger left a handoff-only head unguarded (tester round 1); Testing table: new tmux row — smoke checkpoints 1–4 and 13 once PR #957 has landed and the rig is free, a closure condition together with the pulled-and-probed digest",
+    "1 diffScope": {
+      "status": "PASS",
+      "evidence": "`jj diff --from 7c6f20f6 --to bfae571e --stat` → .github/workflows/worker-image.yaml (+22/−6), .legion/implement.json (+39/−4), docs/kubernetes.md (+15/−7), packages/daemon/docker/worker.Dockerfile (+3/−2); 4 files. `--stat -- .github/workflows/release.yaml` → 0 files changed. The Dockerfile hunk is lines 4–5 of the header comment only ('on a branch push touching this file' → 'on every head of a pull request against main that touches the image files'). Commits: 48f57335 (the change), bfae571e (handoff only)."
+    },
+    "2 workflowContract": {
+      "status": "PASS",
+      "static": "yaml.parse: on = [workflow_call, workflow_dispatch, pull_request]; pull_request = {branches: [main], types: [opened, synchronize, reopened], paths: [packages/daemon/docker/**, packages/daemon/src/daemon/omp-pin.ts, .github/workflows/worker-image.yaml]} — exactly three; `grep -nE '^\\s*push:|branches-ignore'` → none (the only `push` word left is depot/build-push-action's `push: true` input); job env BUILT_SHA = `${{ github.event.pull_request.head.sha || github.sha }}`; actions/checkout@v5 `with.ref: ${{ env.BUILT_SHA }}`; Compute tags `short=\"${BUILT_SHA::12}\"` and emits `built_sha`; OCI label `org.opencontainers.image.revision=${{ steps.meta.outputs.built_sha }}`; concurrency group `worker-image-${{ github.event.pull_request.number || github.ref }}`, cancel-in-progress false; version tag still inside `[ \"$GITHUB_REF\" = \"refs/heads/main\" ] && [ -n \"$CLI_VERSION\" ]`, release edit still `if: steps.meta.outputs.tag_release == 'true'`; lines 134–222 (Depot remedy, Record digest, release append, ECR decide/mirror/failure note) byte-identical to round-1 head lines 120–208 (`diff` empty). actionlint 1.7.12 on both workflows → clean, exit 0.",
+      "simulation": "the `Compute tags` script extracted from the YAML (not retyped) run with bash -e and a scratch GITHUB_OUTPUT: pull_request (BUILT_SHA=bfae571e…, GITHUB_REF=refs/pull/966/merge, no inputs) → tags [sha-bfae571ef468], tag_release=false, built_sha=bfae571e…; workflow_call main + cli 0.9.0/cli-v0.9.0 → [sha-0123456789ab, 0.9.0], tag_release=true; workflow_call main + cli skipped → [sha-0123456789ab], tag_release=false; workflow_dispatch refs/heads/feature with version 0.9.0 → [sha-0123456789ab] only, tag_release=false. Extra shape: main with version but empty release_tag → both tags, tag_release=false (release edit skipped; correct).",
+      "observation": "`version_label` (the OCI `org.opencontainers.image.version` label) is `${CLI_VERSION:-sha-$short}` regardless of ref, so a non-main workflow_dispatch that passes cli_version labels the image `0.9.0` while tagging it sha- only. Operator-only input marked 'main only'; cosmetic; not against spec v8."
+    },
+    "3 gapClosed": {
+      "status": "PASS",
+      "runs": "`gh run list --workflow worker-image.yaml --branch legion/LEGION-23` → 34689268178 pull_request bfae571e failure (10:45:12Z); 34688909353 pull_request 48f57335 failure (10:36:47Z); 34687034827 push 7da0801e failure (round 1). Both pull_request runs: step 3 'Require the Depot project variable' failure, steps 4–14 skipped; check-run annotations `Repository variable DEPOT_PROJECT_ID is unset; the worker image builds on Depot and needs a project (root decision 3 on LEGION-19).` (jobs 103540626816 and 103541558479). Checkout log lines: `HEAD is now at 48f5733 ci(worker-image): build on pull_request …` and `HEAD is now at bfae571 implement: record handoff (correction round 1)` — the PR head, not refs/pull/966/merge. bfae571e is the handoff-only commit the push trigger skipped in round 1 (4214c77e/7c6f20f6 had no image check); it now carries the check.",
+      "rollup": "`gh pr checks 966` → build fail (run 34689268178), lint/pr-title/test/typecheck pass (Tests 34689343090); check-runs API at bfae571e: build failure, the four Tests jobs success ×2 (runs 34689268168 and 34689343090 — Tests fired on both the synchronize and a second event). The PR head is red on `build` and green on Tests, as spec v8 Testing row requires until root decision 3 lands."
+    },
+    "4 docs": {
+      "status": "PASS",
+      "evidence": "docs/kubernetes.md trigger (2): 'on every head of a pull request against `main` whose diff touches … building the PR head and publishing sha- only', with the pull_request-vs-push rationale and the same-repo permissions note; Tags line: 'sha-<12 hex of the built commit> (on a pull request that is the PR head, never the ephemeral merge commit)'; iteration line: 'pushing the PR branch (trigger 2)'. Dockerfile header lines 4–6 describe 'every head of a pull request against main that touches the image files'. `grep -nEi 'branch push|push to any|pushing the branch|on a push|push trigger|branches-ignore'` over kubernetes.md, the Dockerfile, the workflow, both AGENTS.md → only worker-image.yaml:222 ('or pushing the branch again' in the ECR-mirror failure remedy) and the equivalent Depot remedy at 142 — both still correct: a push to a PR branch fires `synchronize`."
+    },
+    "5 smokeCheckpoints": {
+      "status": "BLOCKED (both closure preconditions fail)",
+      "pr957": "OPEN, not merged (`gh pr view 957` → state OPEN, mergedAt null, head dcabf1ec846e); main@origin = 7add4d03 (`chore: release pi-envoy v1.5.0`), whose scripts/smoke/up.sh has no `resolve_omp_path` — main's rig still cannot boot here per LEGION-10's own spec (409 POSSIBLE_DUPLICATE on root-issue creation; pinned OMP controller crash).",
+      "resources": "at 10:50:00Z: container `legion-smoke-nats` running, recreated 2026-09-12T10:48:54Z (LEGION-21's instance from round 1 is gone; this one is LEGION-22's); 127.0.0.1:19020 held by envoy-listener pid 4091623 (`…/workspaces/sjawhar/legion/legion-22/packages/envoy/out/envoy-listener`); 14222 bound by the container; daemon pid 4126678 (`…/legion-22/packages/daemon/src/cli/index.ts start sjawhar/24 --config /tmp/legion22-smoke/rig/legion.yaml`) and envoy-bridge pid 4134225 from the same workspace. Host load average 33.8 (1 min) / 137 (5 and 15 min).",
+      "round2": "unchanged from items.7.smokeRig.round2: once #957 is on main and no rig holds legion-smoke-nats/14222/19020, run up.sh in envoy mode from this workspace (rebased onto that main), checkpoints 1–4 with `secrets DISPATCH_TOKEN --`, checkpoint 13 bare, then down.sh"
+    }
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-12T10:30:02.060Z"
+  "completed": "2026-09-12T10:53:27.850Z"
 }
