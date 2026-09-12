@@ -20,6 +20,7 @@ import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
 import { GATE_OFF_APPROVAL, satisfyGateOff } from "./api/routes/issues";
 import {
+  DAEMON_PROBE_RETRY,
   verifyLegionPluginContract,
   verifyLegionPluginLoaded,
   verifyOmpAgentsCapability,
@@ -223,13 +224,16 @@ async function startDaemonLocked(
   if (config.dispatchToken !== undefined) {
     await writeSecretFile(config.stateDir, DISPATCH_TOKEN_SECRET, config.dispatchToken);
   }
-  const probeSleep =
-    deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const probeOptions = {
+    sleep: deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    timeoutMs: config.slowCommandTimeoutSeconds * 1000,
+    retry: DAEMON_PROBE_RETRY,
+  };
   await verifyOmpAgentsCapability(
     environment.ompInvocation,
     config.ompLaunchPrefix,
     runner,
-    probeSleep
+    probeOptions
   );
   await verifyLegionPluginContract(deps.readPluginManifest);
   await verifyLegionPluginLoaded(
@@ -237,7 +241,7 @@ async function startDaemonLocked(
     config.ompLaunchPrefix,
     runner,
     deps.readPluginManifest,
-    probeSleep
+    probeOptions
   );
   await deps.tokenManager.getToken("implement", owner);
   const stateFile = path.join(config.stateDir, "state.json");
