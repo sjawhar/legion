@@ -36,9 +36,13 @@ require_command() {
 require_env() {
   [[ -n "${!1:-}" ]] || fail "$1 is required"
 }
+# In none mode the rig has no event feed at all: the daemon admits an issue only once it has
+# ingested that issue's Dispatch events (resync skips keys it never saw), and nothing carries a
+# Dispatch issue event or a GitHub webhook into the rig NATS. checkpoints.sh applies the same
+# gating from the recorded mode.
 webhook_ingress_block_reason() {
   printf '%s\n' \
-    'SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints that require live delivery are blocked; resync-driven checkpoints 1-4 remain usable'
+    'SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoint 13 remains usable'
 }
 
 resolve_webhook_mode() {

@@ -71,6 +71,16 @@ webhook_ingress_block_reason() {
     'SMOKE_WEBHOOK_MODE=none: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward'
 }
 
+# Checkpoints 1-4 and 12 read daemon state the root issue only reaches once the daemon has
+# ingested its Dispatch issue events (`state.issues`; resync.ts healStatusDrift and
+# reportRootAnomalies skip keys it never saw). Only up.sh's envoy-mode bridge relays those events
+# into the rig NATS: none mode has no feed at all, and forward mode (`gh webhook forward`) carries
+# GitHub events only -- up.sh creates the root issue over HTTP and the daemon never admits it -- so
+# under either recorded mode these are blocked, never reported as a false FAILED.
+dispatch_ingress_block_reason() {
+  printf 'SMOKE_WEBHOOK_MODE=%s: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy\n' "$1"
+}
+
 
 
 project_slug() {
@@ -512,15 +522,27 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v grep >/dev/null 2>&1 || fail "grep is required"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v tail >/dev/null 2>&1 || fail "tail is required"
-case "$(stored_webhook_mode)" in
+webhook_mode="$(stored_webhook_mode)"
+readonly webhook_mode
+case "$webhook_mode" in
   none)
     case "$checkpoint" in
+      1 | 2 | 3 | 4 | 12)
+        blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+        ;;
       5 | 6 | 7 | 9 | 10 | 11)
         blocked "$(webhook_ingress_block_reason)"
         ;;
     esac
     ;;
-  forward | envoy)
+  forward)
+    case "$checkpoint" in
+      1 | 2 | 3 | 4 | 12)
+        blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+        ;;
+    esac
+    ;;
+  envoy)
     ;;
   *)
     fail "recorded SMOKE_WEBHOOK_MODE must be forward, envoy, or none"

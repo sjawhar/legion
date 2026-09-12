@@ -14,7 +14,9 @@ output_file="${temporary_dir}/output"
 trap 'rm -rf "$temporary_dir"' EXIT
 
 mkdir -p "$fake_bin" "$smoke_dir" "${smoke_dir}/daemon"
-printf 'none\n' >"${smoke_dir}/webhook-mode"
+# Checkpoints 1-4 need Dispatch issue-event ingress, so their fixture-backed OK cases run with
+# envoy recorded; the none-mode and forward-mode blocks further down prove the mode gating itself.
+printf 'envoy\n' >"${smoke_dir}/webhook-mode"
 printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":{"LEGSMOKE-1":{"designAskId":"ask-design"}}}' >"${smoke_dir}/daemon/state.json"
 # LEGSMOKE-1 is this rig's own root; LEGSMOKE-99 is a second parentless issue with no relation to
 # it at all, standing in for a concurrent rig's own root sharing the same LEGSMOKE project. The
@@ -158,6 +160,45 @@ PATH="${fake_bin}:${PATH}" \
   exit 1
 }
 
+# none mode: no Dispatch issue event reaches the rig NATS, so 1-4 and 12 are blocked with the
+# Dispatch-ingress reason before any Dispatch request is made (12 before it even asks for
+# SMOKE_QUEUED_ISSUE); 5-7 and 9-11 keep the GitHub-ingress reason below; 13 is not gated by mode.
+printf 'none\n' >"${smoke_dir}/webhook-mode"
+curl_calls_before="$(wc -l <"$curl_log")"
+for blocked_checkpoint in 1 2 3 4 12; do
+  if PATH="${fake_bin}:${PATH}" \
+    SMOKE_DIR="$smoke_dir" \
+    SMOKE_REPO="example-org/legion-smoke" \
+    SMOKE_PROJECT="example-org/24" \
+    DISPATCH_URL="http://dispatch.test" \
+    DISPATCH_TOKEN="test-dispatch-token" \
+    bash "$checkpoints_script" "$blocked_checkpoint" >"$output_file" 2>&1; then
+    printf 'expected none mode to block checkpoint %s\n' "$blocked_checkpoint" >&2
+    exit 1
+  else
+    status=$?
+  fi
+  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy'* ]] || {
+    printf 'expected exit 3 and the Dispatch-ingress reason for checkpoint %s; got %s:\n%s\n' "$blocked_checkpoint" "$status" "$(<"$output_file")" >&2
+    exit 1
+  }
+done
+[[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
+  printf 'expected a mode-blocked checkpoint to make no Dispatch request\n' >&2
+  exit 1
+}
+if ! PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" FAKE_TMUX_PID="$clean_pid" \
+  env -u DISPATCH_TOKEN bash "$checkpoints_script" 13 >"$output_file" 2>&1; then
+  cat "$output_file" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 13 OK'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: none mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and leaves 13 ungated\n'
+
 if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
   SMOKE_REPO="example-org/legion-smoke" \
@@ -188,12 +229,56 @@ fi
   cat "$output_file" >&2
   exit 1
 }
-printf 'PASS: allows resync checkpoints and blocks live-event checkpoints in none mode\n'
+printf 'PASS: none mode blocks GitHub-fed checkpoints 5-7 and 9-11 with the GitHub-ingress reason; envoy lets checkpoint 5 reach its own PR check\n'
+
+# forward mode: `gh webhook forward` relays GitHub events only, so 1-4 and 12 are blocked with the
+# same Dispatch-ingress reason (naming forward as the recorded mode), while 5 passes the mode gate
+# and reaches its own PR-fixture check exactly as under envoy.
+printf 'forward\n' >"${smoke_dir}/webhook-mode"
+curl_calls_before="$(wc -l <"$curl_log")"
+for blocked_checkpoint in 1 2 3 4 12; do
+  if PATH="${fake_bin}:${PATH}" \
+    SMOKE_DIR="$smoke_dir" \
+    SMOKE_REPO="example-org/legion-smoke" \
+    SMOKE_PROJECT="example-org/24" \
+    DISPATCH_URL="http://dispatch.test" \
+    DISPATCH_TOKEN="test-dispatch-token" \
+    bash "$checkpoints_script" "$blocked_checkpoint" >"$output_file" 2>&1; then
+    printf 'expected forward mode to block checkpoint %s\n' "$blocked_checkpoint" >&2
+    exit 1
+  else
+    status=$?
+  fi
+  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=forward: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy'* ]] || {
+    printf 'expected exit 3 and the Dispatch-ingress reason naming forward for checkpoint %s; got %s:\n%s\n' "$blocked_checkpoint" "$status" "$(<"$output_file")" >&2
+    exit 1
+  }
+done
+[[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
+  printf 'expected a forward-blocked checkpoint to make no Dispatch request\n' >&2
+  exit 1
+}
+if PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  bash "$checkpoints_script" 5 >"$output_file" 2>&1; then
+  printf 'expected checkpoint 5 under forward to require a PR fixture\n' >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 1 && "$(<"$output_file")" == *'set SMOKE_PR or open a legion/issue-* pull request'* ]] || {
+  printf 'expected forward mode to let checkpoint 5 past the mode gate to its PR-fixture check; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  exit 1
+}
+printf 'envoy\n' >"${smoke_dir}/webhook-mode"
+printf 'PASS: forward mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and lets checkpoint 5 reach its own PR check\n'
 
 bare_temporary_dir="$(mktemp -d)"
 bare_smoke_dir="${bare_temporary_dir}/smoke"
 mkdir -p "$bare_smoke_dir"
-printf 'none\n' >"${bare_smoke_dir}/webhook-mode"
+printf 'envoy\n' >"${bare_smoke_dir}/webhook-mode"
 if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$bare_smoke_dir" \
   SMOKE_REPO="example-org/legion-smoke" \
