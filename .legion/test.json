@@ -155,7 +155,9 @@
           "pr957": "`gh pr view 957` → OPEN, mergedAt null, head dcabf1ec846e, no merge commit; main@origin = 7add4d03 (`chore: release pi-envoy v1.5.0`), `grep -c resolve_omp_path scripts/smoke/up.sh` on main → 0. main's rig still cannot boot here per LEGION-10's spec (409 POSSIBLE_DUPLICATE on root-issue creation; pinned OMP controller crash).",
           "resources": "occupied again: container `legion-smoke-nats` running, created 2026-09-12T14:28:28Z; envoy-listener pid 701765 and envoy-bridge pid 714521 from …/workspaces/sjawhar/legion/legion-16 (LEGION-16's rig); 19020/14222 not shown by ss at that instant but the container and processes are live. Load 27 (1 min).",
           "round3": "unchanged: once #957 is on main and no rig holds legion-smoke-nats/14222/19020 — rebase this workspace onto that main, SMOKE_WEBHOOK_MODE=envoy, `secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 DISPATCH_TOKEN -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh'`, `secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <1..4>`, `bash scripts/smoke/checkpoints.sh 13`, `bash scripts/smoke/down.sh`."
-        }
+        },
+        "status": "SUBSTITUTED (root architect ruling 2026-09-12 15:08Z)",
+        "substitution": "Smoke checkpoints 1–4/13 on tmux exercise spawning and the Dispatch lifecycle, which this PR does not touch; this PR's daemon change is a verbatim move of the two boot probes plus one import, proven on the real startDaemon path by items.7.isolatedDaemonBoot (both probes pass; a missing-pi.agents stub is refused before state/NATS/API). Blocked on LEGION-10's PR #957 and shared rig resources at 15:00Z; root acceptance 3 (tmux unchanged) is re-proven by LEGION-19's end-game tester on main after merge."
       }
     }
   },
