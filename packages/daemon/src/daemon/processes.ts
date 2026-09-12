@@ -126,8 +126,9 @@ const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
 export { StopFailed, TreeClosingError } from "./process-errors";
 
 /** Builds the second `--append-system-prompt` fragment every root and phase-worker process gets,
- * so the model can address the architect (and derive a sibling's topic) without hand-encoding a
- * `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built token silently misses. */
+ * so the model can address the architect, the project's controller (the merge queue a merger
+ * publishes READY to), and derive a sibling's topic without hand-encoding a `roleToken` itself —
+ * the encoding escapes `_`/`.`/`-` and a hand-built token silently misses. */
 export function addressingFragment(
   project: string,
   treeKey: IssueKey,
@@ -136,10 +137,11 @@ export function addressingFragment(
 ): string {
   const ownTopic = roleTopic(roleToken(project, issue, role));
   const architectTopic = roleTopic(roleToken(project, treeKey, "architect"));
+  const controllerTopic = roleTopic(controllerToken(project));
   return (
     `Legion addressing: your role topic is \`${ownTopic}\`; your tree's architect is ` +
-    `\`${architectTopic}\`; a sibling role on your issue is your topic with the trailing ` +
-    "`-<role>` replaced."
+    `\`${architectTopic}\`; the project's controller (merge queue) is \`${controllerTopic}\`; ` +
+    "a sibling role on your issue is your topic with the trailing `-<role>` replaced."
   );
 }
 

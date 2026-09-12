@@ -10053,3 +10053,19 @@ describe("ProcessManager", () => {
     expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
   });
 });
+
+describe("addressingFragment", () => {
+  it("names the worker's own topic, its tree's architect, and the project's controller (merge queue)", () => {
+    const fragment = addressingFragment("omp", root, child, "merger");
+
+    expect(fragment).toContain(
+      `your role topic is \`${roleTopic(roleToken("omp", child, "merger"))}\``
+    );
+    expect(fragment).toContain(
+      `your tree's architect is \`${roleTopic(roleToken("omp", root, "architect"))}\``
+    );
+    expect(fragment).toContain(
+      `the project's controller (merge queue) is \`${roleTopic(controllerToken("omp"))}\``
+    );
+  });
+});
