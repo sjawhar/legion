@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { controllerToken, type LegionRole } from "@legion/contracts";
@@ -193,7 +194,10 @@ function isToolDeviceInvocation(toolCall: ToolCallEvent): boolean {
 }
 
 export default function legionExtension(pi: PiApi): void {
-  logger.debug("extension instance loaded", { extension: import.meta.url });
+  // One instance per session (a `task` subagent gets its own). The id ties every hook log line
+  // below to the instance that emitted it, so a per-call grant count can be attributed.
+  const instance = randomUUID().slice(0, 8);
+  logger.debug("extension instance loaded", { extension: import.meta.url, instance });
   (globalThis as Record<symbol, unknown>)[LEGION_LOADED_MARKER] = import.meta.url;
   const defaults = envoyDefaultsFromEnvironment(process.env);
   let controllerSessionID: string | undefined;
@@ -585,6 +589,11 @@ export default function legionExtension(pi: PiApi): void {
   });
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
+    logger.debug("legion tool_call hook", {
+      instance,
+      toolCallId: toolCall.toolCallId,
+      toolName: toolCall.toolName,
+    });
     // No gate of any kind applies to a subagent's own tool calls: the parent session's gate,
     // running in the parent's own module instance, already governs the parent's `task` call
     // that spawned it (see the architect `task` block above and isSubagentSession).
@@ -660,13 +669,24 @@ export default function legionExtension(pi: PiApi): void {
       });
       const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
       const workerBin = await installWorkerGhShim(stateDir);
+      // The host writes this revised input back into the assistant message, so anything placed
+      // in `command` becomes text the model reads as its own and imitates on later calls with
+      // stale or made-up grants. The bash tool's `env` applies to this one command only, and
+      // with the hook's keys spread last an imitated `env` from the model changes nothing.
+      // PATH builds on the pane's, never on whatever the model supplied.
+      const modelEnv =
+        typeof toolCall.input.env === "object" &&
+        toolCall.input.env !== null &&
+        !Array.isArray(toolCall.input.env)
+          ? (toolCall.input.env as Record<string, unknown>)
+          : {};
       return {
         input: {
           ...toolCall.input,
-          command: [
-            workerGhEnvironment(grant.grantId, stateDir, workerBin),
-            toolCall.input.command,
-          ].join("\n"),
+          env: {
+            ...modelEnv,
+            ...workerGhEnvironment(grant.grantId, stateDir, workerBin, process.env.PATH),
+          },
         },
       };
     } catch (error) {
