@@ -45,22 +45,28 @@ Where the digest is published:
   CLI in the same run (`gh release view cli-v<version> --json body -q .body`);
 - `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for any published tag.
 
-Tags: `sha-<12 hex of the commit>` on every run; `<cli version>` only on `main` when `cli` released that
-version in the same run. Runs from any other ref publish the `sha-` tag only and never touch a release.
+Tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the PR head, never the
+ephemeral merge commit); `<cli version>` only on `main` when `cli` released that version in the same run.
+Runs from any other ref publish the `sha-` tag only and never touch a release.
 
 ### How it is built — and the iteration rule
 
 `.github/workflows/worker-image.yaml` builds on Depot (`depot/setup-action` with GitHub OIDC — no static
 Depot token — and `depot/build-push-action`, project `vars.DEPOT_PROJECT_ID`). It runs (1) from
-`release.yaml` after the `cli` job on every `main` push that touches the daemon or plugin, (2) on a push to
-any non-`main` branch that touches `packages/daemon/docker/**`, the OMP pin
-(`packages/daemon/src/daemon/omp-pin.ts`), or the workflow itself (publishes `sha-` only), and (3) by
-`gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`.
+`release.yaml` after the `cli` job on every `main` push that touches the daemon or plugin, (2) on every head
+of a pull request against `main` whose diff touches `packages/daemon/docker/**`, the OMP pin
+(`packages/daemon/src/daemon/omp-pin.ts`), or the workflow itself — building the PR head and publishing
+`sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`.
+Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
+diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
+PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
+unguarded. The workflow's `id-token`/`packages`/`contents` permissions apply to same-repo pull requests (this
+repository takes no fork PRs, whose token would be read-only).
 
 **The image is built only by this workflow, on Depot.** Never build it on a workstation — no `docker build`,
 `docker buildx`, `docker compose build`, or `depot build`: an unrelated buildx job took the sami-agents host
-to load 646 on 2026-09-12 and the Legion daemon with it. Iterate by pushing the branch (trigger 2) or, once
-merged, dispatching (trigger 3); check the Dockerfile and workflow statically (`hadolint`, `actionlint`
+to load 646 on 2026-09-12 and the Legion daemon with it. Iterate by pushing the PR branch (trigger 2) or,
+once merged, dispatching (trigger 3); check the Dockerfile and workflow statically (`hadolint`, `actionlint`
 where installed) and run `bun test` for the TypeScript. Pulling and running the published image locally is
 fine.
 

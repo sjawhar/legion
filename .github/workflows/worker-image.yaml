@@ -26,14 +26,21 @@ on:
         type: string
         required: false
         default: ""
-  # Pre-merge iteration: a branch push touching the image files builds and publishes :sha-<short> only.
-  push:
-    branches-ignore: [main]
+  # Pre-merge iteration: a pull request against main that touches the image files builds its head and
+  # publishes :sha-<short> only. `pull_request` (not `push`) because GitHub evaluates these paths against
+  # the whole PR diff, so the check attaches to every head of such a PR — a handoff-only commit on top
+  # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
+  # a PR head with no image check (LEGION-23 tester round 1).
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
     paths:
       - packages/daemon/docker/**
       - packages/daemon/src/daemon/omp-pin.ts
       - .github/workflows/worker-image.yaml
 
+# Same-repo `pull_request` runs get these too (a fork PR would get a read-only token, and this repo
+# takes no fork PRs).
 permissions:
   contents: write # gh release edit
   packages: write # ghcr.io push
@@ -43,14 +50,20 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     # Job-level (not workflow-level): this file is also a called workflow, and job-level concurrency/env
-    # behave identically for `workflow_call`, `workflow_dispatch`, and `push`.
+    # behave identically for `workflow_call`, `workflow_dispatch`, and `pull_request`.
+    # Two pushes to one PR serialize on the PR number; other events serialize on the ref.
     concurrency:
-      group: worker-image-${{ github.ref }}
+      group: worker-image-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
     env:
       IMAGE: ghcr.io/sjawhar/legion-worker
+      # The commit that is built and that the sha- tag names: the PR head on `pull_request` (github.sha
+      # would be the ephemeral merge commit there); the triggering commit for workflow_call/dispatch.
+      BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.BUILT_SHA }}
 
       - name: Require the Depot project variable
         env:
@@ -68,7 +81,7 @@ jobs:
           CLI_VERSION: ${{ inputs.cli_version }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          short="${GITHUB_SHA::12}"
+          short="${BUILT_SHA::12}"
           tags="${IMAGE}:sha-${short}"
           tag_release="false"
           if [ "$GITHUB_REF" = "refs/heads/main" ] && [ -n "$CLI_VERSION" ]; then
@@ -76,6 +89,7 @@ jobs:
             [ -n "$RELEASE_TAG" ] && tag_release="true"
           fi
           {
+            echo "built_sha=$BUILT_SHA"
             echo "short=$short"
             echo "tag_release=$tag_release"
             echo "version_label=${CLI_VERSION:-sha-$short}"
@@ -112,7 +126,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.built_sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version_label }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}

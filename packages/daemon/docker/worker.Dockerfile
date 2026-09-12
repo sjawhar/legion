@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built on Depot by .github/workflows/worker-image.yaml (called from
-# release.yaml after `cli`, on a branch push touching this file, or dispatched post-merge). Never build
-# it on a workstation — no `docker build`, `docker buildx`, or `docker compose build` (Sami, 2026-09-12).
+# release.yaml after `cli`, on every head of a pull request against main that touches the image files, or
+# dispatched post-merge). Never build it on a workstation — no `docker build`, `docker buildx`, or
+# `docker compose build` (Sami, 2026-09-12).
 #
 # Contents: pinned Bun; the `legion` CLI compiled from this checkout (one binary: legion, worker-shim,
 # credential, gh, handoff, probe-image); the pinned OMP fork build the daemon's default
