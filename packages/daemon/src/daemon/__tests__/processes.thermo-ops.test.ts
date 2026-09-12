@@ -144,7 +144,7 @@ it("reconciles only stale windows owned by this daemon", async () => {
         exitCode: 0,
       };
     });
-    state.controllerLocator = { tmuxSession: "legion-omp", tmuxWindowId: "@42" };
+    state.controllerLocator = { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@42" };
     await processes.reconcileTmuxWindows();
 
     expect(commands.filter((command) => command[3] === "kill-window")).toEqual([

@@ -6,7 +6,7 @@
 // probe behind `probeAlive`.
 import { describe, expect, it } from "bun:test";
 import type { IssueKey, LegionRole } from "@legion/contracts";
-import type { WorkerLocator } from "../legion-state";
+import type { TmuxLocator } from "../runtime";
 import {
   type WatchedClaim,
   WorkerBootWatchdog,
@@ -18,7 +18,8 @@ const root = "sjawhar/legion#1" as IssueKey;
 const child = "sjawhar/legion#2" as IssueKey;
 const role: LegionRole = "implementer";
 const token = "legion-omp-sjawhar__legion-2-implementer";
-const locator: WorkerLocator = {
+const locator: TmuxLocator = {
+  runtime: "tmux",
   tmuxSession: "legion-omp",
   tmuxWindowId: "@42",
   tmuxPaneId: "%7",

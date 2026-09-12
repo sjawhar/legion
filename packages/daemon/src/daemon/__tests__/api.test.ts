@@ -75,7 +75,7 @@ describe("Legion HTTP API", () => {
     state.trees[root] = {
       root,
       generation: 3,
-      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@1" },
+      locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@1" },
       status: "queued",
       launchFailures: 0,
     };
@@ -641,6 +641,7 @@ describe("Legion HTTP API", () => {
     state.issues[root].lastAppliedSeq = 7;
     state.trees[root].readyConfirmedAt = now;
     state.trees[root].locator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@1",
       tmuxPaneId: "%1",
@@ -648,6 +649,7 @@ describe("Legion HTTP API", () => {
       ompSessionFile: "/tmp/root.jsonl",
     };
     state.controllerLocator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
@@ -671,6 +673,7 @@ describe("Legion HTTP API", () => {
       resumeSessionFile: "/tmp/resume.jsonl",
       expectedSessionId: "ses_implementer",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@2",
         tmuxPaneId: "%2",
@@ -729,7 +732,11 @@ describe("Legion HTTP API", () => {
         sessionId: "ses_implementer",
         readyConfirmedAt: now,
         launchFailures: 1,
-        locator: { tmuxSession: "legion-omp", tmuxWindowId: "@2", tmuxPaneId: "%2" },
+        locator: {
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@2",
+          tmuxPaneId: "%2",
+        },
       },
     });
     expect(body.controllerPendingNotices).toBe(1);
@@ -821,7 +828,7 @@ describe("Legion HTTP API", () => {
       status: "in_progress",
       children: [],
     };
-    otherTree.locator = { tmuxSession: "legion-omp", tmuxWindowId: "@9" };
+    otherTree.locator = { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@9" };
 
     const rootBootToken = await api?.mintBootToken(root, 3);
     const otherBootToken = await api?.mintBootToken(otherRoot, 1);
@@ -851,6 +858,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1225,6 +1233,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1266,6 +1275,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1510,6 +1520,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 3,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@1",
         tmuxPaneId: "%1",
@@ -1609,6 +1620,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1667,6 +1679,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1722,6 +1735,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1753,6 +1767,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1794,6 +1809,7 @@ describe("Legion HTTP API", () => {
       generation: 1,
       launchFailures: 2,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1839,6 +1855,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1864,6 +1881,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1897,6 +1915,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1922,6 +1941,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1948,6 +1968,7 @@ describe("Legion HTTP API", () => {
       sessionId: "ses_original",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -1988,6 +2009,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2059,6 +2081,7 @@ describe("Legion HTTP API", () => {
       generation: 1,
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2111,6 +2134,7 @@ describe("Legion HTTP API", () => {
       generation: 1,
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2157,6 +2181,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2227,6 +2252,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2338,6 +2364,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2394,6 +2421,7 @@ describe("Legion HTTP API", () => {
       role: "implementer",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@43",
         tmuxPaneId: "%2",
@@ -2453,6 +2481,7 @@ describe("Legion HTTP API", () => {
       role: "reviewer",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2514,6 +2543,7 @@ describe("Legion HTTP API", () => {
       role: "reviewer",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2568,6 +2598,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2620,6 +2651,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2661,6 +2693,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2710,6 +2743,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2759,6 +2793,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2826,6 +2861,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2875,6 +2911,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -2934,6 +2971,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",

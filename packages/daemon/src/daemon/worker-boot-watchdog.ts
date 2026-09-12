@@ -1,5 +1,5 @@
 import type { IssueKey, LegionRole } from "@legion/contracts";
-import type { WorkerLocator } from "./legion-state";
+import type { TmuxLocator } from "./runtime";
 import type { TmuxServer } from "./tmux";
 import * as tmux from "./tmux";
 import { probeWorkerSocket, type WorkerRpcClient } from "./worker-rpc";
@@ -9,6 +9,15 @@ import { probeWorkerSocket, type WorkerRpcClient } from "./worker-rpc";
  * `WORKER_RETIREMENT_POLL_INTERVAL_MS`, which bounds a different wait (a retiring pane's own
  * exit grace period). */
 const BOOT_WATCHDOG_POLL_INTERVAL_MS = 100;
+
+/** A tmux locator's shim socket. Every locator this daemon writes carries one; a record without
+ * it predates the shim and cannot be reached. */
+function shimSocket(locator: TmuxLocator): string {
+  if (!locator.socketPath) {
+    throw new Error(`tmux locator ${locator.tmuxWindowId} has no shim socket`);
+  }
+  return locator.socketPath;
+}
 
 /** A worker claim's fields the watchdog needs to decide whether a still-armed watch is stale
  * (superseded by a later launch, or since confirmed) — never the whole `WorkerRoleClaim`. */
@@ -51,7 +60,7 @@ export interface WorkerBootWatchdogDeps {
    * escalates at the threshold. Owned by `ProcessManager` — see its own doc comment. */
   retireUnconfirmedBoot(
     token: string,
-    locator: WorkerLocator,
+    locator: TmuxLocator,
     generation: number | undefined,
     retry: { treeKey: IssueKey; issue: IssueKey; role: LegionRole }
   ): Promise<void>;
@@ -173,13 +182,13 @@ export class WorkerBootWatchdog {
    * missed an observation interval is merely slow (never evicted for that alone) or genuinely
    * dead (no pane, no socket).
    */
-  private async probeAlive(token: string, locator: WorkerLocator): Promise<boolean> {
+  private async probeAlive(token: string, locator: TmuxLocator): Promise<boolean> {
     const target = locator.tmuxPaneId ?? locator.tmuxWindowId;
     const pid = await tmux.panePid(this.deps.tmux, target);
     if (pid !== undefined && (await this.deps.isOmpPane(pid))) return true;
     const probe = await probeWorkerSocket(
       (socketPath) => this.deps.workerClient(token, socketPath),
-      locator.socketPath,
+      shimSocket(locator),
       this.deps.workerRpcTimeoutMs()
     );
     if (!probe.client) return false;
@@ -197,7 +206,7 @@ export class WorkerBootWatchdog {
     issue: IssueKey,
     role: LegionRole,
     token: string,
-    locator: WorkerLocator,
+    locator: TmuxLocator,
     generation: number
   ): void {
     if (this.disposed) return;
@@ -233,7 +242,7 @@ export class WorkerBootWatchdog {
       ) {
         attempts += 1;
         try {
-          client = await this.deps.workerClient(token, locator.socketPath);
+          client = await this.deps.workerClient(token, shimSocket(locator));
         } catch {
           await this.cancelableSleep(BOOT_WATCHDOG_POLL_INTERVAL_MS, controller.signal).promise;
         }

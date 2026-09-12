@@ -541,6 +541,7 @@ describe("startDaemon", () => {
       root: restoredIssue,
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@41",
         tmuxPaneId: "%1",

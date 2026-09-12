@@ -3,6 +3,7 @@ import path from "node:path";
 import { assertLegionProjectToken, type IssueKey, isLegionProjectToken } from "@legion/contracts";
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
+import type { TmuxLocator } from "./runtime";
 
 /** Which read last set a fence's timestamp: a real GitHub webhook, or the daemon's own resync (board GraphQL/CI-status) read. At an identical clock a resync read is GitHub's authoritative source of truth and wins a tie against a disagreeing webhook observation. */
 export type UpdateSource = "webhook" | "resync";
@@ -58,18 +59,10 @@ export interface IssueNode {
   lastAppliedSeq?: number;
 }
 
-export interface TmuxWindowLocator {
-  tmuxSession: string;
-  tmuxWindowId: string;
-  tmuxPaneId?: string;
-  socketPath?: string;
-  ompSessionFile?: string;
-}
-
 export interface TreeState {
   root: IssueKey;
   generation: number;
-  locator?: TmuxWindowLocator;
+  locator?: TmuxLocator;
   status: "queued" | "active" | "lingering" | "dead" | "launch-failed" | "closed";
   lingerUntil?: string;
   launchFailures: number;
@@ -107,14 +100,6 @@ export interface PrState {
   reviewDecision?: "approved" | "changes_requested";
 }
 
-export interface WorkerLocator {
-  tmuxSession: string;
-  tmuxWindowId: string;
-  tmuxPaneId: string;
-  socketPath: string;
-  ompSessionFile?: string;
-}
-
 export interface WorkerRoleClaim {
   issue: IssueKey;
   role: string;
@@ -123,7 +108,7 @@ export interface WorkerRoleClaim {
    * `sessionId` is intentionally established earlier by `/worker/started` for capability auth. */
   readyConfirmedAt?: number;
   agentId?: string;
-  locator?: WorkerLocator;
+  locator?: TmuxLocator;
   generation?: number;
   pendingAssignment?: string;
   launchFailures?: number;
@@ -165,14 +150,11 @@ export interface ControllerPendingNotice {
 }
 
 export interface LegionState {
-  version: 23;
+  version: 24;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
-  controllerLocator?: Pick<
-    TmuxWindowLocator,
-    "tmuxSession" | "tmuxWindowId" | "tmuxPaneId" | "socketPath"
-  >;
+  controllerLocator?: TmuxLocator;
   roles: Record<string, RoleClaim>;
   spawnCapabilities: Record<string, SpawnCapability>;
   prs: Record<string, PrState>;
@@ -229,20 +211,22 @@ const IssueNodeSchema = z
   })
   .strict();
 
+const TmuxLocatorSchema = z
+  .object({
+    runtime: z.literal("tmux"),
+    tmuxSession: z.string(),
+    tmuxWindowId: z.string(),
+    tmuxPaneId: z.string().optional(),
+    socketPath: z.string().optional(),
+    ompSessionFile: z.string().optional(),
+  })
+  .strict();
+
 const TreeStateSchema = z
   .object({
     root: IssueKeySchema,
     generation: z.number().int().nonnegative(),
-    locator: z
-      .object({
-        tmuxSession: z.string(),
-        tmuxWindowId: z.string(),
-        tmuxPaneId: z.string().optional(),
-        socketPath: z.string().optional(),
-        ompSessionFile: z.string().optional(),
-      })
-      .strict()
-      .optional(),
+    locator: TmuxLocatorSchema.optional(),
     status: z.enum(["queued", "active", "lingering", "dead", "launch-failed", "closed"]),
     lingerUntil: z.string().optional(),
     launchFailures: z.number().int().nonnegative(),
@@ -282,15 +266,6 @@ const PrStateSchema = z
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
   })
   .strict();
-const WorkerLocatorSchema = z
-  .object({
-    tmuxSession: z.string(),
-    tmuxWindowId: z.string(),
-    tmuxPaneId: z.string(),
-    socketPath: z.string(),
-    ompSessionFile: z.string().optional(),
-  })
-  .strict();
 const WorkerRoleClaimSchema = z
   .object({
     issue: IssueKeySchema,
@@ -298,7 +273,7 @@ const WorkerRoleClaimSchema = z
     sessionId: z.string().optional(),
     readyConfirmedAt: z.number().int().nonnegative().optional(),
     agentId: z.string().optional(),
-    locator: WorkerLocatorSchema.optional(),
+    locator: TmuxLocatorSchema.optional(),
     generation: z.number().int().nonnegative().optional(),
     pendingAssignment: z.string().optional(),
     launchFailures: z.number().int().nonnegative().optional(),
@@ -337,21 +312,13 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(23),
+    version: z.literal(24),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
     issues: z.record(IssueKeySchema, IssueNodeSchema),
     trees: z.record(IssueKeySchema, TreeStateSchema),
-    controllerLocator: z
-      .object({
-        tmuxSession: z.string(),
-        tmuxWindowId: z.string(),
-        tmuxPaneId: z.string().optional(),
-        socketPath: z.string().optional(),
-      })
-      .strict()
-      .optional(),
+    controllerLocator: TmuxLocatorSchema.optional(),
     roles: z.record(z.string().regex(ENVOY_ROLE_TOKEN_PATTERN), RoleClaimSchema),
     spawnCapabilities: z.record(z.string().regex(/^[a-f0-9]{64}$/), SpawnCapabilitySchema),
     prs: z.record(z.string(), PrStateSchema),
@@ -405,7 +372,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 23,
+    version: 24,
     project,
     issues: {},
     trees: {},
@@ -832,6 +799,41 @@ function migrateV22State(state: unknown): unknown {
   return { ...rest, version: 23 };
 }
 
+/** v23 -> v24: every persisted locator predates the runtime boundary and is a tmux one; tags
+ * `TreeState.locator`, each `WorkerRoleClaim.locator`, and `controllerLocator` with
+ * `runtime: "tmux"` so the discriminated `Locator` union can be strict. */
+function migrateV23State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 23) return state;
+  const { trees, roles, controllerLocator, ...rest } = state;
+  const tag = (locator: unknown): unknown =>
+    recordValue(locator) ? { ...locator, runtime: "tmux" } : locator;
+  const migratedTrees = recordValue(trees)
+    ? Object.fromEntries(
+        Object.entries(trees).map(([key, tree]) =>
+          recordValue(tree) && tree.locator !== undefined
+            ? [key, { ...tree, locator: tag(tree.locator) }]
+            : [key, tree]
+        )
+      )
+    : trees;
+  const migratedRoles = recordValue(roles)
+    ? Object.fromEntries(
+        Object.entries(roles).map(([key, claim]) =>
+          recordValue(claim) && "issue" in claim && claim.locator !== undefined
+            ? [key, { ...claim, locator: tag(claim.locator) }]
+            : [key, claim]
+        )
+      )
+    : roles;
+  return {
+    ...rest,
+    version: 24,
+    trees: migratedTrees,
+    roles: migratedRoles,
+    ...(controllerLocator === undefined ? {} : { controllerLocator: tag(controllerLocator) }),
+  };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -868,13 +870,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     (state) => migrateV20State(state, migratedAt),
     migrateV21State,
     migrateV22State,
+    migrateV23State,
   ];
   const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 23) {
+  if (version !== 24) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

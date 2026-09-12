@@ -255,6 +255,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       generation: 1,
       sessionId: "ses_tester",
       locator: {
+        runtime: "tmux",
         tmuxSession: "fake",
         tmuxWindowId: "@1",
         tmuxPaneId: "%1",
@@ -386,6 +387,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         generation: 1,
         sessionId: "ses_tester",
         locator: {
+          runtime: "tmux",
           tmuxSession: SESSION,
           tmuxWindowId: windowId,
           tmuxPaneId: paneId,
@@ -474,6 +476,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         const rootTree = state.trees[root];
         if (!rootTree) throw new Error("test setup expects the root tree to already be recorded");
         rootTree.locator = {
+          runtime: "tmux",
           tmuxSession: SESSION,
           tmuxWindowId: windowId,
           tmuxPaneId: paneId,

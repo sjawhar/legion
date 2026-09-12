@@ -191,6 +191,7 @@ function tree(state: LegionState, issue: IssueKey = root, generation = 1) {
     root: issue,
     generation,
     locator: {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: "%0",
@@ -857,6 +858,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -1407,6 +1409,7 @@ describe("ProcessManager", () => {
     await processes.spawnRoot(root);
 
     expect(state.trees[root]?.locator).toMatchObject({
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@314",
       tmuxPaneId: "%7",
@@ -1442,6 +1445,7 @@ describe("ProcessManager", () => {
     const state = newLegionState("omp", 1);
     tree(state);
     state.controllerLocator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@43",
     };
@@ -1765,7 +1769,7 @@ describe("ProcessManager", () => {
       expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
       expect(state.trees[root]).toMatchObject({
         status: "active",
-        locator: { tmuxSession: "legion-omp", tmuxWindowId: "@77" },
+        locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@77" },
       });
       expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(`demoted ${root}`));
     } finally {
@@ -1819,7 +1823,7 @@ describe("ProcessManager", () => {
       expect(newWindowCalls).toBe(1);
       expect(state.trees[root]).toMatchObject({
         status: "active",
-        locator: { tmuxSession: "legion-omp", tmuxWindowId: "@77" },
+        locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@77" },
       });
     } finally {
       errorLog.mockRestore();
@@ -2097,7 +2101,7 @@ describe("ProcessManager", () => {
       generation: 1,
       status: "active",
       launchFailures: 0,
-      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@42" },
+      locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@42" },
     });
     expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
   });
@@ -2329,7 +2333,7 @@ describe("ProcessManager", () => {
     expect(state.admission).toEqual({ cap: 1, active: [child], queue: [] });
     expect(state.trees[child]).toMatchObject({
       status: "active",
-      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@99" },
+      locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@99" },
     });
   });
 
@@ -2368,7 +2372,7 @@ describe("ProcessManager", () => {
     expect(state.trees[child]).toMatchObject({
       status: "active",
       launchFailures: 0,
-      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@99" },
+      locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@99" },
     });
     expect(state.admission.active).toEqual([child]);
     expect(state.admission.queue).toEqual([]);
@@ -2393,6 +2397,7 @@ describe("ProcessManager", () => {
       issue: child,
       role: "implementer",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@99",
         tmuxPaneId: "%1",
@@ -2465,6 +2470,7 @@ describe("ProcessManager", () => {
       issue: child,
       role: "implementer",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@99",
         tmuxPaneId: "%1",
@@ -2527,6 +2533,7 @@ describe("ProcessManager", () => {
       issue: child,
       role: "implementer",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@99",
         tmuxPaneId: "%1",
@@ -2537,6 +2544,7 @@ describe("ProcessManager", () => {
       issue: grandchild,
       role: "tester",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@100",
         tmuxPaneId: "%2",
@@ -2588,6 +2596,7 @@ describe("ProcessManager", () => {
     tree(state);
     if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       // No tmuxPaneId.
@@ -2627,6 +2636,7 @@ describe("ProcessManager", () => {
     // stopped: the tree is left lingering (with a fresh retry deadline) for the sweep.
     expect(state.trees[root].status).toBe("lingering");
     expect(state.trees[root].locator).toEqual({
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       socketPath: "/state/workers/architect.sock",
@@ -2941,6 +2951,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -3003,6 +3014,7 @@ describe("ProcessManager", () => {
       role: "implementer",
       sessionId: "ses_implementer",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@99",
         tmuxPaneId: "%1",
@@ -3058,6 +3070,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%2",
@@ -3104,6 +3117,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%2",
@@ -3221,6 +3235,7 @@ describe("ProcessManager", () => {
       generation: 1,
       launchFailures: 2,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%2",
@@ -3714,6 +3729,7 @@ describe("ProcessManager", () => {
 
     expect(commands.filter((command) => command[3] === "new-window")).toHaveLength(1);
     expect(state.controllerLocator).toEqual({
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: "%1",
@@ -3763,6 +3779,7 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     state.controllerLocator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
@@ -3808,6 +3825,7 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     const staleLocator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
@@ -3866,6 +3884,7 @@ describe("ProcessManager", () => {
     expect(killPaneRan).toBe(true);
     expect(commands.some((command) => command[3] === "new-window")).toBe(true);
     expect(managedState.controllerLocator).toEqual({
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@44",
       tmuxPaneId: "%3",
@@ -3877,6 +3896,7 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     const locator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
@@ -3973,6 +3993,7 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     const staleLocator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
@@ -4043,6 +4064,7 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     const locator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
@@ -4842,6 +4864,7 @@ describe("ProcessManager", () => {
       root,
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@41",
         tmuxPaneId: "%1",
@@ -5004,6 +5027,7 @@ describe("ProcessManager", () => {
       root,
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@41",
         tmuxPaneId: "%1",
@@ -5071,7 +5095,12 @@ describe("ProcessManager", () => {
     for (const issue of [confirmedIssue, noLocatorIssue, queuedIssue]) {
       state.issues[issue] = { key: issue, title: issue, status: "todo", children: [] };
     }
-    const locator = { tmuxSession: "legion-omp", tmuxWindowId: "@41", tmuxPaneId: "%1" };
+    const locator = {
+      runtime: "tmux" as const,
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@41",
+      tmuxPaneId: "%1",
+    };
     state.trees[confirmedIssue] = {
       root: confirmedIssue,
       generation: 1,
@@ -5165,6 +5194,7 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     const locator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@controller",
       tmuxPaneId: "%1",
@@ -5332,6 +5362,7 @@ describe("ProcessManager", () => {
     tree(state);
     state.trees[root].locator = {
       ...state.trees[root].locator,
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       socketPath: "/state/workers/sjawhar__legion-42-architect.sock",
@@ -5354,6 +5385,7 @@ describe("ProcessManager", () => {
   it("connects a worker-shim client to the controller's socket when it becomes ready", async () => {
     const state = newLegionState("omp", 1);
     state.controllerLocator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@43",
       tmuxPaneId: "%1",
@@ -5408,6 +5440,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%2",
@@ -5652,6 +5685,7 @@ describe("ProcessManager", () => {
     expect(claim.generation).toBe(1);
     expect(claim.pendingAssignment).toBe("verify #41");
     expect(claim.locator).toMatchObject({
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@99",
       tmuxPaneId: "%201",
@@ -5861,6 +5895,7 @@ describe("ProcessManager", () => {
       root,
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%0",
@@ -6096,6 +6131,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -6177,6 +6213,7 @@ describe("ProcessManager", () => {
       role: "planner",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -6188,6 +6225,7 @@ describe("ProcessManager", () => {
       role: "implementer",
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%2",
@@ -6261,6 +6299,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -6352,6 +6391,7 @@ describe("ProcessManager", () => {
       // /worker/ready has not yet durably confirmed the boot. This claim must be queued exactly
       // like the sessionId-less booting case, never probed or prompted as if already live.
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -6402,6 +6442,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -6467,6 +6508,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_planner",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -6481,6 +6523,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       agentId: "agt_tester",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -6610,6 +6653,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -6696,6 +6740,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -6800,6 +6845,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -6878,6 +6924,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       generation: 1,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -7042,6 +7089,7 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_planner",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -7055,6 +7103,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -7149,6 +7198,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -7255,6 +7305,7 @@ describe("ProcessManager", () => {
       generation: 1,
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -7323,6 +7374,7 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_planner",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -7376,6 +7428,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -7420,6 +7473,7 @@ describe("ProcessManager", () => {
     const state = newLegionState("omp", 1);
     const token = roleToken("omp", root, "tester");
     const staleLocator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: "%7",
@@ -7453,6 +7507,7 @@ describe("ProcessManager", () => {
     // While the stale reconnect attempt is still in flight, a fresh launch replaces this
     // token's claim with a genuinely newer locator (a different pane).
     const freshLocator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: "%99",
@@ -7633,6 +7688,7 @@ describe("ProcessManager", () => {
       issue: child,
       role: "architect",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@99",
         tmuxPaneId: "%99",
@@ -8174,6 +8230,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8212,6 +8269,7 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8249,6 +8307,7 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8302,6 +8361,7 @@ describe("ProcessManager", () => {
       // confirmation is the only thing that ever resets it (never mere registration).
       launchFailures: 2,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8336,6 +8396,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       launchFailures: 2,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8365,6 +8426,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8407,6 +8469,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       pendingAssignment: "verify #55",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8438,6 +8501,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8478,6 +8542,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "planner",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -8488,6 +8553,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%2",
@@ -8521,6 +8587,7 @@ describe("ProcessManager", () => {
       role: "planner",
       sessionId: "ses_planner",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%1",
@@ -8564,6 +8631,7 @@ describe("ProcessManager", () => {
       sessionId: "ses_tester",
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8610,6 +8678,7 @@ describe("ProcessManager", () => {
       role: "tester",
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8647,6 +8716,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8745,6 +8815,7 @@ describe("ProcessManager", () => {
       role: "tester",
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -8788,12 +8859,14 @@ describe("ProcessManager", () => {
     const state = newLegionState("omp", 1);
     const token = roleToken("omp", root, "tester");
     const staleLocator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: "%7",
       socketPath: "/state/workers/tester.sock",
     };
     const freshLocator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@50",
       tmuxPaneId: "%9",
@@ -8856,6 +8929,7 @@ describe("ProcessManager", () => {
       generation: 1,
       pendingAssignment: "implement #43",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%9",
@@ -8940,6 +9014,7 @@ describe("ProcessManager", () => {
       generation: 1,
       pendingAssignment: "implement #43",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%9",
@@ -9012,6 +9087,7 @@ describe("ProcessManager", () => {
       generation: 1,
       launchFailures: 0,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%9",
@@ -9106,6 +9182,7 @@ describe("ProcessManager", () => {
       role: "implementer",
       generation: 3,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%9",
@@ -9188,6 +9265,7 @@ describe("ProcessManager", () => {
       role: "implementer",
       generation: 3,
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%9",
@@ -9256,6 +9334,7 @@ describe("ProcessManager", () => {
   it("swallows a controller shim connect failure on ready, a best-effort reconnect attempt never blocking markControllerReady", async () => {
     const state = newLegionState("omp", 1);
     state.controllerLocator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@43",
       tmuxPaneId: "%1",
@@ -9296,6 +9375,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -9352,6 +9432,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -9413,6 +9494,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -9456,6 +9538,7 @@ describe("ProcessManager", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       pendingAssignment: "verify #41",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -9504,6 +9587,7 @@ describe("ProcessManager", () => {
       // its durable confirmation write, so this claim is neither stale (a real session and a
       // live client) nor safely promotable (admission cannot yet trust its readiness).
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
@@ -9684,6 +9768,7 @@ describe("ProcessManager", () => {
     if (!rootTree) throw new Error("test setup expects tree() to have recorded a root tree");
     rootTree.locator = rootLocatorWithoutPaneId;
     state.controllerLocator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@43",
       socketPath: "/state/controller.sock",
@@ -9693,6 +9778,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "planner",
       locator: {
+        runtime: "tmux",
         tmuxSession: "legion-omp",
         tmuxWindowId: "@44",
         tmuxPaneId: "%44",
@@ -9757,6 +9843,7 @@ describe("ProcessManager", () => {
     if (!rootTree) throw new Error("test setup expects tree() to have recorded a root tree");
     rootTree.locator = rootLocatorWithoutPaneId;
     state.controllerLocator = {
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@43",
       socketPath: "/state/controller.sock",
@@ -9823,7 +9910,12 @@ describe("ProcessManager", () => {
       status: "active",
       launchFailures: 0,
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@43", tmuxPaneId: "%1" },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@43",
+        tmuxPaneId: "%1",
+      },
     };
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
 

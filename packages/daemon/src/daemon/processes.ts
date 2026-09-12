@@ -20,8 +20,9 @@ import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
 import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
-import type { LegionState, TreeState, WorkerLocator, WorkerRoleClaim } from "./legion-state";
+import type { LegionState, TreeState, WorkerRoleClaim } from "./legion-state";
 import { StopFailed, TreeClosingError } from "./process-errors";
+import type { TmuxLocator } from "./runtime";
 import {
   DISPATCH_TOKEN_SECRET,
   pruneSecretFiles,
@@ -162,6 +163,15 @@ export function addressingFragment(
     `\`${architectTopic}\`; a sibling role on your issue is your topic with the trailing ` +
     "`-<role>` replaced."
   );
+}
+
+/** A tmux locator's shim socket. Every locator this daemon writes carries one; a record without
+ * it predates the shim and cannot be reached. */
+function shimSocket(locator: TmuxLocator): string {
+  if (!locator.socketPath) {
+    throw new Error(`tmux locator ${locator.tmuxWindowId} has no shim socket`);
+  }
+  return locator.socketPath;
 }
 
 function shellPath(value: string): string {
@@ -535,7 +545,7 @@ export class ProcessManager {
             await this.persist();
             return { status: "resumed", roleToken: token };
           }
-          const socketPath = claim.locator.socketPath;
+          const socketPath = shimSocket(claim.locator);
           const probe = await probeWorkerSocket(
             (path) => this.workerClient(token, path),
             socketPath,
@@ -722,7 +732,7 @@ export class ProcessManager {
         return;
       }
       const task = claim.pendingAssignment;
-      const client = await this.workerClient(token, claim.locator.socketPath);
+      const client = await this.workerClient(token, shimSocket(claim.locator));
       if (task) {
         await this.promptExistingWorker(client, token, issue, role, sessionId, task, () => {
           claim.readyConfirmedAt = this.deps.now();
@@ -755,7 +765,7 @@ export class ProcessManager {
    * its turn, a newer launch for the same token may already have replaced it (or the claim may
    * be gone entirely, e.g. `closeTree`), and this must never delete a newer launch's locator or
    * retire a pane that isn't the one it was told to. */
-  private async markWorkerDeadLocked(token: string, locator: WorkerLocator): Promise<void> {
+  private async markWorkerDeadLocked(token: string, locator: TmuxLocator): Promise<void> {
     const current = this.deps.state.roles[token];
     if (!current || !("issue" in current) || current.locator?.tmuxPaneId !== locator.tmuxPaneId) {
       return;
@@ -770,7 +780,7 @@ export class ProcessManager {
   /** Acquires this token's `roleLaunchQueue` critical section (see `markWorkerDeadLocked` for
    * the actual logic) then re-checks the running-worker queue, since clearing the locator may
    * have freed the slot this worker was occupying. */
-  private async markWorkerDead(token: string, locator: WorkerLocator): Promise<void> {
+  private async markWorkerDead(token: string, locator: TmuxLocator): Promise<void> {
     await this.workerAdmission.mutateClaim(token, () => this.markWorkerDeadLocked(token, locator));
     this.workerAdmission.promoteWorkerQueue();
   }
@@ -788,7 +798,7 @@ export class ProcessManager {
    * does not survive a restart, so without this it would never be probed again. */
   async reconnectWorkers(): Promise<void> {
     const claims = Object.entries(this.deps.state.roles).filter(
-      (entry): entry is [string, WorkerRoleClaim & { locator: WorkerLocator }] =>
+      (entry): entry is [string, WorkerRoleClaim & { locator: TmuxLocator }] =>
         "issue" in entry[1] && entry[1].locator !== undefined
     );
     await Promise.all(
@@ -809,7 +819,7 @@ export class ProcessManager {
         }
         const probe = await probeWorkerSocket(
           (socketPath) => this.workerClient(token, socketPath),
-          probedLocator.socketPath,
+          shimSocket(probedLocator),
           this.workerRpcTimeoutMs
         );
         if (!probe.client) {
@@ -931,7 +941,7 @@ export class ProcessManager {
    */
   private async retireUnconfirmedBoot(
     token: string,
-    locator: WorkerLocator,
+    locator: TmuxLocator,
     generation: number | undefined,
     retry?: { treeKey: IssueKey; issue: IssueKey; role: LegionRole }
   ): Promise<void> {
@@ -1111,7 +1121,7 @@ export class ProcessManager {
     for (;;) {
       await Promise.allSettled([...(this.inFlightLaunches.get(treeKey) ?? [])]);
       const batch = Object.entries(this.deps.state.roles).filter(
-        (entry): entry is [string, WorkerRoleClaim & { locator: WorkerLocator }] =>
+        (entry): entry is [string, WorkerRoleClaim & { locator: TmuxLocator }] =>
           "issue" in entry[1] &&
           this.rootForIssue(entry[1].issue) === treeKey &&
           entry[1].locator !== undefined &&
@@ -2336,7 +2346,7 @@ export class ProcessManager {
     this.reconnectAttempted.add(attemptKey);
     const probe = await probeWorkerSocket(
       (socketPath) => this.workerClient(token, socketPath),
-      locator.socketPath,
+      shimSocket(locator),
       this.workerRpcTimeoutMs
     );
     if (!probe.client) {
@@ -2389,7 +2399,7 @@ export class ProcessManager {
     bootToken: string,
     resumeSessionFile: string | undefined,
     logVerb: string
-  ): Promise<WorkerLocator> {
+  ): Promise<TmuxLocator> {
     await (this.deps.statPrompt ?? stat)(promptPath);
     const resumeArgument = await this.computeResumeArgument(issue, resumeSessionFile, logVerb);
     const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
@@ -2426,7 +2436,7 @@ export class ProcessManager {
       }
     );
 
-    return { tmuxSession: session, tmuxWindowId, tmuxPaneId, socketPath };
+    return { runtime: "tmux", tmuxSession: session, tmuxWindowId, tmuxPaneId, socketPath };
   }
 
   private async launchWorker(
@@ -2504,7 +2514,7 @@ export class ProcessManager {
       // resolving to `treeKey`, or the tree's own status already `"closed"` -- is checked
       // alongside `closingTrees` below: any one of the three means nothing durable should be
       // written for this launch.
-      const freshLocator: WorkerLocator = {
+      const freshLocator: TmuxLocator = {
         ...locator,
         ...(resumeSessionFile ? { ompSessionFile: resumeSessionFile } : {}),
       };
@@ -2649,6 +2659,7 @@ export class ProcessManager {
         session
       );
       this.deps.state.controllerLocator = {
+        runtime: "tmux",
         tmuxSession: session,
         tmuxWindowId: window.windowId,
         tmuxPaneId: window.paneId,
@@ -2845,7 +2856,7 @@ export class ProcessManager {
    * than a full tree shutdown when called for a single stale worker, not a whole tree. May throw
    * `StopFailed`; callers never treat a locator as safe to clear or a replacement as safe to
    * launch when it does. */
-  private async retireWorkerLocator(token: string, locator: WorkerLocator): Promise<void> {
+  private async retireWorkerLocator(token: string, locator: TmuxLocator): Promise<void> {
     this.cancelBootWatchdog(token);
     const claim = this.deps.state.roles[token];
     this.revokeRoleClaim(claim && "issue" in claim ? claim : undefined);
