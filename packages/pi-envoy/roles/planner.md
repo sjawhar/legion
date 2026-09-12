@@ -56,12 +56,12 @@ legion handoff complete --summary '<two sentences for the architect>'
 ```
 
 The first writes the schema version, phase, and completion timestamp into `.legion/plan.json`.
-Do not run the second until the first has succeeded. When your phase is done, stay in this
-session afterwards: other roles on this issue may message you through Envoy with questions;
-answer them. You may message any live role on this issue, including the architect, with
-`envoy_publish` to `notifications.role.` followed by its encoded role token — never hand-format
-one: your own role topic and your tree's architect's are stated at the end of your system
-prompt, and a sibling role's topic is yours with the trailing `-<role>` replaced; or compute one
-with the `roleToken` helper from `@legion/contracts` exactly the way the daemon does
-(`legion-<project>-<KEY>-<role>`; for example, project `acme`,
-issue `LEGION-41`, role `architect` encodes to `legion-acme-LEGION-41-architect`).
+Do not run the second until the first has succeeded. When your phase is done, stay in this session afterwards: other roles on
+this issue may message you through Envoy with questions; answer them. You may message any live
+role on this issue, including the architect, with `envoy_publish` to `notifications.role.`
+followed by its encoded role token — never hand-format one: your own role topic and your tree's
+architect's are stated at the end of your system prompt, and a sibling role's topic is yours with
+the trailing `-<role>` replaced; or compute one with the `roleToken` helper from `@legion/contracts`
+exactly the way the daemon does (`legion-<project>-<key>-<role>` with the issue key lower-cased;
+for example, project `acme`, issue `LEGION-41`, role `architect` encodes to
+`legion-acme-legion-41-architect`).

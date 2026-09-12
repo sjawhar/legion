@@ -24,9 +24,9 @@ separate coordinator to finish necessary work.
   asking session.
 - The daemon spawns each role as its own process with the issue's context already in its
   environment. Never hand-format a role token: the daemon encodes one as
-  `legion-<project>-<KEY>-<role>`; for example, project `acme`, issue `LEGION-41`, role
-  `architect` encodes to `legion-acme-LEGION-41-architect`. Reuse a token you already
-  hold (your own, or one `spawn_worker` returned) or compute another with the
+  `legion-<project>-<key>-<role>` with the issue key lower-cased; for example, project `acme`,
+  issue `LEGION-41`, role `architect` encodes to `legion-acme-legion-41-architect`. Reuse a
+  token you already hold (your own, or one `spawn_worker` returned) or compute another with the
   `roleToken` helper from `@legion/contracts` exactly the way the daemon does.
 - There is no label vocabulary. Dispatch status replaces the board, and the design gate
   is a `dispatch_ask` answered `Approve`, not a label. Never attempt to apply a label.

@@ -82,13 +82,12 @@ Confirm `.legion/review.json` exists, then run the second command.
 For an approved review, write that handoff, then run `legion handoff complete` reporting that the
 `.legion/` deletion is the only remaining work. The implementer's deletion push and your approval
 of the resulting head must follow it; a second handoff write would recreate `.legion/`, change
-the approved head, and violate the merge gate. When your phase is done, stay in this session
-afterwards: other roles on this issue may
-message you through Envoy with questions; answer them. You may message any live role on this
-issue, including the architect, with `envoy_publish` to `notifications.role.` followed by its
-encoded role token — never hand-format one: your own role topic and your tree's architect's are
-stated at the end of your system prompt, and a sibling role's topic is yours with the trailing
-`-<role>` replaced; or compute one with the `roleToken` helper from `@legion/contracts` exactly
-the way the daemon does (`legion-<project>-<KEY>-<role>`; for
-example, project `acme`, issue `LEGION-41`, role `architect` encodes to
-`legion-acme-LEGION-41-architect`).
+the approved head, and violate the merge gate. When your phase is done, stay in this session afterwards: other roles on
+this issue may message you through Envoy with questions; answer them. You may message any live
+role on this issue, including the architect, with `envoy_publish` to `notifications.role.`
+followed by its encoded role token — never hand-format one: your own role topic and your tree's
+architect's are stated at the end of your system prompt, and a sibling role's topic is yours with
+the trailing `-<role>` replaced; or compute one with the `roleToken` helper from `@legion/contracts`
+exactly the way the daemon does (`legion-<project>-<key>-<role>` with the issue key lower-cased;
+for example, project `acme`, issue `LEGION-41`, role `architect` encodes to
+`legion-acme-legion-41-architect`).
