@@ -858,11 +858,17 @@ export function resolveDaemonConfig(
     port.value + 1
   );
   if (!Number.isSafeInteger(workerStreamPort.value) || workerStreamPort.value > 65535) {
-    throw new Error(
-      workerStreamPort.source === "default"
-        ? `worker_stream_port defaults to port + 1 (${workerStreamPort.value}), which is not a valid TCP port; set worker_stream_port`
-        : "LEGION_WORKER_STREAM_PORT must be a valid TCP port"
-    );
+    if (workerStreamPort.source === "default") {
+      throw new Error(
+        `worker_stream_port defaults to port + 1 (${workerStreamPort.value}), which is not a valid TCP port; set worker_stream_port`
+      );
+    }
+    const settingBySource: Record<Exclude<ValueSource, "default">, string> = {
+      cli: "workerStreamPort override",
+      config: "worker_stream_port",
+      env: "LEGION_WORKER_STREAM_PORT",
+    };
+    throw new Error(`${settingBySource[workerStreamPort.source]} must be a valid TCP port`);
   }
   if (workerStreamPort.value === port.value) {
     throw new Error(`worker_stream_port must differ from port (both ${port.value})`);

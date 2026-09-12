@@ -515,6 +515,12 @@ describe("daemon config", () => {
     ).toThrow("LEGION_WORKER_STREAM_PORT must be a valid TCP port");
     expect(() =>
       resolveDaemonConfig({
+        env: requiredEnv,
+        cliOverrides: { ...cliOverrides, workerStreamPort: 70000 },
+      })
+    ).toThrow("workerStreamPort override must be a valid TCP port");
+    expect(() =>
+      resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_DAEMON_PORT: "14000", LEGION_WORKER_STREAM_PORT: "14000" },
         cliOverrides,
       })
