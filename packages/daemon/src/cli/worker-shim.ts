@@ -144,17 +144,12 @@ function createShimBridge(log: (line: string) => void): ShimBridge {
   return {
     attach(spawned) {
       child = spawned;
+      // The same reader the socket sides use: a UTF-8 character split across two stdout reads
+      // is reassembled, and an empty line never spends a backlog slot.
+      const reader = createLineReader(forwardToSocket);
       void (async () => {
-        const decoder = new TextDecoder();
-        let buffer = "";
         for await (const chunk of spawned.stdout as unknown as AsyncIterable<Uint8Array>) {
-          buffer += decoder.decode(chunk, { stream: true });
-          let index = buffer.indexOf("\n");
-          while (index !== -1) {
-            forwardToSocket(buffer.slice(0, index));
-            buffer = buffer.slice(index + 1);
-            index = buffer.indexOf("\n");
-          }
+          reader.push(chunk);
         }
       })();
     },
