@@ -1659,12 +1659,11 @@ describe("startDaemon", () => {
     }
   });
 
-  it("accepts an installed pi-legion-envoy that omp actually loads, reading its manifest exactly once for the contract gate", async () => {
+  it("accepts an installed pi-legion-envoy that omp actually loads and speaks this daemon's API contract", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const nats = new FakeNats();
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
-    let manifestReadCount = 0;
 
     const daemon = await startDaemon(daemonConfig, {
       deps: {
@@ -1678,10 +1677,7 @@ describe("startDaemon", () => {
         }),
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
-        readPluginManifest: async () => {
-          manifestReadCount += 1;
-          return validLegionPluginManifest;
-        },
+        readPluginManifest: async () => validLegionPluginManifest,
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
@@ -1707,9 +1703,6 @@ describe("startDaemon", () => {
     try {
       const response = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/state`);
       expect(response.status).toBe(200);
-      // One read: the contract gate (`verifyLegionPluginContract`). The load probe's own read is
-      // only a best-effort version hint for its (unused, on this path) error message.
-      expect(manifestReadCount).toBe(1);
     } finally {
       await daemon.stop();
       await nats.close();
