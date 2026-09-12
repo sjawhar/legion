@@ -220,3 +220,13 @@ func TestEditAskValidatesChangedFields(t *testing.T) {
 		}
 	}
 }
+
+func TestEditAskRejectsMalformedID(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/not-a-uuid", map[string]string{
+		"question": "A corrected question",
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"ASK_ID_INPUT"`) {
+		t.Fatalf("malformed ask id: status=%d body=%s", response.Code, response.Body.String())
+	}
+}

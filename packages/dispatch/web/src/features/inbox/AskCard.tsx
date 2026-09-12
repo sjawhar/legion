@@ -48,9 +48,12 @@ import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskOptionList } from "./AskOptionList";
 import { AskThread, type AskThreadQuery } from "./AskThread";
+import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
 const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
+const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
+  api.createComment(issueKey, input);
 
 export interface AskCardProps {
   artifactSlug?: string;
@@ -305,6 +308,7 @@ export function AskCard({
   const [selected, setSelected] = useState<string[]>([]);
   const [otherSelected, setOtherSelected] = useState(false);
   const [answerText, setAnswerText] = useState("");
+  const [questionChoice, setQuestionChoice] = useState(false);
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const submitGuard = useSubmitGuard();
   // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
@@ -347,15 +351,50 @@ export function AskCard({
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
+  const clarification = useMutation({
+    mutationFn: (text: string) => {
+      if (ask.issue_key === null) {
+        if (ask.artifact_id === null || ask.artifact_id === undefined) {
+          throw new Error("document ask is missing its artifact id");
+        }
+        return api.createArtifactComment(ask.artifact_id, { ask_id: ask.id, body: text });
+      }
+      return (reply ?? createReply)(ask.issue_key, { ask_id: ask.id, body: text });
+    },
+    onSettled: () => {
+      submitGuard.release();
+    },
+    onSuccess: () => {
+      setAnswerText("");
+      setQuestionChoice(false);
+      void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
+      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+    },
+  });
 
   const hasOptions = ask.options.length > 0;
   const isApproval = ask.kind === "approval";
+  const isSubmitting = mutation.isPending || clarification.isPending;
+  const sendAnswer = (text: string) => {
+    submitGuard.guard(() => {
+      if (isApproval) {
+        mutation.mutate(selected.includes("Request changes") ? { selected, text } : { selected });
+        return;
+      }
+      if (hasOptions) {
+        mutation.mutate(otherSelected ? { selected, text } : { selected });
+        return;
+      }
+      mutation.mutate(text === "" ? { selected } : { selected, text });
+    });
+  };
 
   const selectRealOption = (label: string) => {
+    setQuestionChoice(false);
     if (ask.multiple) {
       setSelected((current) =>
         current.includes(label)
-          ? current.filter((current) => current !== label)
+          ? current.filter((currentLabel) => currentLabel !== label)
           : [...current, label]
       );
       return;
@@ -366,6 +405,7 @@ export function AskCard({
   };
 
   const toggleOther = () => {
+    setQuestionChoice(false);
     if (ask.multiple) {
       setOtherSelected((current) => {
         const next = !current;
@@ -383,17 +423,16 @@ export function AskCard({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = answerText.trim();
-    submitGuard.guard(() => {
-      if (isApproval) {
-        mutation.mutate(selected.includes("Request changes") ? { selected, text } : { selected });
-        return;
-      }
-      if (hasOptions) {
-        mutation.mutate(otherSelected ? { selected, text } : { selected });
-        return;
-      }
-      mutation.mutate(text === "" ? { selected } : { selected, text });
-    });
+    if (!isApproval && hasOptions && otherSelected && isQuestionShapedAnswer(text)) {
+      setQuestionChoice(true);
+      return;
+    }
+    sendAnswer(text);
+  };
+  const sendClarification = () => {
+    const text = answerText.trim();
+    if (text === "") return;
+    submitGuard.guard(() => clarification.mutate(text));
   };
   const canSubmit = isApproval
     ? selected.length > 0 && (!selected.includes("Request changes") || answerText.trim() !== "")
@@ -496,7 +535,7 @@ export function AskCard({
                   >
                     <input
                       checked={checked}
-                      disabled={mutation.isPending}
+                      disabled={isSubmitting}
                       name={`ask-${ask.id}`}
                       onChange={() => selectRealOption(option.label)}
                       type={ask.multiple ? "checkbox" : "radio"}
@@ -520,7 +559,7 @@ export function AskCard({
                 >
                   <input
                     checked={otherSelected}
-                    disabled={mutation.isPending}
+                    disabled={isSubmitting}
                     name={`ask-${ask.id}`}
                     onChange={toggleOther}
                     type={ask.multiple ? "checkbox" : "radio"}
@@ -538,20 +577,52 @@ export function AskCard({
               {isApproval ? "Reason" : "Your answer"}
               <textarea
                 className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
-                disabled={mutation.isPending}
+                disabled={isSubmitting}
                 id={answerFieldId}
-                onChange={(event) => setAnswerText(event.target.value)}
+                onChange={(event) => {
+                  setAnswerText(event.target.value);
+                  setQuestionChoice(false);
+                }}
                 value={answerText}
               />
             </label>
           ) : null}
-          <button
-            className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-            disabled={!canSubmit || mutation.isPending}
-            type="submit"
-          >
-            {mutation.isPending ? "Submitting…" : "Submit answer"}
-          </button>
+          {questionChoice ? (
+            <fieldset aria-label="Question-shaped answer" className="space-y-2">
+              <button
+                className={`min-h-11 w-full rounded-lg border px-3 py-2 text-left text-sm font-semibold ${borderDefault} ${textPrimaryOnSurface} ${cardHoverBorder}`}
+                disabled={isSubmitting}
+                onClick={sendClarification}
+                ref={(node) => node?.focus()}
+                type="button"
+              >
+                This reads like a question — send as clarification (keeps the ask open)
+              </button>
+              <button
+                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+                disabled={isSubmitting}
+                onClick={() => sendAnswer(answerText.trim())}
+                type="button"
+              >
+                Answer with it anyway
+              </button>
+              {clarification.isError ? (
+                <QueryError
+                  message="Could not send your clarification."
+                  onRetry={() => submitGuard.retryLast(clarification)}
+                  retrying={clarification.isPending}
+                />
+              ) : null}
+            </fieldset>
+          ) : (
+            <button
+              className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+              disabled={!canSubmit || isSubmitting}
+              type="submit"
+            >
+              {mutation.isPending ? "Submitting…" : "Submit answer"}
+            </button>
+          )}
           {mutation.isError ? (
             <QueryError
               message="Could not save your answer."

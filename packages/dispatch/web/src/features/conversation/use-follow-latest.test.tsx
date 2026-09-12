@@ -200,3 +200,60 @@ test("does not follow another turn arriving while the reader is away", () => {
     }
   }
 });
+
+test("follows another turn when the reader returns to the document top", () => {
+  const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
+  const layout = installScrollLayoutMocks();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const view = render(<Harness itemSeqs={[1]} ownSendCount={0} />);
+    unmount = view.unmount;
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 0, writable: true });
+    act(() => {
+      window.dispatchEvent(new Event("scroll"));
+      view.rerender(<Harness itemSeqs={[2, 1]} ownSendCount={0} />);
+    });
+
+    expect(window.scrollY).toBe(RESTING_SCROLL_Y);
+  } finally {
+    unmount?.();
+    layout.restore();
+    if (scrollY === undefined) {
+      Reflect.deleteProperty(window, "scrollY");
+    } else {
+      Object.defineProperty(window, "scrollY", scrollY);
+    }
+  }
+});
+
+test("does not follow another turn after a small reader scroll", () => {
+  const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
+  const layout = installScrollLayoutMocks();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const view = render(<Harness itemSeqs={[1]} ownSendCount={0} />);
+    unmount = view.unmount;
+    const readerPosition = RESTING_SCROLL_Y + 37;
+    Object.defineProperty(window, "scrollY", {
+      configurable: true,
+      value: readerPosition,
+      writable: true,
+    });
+
+    act(() => {
+      view.rerender(<Harness itemSeqs={[2, 1]} ownSendCount={0} />);
+    });
+
+    expect(window.scrollY).toBe(readerPosition);
+  } finally {
+    unmount?.();
+    layout.restore();
+    if (scrollY === undefined) {
+      Reflect.deleteProperty(window, "scrollY");
+    } else {
+      Object.defineProperty(window, "scrollY", scrollY);
+    }
+  }
+});

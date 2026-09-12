@@ -11,6 +11,7 @@ import {
   type DispatchEvent,
   DispatchEventSchema,
   type EditCommentInput,
+  IssueEventPayloadSchema,
   MessageEventPayloadSchema,
 } from "./dispatch-api";
 
@@ -31,6 +32,12 @@ test("accepts the typed artifact version event payload", () => {
   };
 
   expect(DispatchEventSchema.safeParse(event)).toMatchObject({ success: true });
+});
+
+test("preserves labels on an issue update event payload", () => {
+  expect(IssueEventPayloadSchema.parse({ labels: ["frontend", "urgent"] })).toEqual({
+    labels: ["frontend", "urgent"],
+  });
 });
 
 test("requires a positive opened event id on an ask event payload", () => {

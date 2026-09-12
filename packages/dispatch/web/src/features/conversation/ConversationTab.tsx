@@ -40,8 +40,8 @@ import {
   dateKey,
   visibleConversationItems,
 } from "./conversation-model";
+import { ReaderPosition } from "./ReaderPosition";
 import { useFollowLatest } from "./use-follow-latest";
-import { usePreserveReaderPosition } from "./use-preserve-reader-position";
 import { useShowActivity } from "./use-show-activity";
 import { useAgents } from "./useAgents";
 
@@ -214,7 +214,6 @@ export function ConversationTab({
     itemSeqs,
     ownSendCount,
   });
-  const setSection = usePreserveReaderPosition(() => !follow.pinnedToTop());
   const { agents, titles } = useAgents(visible);
   const observedTurnKey = useMemo(
     () =>
@@ -459,10 +458,9 @@ export function ConversationTab({
   }
 
   return (
-    <section
-      aria-label="Conversation"
+    <ReaderPosition
       className="flex min-h-[60dvh] flex-col gap-3 pb-16 xl:pb-0"
-      ref={setSection}
+      shouldCompensate={() => !follow.pinnedToTop()}
     >
       {hasFailedOps ? (
         <div className={`flex items-center gap-3 text-sm ${dangerText}`} role="alert">
@@ -630,6 +628,6 @@ export function ConversationTab({
           Jump to latest{follow.newItemCount === 0 ? "" : ` · ${follow.newItemCount} new`}
         </button>
       ) : null}
-    </section>
+    </ReaderPosition>
   );
 }

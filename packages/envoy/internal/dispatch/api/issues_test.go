@@ -370,7 +370,7 @@ func TestListIssuesQueryUsesAsksOpenIndex(t *testing.T) {
 	}
 
 	var planJSON []byte
-	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "", nil).Scan(&planJSON); err != nil {
+	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "", nil, []string{}).Scan(&planJSON); err != nil {
 		t.Fatalf("explain list query: %v", err)
 	}
 
@@ -528,5 +528,122 @@ func TestListIssuesPinnedFilterAndLabels(t *testing.T) {
 	}
 	if bearer := agentRequest(t, handler, http.MethodGet, "/api/v1/issues?pinned=true", nil, "agent-token"); bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"HUMAN_ONLY"`) {
 		t.Fatalf("bearer pinned issues: status=%d body=%s", bearer.Code, bearer.Body.String())
+	}
+}
+
+func TestIssueLabelsCreateNormalizePatchAndFilter(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	create := func(title string, labels []string) model.Issue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "CORE", "title": title, "labels": labels,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	expectLabels := func(got []string, want ...string) {
+		t.Helper()
+		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("labels = %#v, want %#v", got, want)
+		}
+	}
+
+	first := create("First", []string{"Frontend", "frontend", "api"})
+	expectLabels(first.Labels, "Frontend", "api")
+	second := create("Second", []string{"frontend", "docs"})
+	third := create("Third", []string{"backend", "docs"})
+	crossCase := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE&label=frontend&label=api", nil, "alice")
+	if crossCase.Code != http.StatusOK {
+		t.Fatalf("filter labels case-insensitively: status=%d body=%s", crossCase.Code, crossCase.Body.String())
+	}
+	if issues := decodeBody[[]model.IssueSummary](t, crossCase); len(issues) != 1 || issues[0].Key != first.Key {
+		t.Fatalf("issues matching frontend and api = %#v, want only %s", issues, first.Key)
+	}
+	duplicateLabel := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE&label=Frontend&label=frontend&label=api", nil, "alice")
+	if duplicateLabel.Code != http.StatusOK {
+		t.Fatalf("filter duplicate labels case-insensitively: status=%d body=%s", duplicateLabel.Code, duplicateLabel.Body.String())
+	}
+	if issues := decodeBody[[]model.IssueSummary](t, duplicateLabel); len(issues) != 1 || issues[0].Key != first.Key {
+		t.Fatalf("issues matching duplicated frontend and api = %#v, want only %s", issues, first.Key)
+	}
+
+	updatedResponse := sessionRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+first.Key, map[string]any{
+		"labels": []string{" urgent ", "URGENT", "api"},
+		"actor":  sessionActor(),
+	})
+	if updatedResponse.Code != http.StatusOK {
+		t.Fatalf("update labels: status=%d body=%s", updatedResponse.Code, updatedResponse.Body.String())
+	}
+	updated := decodeBody[model.Issue](t, updatedResponse)
+	expectLabels(updated.Labels, "urgent", "api")
+
+	eventsResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+first.Key+"/events", nil, "alice")
+	if eventsResponse.Code != http.StatusOK {
+		t.Fatalf("list label update events: status=%d body=%s", eventsResponse.Code, eventsResponse.Body.String())
+	}
+	var events []struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Labels []string `json:"labels"`
+		} `json:"payload"`
+	}
+	if err := json.NewDecoder(eventsResponse.Body).Decode(&events); err != nil {
+		t.Fatalf("decode label update events: %v", err)
+	}
+	foundLabelUpdate := false
+	for _, event := range events {
+		if event.Type == "issue.updated" {
+			foundLabelUpdate = true
+			expectLabels(event.Payload.Labels, "urgent", "api")
+			break
+		}
+	}
+	if !foundLabelUpdate {
+		t.Fatal("label update did not append an issue.updated event")
+	}
+
+	filtered := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE&label=frontend&label=docs", nil, "alice")
+	if filtered.Code != http.StatusOK {
+		t.Fatalf("filter labels: status=%d body=%s", filtered.Code, filtered.Body.String())
+	}
+	issues := decodeBody[[]model.IssueSummary](t, filtered)
+	if len(issues) != 1 || issues[0].Key != second.Key {
+		t.Fatalf("issues matching frontend and docs = %#v, want only %s (not %s)", issues, second.Key, third.Key)
+	}
+}
+
+func TestIssueLabelsRejectInvalidInput(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "CORE", "title": "Labels",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[model.Issue](t, created)
+
+	for _, labels := range [][]string{
+		{" "},
+		{strings.Repeat("x", 41)},
+		strings.Fields(strings.Repeat("label ", 21)),
+	} {
+		response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string][]string{
+			"labels": labels,
+		}, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"LABELS_INPUT"`) {
+			t.Fatalf("reject labels %#v: status=%d body=%s", labels, response.Code, response.Body.String())
+		}
 	}
 }

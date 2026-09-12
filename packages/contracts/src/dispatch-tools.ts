@@ -99,6 +99,10 @@ export const dispatchToolSpecs = [
         .string()
         .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_GUIDANCE}`)
         .optional(),
+      labels: z
+        .array(z.string({ min: 1, max: 40 }), { max: 20 })
+        .describe("Optional initial labels, at most 20 labels of up to 40 characters.")
+        .optional(),
     }),
   },
   {
@@ -111,7 +115,7 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
-      artifact: z.string().describe("Project document slug or id.").optional(),
+      artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       question: z.string({ max: 800 }).describe("Decision question, at most 800 characters."),
       options: z
@@ -204,7 +208,10 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
-      artifact: z.string().describe("Artifact slug or id required when quote is given.").optional(),
+      artifact: z
+        .string()
+        .describe("Project document artifact id, slug, or filename required when quote is given.")
+        .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z
@@ -233,7 +240,9 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Artifact slug or id containing the quoted text; optional when ref names it.")
+        .describe(
+          "Project document artifact id, slug, or filename containing the quoted text; optional when ref names it."
+        )
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Exact document text to replace."),
@@ -278,7 +287,7 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Artifact slug or id for the document; optional when ref names it.")
+        .describe("Project document artifact id, slug, or filename; optional when ref names it.")
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z
@@ -312,7 +321,9 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Optional artifact slug or id; primary document by default for an issue.")
+        .describe(
+          "Optional project document artifact id, slug, or filename; primary document by default for an issue."
+        )
         .optional(),
       version: z.number({ int: true, min: 1 }).describe("Optional version number.").optional(),
       ref: z.string().describe("Optional dispatch:// document reference.").optional(),
@@ -333,7 +344,9 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Artifact slug or id; primary document by default for an issue.")
+        .describe(
+          "Project document artifact id, slug, or filename; primary document by default for an issue."
+        )
         .optional(),
     }),
     validation: documentOwnerValidation(true),
@@ -377,7 +390,7 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
-      artifact: z.string().describe("Project document slug or id.").optional(),
+      artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
     }),
     validation: documentOwnerValidation(true),

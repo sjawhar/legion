@@ -114,6 +114,9 @@ export function anchoredThreadComments(
   comments: Comment[],
   artifactId: string | undefined
 ): Comment[] {
+  if (artifactId === undefined) {
+    return [];
+  }
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
   return comments.filter((comment) => {
     let root = comment;

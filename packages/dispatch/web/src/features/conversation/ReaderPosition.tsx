@@ -1,8 +1,14 @@
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { Component, type ReactNode } from "react";
 
 interface ReadingAnchor {
   seq: number;
   top: number;
+}
+
+interface ReaderPositionProps {
+  children: ReactNode;
+  className: string;
+  shouldCompensate: () => boolean;
 }
 
 const probeSteps = 5;
@@ -48,71 +54,49 @@ function measureAnchor(root: HTMLElement): ReadingAnchor | null {
  * unread divider moving as a turn is marked read). Readers already at the top are pinned to the
  * latest turn, so a new turn simply appears in place there without any adjustment.
  *
- * The reader's position is tracked by a scroll listener rather than sampled inside the
- * render-triggered effect below: a reader can scroll (or scroll back) without causing any React
- * render, and compensating against whatever was true as of the last render would apply a stale
- * anchor. The listener samples synchronously on its leading edge and again on a trailing animation
- * frame, coalescing a fast scroll gesture's flood of events into one settled measurement.
- *
- * Whether to compensate is decided at render time from both the live window position and the
- * caller's current reading mode. A Conversation following the latest turn must not compensate
- * after a prepend; a reader browsing older turns may keep their anchor.
- *
- * Returns a ref callback rather than accepting a useRef object: the Conversation section may not
- * mount on its first several renders, and a callback fires exactly when it attaches or detaches.
+ * `getSnapshotBeforeUpdate` is essential here: a scroll performed immediately before an SSE update
+ * may not dispatch its browser `scroll` event before React commits that update. It captures the
+ * actual viewport anchor before the DOM reflow, then compensates exactly once after the commit.
  */
-export function usePreserveReaderPosition(
-  shouldCompensate: () => boolean
-): (node: HTMLElement | null) => void {
-  const root = useRef<HTMLElement | null>(null);
-  const anchor = useRef<ReadingAnchor | null>(null);
-  const detach = useRef<(() => void) | null>(null);
+export class ReaderPosition extends Component<ReaderPositionProps, object, ReadingAnchor | null> {
+  private root: HTMLElement | null = null;
 
-  const attach = useCallback((node: HTMLElement | null) => {
-    detach.current?.();
-    detach.current = null;
-    root.current = node;
-    anchor.current = node === null ? null : measureAnchor(node);
-    if (node === null) {
+  getSnapshotBeforeUpdate(): ReadingAnchor | null {
+    if (this.root === null || window.scrollY <= 0 || !this.props.shouldCompensate()) {
+      return null;
+    }
+    return measureAnchor(this.root);
+  }
+
+  componentDidUpdate(
+    _previousProps: Readonly<ReaderPositionProps>,
+    _previousState: Readonly<object>,
+    anchor: ReadingAnchor | null
+  ): void {
+    if (anchor === null || this.root === null) {
       return;
     }
-    let frame: number | null = null;
-    const sample = () => {
-      anchor.current = measureAnchor(node);
-    };
-    const onScroll = () => {
-      sample();
-      if (frame === null) {
-        frame = window.requestAnimationFrame(() => {
-          frame = null;
-          sample();
-        });
-      }
-    };
-    window.addEventListener("scroll", onScroll, { passive: true });
-    detach.current = () => {
-      window.removeEventListener("scroll", onScroll);
-      if (frame !== null) {
-        window.cancelAnimationFrame(frame);
-      }
-    };
-  }, []);
-
-  useLayoutEffect(() => {
-    const current = root.current;
-    const previous = anchor.current;
-    if (current === null || previous === null || window.scrollY <= 0 || !shouldCompensate()) {
-      return;
-    }
-    const element = current.querySelector<HTMLElement>(`[data-event-seq="${previous.seq}"]`);
+    const element = this.root.querySelector<HTMLElement>(`[data-event-seq="${anchor.seq}"]`);
     if (element === null) {
       return;
     }
-    const delta = element.getBoundingClientRect().top - previous.top;
+    const delta = element.getBoundingClientRect().top - anchor.top;
     if (delta !== 0) {
       window.scrollBy(0, delta);
     }
-  });
+  }
 
-  return attach;
+  render(): ReactNode {
+    return (
+      <section
+        aria-label="Conversation"
+        className={this.props.className}
+        ref={(node) => {
+          this.root = node;
+        }}
+      >
+        {this.props.children}
+      </section>
+    );
+  }
 }
