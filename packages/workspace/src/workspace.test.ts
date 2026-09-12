@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { provisionIssueWorkspace, type RunResult } from "./workspace";
@@ -11,9 +11,14 @@ type RunCall = {
     | {
         readonly cwd?: string;
         readonly env?: Readonly<Record<string, string>>;
+        readonly timeoutMs?: number;
       }
     | undefined;
 };
+const commandTimeoutMs = 300_000;
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
   const env = call.opts?.env;
   if (!env) throw new Error("Provisioning command did not receive an environment");
@@ -116,7 +121,7 @@ function credentialConfigCommands(gitDir: string, helper: string): string[][] {
 }
 
 describe("provisionIssueWorkspace", () => {
-  test("clones a missing repository before fetching and provisioning its issue workspace", async () => {
+  test("clones a missing repository into a temporary sibling, renames it into place, then fetches and provisions its issue workspace", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
     const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
@@ -131,11 +136,16 @@ describe("provisionIssueWorkspace", () => {
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
+      commandTimeoutMs,
       run: async (cmd, opts) => {
         calls.push({ cmd, opts });
         if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
-          expect(existsSync(path.dirname(repoCloneDir))).toBeTrue();
-          await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+          const target = cmd[4];
+          if (!target) throw new Error("clone is missing its destination");
+          // The clone lands in a sibling of the final path, never at the final path itself.
+          expect(target).not.toBe(repoCloneDir);
+          expect(existsSync(repoCloneDir)).toBeFalse();
+          await mkdir(path.join(target, ".jj"), { recursive: true });
         }
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
           await mkdir(workspaceDir, { recursive: true });
@@ -150,7 +160,13 @@ describe("provisionIssueWorkspace", () => {
     expect(provisioningEnv(fetch)).toEqual(cloneEnv);
     expect(existsSync(cloneEnv.GIT_ASKPASS)).toBeFalse();
     expect(calls.map((call) => call.cmd)).toEqual([
-      ["jj", "git", "clone", "https://github.com/acme/widgets", repoCloneDir],
+      [
+        "jj",
+        "git",
+        "clone",
+        "https://github.com/acme/widgets",
+        expect.stringMatching(new RegExp(`^${escapeRegExp(repoCloneDir)}\\.clone-`)),
+      ],
       ["jj", "git", "fetch", "-R", repoCloneDir],
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       [
@@ -168,9 +184,15 @@ describe("provisionIssueWorkspace", () => {
       ["jj", "bookmark", "set", bookmark, "--allow-backwards"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
     ]);
+    // Every provisioning command runs under the slow budget, not the runner's generic default.
+    expect(calls.map((call) => call.opts?.timeoutMs)).toEqual(calls.map(() => commandTimeoutMs));
     expect(
       calls.flatMap(({ cmd }) => cmd).some((argument) => argument.startsWith("user."))
     ).toBeFalse();
+    expect(existsSync(path.join(repoCloneDir, ".jj"))).toBeTrue();
+    expect(
+      (await readdir(path.dirname(repoCloneDir))).filter((entry) => entry.startsWith("widgets."))
+    ).toEqual([]);
     expect(await readFile(path.join(workspaceDir, ".omp", "config.yml"), "utf8")).toBe("");
     expect(spec).toEqual({ repoCloneDir, workspaceDir, bookmark });
   });
@@ -189,6 +211,7 @@ describe("provisionIssueWorkspace", () => {
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
+      commandTimeoutMs,
       run: async (cmd) => {
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
           expect(existsSync(path.dirname(workspaceDir))).toBeTrue();
@@ -219,6 +242,7 @@ describe("provisionIssueWorkspace", () => {
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
+      commandTimeoutMs,
       run: async (cmd, opts) => {
         if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") {
           return { exitCode: 0, stdout: "", stderr: "" };
@@ -279,6 +303,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper: pinnedHelper,
+      commandTimeoutMs,
       run: (cmd, opts) =>
         cmd[0] === "git"
           ? runCommand([SYSTEM_GIT, ...cmd.slice(1)], opts)
@@ -332,6 +357,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       stateDir,
       provisioningToken: async () => "installation-token",
       credentialHelper,
+      commandTimeoutMs,
       run: async (cmd: string[], opts?: RunCall["opts"]) => {
         calls.push({ cmd, opts });
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
@@ -385,6 +411,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         stateDir,
         provisioningToken: async () => "installation-token",
         credentialHelper,
+        commandTimeoutMs,
         run: (cmd: string[], opts?: RunCall["opts"]) =>
           runCommand(cmd[0] === "jj" ? [...command, ...cmd.slice(1)] : cmd, opts),
       };
@@ -435,7 +462,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         (await runCommand([...command, "bookmark", "list", bookmark], { cwd: workspaceDir })).stdout
       ).toContain(bookmark);
     }
-  });
+    // Two real jj binaries (one resolved through mise) and ~30 subprocesses: well past bun's 5 s
+    // default on a loaded host.
+  }, 60_000);
 
   test("recovers a jj registration for a deleted issue workspace", async () => {
     const stateDir = await temporaryDirectory();
@@ -457,6 +486,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         stateDir,
         provisioningToken: async () => "installation-token",
         credentialHelper,
+        commandTimeoutMs,
         run: async (cmd, opts) => {
           calls.push({ cmd, opts });
           if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
@@ -516,11 +546,112 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     ]);
   });
 
-  test("rejects a partial repository clone before provisioning an issue workspace", async () => {
+  test("reports a clone killed at its budget as a timeout, leaves nothing at the final path, and clones fresh on the next attempt", async () => {
     const stateDir = await temporaryDirectory();
     const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    const cloneTargets: string[] = [];
+    let clones = 0;
+    const deps = {
+      extensionPackage,
+      stateDir,
+      repo: "acme/widgets" as const,
+      provisioningToken: async () => "installation-token",
+      credentialHelper,
+      commandTimeoutMs,
+      run: async (cmd: string[]) => {
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
+          const target = cmd[4];
+          if (!target) throw new Error("clone is missing its destination");
+          cloneTargets.push(target);
+          clones += 1;
+          if (clones === 1) {
+            // The runner killed the clone mid-way: a half-written `.jj` is left in the target.
+            await mkdir(path.join(target, ".jj"), { recursive: true });
+            await writeFile(path.join(target, ".jj", "partial"), "half", "utf8");
+            return {
+              exitCode: 143,
+              stdout: "",
+              stderr: "",
+              timedOut: { limitMs: 300_000, elapsedMs: 300_400 },
+            };
+          }
+          await mkdir(path.join(target, ".jj"), { recursive: true });
+        }
+        if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+          await mkdir(workspaceDir, { recursive: true });
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    await expect(provisionIssueWorkspace(issue, deps)).rejects.toThrow(
+      `Command timed out after 300 s (ran 300.4 s): jj git clone https://github.com/acme/widgets `
+    );
+    expect(existsSync(repoCloneDir)).toBeFalse();
+    expect(
+      (await readdir(path.dirname(repoCloneDir))).filter((entry) => entry.startsWith("widgets"))
+    ).toEqual([]);
+
+    await expect(provisionIssueWorkspace(issue, deps)).resolves.toMatchObject({ repoCloneDir });
+    expect(clones).toBe(2);
+    expect(cloneTargets[1]).not.toBe(cloneTargets[0]);
+    expect(existsSync(path.join(repoCloneDir, ".jj"))).toBeTrue();
+    expect(existsSync(path.join(repoCloneDir, ".jj", "partial"))).toBeFalse();
+  });
+
+  test("removes an incomplete clone that has no .jj and clones again, logging it", async () => {
+    const stateDir = await temporaryDirectory();
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     await mkdir(repoCloneDir, { recursive: true });
+    await writeFile(path.join(repoCloneDir, "leftover"), "from an older daemon", "utf8");
+    const calls: string[][] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[];
+    try {
+      await provisionIssueWorkspace(issue, {
+        extensionPackage,
+        stateDir,
+        repo: "acme/widgets",
+        provisioningToken: async () => "installation-token",
+        credentialHelper,
+        commandTimeoutMs,
+        run: async (cmd) => {
+          calls.push(cmd);
+          if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
+            const target = cmd[4];
+            if (!target) throw new Error("clone is missing its destination");
+            await mkdir(path.join(target, ".jj"), { recursive: true });
+          }
+          if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+            await mkdir(workspaceDir, { recursive: true });
+          }
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      });
+      logged = errorSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(
+      calls.some((cmd) => cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone")
+    ).toBeTrue();
+    expect(logged).toContainEqual(
+      expect.stringContaining(`removing incomplete clone at ${repoCloneDir} (no .jj)`)
+    );
+    expect(existsSync(path.join(repoCloneDir, ".jj"))).toBeTrue();
+    expect(existsSync(path.join(repoCloneDir, "leftover"))).toBeFalse();
+  });
+
+  test("still reports a command that failed on its own as a plain failure with its stderr", async () => {
+    const stateDir = await temporaryDirectory();
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
     await expect(
       provisionIssueWorkspace(issue, {
@@ -529,8 +660,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         repo: "acme/widgets",
         provisioningToken: async () => "installation-token",
         credentialHelper,
-        run: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        commandTimeoutMs,
+        run: async (cmd) =>
+          cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch"
+            ? { exitCode: 1, stdout: "", stderr: "fatal: x" }
+            : { exitCode: 0, stdout: "", stderr: "" },
       })
-    ).rejects.toThrow(`Incomplete Jujutsu clone at ${repoCloneDir}`);
+    ).rejects.toThrow(`Command failed (exit 1): jj git fetch -R ${repoCloneDir}\nfatal: x`);
   });
 });

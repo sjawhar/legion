@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { IssueKey } from "@legion/contracts";
 
@@ -7,6 +7,9 @@ export interface RunResult {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
+  /** Set by the runner when it killed the command at `limitMs`; `elapsedMs` is the wall time the
+   * command actually ran. See `CommandResult` in the daemon's command runner. */
+  readonly timedOut?: { readonly limitMs: number; readonly elapsedMs: number };
 }
 
 export interface WorkspaceSpec {
@@ -18,6 +21,8 @@ export interface WorkspaceSpec {
 export interface WorkspaceCommandOptions {
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
+  /** Budget after which the runner kills the command. */
+  readonly timeoutMs?: number;
 }
 
 export interface ProvisionIssueWorkspaceDeps {
@@ -29,10 +34,28 @@ export interface ProvisionIssueWorkspaceDeps {
   /** The single GitHub repository every Legion issue provisions against (`DaemonConfig.repo`) —
    * a Dispatch issue key carries no owner/repo of its own. */
   readonly repo: `${string}/${string}`;
+  /** Budget for every provisioning command (`jj git clone`/`fetch`, `jj workspace add`, the git
+   * config writes): each waits on the network or a credential helper, so the daemon passes its
+   * `slow_command_timeout_seconds` here rather than the runner's generic default. */
+  readonly commandTimeoutMs: number;
 }
 
 function commandFailure(result: RunResult, cmd: string[]): Error {
+  if (result.timedOut) {
+    const { limitMs, elapsedMs } = result.timedOut;
+    const message = `Command timed out after ${limitMs / 1000} s (ran ${(elapsedMs / 1000).toFixed(1)} s): ${cmd.join(" ")}`;
+    return new Error(result.stderr ? `${message}\n${result.stderr}` : message);
+  }
   return new Error(`Command failed (exit ${result.exitCode}): ${cmd.join(" ")}\n${result.stderr}`);
+}
+
+/** Every provisioning command goes through here so each carries `deps.commandTimeoutMs`. */
+function run(
+  deps: ProvisionIssueWorkspaceDeps,
+  cmd: string[],
+  opts?: WorkspaceCommandOptions
+): Promise<RunResult> {
+  return deps.run(cmd, { ...opts, timeoutMs: deps.commandTimeoutMs });
 }
 
 async function runChecked(
@@ -40,7 +63,7 @@ async function runChecked(
   cmd: string[],
   opts?: WorkspaceCommandOptions
 ): Promise<void> {
-  const result = await deps.run(cmd, opts);
+  const result = await run(deps, cmd, opts);
   if (result.exitCode !== 0) throw commandFailure(result, cmd);
 }
 
@@ -77,6 +100,15 @@ async function createProvisioningCredential(
   };
 }
 
+/** Clones the repository into `repoCloneDir` unless a complete clone (one with `.jj`) is already
+ * there. The clone is written into a temporary sibling (`<repoCloneDir>.clone-XXXXXX`, same
+ * parent, so the final step is a same-filesystem directory move) and renamed into place only
+ * after `jj git clone` exits 0 and `.jj` exists: a clone the runner killed at its budget, or one
+ * a daemon crash interrupted, can never be left at the final path looking like a finished clone.
+ * A final directory without `.jj` (left by an older daemon) is removed and cloned again, with a
+ * log line, instead of failing every launch forever. Leftover `.clone-*` siblings from a crash are
+ * inert — nothing ever mistakes one for a clone — and are deliberately not swept: a sweep would
+ * race a concurrent in-flight clone of the same repository. */
 async function ensureRepoClone(
   deps: ProvisionIssueWorkspaceDeps,
   repoCloneDir: string,
@@ -86,20 +118,33 @@ async function ensureRepoClone(
 ): Promise<void> {
   const jjDir = path.join(repoCloneDir, ".jj");
   if (existsSync(repoCloneDir)) {
-    if (!existsSync(jjDir)) {
-      throw new Error(`Incomplete Jujutsu clone at ${repoCloneDir}: missing ${jjDir}`);
-    }
-    return;
+    if (existsSync(jjDir)) return;
+    console.error(
+      `[legion] removing incomplete clone at ${repoCloneDir} (no .jj) before cloning again`
+    );
+    await rm(repoCloneDir, { recursive: true, force: true });
   }
 
   await mkdir(path.dirname(repoCloneDir), { recursive: true });
-
-  const remote = `https://github.com/${owner}/${repo}`;
-  await runChecked(deps, ["jj", "git", "clone", remote, repoCloneDir], {
-    env: credentialEnv,
-  });
-  if (!existsSync(jjDir)) {
-    throw new Error(`Incomplete Jujutsu clone at ${repoCloneDir}: missing ${jjDir}`);
+  const tempDir = await mkdtemp(`${repoCloneDir}.clone-`);
+  try {
+    const remote = `https://github.com/${owner}/${repo}`;
+    await runChecked(deps, ["jj", "git", "clone", remote, tempDir], { env: credentialEnv });
+    const tempJjDir = path.join(tempDir, ".jj");
+    if (!existsSync(tempJjDir)) {
+      throw new Error(`Incomplete Jujutsu clone at ${tempDir}: missing ${tempJjDir}`);
+    }
+    try {
+      await rename(tempDir, repoCloneDir);
+    } catch (error) {
+      // Two issues provisioning the same repository for the first time concurrently: if the
+      // other clone has landed, it won and ours is surplus.
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code === "ENOTEMPTY" || code === "EEXIST") && existsSync(jjDir)) return;
+      throw error;
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -128,10 +173,10 @@ async function createWorkspace(
   ];
 
   try {
-    await deps.run(pruneArgs);
+    await run(deps, pruneArgs);
   } catch {}
 
-  const result = await deps.run(initialWorkspaceArgs);
+  const result = await run(deps, initialWorkspaceArgs);
   if (result.exitCode === 0) return;
   if (!/already (?:registered|exists)/.test(result.stderr)) {
     throw commandFailure(result, initialWorkspaceArgs);
@@ -148,7 +193,7 @@ async function createWorkspace(
     repoCloneDir,
   ]);
   try {
-    await deps.run(pruneArgs);
+    await run(deps, pruneArgs);
   } catch {}
 
   const recoveryWorkspaceArgs = [
@@ -163,7 +208,7 @@ async function createWorkspace(
     "-R",
     repoCloneDir,
   ];
-  const retry = await deps.run(recoveryWorkspaceArgs);
+  const retry = await run(deps, recoveryWorkspaceArgs);
   if (retry.exitCode !== 0) throw commandFailure(retry, recoveryWorkspaceArgs);
 }
 
