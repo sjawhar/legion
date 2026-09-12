@@ -7,7 +7,7 @@
     "base": "main",
     "headSha": "5cfc35fa8c90989d2c569fae09126568baaae61f"
   },
-  "rebasedOnto": "main@origin 9fa17a3c (after LEGION-21 #962 merged as d7ada4c0; earlier e7a284f2 after LEGION-18/22, fd4fce51 after LEGION-29). LEGION-12 #974 still open.",
+  "rebasedOnto": "main@origin 9e8b5759 (fourth rebase; after LEGION-21 #962 merged as d7ada4c0 and #984/#985/#987 landed). LEGION-12 #974 still open.",
   "commits": [
     {
       "change": "uvwstwxz",
@@ -543,11 +543,11 @@
     }
   },
   "fifthPass": {
-    "completedAt": "2026-09-12T22:36:08.342640+00:00",
+    "completedAt": "2026-09-12T22:44:23.172977+00:00",
     "review": "reviewer round 3 at head 665f4b1b (session 01a09624-3c98-7000-b194-fc1294ffbd20): COMMENT, no blocker; four should-fixes R3-S1..S4 and seven batched items R3-N1..N7, landed before the cleanup head per the architect. Tester round 4 at 665f4b1b: PASS on every criterion incl. the live sandbox merge.",
     "reviewedHead": "665f4b1be75516dabd285578d2b9c85256e8f129",
     "startedFrom": "e588e4e6c005f87907f1fef843920a0bc4ba6c0c (665f4b1b + reviewer round-3 review.json 97d55ebf + tester round-4 test.json e588e4e6)",
-    "newHead": "44cf72ad00feeb6149f6a7453eac5c09f7bf4c7f (GitHub's headRefOid after the push; the handoff commit that records this section is the final head)",
+    "newHead": "e20a5233289f9495a528995b8e3e39fab20ccef6 (GitHub headRefOid after the push; the handoff commit recording this section is the final head)",
     "legionDirectory": "NOT deleted in this pass by the architect's direction: the tester verifies this head first; a separate pass pushes the deletion.",
     "rebaseStatus": "main@origin moved from fd4fce51 to 9f7f1df6 (#976 action asks, #978 cli config from injected env, #982 dispatch server URL, release bumps). LEGION-21 #962 and LEGION-12 #974 both still OPEN. GitHub reports #961 MERGEABLE at 44cf72ad against the moved main (three overlapping files \u2014 packages/daemon/src/cli/index.ts, its test, packages/pi-envoy/AGENTS.md \u2014 merge cleanly), so per the controller skill's own rule no rebase was made; the #974 and #962 recipes under testerNotes stay relevant.",
     "findingsToCommits": [
@@ -622,6 +622,22 @@
         "grep pr-queue empty; constraint A one hunk @@ -260,10 +260,14 @@ vs main@origin 9fa17a3c; zero conflicted commits"
       ],
       "tmuxRecipeNote": "processes.test.ts's controller tests still drive TmuxRuntime through the injected tmux run callback, so they moved over unchanged apart from runtime: 'tmux' tags on locator literals and union narrowing on tmuxPaneId reads."
-    }
+    },
+    "fourthRebase": {
+      "trigger": "main moved again (#984, #985, #987 dispatch/pi-envoy fixes and release bumps) while the LEGION-21 rebase was pushed; GitHub reported CONFLICTING on packages/pi-envoy/extensions/envoy.ts.",
+      "onto": "main@origin 9e8b5759 (fix(pi-envoy): dispatch tools re-read their server URL and token on every call, #987)",
+      "conflicts": "Only formatting drift: this branch's biome pass had re-wrapped an unrelated dispatch-reply block that #987 rewrote. Resolved to main's text; the bridge commit's envoy.ts change was re-applied from its predecessor as a filtered patch (the import-order and three re-wrap hunks dropped) after a file-level `jj resolve --tool :ours` turned out to take main's whole file, not just the conflicted hunk.",
+      "t2Title": "T2's title now says state v25 (v24 is LEGION-21's runtime tag); content unchanged."
+    },
+    "jjIncident": {
+      "what": "Two `jj undo` runs at 22:31:05Z and 22:31:17Z (operations 63461aba, 805478f4) \u2014 trying to reverse a `jj squash --into` that had put the AGENTS.md v25 paragraph into an early docs commit and conflicted 25 descendants. The shared operation log meant they rewrote nine of LEGION-30's commits and rolled back its implementer's in-flight rebase (recovered by hand by that implementer). The undos did not fix my problem either; I fixed it in place by `jj resolve -r <commit> --tool :ours` on that one commit's AGENTS.md (its own original side) and re-applied the paragraph as a new head commit.",
+      "rule": "Per the architect (22:40Z) and the legion-worker skill: never jj undo, jj op restore, or jj abandon in a Legion workspace. Correct with a new commit or `jj restore` of specific files from a known-good change; an operation that seems to need rolling back is reported to the architect with the operation ids."
+    },
+    "verificationAtRebasedHead": [
+      "packages/daemon: biome clean; tsc 0; bun test 948 pass, 5 skip, 0 fail (953 across 57 files)",
+      "packages/contracts: tsc 0; biome clean; 99 pass",
+      "packages/pi-envoy: tsc 0; biome clean; 160 pass, 0 fail (main's #987 added one)",
+      "grep pr-queue empty; constraint A one hunk @@ -260,10 +260,14 @@ vs main@origin 9e8b5759; zero conflicted commits; working copy clean; 42 commits on main, all LEGION-16's"
+    ]
   }
 }
