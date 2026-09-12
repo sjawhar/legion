@@ -1,0 +1,66 @@
+{
+  "issue": "LEGION-11",
+  "spec": "dispatch://LEGION-11/spec (version 3; design approved by Sami 2026-09-12 via ask 522eaa0a-da53-44bc-96f6-3784203294bb; architect amending Design 5 to 'no behaviour change' in processes.ts/api.ts/api/auth.ts, comment edits allowed)",
+  "plan": "docs/plans/2026-09-12-reconnect-workers-after-api.md",
+  "planCommit": "5b732e1251a8",
+  "summary": "Move reconnectWorkers (try/console.error verbatim), pruneSecretFiles(), and the controllerPendingNotices drain/ensureController block in startDaemonLocked to immediately after `api = startLegionApi(...)` and before enableWorkerPromotion(); replace the false 'needs no api reference' comment with the ordering invariant. Regression test in index.test.ts boots the daemon through the real closures with a dead-socket ready-confirmed claim and a pre-seeded secrets/<token> file.",
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Regression test (red): index.test.ts",
+      "files": [
+        "packages/daemon/src/daemon/__tests__/index.test.ts"
+      ],
+      "expectedRed": "expect(failures).toEqual([]) receives [[\"[legion] worker reconnection failed:\", TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')]]"
+    },
+    {
+      "id": 2,
+      "title": "Move the three boot blocks after api (green); one commit with task 1",
+      "files": [
+        "packages/daemon/src/daemon/index.ts"
+      ],
+      "removes": "index.ts:401-415 and 457-479 (branch parent 7db2cd83 numbering)",
+      "inserts": "after the `);` closing `api = startLegionApi(` and before the 'Awaited only now that `api` is assigned' comment"
+    },
+    {
+      "id": 3,
+      "title": "Comment/doc sweep (second commit)",
+      "files": [
+        "packages/daemon/src/daemon/worker-admission.ts:120-129,327-330",
+        "packages/daemon/src/daemon/processes.ts:912-916 (comment clause only)",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts:348-350,7302-7305,7340-7343,8866-8867 (comments only)",
+        "packages/daemon/src/daemon/AGENTS.md (one Operational invariants bullet)",
+        "docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md:95-97"
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Gates once, bookmark -r @-, push, PR with Dispatch: LEGION-11 + what-moved + closure audit",
+      "gates": [
+        "cd $LEGION_WORKSPACE && bunx biome check packages/daemon/src",
+        "cd $LEGION_WORKSPACE/packages/daemon && bunx tsc --noEmit",
+        "cd $LEGION_WORKSPACE && bun test packages/daemon"
+      ]
+    }
+  ],
+  "closureAudit": "All four api-reading ProcessManager deps (mintControllerCapability, mintBootToken, mintWorkerBootToken, revokeSessionCapability) are reachable only via HTTP handlers, NATS callbacks, timers, promotion cascades gated by enableWorkerPromotion(), or the three moved boot blocks; the span from `new ProcessManager` to `api = startLegionApi(...)` contains no await after the move, so no processManager method can run before api is assigned. Full table in the plan doc.",
+  "plannerVerification": "Applied tasks 1-2 verbatim to a throwaway git archive of 7db2cd83: task 1 alone fails with the TypeError above; tasks 1+2 give index.test.ts 19 pass, the three processes.test.ts reconnect cases (7293/8604/8632) 3 pass unmodified, biome and tsc clean. Tester seed-state.ts produced a state.json loadState accepts.",
+  "implementerNotes": [
+    "Run `bun install --frozen-lockfile` first; the workspace has no node_modules.",
+    "The working copy carries an empty untracked-on-main `.omp/config.yml` from OMP provisioning: commit with `jj split <paths>`, never include it, and `jj bookmark set legion/LEGION-11 -r @-` before every push (in this jj the bookmark follows the working copy after split).",
+    "Task 3's processes.ts edit is comment-only (architect ruling 2026-09-12T04:22Z, envoy id 4557e89b0fb6cfb523fd42643c7d047c).",
+    "main in this workspace is 9514f63b; the production daemon runs /home/ubuntu/legion-ws-RunDaemon (main lineage, parent 3d035027). No rebase required for index.ts."
+  ],
+  "testerNotes": [
+    "Follow plan §Tester exactly: scratch project sjawhar/11, state /tmp/legion11-smoke/<main|branch>/daemon, tmux -L legion-sjawhar11, port 19371, isolated NATS docker legion11-nats on 127.0.0.1:14223 (-js; missing-stream restart noise is expected).",
+    "Main run first from /home/ubuntu/legion-ws-RunDaemon (read-only, record `jj log -r @-`); branch run from $LEGION_WORKSPACE at the PR head. Expected main signature: `[legion] worker reconnection failed:` + `TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')`, locator and secret file retained. Prior real capture: /tmp/legion6-smoke/rig/daemon.log.round2b-typeerror.",
+    "Never restart, stop, or reconfigure the production daemon (legion-sjawharlegion, port 13370). Verify `tmux -L legion-sjawharlegion list-panes -a` is identical before/after."
+  ],
+  "reviewerNotes": [
+    "Behaviour diff is index.ts only; reconnectWorkers/processes.ts/api.ts/api/auth.ts executable code unchanged. Check the PR body carries the what-moved statement and the closure audit (spec Acceptance 4).",
+    "Spec Testing row 2: processes.test.ts 7293/8604/8632 pass unmodified; only their comments change."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-12T04:51:32.388Z"
+}
