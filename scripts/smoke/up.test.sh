@@ -105,6 +105,14 @@ write_daemon_config
   printf 'expected generated daemon config to pin repos to SMOKE_REPO\n' >&2
   exit 1
 }
+[[ "$(<"${SMOKE_DIR}/legion.yaml")" == *$'\n'"instructions: ${SMOKE_DIR}/deployment-instructions.md"$'\n'* ]] || {
+  printf 'expected generated daemon config to point instructions at the rig file\n' >&2
+  exit 1
+}
+[[ "$(<"${SMOKE_DIR}/deployment-instructions.md")" == *"repository sjawhar/legion-smoke"* ]] || {
+  printf 'expected the rig deployment-instructions file to name SMOKE_REPO\n' >&2
+  exit 1
+}
 
 
 [[ "$(SMOKE_GH_WEBHOOK_HELP_EXIT=0 resolve_webhook_mode)" == "forward" ]] || {

@@ -42,6 +42,7 @@ The localhost-only Legion API lives in `api.ts`.
 | `tmux.ts` | Pure tmux command construction/parsing (open/split a window, probe pane liveness and pid, kill a window or a single pane, list a session's unknown owned windows and its unrecorded worker-shim panes) over an injected `run` callback, every argv prefixed `tmux -L legion-<project>` (`TmuxServer`) — no daemon state. |
 | `secrets.ts` | `<state_dir>/secrets` primitives: 0700 directory, 0600 files, and the listing prune `index.ts` runs at boot; `ProcessManager.persist()` prunes the files it wrote itself without listing. |
 | `worker-stream-listener.ts` | TCP listener for reverse-dialed `legion worker-shim --connect` streams, bound with the API on `worker_stream_port`. Each connection's first line must be `{"type":"hello","bootToken"}`; the token is resolved through the same lookup `/worker/started` uses (`CapabilityService.resolveWorkerClaim`: the in-memory mint record, then the claim's persisted `bootTokenHash`), the daemon answers `{"type":"hello_ack"}`, and the socket becomes a `WorkerRpcClient` keyed by claim token (`registrations`; `awaitRegistration(claimToken, timeoutMs)` is what a runtime's `connect` awaits instead of dialing). An unknown, stale-generation, already-bound, or malformed hello — or a connection that has not completed its hello within `worker_rpc_timeout_seconds` of opening (`hello timeout`) — is closed and logged `worker-stream: rejected hello (<reason>)` with no state change. |
+| `deployment-instructions.ts` | `<state_dir>/deployment-instructions.md`: reads the operator's `instructions` file once at boot, refuses a missing/unreadable/blank one naming the resolved path, and writes `# Deployment instructions (<project>)` + content for every pane to `$(cat)`. |
 
 ## Operational invariants
 
@@ -86,6 +87,22 @@ credentials (they live in secretsd, not the daemon's own environment) gets them 
 process: the prefix's own exec — `secrets KEY... -- <omp invocation>` — resolves them *inside* the
 pane, never on the daemon's environment or a pane's tmux `-e` argv. Empty by default (nothing is
 prepended). See `withOmpLaunchPrefix` in `processes.ts`.
+
+Set `instructions` in `legion.yaml` (a path, resolved against `legion.yaml`'s own directory when
+relative — `legion start --config` passes that directory as the loader's `configDir`) or
+`LEGION_INSTRUCTIONS` (used as given; consulted only when the file omits the key, like every other
+`LEGION_*` override) to a markdown file of the deployment's standing rules — required checks,
+deploy/smoke commands, code-owner expectations, standing Envoy roles to consult, the merge
+credential. An empty value from either source is rejected at config load. At startup the daemon
+reads the file once, refuses to start when it is missing, unreadable, a directory, or blank (the
+message names the resolved path), and writes `# Deployment instructions (<project as written in
+legion.yaml>)` plus the content to `<state_dir>/deployment-instructions.md`
+(`deployment-instructions.ts`). Every pane it launches — root architect, sub-architects, phase
+workers, controller — appends that file as its last `--append-system-prompt "$(cat …)"` fragment,
+after the role prompt and (for roots and workers) the addressing fragment; `systemPromptArguments`
+in `processes.ts` is the one builder both launch sites use, so they cannot drift. Absent key: no
+fragment. The file is `$(cat)`-expanded by the pane's shell exactly like the role prompt, never
+inlined into the command.
 
 Every root, worker, and controller pane also receives `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` when
 `dispatch_url` is configured: `DISPATCH_URL` is the configured service base URL (no `/mcp` suffix),
